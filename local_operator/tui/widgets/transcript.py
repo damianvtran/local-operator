@@ -328,6 +328,25 @@ class TranscriptBlock(Static):
         """Freeze the block; the container never re-renders it afterwards."""
         self._finalized = True
 
+    def retheme(self) -> None:
+        """Rebuild this block's content in the CURRENT theme's ink.
+
+        Blocks resolve ``semantic_color`` when content is built, so a theme
+        switch leaves every settled block wearing the old ramp until it is
+        rebuilt. Each subclass whose content is a pure function of its state
+        overrides this with its own existing rebuild seam (the same one its
+        ``on_resize`` uses); the base is a no-op because the base class cannot
+        know how to rebuild content it was handed pre-rendered
+        (:class:`RichBlock`), and repainting nothing is the honest fallback —
+        such blocks keep their ink as history.
+
+        This deliberately does NOT bypass finalization by itself: overriders
+        use the same finalized-guard dance their resize handlers do, so the
+        FINALIZED-BLOCK protocol keeps exactly two sanctioned re-entry points
+        (width changed, theme changed), both producing the same rows for the
+        same state.
+        """
+
     def is_finalized(self) -> bool:
         """True when the block is immutable (FINALIZED-BLOCK protocol)."""
         return self._finalized
@@ -646,6 +665,15 @@ class UserBlock(TranscriptBlock):
             self._receipt_row = None
         return rows
 
+    def retheme(self) -> None:
+        """Re-ink rule, prose and receipt from the current ramp."""
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build(), layout=False)
+        finally:
+            self._finalized = was_finalized
+
     def _build(self) -> RenderableType:
         """The prompt, every row prefixed by the gutter rule.
 
@@ -813,6 +841,15 @@ class NoticeBlock(TranscriptBlock):
         parent = self.parent
         if isinstance(parent, TranscriptView):
             parent.refresh_gap_around(self)
+
+    def retheme(self) -> None:
+        """Re-ink glyph and text: the notice's whole render is `_token`'s hue."""
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build(), layout=False)
+        finally:
+            self._finalized = was_finalized
 
     def _build(self) -> RenderableType:
         """Glyph + text on the spine, WRAPPED with a hanging indent.

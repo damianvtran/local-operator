@@ -127,6 +127,7 @@ from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     DEFAULT_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
+    ArgumentHighlightChanged,
     ArgumentQueryOpened,
     Attachment,
     Editor,
@@ -372,6 +373,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # still prints the ladder with the current one marked. The list is what
         # the printed ladder could never be — the rungs are OFFERED rather than
         # transcribed by hand from a line of prose.
+        arguments=ArgumentMode.OPTIONAL,
+    ),
+    # NOT an echo, same rule as `/approvals`: the argument is a setting, and
+    # the receipt names the theme that ended up in force — strictly more than
+    # the typed word, which may have been an abbreviation the matcher resolved.
+    SlashCommand(
+        "theme",
+        # Terse like `/model`'s: the description column wraps past ~55 cells.
+        # "live preview" is the half the list cannot teach on its own — a user
+        # has to know arrowing is safe before they will browse with it.
+        "Switch color theme; arrows preview live",
+        aliases=("themes",),
+        # OPTIONAL: a bare `/theme` reports the active theme, and the space
+        # offers every registered ramp with the current one marked.
         arguments=ArgumentMode.OPTIONAL,
     ),
     # The listing is the receipt.
@@ -854,7 +869,15 @@ class OperatorApp(App[None]):
         resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
     ) -> None:
         super().__init__()
-        theme_mod.set_theme(theme_name)  # dark is the product's island night
+        # Dark is the product's island night and the fallback: `theme_name`
+        # arrives from config.yml, and a saved name a build no longer ships
+        # (downgrade, hand-edited config) must not keep the app from booting.
+        # `set_theme` deliberately raises for CODE handing it a bad name; a
+        # CONFIG value is user data, and user data degrades gracefully.
+        try:
+            theme_mod.set_theme(theme_name)
+        except KeyError:
+            theme_mod.set_theme(theme_mod.DEFAULT_THEME)
         self._session_factory = session_factory
         # ``/resume <id>`` rebinds the session factory to a resume-specific one
         # (the CLI wires it to ``create_session`` with ``args.resume`` mutated)
@@ -870,6 +893,19 @@ class OperatorApp(App[None]):
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
         self._providers = provider_controller
+        #: The real theme while a ``/theme`` list preview repaints the screen
+        #: in a candidate ramp; ``None`` when no preview is standing. Stashed
+        #: on the first highlight and spent on close-or-commit, so however the
+        #: list ends the screen is never left wearing a theme nobody chose.
+        self._theme_before_preview: str | None = None
+        #: Whether a markdown ramp is on the console's theme stack, so a theme
+        #: switch pops the previous one instead of stacking forever.
+        self._markdown_theme_pushed = False
+        #: True once a preview has actually painted a candidate ramp — i.e.
+        #: offscreen blocks may be wearing skipped ink. It is what lets the
+        #: settle path skip the full sweep for a list that was opened and
+        #: closed without ever moving off the current theme.
+        self._theme_preview_painted = False
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
@@ -1313,6 +1349,7 @@ class OperatorApp(App[None]):
         install_markdown_theme()
         try:
             self.console.push_theme(brand_markdown_theme())  # D1 markdown ramp
+            self._markdown_theme_pushed = True
         except Exception:
             pass  # headless consoles without a pushable theme keep defaults
         self.ansi_theme_dark = _brand_terminal_theme()
@@ -6056,6 +6093,8 @@ class OperatorApp(App[None]):
             self._cmd_model(arg, notice)
         elif command == "/effort":
             self._cmd_effort(arg, notice)
+        elif command == "/theme":
+            self._cmd_theme(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
         elif command == "/search":
@@ -6584,6 +6623,257 @@ class OperatorApp(App[None]):
         # `notice`, not `_system_notice`: this one CHANGED something, so it is a
         # receipt for an action rather than an answer about the app's settings.
         notice(f"reasoning effort: {current or 'provider default'} → {wanted} (this session)")
+
+    # -- theme --------------------------------------------------------------
+    def _cmd_theme(self, arg: str, notice: NoticeFn) -> None:
+        """``/theme`` — name the active theme; ``/theme <name>`` — switch to it.
+
+        A switch PERSISTS (``tui.theme`` in config.yml) without a ``default``
+        word, which is where this parts company with ``/model``. A theme is a
+        standing preference by nature — nobody wants their colors reverting at
+        the next launch — and unlike a model it has no cost dimension, so the
+        one-word form does the thing every user means. The receipt says so,
+        because a persisted setting whose persistence is silent looks
+        session-scoped and sends users hunting for a config key.
+
+        A bare ``/theme`` answers with the current theme and points at the
+        space, mirroring ``/approvals``: the LIST (with live preview) is the
+        real browsing surface, and a printed catalogue of thirty names would
+        be the one presentation that cannot show what any of them look like.
+        """
+        wanted = arg.strip().lower()
+        current = theme_mod.current_theme()
+        if not wanted:
+            label = theme_mod.theme_spec(current).label
+            self._system_notice(
+                f"theme: {label} ({current}) — /theme <name> switches; "
+                "space opens the list, arrows preview live"
+            )
+            return
+        try:
+            spec = theme_mod.theme_spec(wanted)
+        except KeyError:
+            self._system_notice(
+                f"unknown theme {wanted!r} — type /theme and space to browse the list",
+                "warning",
+            )
+            return
+        # A no-op switch still ends a live preview: the preview repainted the
+        # screen in the candidate ramp, so "already dark" must put DARK back
+        # rather than leaving the preview's colors standing with a receipt
+        # claiming nothing changed.
+        if spec.name == current and self._theme_before_preview is None:
+            self._system_notice(f"theme: already {spec.label}")
+            return
+        self._theme_before_preview = None
+        # A commit is a settle: the full sweep below covers whatever the
+        # preview skipped, so the painted flag is spent here too.
+        self._theme_preview_painted = False
+        self._apply_theme(spec.name)
+        persisted = self._persist_theme(spec.name)
+        if spec.name == current:
+            self._system_notice(f"theme: already {spec.label}")
+        elif persisted is None:
+            notice(f"theme: {current} → {spec.name} (saved as your default)")
+        else:
+            # Switched but not saved: the screen is honest about both halves.
+            notice(f"theme switched, but could not save default: {persisted}", "warning")
+
+    def _persist_theme(self, name: str) -> str | None:
+        """Write ``tui.theme`` to config.yml; the error text on failure.
+
+        The same nested ``tui`` mapping the CLI reads at boot
+        (``tui_config.get("theme", ...)``), merged rather than replaced so a
+        future sibling key survives the write.
+        """
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            manager = ConfigManager(config_dir())
+            tui_config = manager.get_config_value("tui", None)
+            merged = dict(tui_config) if isinstance(tui_config, dict) else {}
+            merged["theme"] = name
+            manager.set_config_value("tui", merged)
+            return None
+        except Exception as error:  # noqa: BLE001 — reported to the user verbatim
+            return str(error)
+
+    def _apply_theme(self, name: str, *, preview: bool = False) -> None:
+        """Switch every rendering surface to ``name``, live.
+
+        One orchestrator, because the theme is spread across four systems that
+        do not watch each other and each has to be told in its own language:
+
+        * the TCSS variables — ``refresh_css`` re-asks ``get_css_variables``
+          and reflows every widget's styles;
+        * the rich console theme — markdown element styles are pushed once at
+          mount, so a switch pushes the new ramp's table on top;
+        * the ANSI terminal theme — ``_brand_terminal_theme`` bakes hexes;
+        * every widget that resolved ``semantic_color`` at build time — the
+          epoch bump plus :meth:`_repaint_themed_widgets` below.
+
+        Bump-then-repaint order matters: caches key on the epoch, so painting
+        first would faithfully reproduce the OLD colors out of every cache.
+
+        ``preview=True`` bounds the cost for the browsing path (review round 1,
+        F1). A full switch re-inks EVERY transcript block, which is linear in
+        session length — measured at ~219 ms on a 120-block transcript, ~152 ms
+        of it the sweep — and the preview pays this on every arrow key. A
+        preview therefore re-inks only the blocks whose rows are actually on
+        screen (the only ones a preview can show anybody) and leaves the rest
+        wearing the old ramp; they are corrected by the FULL sweep that runs
+        when the preview settles — every preview ends in a commit
+        (``_cmd_theme``) or a restore (``on_argument_highlight_changed``), and
+        both call this with ``preview=False``. Blocks scrolled INTO view
+        mid-preview still self-correct: their next rebuild (resize, expand)
+        reads the current theme, and the settle sweep is never more than one
+        keystroke away.
+        """
+        theme_mod.set_theme(name)
+        try:
+            # Pop the ramp the mount (or the previous switch) pushed before
+            # pushing this one: a preview arrows through dozens of themes, and
+            # push-without-pop grows the console's theme stack by one entry
+            # per row visited for the life of the process. The flag is cleared
+            # between the two calls so a pop that succeeds followed by a push
+            # that raises cannot leave it claiming a ramp this code never
+            # pushed (F5).
+            if self._markdown_theme_pushed:
+                self._markdown_theme_pushed = False
+                self.console.pop_theme()
+            self.console.push_theme(brand_markdown_theme())
+            self._markdown_theme_pushed = True
+        except Exception:
+            pass  # headless consoles without a pushable theme keep defaults
+        self.ansi_theme_dark = _brand_terminal_theme()
+        self.refresh_css(animate=False)
+        self._repaint_themed_widgets(visible_only=preview)
+
+    def _repaint_themed_widgets(self, *, visible_only: bool = False) -> None:
+        """Re-ink content that resolved its colors at BUILD time.
+
+        The stylesheet pass handles everything painted through TCSS variables,
+        but most transcript content is rich ``Text`` carrying ``Style`` objects
+        resolved from ``semantic_color`` when the block was built — a finalized
+        notice keeps its old ink forever unless rebuilt. Each branch below uses
+        the widget's own existing re-build seam (the same ones ``on_resize``
+        uses), so no block gains a second way to render:
+
+        * every ``TranscriptBlock`` gets :meth:`TranscriptBlock.retheme` —
+          notices, prompts, assistant messages and tool cards each rebuild
+          through their own existing seam; blocks holding pre-rendered
+          content (``RichBlock``) inherit the no-op and keep their ink as
+          history, which is accepted: those listings are receipts of what
+          was shown, and new content takes the new ramp immediately;
+        * the status band re-renders now rather than on its next tick, so an
+          idle band does not keep stale ink until the next turn;
+        * the welcome view re-renders from its reactive state.
+
+        ``visible_only`` is the preview's cost bound (F1): re-ink only blocks
+        whose rows overlap the transcript viewport — the same predicate the
+        stop notice uses (:meth:`_is_on_screen`) — because a preview can only
+        ever be seen on the rows that are on screen. The settle sweep
+        (``visible_only=False``) still covers everything, so no block keeps
+        preview-skipped ink past the preview's own lifetime.
+        """
+        from local_operator.tui.widgets.transcript import TranscriptBlock
+
+        for block in self.query(TranscriptBlock):
+            if visible_only and not self._is_on_screen(block):
+                continue
+            try:
+                block.retheme()
+            except Exception:
+                # One stubborn block must not stop the sweep: the rest of the
+                # screen still deserves the new ramp, and the straggler catches
+                # up on its own next real resize.
+                continue
+        if self._status is not None:
+            try:
+                self._status.refresh()
+            except Exception:
+                pass
+        try:
+            self.query_one(WelcomeView).refresh()
+        except Exception:
+            pass
+
+    def _theme_choices(self) -> list[ArgumentChoice]:
+        """One row per registered theme, the active one marked.
+
+        ``detail`` carries the ACTIVE marker only. The row's description is
+        the one-liner from the spec; the colors themselves are previewed live
+        on the whole screen as the highlight moves, which says more than any
+        swatch a text row could carry.
+        """
+        current = theme_mod.current_theme()
+        return [
+            ArgumentChoice(
+                spec.name,
+                spec.description,
+                detail="← current" if spec.name == current else "",
+            )
+            for spec in (theme_mod.theme_spec(name) for name in theme_mod.available_themes())
+        ]
+
+    def on_argument_highlight_changed(self, message: ArgumentHighlightChanged) -> None:
+        """Live-preview the highlighted theme; restore when the list closes.
+
+        The whole screen IS the swatch: as the user arrows or hovers through
+        ``/theme``'s rows the app paints itself in the candidate ramp, and the
+        first highlight stashes the real theme so Esc, deleting the word, or
+        submitting some other command all land back where the user started.
+        Only ``/theme`` previews — every other argument list reports ``None``
+        command matches and falls through to the restore branch, which is a
+        no-op unless a preview is actually standing.
+        """
+        message.stop()
+        # The editor reports the TYPED word, so the alias resolves here — the
+        # same one-resolver rule `_run_slash_command` documents: `/themes`
+        # must preview exactly as `/theme` does.
+        entry = slash_command_for(f"/{message.command}") if message.command else None
+        resolved = entry.name if entry is not None else message.command
+        if resolved == "theme" and message.name is not None:
+            candidate = message.name.lower()
+            try:
+                theme_mod.theme_spec(candidate)
+            except KeyError:
+                return  # a row that is not a theme name cannot be tried on
+            # Stash only when a preview actually paints (the seeded first
+            # report names the CURRENT theme, which needs no restore and must
+            # not arm one): `current_theme` has not moved yet on the first
+            # differing candidate, so stashing at that moment still records
+            # the user's real theme.
+            if candidate != theme_mod.current_theme():
+                if self._theme_before_preview is None:
+                    self._theme_before_preview = theme_mod.current_theme()
+                # `preview=True` bounds the repaint to the visible rows (F1):
+                # this runs per arrow key, and the full-transcript sweep is
+                # deferred to the settle below, which is at most one keystroke
+                # away however the browse ends.
+                self._theme_preview_painted = True
+                self._apply_theme(candidate, preview=True)
+            return
+        # List closed or moved off the rows: put the real theme back. `/theme
+        # <name>` clears the stash BEFORE applying, so a submit is not undone.
+        restore = self._theme_before_preview
+        if restore is not None:
+            self._theme_before_preview = None
+            painted = self._theme_preview_painted
+            self._theme_preview_painted = False
+            if restore != theme_mod.current_theme():
+                self._apply_theme(restore)
+            elif painted:
+                # The browse ended ON the real theme, reached by arrowing
+                # back home — which re-applied it via the preview path, so
+                # `current_theme` is already right but offscreen blocks were
+                # skipped by every one of those bounded sweeps. The explicit
+                # full sweep here is what corrects them; epoch-keyed caches
+                # alone cannot, because a cache is only consulted when its
+                # block repaints, and nothing else repaints an offscreen
+                # block. A list that never painted (opened, closed) skips it.
+                self._repaint_themed_widgets()
 
     def action_cycle_effort(self) -> None:
         """``shift+tab`` — step one level up this model's ladder, wrapping.
@@ -7781,6 +8071,15 @@ class OperatorApp(App[None]):
             return
         if message.command == "approvals":
             picker.set_choices(self._approval_choices())
+            picker.set_notice("")
+            return
+        if message.command in ("theme", "themes"):
+            # Seeded on the CURRENT theme's row (F2): the highlight previews
+            # live, so opening the list must not flash the screen to whatever
+            # theme happens to sort first — and a browse naturally starts from
+            # where the user already is, the same landing `/model` gives its
+            # empty query.
+            picker.set_choices(self._theme_choices(), highlight=theme_mod.current_theme())
             picker.set_notice("")
             return
         if message.command == "effort":
@@ -9708,31 +10007,38 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
 
 
 def _brand_terminal_theme() -> TerminalTheme:
-    """Map the ANSI palette onto the brand ramp (no Monokai in this house)."""
-    tokens = theme_mod.BRAND_TOKENS["dark"]
+    """Map the ANSI palette onto the ACTIVE ramp's semantic tokens.
+
+    Resolved through ``semantic_color`` rather than ``BRAND_TOKENS[\"dark\"]``
+    so a `/theme` switch re-maps ANSI content too — the mapping is rebuilt by
+    ``_apply_theme`` on every switch. (Historical note: the docstring used to
+    say "no Monokai in this house"; Monokai is now a registered guest, but
+    only when asked for by name.)
+    """
+    color = theme_mod.semantic_color
     ansi = [
-        tokens["bg"],
-        tokens["danger"],
-        tokens["accent"],
-        tokens["amber"],
-        tokens["fg"],
-        tokens["muted"],
-        tokens["dim"],
-        tokens["edge"],
+        color("bg"),
+        color("danger"),
+        color("accent"),
+        color("warning"),
+        color("fg"),
+        color("muted"),
+        color("dim"),
+        color("edge"),
     ]
     bright = [
-        tokens["string"],
-        tokens["danger"],
-        tokens["accent"],
-        tokens["amber"],
-        tokens["fg"],
-        tokens["muted"],
-        tokens["dim"],
-        tokens["surface"],
+        color("string"),
+        color("danger"),
+        color("accent"),
+        color("warning"),
+        color("fg"),
+        color("muted"),
+        color("dim"),
+        color("surface"),
     ]
     return TerminalTheme(
-        _hex_to_rgb(tokens["bg"]),
-        _hex_to_rgb(tokens["fg"]),
+        _hex_to_rgb(color("bg")),
+        _hex_to_rgb(color("fg")),
         [_hex_to_rgb(c) for c in ansi],
         [_hex_to_rgb(c) for c in bright],
     )

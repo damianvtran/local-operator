@@ -334,9 +334,26 @@ class CommandPicker(Static):
     never touches the buffer.
     """
 
-    def __init__(self, on_choose: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        on_choose: Callable[[str], None],
+        on_highlight: Callable[[str | None], None] | None = None,
+    ) -> None:
         super().__init__()
         self._on_choose = on_choose
+        #: Observer for the row the user is CONSIDERING — the hover target when
+        #: the mouse is over a row, else the keyboard highlight — called with
+        #: ``None`` when an argument list stops showing rows. It exists for
+        #: live preview (``/theme``): the preview has to track what the eye is
+        #: on, which is not always what Enter would choose. Only ARGUMENT rows
+        #: report; a command-word list has nothing to preview.
+        self._on_highlight = on_highlight
+        #: Last name reported to ``_on_highlight``, so the observer hears each
+        #: change once — mouse-move events arrive per cell, not per row.
+        self._reported_highlight: str | None = None
+        #: True only while ``set_choices`` seeds a highlight: the interim
+        #: row-0 state must not reach the observer (see ``set_choices``).
+        self._suppress_report = False
         self._commands: list[SlashCommand] = []
         self._choices: list[ArgumentChoice] = []
         self._mode = PickerMode.COMMAND
@@ -363,18 +380,43 @@ class CommandPicker(Static):
         """Replace the offered command registry."""
         self._commands = list(commands)
 
-    def set_choices(self, choices: list[ArgumentChoice]) -> None:
+    def set_choices(self, choices: list[ArgumentChoice], highlight: str | None = None) -> None:
         """Replace the values offered for the current command's ARGUMENT.
 
         Re-derives the visible rows immediately, because the app fills these in
         answer to a posted message — one message-loop tick after the keystroke
         that opened the list. Without the resync the picker would sit closed on
         the empty set it was opened with until the user typed another character.
+
+        ``highlight`` seeds the selection onto the named row when the list
+        opens bare (empty query, nothing chosen by hand). It exists for lists
+        where the highlight has a SIDE EFFECT: ``/theme`` previews the
+        highlighted row live, so a list that opened on row 0 flashed every
+        non-default user to the default theme before they touched a key
+        (review round 1, F2). Seeding the row where the user already IS makes
+        the first report a no-op — and is where a browse should start anyway.
         """
         self._choices = list(choices)
         if self._mode is PickerMode.ARGUMENT:
             matches = argument_suggestions(self._query, self._choices)
-            self._apply(PickerMode.ARGUMENT, self._query, matches)
+            seeding = highlight is not None and not self._query and not self._chosen_by_hand
+            if seeding:
+                # Silence `_apply`'s own report: it fires for row 0 before the
+                # seed lands, and for a previewing list that one report IS the
+                # flash — the observer would try row 0 on and take it off
+                # again one message later.
+                self._suppress_report = True
+            try:
+                self._apply(PickerMode.ARGUMENT, self._query, matches)
+            finally:
+                self._suppress_report = False
+            if seeding:
+                names = [name for name, _ in self._matches]
+                if highlight in names and names.index(highlight) != self._selected:
+                    self._selected = names.index(highlight)
+                    self._scroll_to_selection()
+                    self._repaint()
+                self._report_highlight()
 
     def set_notice(self, text: str) -> None:
         """Say why an ARGUMENT list is empty, IN THE LIST'S OWN PLACE.
@@ -541,6 +583,7 @@ class CommandPicker(Static):
         self.display = True
         self._scroll_to_selection()
         self._repaint()
+        self._report_highlight()
 
     def move(self, delta: int) -> None:
         """Move the highlight by ``delta`` rows, wrapping at both ends."""
@@ -554,6 +597,7 @@ class CommandPicker(Static):
         self._chosen_by_hand = True
         self._scroll_to_selection()
         self._repaint()
+        self._report_highlight()
 
     def scroll_rows(self, delta: int) -> None:
         """Move the highlight by ``delta`` rows for a WHEEL notch, clamped.
@@ -575,6 +619,7 @@ class CommandPicker(Static):
         self._chosen_by_hand = True
         self._scroll_to_selection()
         self._repaint()
+        self._report_highlight()
 
     def dismiss(self) -> None:
         """Hide the picker for the CURRENT word without touching the text."""
@@ -621,6 +666,7 @@ class CommandPicker(Static):
         if index != self._hovered:
             self._hovered = index
             self._repaint()
+            self._report_highlight()
         # The hand pointer only over a ROW: the picker's padding and notice
         # rows are not click targets, and a static `pointer` rule on the
         # widget would promise the click the empty rows cannot keep. Setting
@@ -633,6 +679,7 @@ class CommandPicker(Static):
         if self._hovered is not None:
             self._hovered = None
             self._repaint()
+            self._report_highlight()
         self.styles.pointer = "default"
 
     def on_resize(self, event: events.Resize) -> None:
@@ -1014,6 +1061,26 @@ class CommandPicker(Static):
             return None
         return index
 
+    def _report_highlight(self) -> None:
+        """Tell the observer which ARGUMENT row the user's eye is on now.
+
+        The reported row is the HOVER target when the pointer is over one,
+        else the keyboard highlight — the same precedence the row grounds
+        paint, so what previews is always the row that reads as active.
+        De-duplicated on the name: a mouse crossing five cells of one row and
+        a repaint that reproduced the same set both say nothing new.
+        """
+        if self._on_highlight is None or self._suppress_report:
+            return
+        name: str | None = None
+        if self._mode is PickerMode.ARGUMENT and self._matches:
+            index = self._hovered if self._hovered is not None else self._selected
+            if 0 <= index < len(self._matches):
+                name = self._matches[index][0]
+        if name != self._reported_highlight:
+            self._reported_highlight = name
+            self._on_highlight(name)
+
     def _reset_rows(self) -> None:
         """Drop every row and the state that pointed into them, but not the
         notice: a list can be showing its informational row with no rows at all."""
@@ -1033,3 +1100,4 @@ class CommandPicker(Static):
         # submission all arrive here, and each one is the user done with it.
         self._notice = ""
         self.display = False
+        self._report_highlight()

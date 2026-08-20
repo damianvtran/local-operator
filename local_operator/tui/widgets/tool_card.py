@@ -1447,6 +1447,10 @@ class ToolCard(TranscriptBlock):
             return
         self._refresh_row()
 
+    def retheme(self) -> None:
+        """Re-fit the row: `_build_content` resolves every ink at build time."""
+        self._refresh_row()
+
     # -- text selection (TUI-021) -------------------------------------------
     #: The icon field on the summary row: the per-tool glyph and its separator,
     #: which every rung of :meth:`_build_row` writes as ``icon + " "`` and every
