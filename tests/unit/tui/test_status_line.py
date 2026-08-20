@@ -1368,6 +1368,13 @@ def test_the_titles_seam_stays_tight_against_the_title(monkeypatch) -> None:
     row early, and `rjust` reached the edge while orphaning the chevron behind
     a run of blanks that read as a segment that failed to render. Asserting
     the pair pins the one arrangement that does both.
+
+    The third assertion is the one that falsifies the RESERVED design itself
+    (review round 1, M1): paying the box's slack out on the seam's LEFT kept
+    the seam tight and the row flush — both checks above passed against the
+    very code this PR removes — while parking the dead run between the alarm
+    and the chevron. So the cells left of the title's seam must end on ink:
+    the seam's own leading space is the only blank allowed to touch them.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     for label, state in _LADDER_STATES.items():
@@ -1392,6 +1399,18 @@ def test_the_titles_seam_stays_tight_against_the_title(monkeypatch) -> None:
                 assert (
                     cell_len(row) == width
                 ), f"{where}: the seam is tight but the row stops short of the edge"
+                # The discriminating half (M1): everything left of the title's
+                # seam ends on ink. The old reserved box painted its unused
+                # cells exactly here — a blank run between the alarm and the
+                # `‹` — and both assertions above were satisfied by it. The
+                # inter-group filler lives further left and is bounded by the
+                # groups' own separators, so a trailing blank run here can only
+                # be a reintroduced name reserve.
+                head = row[: row.rindex(seam)]
+                assert head == head.rstrip(), (
+                    f"{where}: {len(head) - len(head.rstrip())} dead cells "
+                    f"between the right group and the title's seam"
+                )
 
 
 def test_a_double_width_title_never_overflows_the_band(monkeypatch) -> None:
