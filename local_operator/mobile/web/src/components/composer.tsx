@@ -267,7 +267,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={() => void send("continue", "prompt")}
-					className="flex min-h-11 items-center justify-center rounded-sm border border-hairline bg-surface text-body-sm text-ink-muted active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-sm border border-control bg-surface text-body-sm text-ink active:bg-elevated"
 				>
 					interrupted — tap to resume
 				</button>

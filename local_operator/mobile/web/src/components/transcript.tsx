@@ -48,7 +48,7 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 		case "notice":
 		case "compaction":
 			return (
-				<p className="text-center text-meta text-ink-dim">
+				<p className="text-meta text-ink-dim">
 					{entry.text}
 				</p>
 			);

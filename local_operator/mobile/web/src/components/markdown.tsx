@@ -42,7 +42,7 @@ function renderInline(text: string): ReactNode[] {
 			out.push(
 				<code
 					key={key()}
-					className="rounded-xs bg-sunken px-1 font-mono text-mono-sm"
+					className="rounded-xs bg-sunken px-0.5 font-mono text-mono-sm"
 				>
 					{code.slice(1, -1)}
 				</code>,

@@ -61,7 +61,7 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 				) : null}
 				{s.todos_open ? (
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						{s.todos_open}
+						☐ {s.todos_open}
 					</span>
 				) : null}
 				{s.ended ? (
@@ -70,8 +70,7 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 			</div>
 			<div className="flex items-baseline gap-2">
 				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
-					{basename(s.cwd)}
-					{home ? ` · ${shortenHome(s.cwd, home)}` : ""}
+					{home ? shortenHome(s.cwd, home) : s.cwd}
 				</span>
 				<span className="ml-auto shrink-0 font-mono text-mono-sm text-ink-dim">
 					{s.model_label}
