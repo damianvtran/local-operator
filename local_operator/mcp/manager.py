@@ -52,6 +52,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.mcp.auth import McpAuthRequiredError
 from local_operator.mcp.config import (
     MCPHttpServerConfig,
     MCPServerConfig,
@@ -127,6 +128,38 @@ DEFAULT_MCP_TIMEOUT_MS = 30_000.0
 
 class McpConnectionError(RuntimeError):
     """Raised when a server cannot be reached (deferred execute path)."""
+
+
+def _unwrap_auth_required(exc: BaseException) -> BaseException:
+    """Surface a :class:`McpAuthRequiredError` wrapped in an ``ExceptionGroup``.
+
+    The streamable-HTTP transport runs its auth flow inside an anyio TaskGroup,
+    which wraps any exception the redirect handler raises in an
+    ``ExceptionGroup`` — and that group can itself be nested inside the
+    ``ClientSession`` task group's own group, so the auth error may arrive at
+    ANY depth. Callers that need to RECOGNISE an auth requirement (the startup
+    toast, the reconnect breaker, ``/mcp login``) would otherwise see only
+    ``"unhandled errors in a TaskGroup"`` and treat a recoverable grant as an
+    opaque transport failure. This walks the group's LEAVES (``subgroup``
+    preserves nesting structure, so ``matches.exceptions[0]`` can be another
+    group) and returns the first auth error found, else the original exception
+    unchanged.
+    """
+    if isinstance(exc, McpAuthRequiredError):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        matches = exc.subgroup(McpAuthRequiredError)
+        if matches is not None:
+            # A connect raises at most ONE auth error, so the first leaf is the
+            # whole story; flattening keeps the re-raise a single clean type.
+            stack: list[BaseException] = [matches]
+            while stack:
+                candidate = stack.pop()
+                if isinstance(candidate, McpAuthRequiredError):
+                    return candidate
+                if isinstance(candidate, BaseExceptionGroup):
+                    stack.extend(candidate.exceptions)
+    return exc
 
 
 def _settle_future_error(future: asyncio.Future[ServerConnection] | None, exc: Exception) -> None:
@@ -793,6 +826,16 @@ class McpManager:
         self._on_tools_changed: ToolsChangedCallback | None = None
         # Session-installed sink for model-visible MCP breaker incidents.
         self.on_incident: Callable[[str, str], None] | None = None
+        # UI-installed sink fired when a server needs an OAuth login. The
+        # startup toast only covers failures that land INSIDE the 250 ms gate;
+        # HTTP OAuth servers connect AFTER it, so their auth failures (and
+        # mid-session expiry) need this dedicated hook to reach the user as a
+        # toast. Signature: (server_name, message).
+        self.on_auth_required: Callable[[str, str], None] | None = None
+        # Servers already toasted for an auth requirement, so a dead grant that
+        # a tool call keeps retrying does not re-raise the toast on every
+        # attempt. Cleared per server when it connects again.
+        self._auth_toasted: set[str] = set()
         # Tool-name collision state keyed by stable origin key (MCP-09):
         # (server name, original tool name), never registration order.
         self._tool_meta: dict[str, McpToolMeta] = {}
@@ -801,6 +844,12 @@ class McpManager:
         self._origins_by_server: dict[str, set[tuple[str, str]]] = {}
         # First-connect security surface (MCP-12): one warning per server.
         self._security_logged: set[str] = set()
+        # Discovered OAuth endpoints per server URL, populated by the proactive
+        # refresh in ``_connect_server`` and handed to the provider so an
+        # in-flow (mid-session) refresh targets the real token endpoint instead
+        # of the SDK's ``<server_base>/token`` guess. Keyed by URL because the
+        # provider is rebuilt per connect while discovery is per server.
+        self._oauth_endpoints: dict[str, Any] = {}
         self._epoch = 0
         self._disposed = False
 
@@ -864,7 +913,7 @@ class McpManager:
         return self._configs.get(name)
 
     async def connect_configured_server(
-        self, name: str, *, timeout_ms: float | None = None
+        self, name: str, *, timeout_ms: float | None = None, interactive: bool = True
     ) -> ServerConnection:
         """Connect one configured server without touching unrelated entries.
 
@@ -872,6 +921,11 @@ class McpManager:
         every configured server through the session's 250 ms startup gate.
         ``timeout_ms`` lets that interactive flow outlive the normal 30-second
         request budget without weakening ordinary session connections.
+
+        ``interactive`` defaults to ``True`` because this is the explicit login
+        path: it may open a browser to complete a grant. Ordinary startup and
+        reconnects go through ``_connect_round``/``_reconnect``, which stay
+        non-interactive.
         """
         configs, sources = load_all_mcp_configs(self.cwd)
         cfg = configs.get(name)
@@ -880,14 +934,44 @@ class McpManager:
         errors = validate_server_config(name, cfg)
         if errors:
             raise McpConnectionError("; ".join(errors))
-        if timeout_ms is not None:
-            cfg = cfg.model_copy(update={"timeout": timeout_ms})
 
+        # The PRISTINE config is what persists: the login-widened timeout below
+        # must scope to the one interactive connect, or every later tool call
+        # and reconnect on this server would inherit a 10-minute request budget
+        # (ServerConnection.config and _configs both feed resolve_mcp_timeout_s).
         self._configs[name] = cfg
         self._sources[name] = sources[name]
         self._disposed = False
-        conn = await self._connect_server(name, cfg)
+        connect_cfg = (
+            cfg.model_copy(update={"timeout": timeout_ms}) if timeout_ms is not None else cfg
+        )
+        conn = await self._connect_server(name, connect_cfg, interactive=interactive)
+        # The live connection must carry the pristine config too — tool calls
+        # read their timeout from conn.config, not from _configs.
+        conn.config = cfg
+        # The widened budget also became the SESSION's default read timeout
+        # (ClientSession(read_timeout_seconds=...) baked in at connect), which
+        # requests WITHOUT an explicit per-call timeout — tools/list refreshes
+        # — would inherit for the session's whole life. Reset it to the
+        # pristine config's budget. Private attribute, set under suppress: the
+        # SDK offers no setter, and a rename would merely leave the widened
+        # default in place (the pre-fix behavior), never break the login.
+        with suppress(Exception):
+            conn.live_session._session_read_timeout_seconds = (  # type: ignore[attr-defined]
+                resolve_mcp_timeout_s(cfg)
+            )
+        # An explicit login is the documented recovery from an auth-suspended
+        # breaker (see _reconnect's McpAuthRequiredError arm): clear the breaker
+        # state so the server's NEXT disconnect auto-reconnects again instead of
+        # being abandoned by the suspension this login just resolved.
+        self._reconnect_history.pop(name, None)
+        self._reconnect_suspended.discard(name)
+        self._backoff_index.pop(name, None)
         self._register_connection(conn)
+        # A mid-session login adds tools the session booted without; notify
+        # subscribers exactly like a successful reconnect does. A no-op when no
+        # callback is installed (the CLI login path).
+        self._fire_tools_changed()
         return conn
 
     async def discover_and_connect(self) -> McpLoadResult:
@@ -985,6 +1069,15 @@ class McpManager:
             task = tasks[name]
             try:
                 conn = task.result()
+            except McpAuthRequiredError as exc:
+                # Actionable, not raw: the startup toast is where a user first
+                # learns a server needs a login, and "run /mcp login <name>" is
+                # the one thing they can do about it.
+                result.errors[name] = self._auth_required_text(name, exc)
+                logger.info("MCP server %r needs authorization: %s", name, exc)
+                waiter = self._connect_futures.pop(name, None)
+                _settle_future_error(waiter, exc)
+                continue
             except Exception as exc:
                 result.errors[name] = str(exc)
                 logger.warning("MCP server %r failed to connect: %s", name, exc)
@@ -1069,6 +1162,10 @@ class McpManager:
             return None
         try:
             conn = await self._connect_server(name, cfg)
+        except McpAuthRequiredError as exc:
+            logger.info("Manual MCP reconnect needs authorization for %r", name)
+            self._fire_auth_required(name, exc)
+            return None
         except Exception as exc:
             logger.warning("Manual MCP reconnect failed for %r: %s", name, exc)
             return None
@@ -1130,13 +1227,28 @@ class McpManager:
 
     # --- connection lifecycle ----------------------------------------------
 
-    async def _connect_server(self, name: str, cfg: MCPServerConfig) -> ServerConnection:
+    async def _connect_server(
+        self, name: str, cfg: MCPServerConfig, *, interactive: bool = False
+    ) -> ServerConnection:
         """Open transport + session, initialize, list tools, update cache.
 
         This is the seam tests override: it returns a :class:`ServerConnection`
         without touching a real server.
+
+        ``interactive`` controls OAuth: an ordinary startup or auto-reconnect
+        passes ``False`` and must never open a browser — an unrefreshable grant
+        surfaces as an actionable :class:`McpAuthRequiredError` instead. Only
+        an explicit ``/mcp login`` (``connect_configured_server``) runs with
+        ``True``.
+
+        Before opening the transport, an OAuth server gets a PROACTIVE refresh
+        (:func:`~local_operator.mcp.auth.ensure_mcp_oauth_fresh`): it spends a
+        stored refresh token against the DISCOVERED token endpoint, race-free
+        across concurrently starting sessions, so a day-old access token never
+        forces a browser grant on startup.
         """
         timeout_s = resolve_mcp_timeout_s(cfg)
+        await self._ensure_oauth_fresh(name, cfg)
         stack = AsyncExitStack()
         # One collector per connect ATTEMPT, so a retry never quotes the
         # previous attempt's stderr as this one's reason. Made unconditionally:
@@ -1145,20 +1257,67 @@ class McpManager:
         # branch someone has to keep in step with the transport list.
         stderr_log = McpServerStderr(name)
         try:
-            conn = await self._open_transport_and_session(stack, name, cfg, timeout_s, stderr_log)
+            conn = await self._open_transport_and_session(
+                stack, name, cfg, timeout_s, stderr_log, interactive=interactive
+            )
             tools = await self._list_all_tools(conn.live_session)
-        except Exception as exc:
-            # `aclose` FIRST: it stops the child and drains its stderr, so the
-            # tail is complete by the time `explain` quotes it. A stdio server
-            # that dies mid-handshake otherwise surfaces as a bare transport
-            # error with no text at all.
-            await stack.aclose()
+        except BaseException as exc:
+            # Tear down FIRST: for a stdio child this stops the process and
+            # drains its stderr so the tail is complete by the time ``explain``
+            # quotes it; for the streamable-HTTP transport this is where the
+            # anyio task group's scope exits, which is ITSELF where a failure
+            # raised inside the auth flow surfaces — anyio delivers that
+            # failure to the awaiting task as a CancelledError first, and the
+            # group's ``__aexit__`` then re-raises it as an ExceptionGroup.
+            close_exc: BaseException | None = None
+            try:
+                await stack.aclose()
+            except BaseException as ce:  # noqa: BLE001 — examined below, never lost
+                close_exc = ce
+            # A GENUINE external cancellation (dispose/reload/esc) keeps its
+            # priority even when the teardown surfaced a grouped auth error:
+            # the task itself was asked to cancel (``cancelling() > 0``), and
+            # converting that into an auth failure would toast + suspend a
+            # server for what was actually the user leaving. anyio's own
+            # internal delivery — the auth flow failing inside the transport's
+            # task group — raises CancelledError WITHOUT marking this task as
+            # cancelling, which is exactly what lets the two be told apart.
+            current = asyncio.current_task()
+            externally_cancelled = (
+                current is not None
+                and current.cancelling() > 0
+                and (
+                    isinstance(exc, asyncio.CancelledError)
+                    # The cancel can also land DURING ``stack.aclose()`` — then
+                    # it rides ``close_exc`` while ``exc`` carries the original
+                    # failure, and converting would swallow the pending
+                    # cancellation (F12).
+                    or isinstance(close_exc, asyncio.CancelledError)
+                )
+            )
+            if externally_cancelled:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                assert isinstance(close_exc, asyncio.CancelledError)
+                raise close_exc
+            # An OAuth grant requirement is not a transport failure: surface it
+            # as the clean type so callers (startup toast, reconnect breaker,
+            # /mcp login) can recognise it. It can ride EITHER the original
+            # exception or the group the task raised on close, so check both —
+            # otherwise the actionable error reads as an opaque TaskGroup
+            # failure or, worse, a bare CancelledError.
+            for candidate in (exc, close_exc):
+                if candidate is None:
+                    continue
+                auth_exc = _unwrap_auth_required(candidate)
+                if isinstance(auth_exc, McpAuthRequiredError):
+                    raise auth_exc from candidate
+            if isinstance(exc, asyncio.CancelledError):
+                raise  # a real cancellation (dispose/esc): never converted
+            if not isinstance(exc, Exception):
+                raise  # KeyboardInterrupt & co. propagate unchanged
             stderr_log.report_failure(f"failed to connect: {exc}")
             raise stderr_log.explain(exc) from exc
-        except BaseException:
-            # Cancellation is not a server failure and must propagate as-is.
-            await stack.aclose()
-            raise
 
         conn.tools = tools
         if self.tool_cache is not None:
@@ -1172,12 +1331,17 @@ class McpManager:
         cfg: MCPServerConfig,
         timeout_s: float | None,
         stderr_log: McpServerStderr,
+        *,
+        interactive: bool = False,
     ) -> ServerConnection:
         """Enter the transport + ClientSession context managers on ``stack``.
 
         ``stderr_log`` is what the stdio transport writes the child's stderr to
         instead of the terminal. The remote transports spawn nothing and leave
         it untouched.
+
+        ``interactive`` is forwarded to the OAuth provider builder: only an
+        explicit login may open a browser.
         """
         import mcp.types as mcp_types
         from mcp.client.session import ClientSession
@@ -1199,7 +1363,7 @@ class McpManager:
 
             http_client = create_mcp_http_client(
                 headers=dict(cfg.headers) or None,
-                auth=self._build_oauth_auth(cfg.url, cfg),
+                auth=self._build_oauth_auth(cfg.url, cfg, interactive=interactive),
             )
             streams_cm = streamable_http_client(cfg.url, http_client=http_client)
         elif isinstance(cfg, MCPSseServerConfig):
@@ -1240,15 +1404,29 @@ class McpManager:
             logger.debug("providers.auth_store unavailable", exc_info=True)
             return None
 
-    def _build_oauth_auth(self, url: str, cfg: MCPServerConfig) -> OAuthClientProvider | None:
-        """Build an ``OAuthClientProvider`` for configs with ``auth.type=oauth``."""
+    def _build_oauth_auth(
+        self, url: str, cfg: MCPServerConfig, *, interactive: bool = False
+    ) -> OAuthClientProvider | None:
+        """Build an ``OAuthClientProvider`` for configs with ``auth.type=oauth``.
+
+        ``interactive`` decides whether the flow may open a browser (only an
+        explicit login). The provider is primed with the endpoints the
+        proactive refresh discovered, so a mid-session in-flow refresh targets
+        the real token endpoint.
+        """
         auth = cfg.auth
         if auth is None or auth.type != "oauth":
             return None
         try:
             from local_operator.mcp.auth import build_oauth_provider
 
-            return build_oauth_provider(url, cfg, store=self._effective_auth_store())
+            return build_oauth_provider(
+                url,
+                cfg,
+                store=self._effective_auth_store(),
+                interactive=interactive,
+                endpoints=self._oauth_endpoints.get(url),
+            )
         except Exception:
             logger.warning(
                 "OAuth wiring unavailable for %r; connecting unauthenticated",
@@ -1256,6 +1434,61 @@ class McpManager:
                 exc_info=True,
             )
             return None
+
+    async def _ensure_oauth_fresh(self, name: str, cfg: MCPServerConfig) -> None:
+        """Proactively refresh an OAuth grant before connecting (best-effort).
+
+        Spends a stored refresh token against the DISCOVERED token endpoint so
+        a day-old access token never forces a browser grant on startup, and
+        caches the discovered endpoints for the provider. Never raises: a
+        failed refresh simply leaves the stored token as-is, and the provider's
+        non-interactive redirect handler is what turns the resulting grant
+        attempt into an actionable error instead of a login tab.
+        """
+        auth = getattr(cfg, "auth", None)
+        url = getattr(cfg, "url", None)
+        if auth is None or getattr(auth, "type", None) != "oauth" or not url:
+            return
+        try:
+            from local_operator.mcp.auth import ensure_mcp_oauth_fresh
+
+            endpoints = await ensure_mcp_oauth_fresh(url, cfg, store=self._effective_auth_store())
+        except Exception:  # noqa: BLE001 — refresh is best-effort; degrade, don't fail
+            logger.debug("MCP proactive refresh failed for %r", name, exc_info=True)
+            return
+        if endpoints is not None:
+            self._oauth_endpoints[url] = endpoints
+
+    @staticmethod
+    def _auth_required_text(name: str, exc: McpAuthRequiredError) -> str:
+        """The startup-toast wording for a server that needs an OAuth login.
+
+        Names the command that fixes it. The same string lands in the durable
+        transcript notice and in ``/mcp``, so one helper keeps all three
+        surfaces agreeing.
+        """
+        return f"needs authorization — run /mcp login {name}"
+
+    def _fire_auth_required(self, name: str, exc: McpAuthRequiredError) -> None:
+        """Notify the UI that ``name`` needs an OAuth login (best-effort).
+
+        Fired for auth failures that land OUTSIDE the startup gate (the common
+        case for HTTP OAuth servers) and for mid-session expiry, so the user
+        sees a toast rather than only a transcript incident. Deduped per
+        server until it connects again, so a dead grant a tool call keeps
+        retrying does not re-raise the toast on every attempt. Never raises: a
+        broken UI hook must not take down the connect/reconnect machinery.
+        """
+        if name in self._auth_toasted:
+            return
+        sink = self.on_auth_required
+        if sink is None:
+            return
+        try:
+            sink(name, self._auth_required_text(name, exc))
+            self._auth_toasted.add(name)
+        except Exception:  # noqa: BLE001 — UI hooks must never break the manager
+            logger.debug("on_auth_required sink raised", exc_info=True)
 
     async def _on_session_message(
         self, name: str, conn: ServerConnection, message: IncomingMessage
@@ -1288,6 +1521,25 @@ class McpManager:
             return
         except Exception as exc:
             logger.warning("MCP server %r failed to connect after the gate: %s", name, exc)
+            # An OAuth grant requirement that lands AFTER the startup gate (the
+            # common case for HTTP servers, which are slow) never reaches the
+            # startup toast. Fire the incident sink so the failure is recorded
+            # durably and the agent knows the tools are gone until a login.
+            auth_exc = _unwrap_auth_required(exc)
+            if isinstance(auth_exc, McpAuthRequiredError):
+                sink = getattr(self, "on_incident", None)
+                if sink is not None:
+                    try:
+                        sink(
+                            name,
+                            f"OAuth authorization expired; run /mcp login {name} to "
+                            "restore its tools",
+                        )
+                    except Exception:  # noqa: BLE001 — incidents must never break the manager
+                        logger.debug("mcp incident sink raised", exc_info=True)
+                # The startup toast has already been dismissed by the time an
+                # after-gate connect fails, so raise a fresh one via the UI hook.
+                self._fire_auth_required(name, auth_exc)
             # Re-fetch the waiter: a reload during the await may have swapped
             # it, and settling the stale one would strand the current waiters.
             _settle_future_error(self._connect_futures.get(name), exc)
@@ -1314,6 +1566,9 @@ class McpManager:
                 with suppress(Exception):
                     asyncio.get_running_loop().create_task(old.stack.aclose())
         self._connections[conn.name] = conn
+        # A successful (re)connect clears the auth-toast latch, so a grant that
+        # expires AGAIN later gets its own toast instead of staying silent.
+        self._auth_toasted.discard(conn.name)
         self._log_first_connect_security(conn)
         self._register_tools(conn.name, conn.tools)
         future = self._connect_futures.pop(conn.name, None)
@@ -1745,6 +2000,37 @@ class McpManager:
             self._connect_futures[name] = future
         try:
             conn = await self._connect_server(name, cfg)
+        except McpAuthRequiredError as exc:
+            # An expired grant will not heal by retrying: auto-reconnect is
+            # non-interactive by design, so further attempts would only burn the
+            # breaker window. Abandon with an actionable reason; ``/mcp login``
+            # (which resets the breaker) is the recovery path.
+            logger.info("MCP reconnect needs authorization for %r", name)
+            # Model-visible incident: the agent must know the server's tools are
+            # gone until a login, or it hammers them. Same fire-and-forget guard
+            # as the breaker path.
+            sink = getattr(self, "on_incident", None)
+            if sink is not None:
+                try:
+                    sink(
+                        name,
+                        f"OAuth authorization expired; run /mcp login {name} to "
+                        "restore its tools",
+                    )
+                except Exception:  # noqa: BLE001 — incidents must never break the manager
+                    logger.debug("mcp incident sink raised", exc_info=True)
+            # Mid-session expiry happens long after the startup toast, so raise a
+            # fresh one via the UI hook.
+            self._fire_auth_required(name, exc)
+            if not future.done():
+                future.set_exception(exc)
+                future.exception()  # mark retrieved; waiters still see the raise
+            self._connect_futures.pop(name, None)
+            # Suspend durably (like the breaker) so a call-site retry also stops
+            # hammering a grant that cannot heal without a login.
+            self._reconnect_suspended.add(name)
+            self._abandon_reconnect(name, str(exc))
+            return
         except Exception as exc:
             logger.warning("MCP reconnect attempt failed for %r: %s", name, exc)
             if not future.done():
@@ -1782,6 +2068,10 @@ class McpManager:
         await self._teardown_connection(name)
         try:
             conn = await self._connect_server(name, cfg)
+        except McpAuthRequiredError as exc:
+            logger.info("MCP call-site reconnect needs authorization for %r", name)
+            self._fire_auth_required(name, exc)
+            return None
         except Exception as exc:
             logger.warning("MCP call-site reconnect failed for %r: %s", name, exc)
             return None
