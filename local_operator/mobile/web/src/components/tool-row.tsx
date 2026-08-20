@@ -21,12 +21,18 @@ const GLYPH: Record<TranscriptEntry["tool_state"], string> = {
 };
 
 function DiffBlock({ diff }: { diff: string }) {
+	/* span rows, never <div> inside <pre>: <div> is not phrasing content, so
+	   the HTML parser hoists it out of the <pre> and the expansion repaints
+	   as a broken, layout-filling block — read on the phone as "the whole
+	   page went solid". whitespace-pre-wrap on the container plus block
+	   spans gives the same monospace, per-line-tinted result legally. */
 	return (
-		<pre className="lo-scroll max-h-64 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm whitespace-pre">
+		<div className="lo-scroll max-h-64 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap">
 			{diff.split("\n").map((line, i) => (
-				<div
+				<span
 					key={i}
 					className={cn(
+						"block",
 						line.startsWith("+") &&
 							!line.startsWith("+++") &&
 							"text-success",
@@ -37,9 +43,9 @@ function DiffBlock({ diff }: { diff: string }) {
 					)}
 				>
 					{line}
-				</div>
+				</span>
 			))}
-		</pre>
+		</div>
 	);
 }
 
