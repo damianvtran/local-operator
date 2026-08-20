@@ -79,7 +79,7 @@ export function NewSessionScreen() {
 				</button>
 				<h1 className="text-heading">new session</h1>
 			</header>
-			<main className="flex flex-1 flex-col gap-4 px-4 pb-4">
+			<main className="flex flex-1 flex-col gap-3 px-3 pb-3">
 				<section className="flex flex-col gap-2">
 					<label
 						htmlFor="cwd-input"
@@ -109,7 +109,7 @@ export function NewSessionScreen() {
 										type="button"
 										onClick={() => setCwd(p)}
 										className={cn(
-											"flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-elevated",
+											"flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-elevated",
 											cwd === p && "bg-accent-wash",
 										)}
 									>
@@ -176,7 +176,7 @@ export function NewSessionScreen() {
 							setModel(null);
 							setModelSheetOpen(false);
 						}}
-						className="flex min-h-11 items-center rounded-sm px-3 text-left text-ink-muted active:bg-surface"
+						className="flex min-h-8 items-center rounded-sm px-2 text-left text-ink-muted active:bg-surface"
 					>
 						default
 					</button>
@@ -188,7 +188,7 @@ export function NewSessionScreen() {
 								setModel(m);
 								setModelSheetOpen(false);
 							}}
-							className="flex min-h-11 items-center gap-2 rounded-sm px-3 text-left active:bg-surface"
+							className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 						>
 							<span className="min-w-0 flex-1 truncate text-body">
 								{m.name}

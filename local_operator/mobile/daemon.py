@@ -158,7 +158,12 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     frames until the connection dies. One task per session."""
     record = entry.record
     try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+        # Match the registrant's 1 MB line limit. The default 64 KB
+        # StreamReader cap is what made a transcript push raise
+        # ValueError and leave the session stuck on "connecting…".
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
     except OSError:
         entry.degraded = True
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S

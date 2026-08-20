@@ -30,30 +30,30 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 			type="button"
 			onClick={() => navigate(`/s/${s.pid}`)}
 			className={cn(
-				"flex w-full flex-col gap-1.5 rounded-md px-3 py-3 text-left select-none active:bg-elevated",
+				"flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated",
 				s.ended && "text-ink-disabled",
 			)}
 		>
 			<div className="flex items-center gap-2">
 				{s.needs_attention && pendingLabel ? (
-					<>
-						<span
-							className="lo-pulse inline-block size-2 shrink-0 rounded-full bg-danger"
-							aria-hidden
-						/>
-						<span className="text-meta text-danger">
-							{pendingLabel}
-						</span>
-					</>
+					<span
+						className="lo-pulse inline-block size-1.5 shrink-0 rounded-full bg-danger"
+						aria-hidden
+					/>
 				) : null}
 				<span
 					className={cn(
-						"min-w-0 flex-1 truncate text-heading",
+						"min-w-0 flex-1 truncate text-body-sm font-medium",
 						s.streaming && !s.ended && "lo-shimmer",
 					)}
 				>
 					{s.conversation_name || "untitled"}
 				</span>
+				{s.needs_attention && pendingLabel ? (
+					<span className="shrink-0 text-meta text-danger">
+						{pendingLabel}
+					</span>
+				) : null}
 				{s.subagents_running > 0 ? (
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
 						⟳ {s.subagents_running}
@@ -64,29 +64,18 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 						{s.todos_open}
 					</span>
 				) : null}
+				{s.ended ? (
+					<span className="shrink-0 text-meta text-ink-dim">ended</span>
+				) : null}
 			</div>
 			<div className="flex items-baseline gap-2">
-				<span className="shrink-0 font-mono text-mono-sm text-ink-muted">
-					{basename(s.cwd)}
-				</span>
 				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
-					{shortenHome(s.cwd, home)}
+					{basename(s.cwd)}
+					{home ? ` · ${shortenHome(s.cwd, home)}` : ""}
 				</span>
-			</div>
-			<div className="flex items-center gap-2">
-				<span className="min-w-0 flex-1 truncate text-meta text-ink-dim">
+				<span className="ml-auto shrink-0 font-mono text-mono-sm text-ink-dim">
 					{s.model_label}
 				</span>
-				{s.degraded ? (
-					<span className="shrink-0 rounded-sm bg-warning-wash px-1.5 text-meta text-warning">
-						reconnecting
-					</span>
-				) : null}
-				{s.ended ? (
-					<span className="shrink-0 rounded-sm bg-sunken px-1.5 text-meta text-ink-dim">
-						ended
-					</span>
-				) : null}
 			</div>
 		</button>
 	);
@@ -111,7 +100,7 @@ function ThemePicker({
 							applyTheme(t.id);
 							setCurrent(t.id);
 						}}
-						className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-left active:bg-surface"
+						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -153,18 +142,18 @@ export function SessionListScreen() {
 
 	return (
 		<div className="mx-auto flex min-h-full w-full max-w-md flex-col">
-			<header className="flex items-center gap-3 px-4 pt-[max(env(safe-area-inset-top),1.25rem)] pb-4">
+			<header className="flex items-center gap-2 px-3 pt-[max(env(safe-area-inset-top),0.75rem)] pb-2">
 				<img
 					src="/mark.png"
 					alt=""
-					width={28}
-					height={28}
+					width={20}
+					height={20}
 				/>
 				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
 					local operator
 				</h1>
 			</header>
-			<main className="flex flex-1 flex-col px-2 pb-4">
+			<main className="flex flex-1 flex-col px-1 pb-2">
 				{sessions.length === 0 ? (
 					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
 						<p className="text-body text-ink-muted">
@@ -184,7 +173,7 @@ export function SessionListScreen() {
 					</div>
 				)}
 			</main>
-			<footer className="flex items-center gap-2 border-t border-hairline px-4 py-3 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
+			<footer className="flex items-center gap-2 border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 				<button
 					type="button"
 					onClick={() => navigate("/new")}

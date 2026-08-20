@@ -70,7 +70,7 @@ export function ModelSheet({
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-9 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{error ? (
 					<p className="px-3 py-1 text-body-sm text-danger">
@@ -90,7 +90,7 @@ export function ModelSheet({
 									key={m.selector}
 									type="button"
 									onClick={() => void choose(m)}
-									className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-left active:bg-surface"
+									className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 								>
 									<span
 										className={cn(

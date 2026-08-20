@@ -201,14 +201,14 @@ const HEADING_CLASSES = [
 export function Markdown({ text }: { text: string }) {
 	const blocks = splitBlocks(text);
 	return (
-		<div className="flex flex-col gap-2">
+		<div className="flex flex-col gap-1.5">
 			{blocks.map((b) => {
 				switch (b.kind) {
 					case "code":
 						return (
 							<pre
 								key={key()}
-								className="lo-scroll overflow-x-auto rounded-sm bg-sunken p-3 font-mono text-mono-sm whitespace-pre"
+								className="lo-scroll overflow-x-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre"
 							>
 								{b.lines.join("\n")}
 							</pre>
@@ -228,7 +228,7 @@ export function Markdown({ text }: { text: string }) {
 						);
 					case "ul":
 						return (
-							<ul key={key()} className="flex list-disc flex-col gap-1 pl-5">
+							<ul key={key()} className="flex list-disc flex-col gap-0.5 pl-5">
 								{b.lines.map((li) => (
 									<li key={key()}>{renderInline(li)}</li>
 								))}
@@ -238,7 +238,7 @@ export function Markdown({ text }: { text: string }) {
 						return (
 							<ol
 								key={key()}
-								className="flex list-decimal flex-col gap-1 pl-5"
+								className="flex list-decimal flex-col gap-0.5 pl-5"
 							>
 								{b.lines.map((li) => (
 									<li key={key()}>{renderInline(li)}</li>

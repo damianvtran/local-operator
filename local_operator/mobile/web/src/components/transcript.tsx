@@ -21,7 +21,7 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 		case "user":
 			return (
 				<div className="flex justify-end">
-					<div className="max-w-[85%] rounded-frame bg-elevated px-3 py-2 text-body whitespace-pre-wrap">
+					<div className="max-w-[85%] rounded-md border border-hairline bg-surface px-3 py-1.5 text-body leading-normal whitespace-pre-wrap">
 						{entry.text}
 					</div>
 				</div>
@@ -29,14 +29,14 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 		case "steer":
 			return (
 				<div className="flex justify-end">
-					<div className="max-w-[85%] rounded-frame border border-hairline px-3 py-2 text-body-sm text-ink-muted whitespace-pre-wrap">
+					<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted whitespace-pre-wrap">
 						{entry.text}
 					</div>
 				</div>
 			);
 		case "assistant":
 			return (
-				<div className="text-body">
+				<div className="text-body leading-normal">
 					<Markdown text={entry.text} />
 					{!entry.final ? (
 						<span className="lo-caret" aria-hidden />
@@ -48,7 +48,7 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 		case "notice":
 		case "compaction":
 			return (
-				<p className="py-1 text-center text-meta text-ink-dim">
+				<p className="text-center text-meta text-ink-dim">
 					{entry.text}
 				</p>
 			);
@@ -86,7 +86,7 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
 			ref={scrollRef}
 			onScroll={onScroll}
 			className={cn(
-				"lo-scroll flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3",
+				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2",
 			)}
 		>
 			{hiddenCount > 0 ? (

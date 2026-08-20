@@ -58,14 +58,14 @@ export function PendingCard({
 		);
 
 	return (
-		<div className="border-accent bg-accent-wash mx-3 flex flex-col gap-3 rounded-lg border p-3">
-			<div className="flex flex-col gap-1">
+		<div className="border-accent bg-accent-wash mx-2 flex flex-col gap-2 rounded-md border p-2.5">
+			<div className="flex flex-col gap-0.5">
 				<span className="text-meta text-accent">
 					{pending.kind === "approval"
 						? "approval needed"
 						: "question"}
 				</span>
-				<span className="text-heading">{pending.title}</span>
+				<span className="text-body font-medium">{pending.title}</span>
 				{pending.detail ? (
 					<p className="text-body-sm text-ink-muted whitespace-pre-wrap">
 						{pending.detail}

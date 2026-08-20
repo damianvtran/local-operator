@@ -65,7 +65,7 @@ function SlashSheet({
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-9 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{filtered.map((c) => (
 					<button
@@ -79,7 +79,7 @@ function SlashSheet({
 							}
 							onClose();
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-3 text-left active:bg-surface"
+						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span className="shrink-0 font-mono text-mono-sm text-ink">
 							/{c.name}
@@ -127,7 +127,7 @@ function EffortSheet({
 						key={rung}
 						type="button"
 						onClick={() => set(rung)}
-						className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-left active:bg-surface"
+						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -242,7 +242,7 @@ export function Composer({
 	};
 
 	return (
-		<div className="flex flex-col gap-2 px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
+		<div className="flex flex-col gap-1.5 px-3 pt-1.5 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 			{showResume && !projection.streaming && !disabled ? (
 				<button
 					type="button"
@@ -256,7 +256,7 @@ export function Composer({
 			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 
 			<div className="flex items-end gap-2">
-				<div className="flex min-w-0 flex-1 items-end rounded-md border border-control bg-elevated px-3.5 py-2.5">
+				<div className="flex min-w-0 flex-1 items-end rounded-md border border-control bg-elevated px-3 py-2">
 					<textarea
 						ref={textareaRef}
 						value={text}
@@ -305,7 +305,7 @@ export function Composer({
 				</button>
 			</div>
 
-			<div className="flex items-center gap-3 px-1">
+			<div className="flex items-center gap-2 px-0.5">
 				{projection.queued_count > 0 ? (
 					<span className="font-mono text-mono-sm text-ink-dim">
 						{projection.queued_count} queued
@@ -315,7 +315,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={onOpenModels}
-					className="flex min-h-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+					className="flex min-h-8 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 				>
 					{projection.model_label || "model"}
 				</button>
@@ -323,7 +323,7 @@ export function Composer({
 					<button
 						type="button"
 						onClick={onOpenEffort}
-						className="flex min-h-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+						className="flex min-h-8 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 					>
 						{projection.effort || "effort"}
 					</button>

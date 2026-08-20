@@ -35,7 +35,7 @@ function Header({
 				? "lo-pulse bg-accent"
 				: "bg-success";
 	return (
-		<header className="flex items-center gap-2 border-b border-hairline px-2 py-2 pt-[max(env(safe-area-inset-top),0.5rem)]">
+		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 			<button
 				type="button"
 				onClick={() => navigate("/")}
@@ -48,7 +48,7 @@ function Header({
 				className={cn("size-2 shrink-0 rounded-full", status)}
 				aria-hidden
 			/>
-			<span className="min-w-0 flex-1 truncate text-heading">
+			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
 			</span>
 		</header>
@@ -90,7 +90,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 				ref={rootRef}
 				className="mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
 			>
-				<header className="flex items-center gap-2 border-b border-hairline px-2 py-2 pt-[max(env(safe-area-inset-top),0.5rem)]">
+				<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 					<button
 						type="button"
 						onClick={() => navigate("/")}
