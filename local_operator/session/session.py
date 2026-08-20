@@ -1760,6 +1760,11 @@ class Session:
             self._abort_requested = False
             if self._is_streaming:
                 raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+            # Flush a pending wake catch-up before the user's own turn: on a
+            # session built inside a running loop (the TUI) this prompt is the
+            # only trigger guaranteed to exist, and the aggregated missed
+            # wakes belong ahead of the work they were meant to start.
+            self._handle_missed_wakes()
             await self._run_turn_pipeline([Message.user(text, images)])
         finally:
             self._turn_lock.release()
@@ -2225,6 +2230,9 @@ class Session:
         if self._disposed:
             raise RuntimeError("session is disposed")
         async with self._turn_lock:
+            # Same flush as prompt(): a wake-delivery turn is still a prompt
+            # path, and the catch-up must not be stranded behind it.
+            self._handle_missed_wakes()
             await self._run_turn_pipeline(initial)
 
     async def _run_turn_pipeline(self, initial: list[AgentMessage]) -> None:
@@ -3685,19 +3693,33 @@ class Session:
         # is good enough here: grace comparisons happen against the same clock
         # the scheduler reads (``now=lambda: int(time.time() * 1000)``).
         self._resume_grace_ends_ms = float(now + LOAD_GRACE_MS)
-        self._missed_wake_occurrences = {m["schedule"].id: m["occurrences"] for m in missed}
+        # The delivery note shows the DUE-while-down count (how often the wake
+        # actually came due), not the budget-clamped delivered-miss count —
+        # for a limit-bounded recurring wake the clamped figure understates
+        # the downtime (review round 2, M2).
+        self._missed_wake_occurrences = {m["schedule"].id: m["due"] for m in missed}
         self._resume_catchup_text = self._format_missed_wake_catchup(missed, now)
+        # Install the suppression shim NOW, not at first trigger: it is cheap
+        # (a no-op passthrough once the catch-up is sent) and installing it
+        # late is what let the scheduler's own tick swallow a per-schedule
+        # delivery before any trigger had run — the wake then reached the
+        # model nowhere (review round 2, M1).
+        self._wake_deliver_hook = self._deliver_wake_catchup
 
     def _handle_missed_wakes(self) -> None:
-        """Route the overdue wakes adopted at load into ONE catch-up prompt.
+        """Send the aggregated catch-up for the overdue wakes adopted at load.
 
-        Called at the head of both wake pumps (async_init, first turn). Sends
-        the aggregated prompt the moment grace has expired — the grace exists
-        so a fresh session shows its wake LIVE in the conversation rather than
-        inside the boot path — and suppresses the scheduler's own per-schedule
-        fires for it while the catch-up is pending, so a resume with three
-        overdue wakes costs one turn, not three."""
-        self._wake_deliver_hook = self._deliver_wake_catchup
+        Reachable from every path that can fire a wake, because the session
+        cannot know which one a host uses: ``async_init`` (the off-loop boot),
+        the ``needs_rearm`` first-turn re-arm, and the head of EVERY
+        ``prompt``/``_prompt_messages`` (the only trigger guaranteed to exist
+        on a session built inside a running loop, where the TUI lives — the
+        gap that let a resumed TUI session fire N separate wake turns and
+        never aggregate, review round 2 M1). Sends once, the moment grace has
+        expired, so a fresh session shows the wake LIVE rather than inside
+        the boot path; the shim installed at prepare swallows the scheduler's
+        per-schedule fires until then, so a resume with three overdue wakes
+        costs one turn, not three."""
         if self._resume_catchup_sent or self._resume_catchup_text is None:
             return
         if int(time.time() * 1000) < self._resume_grace_ends_ms:
@@ -3747,7 +3769,8 @@ class Session:
         lines = []
         for entry in missed:
             schedule = entry["schedule"]
-            occurrences = entry["occurrences"]
+            # The DUE-while-down count is what the agent should read (M2).
+            occurrences = entry["due"]
             if occurrences > 1:
                 # occurrences > 1 implies a repeating schedule, so every_ms is
                 # set; the assert turns that reasoning into a type narrowing.
@@ -3880,6 +3903,8 @@ class Session:
             WakeDeliveredEvent(
                 text=text,
                 catchup=False,
+                wake_id=due.schedule.id,
+                occurrence=due.occurrence,
             )
         )
         if self._is_streaming:

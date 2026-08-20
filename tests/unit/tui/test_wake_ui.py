@@ -156,6 +156,22 @@ class TestWakePanel:
             panel.sync(object())  # no wake_scheduler attribute
             assert panel.display is False
 
+    @pytest.mark.asyncio
+    async def test_overflow_marker_survives_a_short_screen(self) -> None:
+        """On a screen short enough to floor the row budget, the "… N more"
+        marker must still paint (review round 2, m1): silently dropping it
+        leaves one visible wake beside a hidden count. The fix reserves the
+        marker row even when that costs the last visible wake."""
+        app = _PanelHost()
+        async with app.run_test(size=(100, 12)):
+            panel = app.query_one(WakePanel)
+            session = _FakeSession([_schedule(f"w{i}", f"wake {i}") for i in range(1, 6)])
+            panel.sync(session)
+            out = str(panel._body.content)
+            # Five schedules can never fit a floored budget; the marker must
+            # report the hidden ones rather than vanish.
+            assert "more wakes" in out
+
 
 class TestWakeDeliveredEvent:
     def test_live_fire_and_catchup_are_distinguished(self) -> None:

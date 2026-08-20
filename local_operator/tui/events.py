@@ -188,10 +188,12 @@ class ToolUpdated(Message):
 class WakeDelivered(Message):
     """A scheduled wake's prompt was delivered — render the expandable receipt."""
 
-    def __init__(self, text: str, catchup: bool) -> None:
+    def __init__(self, text: str, catchup: bool, wake_id: str = "", occurrence: int = 0) -> None:
         super().__init__()
         self.text = text
         self.catchup = catchup
+        self.wake_id = wake_id
+        self.occurrence = occurrence
 
 
 class NoticePosted(Message):
@@ -558,7 +560,7 @@ class EventController:
         # No generation guard: a wake receipt is a state fact about the
         # session (this prompt was delivered), not a turn-scoped boundary, so
         # a superseded turn cannot invalidate it.
-        self._post(WakeDelivered(event.text, event.catchup))
+        self._post(WakeDelivered(event.text, event.catchup, event.wake_id, event.occurrence))
 
     def _handle_steering_delivered(self, event: SteeringDeliveredEvent) -> None:
         # No generation guard, deliberately: the drain belongs to whichever turn

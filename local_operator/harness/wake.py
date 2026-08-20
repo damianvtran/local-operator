@@ -109,15 +109,17 @@ class DueWake(BaseModel):
 class MissedWakeOccurrence(TypedDict):
     """One schedule's skipped occurrences between shutdown and resume.
 
-    ``occurrences`` counts only the strictly-past, never-delivered due times —
-    not the imminent fire the resume is about to deliver itself — and it is
-    clamped to the remaining ``limit`` budget, the same budget the live
-    scheduler fires against, so a ``limit 3`` wake resumed a week late never
-    claims more misses than it could ever have delivered.
+    ``occurrences`` counts the strictly-past, never-delivered due times,
+    clamped to the remaining ``limit`` budget — the count the delivery
+    accounting uses. ``due`` is the UNCLAMPED count of how many times the
+    wake actually came due while down (:func:`due_while_down`); the two
+    differ for a ``limit``-bounded recurring wake, and ``due`` is the one to
+    show the agent so a long stretch of downtime is not understated.
     """
 
     schedule: WakeSchedule
     occurrences: int
+    due: int
 
 
 #: Why a schedule stopped repeating. Only these three are ever produced:
@@ -398,24 +400,47 @@ def advance_wake_schedule(schedule: WakeSchedule, now_ms: int) -> WakeAdvanceRes
     return {"next": next_schedule}
 
 
-def missed_occurrences(schedule: WakeSchedule, now_ms: int) -> int:
-    """How many of ``schedule``'s occurrences were strictly due before
-    ``now_ms`` and will never be delivered (the resume fires only the latest).
+def due_while_down(schedule: WakeSchedule, now_ms: int) -> int:
+    """How many of ``schedule``'s occurrences came strictly due before
+    ``now_ms`` — the honest "this is how far behind we are" count, with NO
+    clamp to the delivery budget.
 
-    Recurrence advance SKIPS missed occurrences rather than replaying them, so
-    this count is the only place the skip is visible to the agent. Occurrences
-    past ``until_at`` do not count — the schedule was already retired then.
+    This is the count the agent should SEE (review round 2, M2): for an
+    ``every 1h, limit 1`` wake resumed five hours late, four occurrences came
+    due while the process was down even though the schedule would only ever
+    have delivered one of them — and "1 occurrence was missed" misinforms the
+    model about how stale the wake's subject is. Occurrences past ``until_at``
+    do not count (the schedule was already retired by then); a one-shot
+    contributes at most its single occurrence.
     """
     if schedule.every_ms is None:
         return 1 if schedule.next_due_at < now_ms else 0
     if schedule.next_due_at >= now_ms:
         return 0
-    missed = (now_ms - schedule.next_due_at) // schedule.every_ms
+    due = (now_ms - schedule.next_due_at) // schedule.every_ms
     if schedule.until_at is not None and schedule.next_due_at <= schedule.until_at:
-        missed = min(missed, (schedule.until_at - schedule.next_due_at) // schedule.every_ms + 1)
-    if schedule.limit is not None:
-        missed = min(missed, max(schedule.limit - schedule.fired_count, 0))
-    return max(missed, 0)
+        due = min(due, (schedule.until_at - schedule.next_due_at) // schedule.every_ms + 1)
+    return max(due, 0)
+
+
+def missed_occurrences(schedule: WakeSchedule, now_ms: int) -> int:
+    """How many of ``schedule``'s occurrences were strictly due before
+    ``now_ms`` and will never be delivered, CLAMPED to the delivery budget
+    (``limit - fired_count``).
+
+    This is the DELIVERED-miss count: recurrence advance skips missed
+    occurrences rather than replaying them, and a ``limit``-bounded schedule
+    never had more deliveries to skip than its remaining budget, so the count
+    the budget-consumed accounting reports is the clamped one. For the count
+    the agent should see (how many times the wake actually came due while
+    down) use :func:`due_while_down` — the two differ exactly when a ``limit``
+    truncates a longer stretch of downtime. Occurrences past ``until_at`` do
+    not count — the schedule was already retired then.
+    """
+    due = due_while_down(schedule, now_ms)
+    if schedule.every_ms is not None and schedule.limit is not None:
+        due = min(due, max(schedule.limit - schedule.fired_count, 0))
+    return due
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +559,13 @@ class WakeScheduler:
             if copy.next_due_at <= now:
                 skipped = missed_occurrences(copy, now)
                 if skipped:
-                    missed.append({"schedule": copy.model_copy(deep=True), "occurrences": skipped})
+                    missed.append(
+                        {
+                            "schedule": copy.model_copy(deep=True),
+                            "occurrences": skipped,
+                            "due": due_while_down(copy, now),
+                        }
+                    )
                 copy = copy.model_copy(update={"next_due_at": now + LOAD_GRACE_MS})
             adopted.append(copy)
         adopted.sort(key=lambda s: s.created_at)

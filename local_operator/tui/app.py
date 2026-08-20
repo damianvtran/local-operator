@@ -1080,6 +1080,13 @@ class OperatorApp(App[None]):
         #: The two together are the FIFO the engine drains: these rows were
         #: queued first, so they settle first (see `on_steering_delivered`).
         self._deferred_steer_notices: list[NoticeBlock] = []
+        #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
+        #: keys. ``on_wake_delivered`` records each; the history replay skips a
+        #: persisted ``wake_prompt`` whose key is already here — otherwise a
+        #: wake that fired mid-session and was then replayed (``/resume`` into
+        #: the same conversation) would paint its receipt twice (review round
+        #: 2, m2).
+        self._live_wake_receipts: set[tuple[str, object]] = set()
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -1851,8 +1858,14 @@ class OperatorApp(App[None]):
                 if getattr(message, "custom_type", None) == WAKE_PROMPT_MESSAGE_TYPE:
                     details = getattr(message, "details", None) or {}
                     if not details.get("wake_catchup"):
-                        self._append_block(WakeBlock(str(details.get("text", "")), catchup=False))
-                        appended = True
+                        key = (str(details.get("wake_id", "")), details.get("occurrence"))
+                        # Skip a receipt this session already painted live —
+                        # replaying it would double the line (round 2, m2).
+                        if key not in self._live_wake_receipts:
+                            self._append_block(
+                                WakeBlock(str(details.get("text", "")), catchup=False)
+                            )
+                            appended = True
                     continue
                 role = getattr(message, "role", None)
                 if role == "tool":
@@ -9907,7 +9920,11 @@ class OperatorApp(App[None]):
         name the wake and the expansion can show exactly what the model was
         handed. A catch-up folds several missed wakes into one line; a live
         fire gets its own.
+        The receipt's ``(wake_id, occurrence)`` key is recorded so the history
+        replay does not mount a second copy of the same delivery (see
+        ``_live_wake_receipts``).
         """
+        self._live_wake_receipts.add((message.wake_id, message.occurrence))
         self._append_block(WakeBlock(message.text, catchup=message.catchup))
 
     def _settle_queued_steer_notices_unsent(self) -> None:
