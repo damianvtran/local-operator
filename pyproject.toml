@@ -154,6 +154,14 @@ Homepage = "https://github.com/damianvtran/local-operator"
 
 [project.scripts]
 local-operator = "local_operator.cli:main"
+# `lop` is the short form every doc, hint and the stable `~/.local/bin/lop`
+# launcher already assumes. Registering it here makes a standard
+# `pip`/`uv tool install` provide it too, so the session-ended "resume with:"
+# hint can name a command that exists without the machine-specific launcher.
+# setuptools/pip generate the platform-correct wrapper (console-script shim on
+# Unix, .exe launcher on Windows), so the alias is cross-platform by
+# construction rather than by a POSIX-only symlink.
+lop = "local_operator.cli:main"
 
 [tool.black]
 line-length = 100

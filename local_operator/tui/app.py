@@ -174,6 +174,7 @@ from local_operator.tui.widgets.toast import (
 from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard, clean_intent
 from local_operator.tui.widgets.transcript import (
+    BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,
     GAP_CLASS,
     NoticeBlock,
@@ -3045,6 +3046,27 @@ class OperatorApp(App[None]):
         box = max(0, terminal_width - SCREEN_INSET)
         card = boot_card_width(box)
         self.screen.set_class(box - card >= BOOT_CARD_MIN_INSET, BOOT_CARD_CLASS)
+        self._sync_boot_column_width(box)
+
+    def _sync_boot_column_width(self, box: int) -> None:
+        """Give a boot-column block the card's EXACT width, in cells.
+
+        A notice under the splash (an MCP server that failed to connect) is part
+        of the centred boot composition, not the full-width spine: left at
+        ``1fr`` it drew flush against the terminal's left edge while the splash
+        and card sat centred. It has to be the SAME width as the card and share
+        its axis, and neither is a percentage the stylesheet can ask for — the
+        card's own clamp is resolved in Python for the same reason (see
+        :meth:`_sync_boot_card`). So the width the card resolved to is written
+        onto the block here, one place for both, and the sheet only centres it
+        (``Screen.boot .boot-column``). Below the card threshold the block keeps
+        the spine's full width, matching the bar the card degrades to.
+        """
+        transcript = self._transcript_view()
+        card = boot_card_width(box)
+        width = card if box - card >= BOOT_CARD_MIN_INSET else box
+        for block in transcript.query("." + BOOT_COLUMN_CLASS):
+            block.styles.width = width
 
     def _sync_boot_composition(self, size: Size) -> None:
         """Centre the boot composition — splash, separator, card — in the screen.
@@ -3570,7 +3592,7 @@ class OperatorApp(App[None]):
             return
         self._last_interrupt_at = now
         self._interrupt()
-        # Short, and WITHOUT the command. The full `local-operator --resume <id>`
+        # Short, and WITHOUT the command. The full `lop --resume <id>`
         # belongs in the exit block printed to the terminal, where it can be
         # copied; in a transcript line it is the unreachable copy (the alt screen
         # is discarded on exit), it wrapped at 60 columns and split across rows at
@@ -3623,14 +3645,19 @@ class OperatorApp(App[None]):
         return session_id if transcript.is_file() else ""
 
     def resume_hint(self) -> str:
-        """``local-operator --resume <id>`` for this session, or "" when there is none.
+        """``lop --resume <id>`` for this session, or "" when there is none.
 
         Read by :func:`run_tui` after the app has released the terminal, so the
         command lands in the user's scrollback where they can copy it, rather
         than in a frame that is about to be torn down.
+
+        ``lop`` rather than ``local-operator``: the short form is registered as
+        a script in pyproject, so a standard install provides it and the hint
+        names a command that resolves on any machine, not only one with the
+        local launcher shim.
         """
         session_id = self._resumable_session_id()
-        return f"local-operator --resume {session_id}" if session_id else ""
+        return f"lop --resume {session_id}" if session_id else ""
 
     def _interrupt(self) -> None:
         """Abort the running turn AND stop any ``/loop`` in flight.
@@ -6312,7 +6339,17 @@ class OperatorApp(App[None]):
         collapsed the boot composition on launch for anyone with one broken
         server, which is how the centred prompt became unreachable.
         """
-        self._append_block(NoticeBlock(body, kind), ends_empty_state=False)
+        block = NoticeBlock(body, kind)
+        # Only while the boot CARD is up is the notice part of a centred
+        # composition; below the card threshold the input is a full-width bar and
+        # the spine is the axis everything shares, so the notice keeps it too.
+        # The class marks it for the column (width + centring) the app resolves
+        # in `_sync_boot_column_width`; the width set here covers the first
+        # frame, and the sync keeps it right across resizes.
+        if self.screen.has_class(BOOT_CARD_CLASS):
+            block.add_class(BOOT_COLUMN_CLASS)
+            block.styles.width = boot_card_width(max(0, self.size.width - SCREEN_INSET))
+        self._append_block(block, ends_empty_state=False)
 
     def _echo_user_command(self, text: str) -> None:
         """Write a slash command into the ledger as the user's own row, IF its

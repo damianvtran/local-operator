@@ -583,6 +583,39 @@ async def test_notices_under_the_splash_never_scroll_the_region(notices: int) ->
 
 
 @pytest.mark.asyncio
+async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine() -> None:
+    """A boot notice is part of the centred composition, not the full-width spine.
+
+    The splash above it and the card below it are both centred, so a notice left
+    at `1fr` drew flush against the terminal's left edge — one line visibly out
+    of column on the first frame a user with a broken MCP server sees. The fix
+    gives it the card's width and centres its TEXT within that width: the
+    wordmark and the card's caret are centred masses, not left edges, so
+    edge-aligning the row still read as "off to the left". Asserted off the
+    notice's own geometry: its block is the card's width and its text is centred
+    in it (equal slack on both sides, give or take the odd cell).
+    """
+    app = _make_app()
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app._system_notice("MCP cloudflare failed: needs authorization", "error")
+        await _settle(pilot)
+        card = app.query_one("#input-shell").region
+        notice = app.query_one(NoticeBlock).region
+        assert card.width == _expected_card_width(120) < 120 - 2
+        assert notice.width == card.width, (notice.width, card.width)
+        # The text is centred in the card-wide block: the slack left and right of
+        # the row's ink, measured WITHIN the block's own span, differs by at most
+        # the odd cell a centred row leaves.
+        line = _rows(app)[notice.y]
+        span = line[notice.x : notice.x + notice.width]
+        left = len(span) - len(span.lstrip())
+        right = len(span) - len(span.rstrip())
+        assert abs(left - right) <= 1, (left, right, span)
+
+
+@pytest.mark.asyncio
 async def test_notices_spend_the_mark_before_existing_information() -> None:
     """Two startup failures consume rows from the splash's region.
 
