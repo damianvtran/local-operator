@@ -149,6 +149,47 @@ class TestMcpTokenStorage:
         assert fetched is not None and fetched.client_id == "cid"
 
     @pytest.mark.asyncio
+    async def test_get_client_info_drops_legacy_port_registration(self) -> None:
+        """A stored registration still targeting :3000 is stale and discarded.
+
+        Regression guard for the pinned-client dead-end: a registration whose
+        redirect URIs point at the legacy callback port can never complete a
+        grant once the runtime advertises a different port, and the SDK never
+        re-runs DCR while ``client_info`` is present. ``get_client_info`` must
+        drop it (and persist the drop) so the flow re-registers / re-seeds.
+        """
+        from mcp.shared.auth import OAuthClientInformationFull
+        from pydantic import AnyUrl
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage("https://srv.example/mcp", store)
+        info = OAuthClientInformationFull(
+            client_id="cid",
+            redirect_uris=[AnyUrl("http://127.0.0.1:3000/callback")],
+        )
+        await storage.set_client_info(info)
+
+        assert await storage.get_client_info() is None
+        # The drop is persisted, not just filtered for this read.
+        rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        assert "client_info" not in rows[0].data
+
+    @pytest.mark.asyncio
+    async def test_get_client_info_keeps_current_port_registration(self) -> None:
+        from mcp.shared.auth import OAuthClientInformationFull
+        from pydantic import AnyUrl
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage("https://srv.example/mcp", store)
+        info = OAuthClientInformationFull(
+            client_id="cid",
+            redirect_uris=[AnyUrl("http://127.0.0.1:33441/callback")],
+        )
+        await storage.set_client_info(info)
+        kept = await storage.get_client_info()
+        assert kept is not None and kept.client_id == "cid"
+
+    @pytest.mark.asyncio
     async def test_set_tokens_preserves_sibling_client_info(self) -> None:
         from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
@@ -642,6 +683,19 @@ class TestWireOauthAuth:
         # The kwargs construct a real provider (PKCE is automatic inside it).
         provider = OAuthClientProvider(**kwargs)
         assert provider is not None
+
+    def test_default_redirect_uri_is_the_rare_port(self) -> None:
+        """Pin the default to the deliberate rare port, not the constant.
+
+        ``test_default_redirect_uri`` asserts against ``DEFAULT_CALLBACK_PORT``
+        symbolically, so it would pass no matter what value the constant
+        takes. This test pins the actual default so an accidental revert to a
+        colliding dev-server port (e.g. :3000) fails loudly.
+        """
+        kwargs = wire_oauth_auth("https://srv.example/mcp", self._cfg(), FakeAuthStore())
+        assert [str(u) for u in kwargs["client_metadata"].redirect_uris] == [
+            "http://127.0.0.1:33441/callback"
+        ]
 
     def test_custom_callback_port_and_path(self) -> None:
         kwargs = wire_oauth_auth(

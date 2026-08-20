@@ -77,7 +77,13 @@ MCP_OAUTH_CREDENTIAL_PREFIX = "mcp_oauth:"
 # Provider column value in the shared auth_credentials table.
 MCP_OAUTH_PROVIDER = "mcp-oauth"
 
-DEFAULT_CALLBACK_PORT = 3000
+#: Loopback port for OAuth callbacks when a server does not pin its own.
+#: 33441 is deliberately rare (sibling of Codex's 33418): :3000 collides with
+#: local dev servers often enough that the listener bind routinely failed and
+#: the grant fell back to the manual paste flow. Servers that registered a
+#: redirect URI against the old default must pin ``callback_port: 3000`` in
+#: their config oauth block to keep working.
+DEFAULT_CALLBACK_PORT = 33441
 DEFAULT_CALLBACK_PATH = "/callback"
 
 #: Payload key holding the wall-clock time (epoch seconds) the stored access
@@ -117,6 +123,13 @@ def mcp_oauth_credential_id(server_url: str) -> str:
     """Stable logical credential id for one MCP server's OAuth grant."""
     return f"{MCP_OAUTH_CREDENTIAL_PREFIX}{server_url}"
 
+
+#: The callback port every local-operator shipped with before 33441. Stored
+#: client registrations pinned to it are dropped once on sight (see
+#: :meth:`McpTokenStorage.get_client_info`) so they re-register / re-seed
+#: against the new default instead of dead-ending at the provider with
+#: ``redirect_uri_mismatch``.
+LEGACY_CALLBACK_PORT = 3000
 
 #: How long to wait for the browser launcher before assuming the page opened.
 #: The stdlib's ``GenericBrowser`` WAITS on a foreground browser, so a launcher
@@ -394,10 +407,34 @@ class McpTokenStorage:
         return float(obtained_at) + float(expires_in)
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
-        """Stored client registration (DCR result or pinned config), or ``None``."""
+        """Stored client registration (DCR result or pinned config), or ``None``.
+
+        A stored registration whose redirect URIs still point at the legacy
+        :data:`LEGACY_CALLBACK_PORT` is stale by definition — the runtime now
+        advertises a different loopback port, so that registration can never
+        complete a grant (the provider rejects the authorization redirect with
+        ``redirect_uri_mismatch``, and because ``client_info`` is present the
+        SDK never re-runs DCR — a dead-end with no in-app recovery). Dropping
+        it here, before the SDK reads it, lets the flow re-register (DCR
+        servers) or re-seed (pinned ``client_id`` servers, which
+        :meth:`seed_client_info` rewrites on the next login) against the new
+        redirect URI.
+        """
         creds = self._read()
         info = creds.get("client_info") if creds is not None else None
         if not isinstance(info, dict):
+            return None
+        if self._redirect_uris_use_legacy_port(info):
+            logger.info(
+                "Discarding MCP client registration for %s: its redirect URIs "
+                "still target the legacy :%d callback, which can no longer "
+                "complete a grant; it will re-register on this login.",
+                self.credential_id,
+                LEGACY_CALLBACK_PORT,
+            )
+            if creds is not None:
+                creds.pop("client_info", None)
+                self._write(creds)
             return None
         try:
             from mcp.shared.auth import OAuthClientInformationFull
@@ -410,6 +447,23 @@ class McpTokenStorage:
                 exc_info=True,
             )
             return None
+
+    @staticmethod
+    def _redirect_uris_use_legacy_port(info: dict[str, Any]) -> bool:
+        """True when any stored redirect URI targets the legacy callback port."""
+        uris = info.get("redirect_uris") or []
+        if not isinstance(uris, list):
+            return False
+        for uri in uris:
+            if not isinstance(uri, str):
+                continue
+            try:
+                port = urlparse(uri).port
+            except ValueError:
+                continue
+            if port == LEGACY_CALLBACK_PORT:
+                return True
+        return False
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         """Persist a dynamic-client registration (RFC 7591)."""
@@ -711,7 +765,7 @@ class LoopbackAuthFlow:
             self._server = await asyncio.start_server(self._serve, self._host, self._port)
         except OSError as exc:
             # Almost always "address already in use": another local-operator, or
-            # a dev server squatting :3000. Not fatal — the paste path still
+            # a dev server squatting the port. Not fatal — the paste path still
             # completes the grant — but the user has to be told, because from
             # the browser's side this looks like the login simply not working.
             self._result = None
@@ -1225,8 +1279,9 @@ def wire_oauth_auth(
 
     - ``server_url``: the MCP server URL (resource indicator base);
     - ``client_metadata``: PKCE authorization-code client, redirect URI
-      ``http://127.0.0.1:{callback_port or 3000}{callback_path or /callback}``
-      (PKCE itself is automatic inside the SDK);
+      ``http://127.0.0.1:{callback_port or DEFAULT_CALLBACK_PORT}``
+      ``{callback_path or /callback}`` (PKCE itself is automatic inside the
+      SDK);
     - ``storage``: a :class:`McpTokenStorage` bound to ``store``; a config
       ``client_id`` pre-seeds the client registration so DCR is skipped
       (MCP-11);
