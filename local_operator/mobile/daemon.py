@@ -174,8 +174,15 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                 continue
             op = frame.get("op")
             if op in ("projection", "welcome"):
-                data = frame.get("data") or {}
-                entry.projection = _projection_from_json(data, record)
+                try:
+                    data = frame.get("data") or {}
+                    entry.projection = _projection_from_json(data, record)
+                except (TypeError, ValueError, KeyError):
+                    # A malformed push (mid-upgrade registrant, renamed field)
+                    # must not tear the dial loop down to the reconnect path —
+                    # the NEXT push is a full repaint that repairs the view.
+                    logger.debug("mobile daemon: dropping malformed projection", exc_info=True)
+                    continue
                 entry.projection.degraded = entry.degraded
                 entry.projection.ended = entry.ended
                 _fan_out(entry)
@@ -233,21 +240,22 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
 
 def _fan_out(entry: SessionEntry) -> None:
     """Push the current projection to every open SSE queue for this session.
-    A full queue means a slow phone: drop the oldest by replacing — repaints
-    supersede, so dropping stale ones loses nothing."""
+    A slow phone's queue fills; repaints supersede, so evict the oldest and
+    retry until the put lands — a repaint must never be silently lost, because
+    the dropped one might be the approval card."""
     if entry.projection is None:
         return
     frame = entry.projection.to_json()
     for queue in entry.subscribers:
-        if queue.full():
+        while True:
             try:
-                queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        try:
-            queue.put_nowait(frame)
-        except asyncio.QueueFull:
-            pass
+                queue.put_nowait(frame)
+                break
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break  # racing consumer drained it; retry the put
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +301,11 @@ class MobileDaemon:
                 changed = True
             elif state == "wedged":
                 entry.degraded = True
-            if not entry.ended and entry.writer is None and not entry.degraded:
+            # Degraded is precisely "we owe this session a redial" — the only
+            # gates are ended, an open socket, and the backoff clock. Excluding
+            # degraded entries here was the starvation bug: one refused dial
+            # meant never trying again.
+            if not entry.ended and entry.writer is None:
                 if time.monotonic() >= entry.next_dial_at and (
                     record.pid not in self._dial_tasks or self._dial_tasks[record.pid].done()
                 ):
@@ -604,9 +616,17 @@ def build_app(daemon: MobileDaemon):
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        cwd = str(body.get("cwd") or Path.home())
-        if not Path(cwd).is_dir():
-            return JSONResponse({"error": f"not a directory: {cwd}"}, status_code=400)
+        cwd_raw = str(body.get("cwd") or Path.home())
+        # Resolve to a real directory under the owner's home: the picker only
+        # ever sends those, and the spawn runs with the daemon's environment,
+        # so the check is about fat-fingered/traversed input, not trust.
+        cwd_path = Path(cwd_raw).expanduser().resolve()
+        home = Path.home().resolve()
+        if not cwd_path.is_dir() or not (cwd_path == home or home in cwd_path.parents):
+            return JSONResponse(
+                {"error": f"not a directory under home: {cwd_raw}"}, status_code=400
+            )
+        cwd = str(cwd_path)
         provider = body.get("provider")
         model_id = body.get("model_id")
         try:
@@ -668,6 +688,10 @@ def build_app(daemon: MobileDaemon):
         Route("/", index),
     ]
     if _DIST_DIR.exists():
+        # The mount is resolved at app build time: a rebuilt bundle needs
+        # `lop mobile restart` to appear, which is the documented upgrade
+        # path — per-request checks would slow every asset hit to catch a
+        # once-per-upgrade event.
         routes.append(
             Mount(
                 "/assets",

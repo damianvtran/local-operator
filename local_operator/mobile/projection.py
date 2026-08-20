@@ -133,6 +133,10 @@ class ProjectionFold:
         self._tool_args: dict[str, dict[str, Any]] = {}
         # The streaming assistant row, if one is open.
         self._open_message_id: str | None = None
+        # The open compaction row's id, tracked explicitly the same way: a
+        # reverse-scan fallback could finalize a LATER compaction's row with
+        # an EARLIER end event once the tail cap starts dropping rows.
+        self._open_compaction_id: str | None = None
         # Subagent roster by job id; progress updates are throttled upstream
         # (SubagentProgressEvent is never per-delta by contract).
         self._subagents: dict[str, SubagentRow] = {}
@@ -188,6 +192,20 @@ class ProjectionFold:
         # A resumed fold starts clean: no streaming row, no half-run tools.
         self._open_message_id = None
         self.projection.transcript = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
+        # Prune the correlation maps to the surviving tail: a long history
+        # pairs every historical tool call, and keeping ids whose rows were
+        # cut is dead weight per rebind (and a stale hit if a call id were
+        # ever reused).
+        surviving = {entry.id for entry in self.projection.transcript}
+        self._tool_rows = {
+            call_id: entry_id
+            for call_id, entry_id in self._tool_rows.items()
+            if entry_id in surviving
+        }
+        live_call_ids = set(self._tool_rows)
+        self._tool_args = {
+            call_id: args for call_id, args in self._tool_args.items() if call_id in live_call_ids
+        }
         self._bump()
 
     # -- events ------------------------------------------------------------
@@ -304,25 +322,24 @@ class ProjectionFold:
                 time.monotonic() - self._subagent_started_at.pop(event.job_id, time.monotonic())
             )
         elif isinstance(event, CompactionStartEvent):
-            self._append(
-                TranscriptEntry(
-                    id=f"cx-{time.time_ns()}",
-                    kind="compaction",
-                    text="compacting context…",
-                    final=False,
-                )
+            entry = TranscriptEntry(
+                id=f"cx-{time.time_ns()}",
+                kind="compaction",
+                text="compacting context…",
+                final=False,
             )
+            self._append(entry)
+            self._open_compaction_id = entry.id
         elif isinstance(event, CompactionEndEvent):
-            for row in reversed(p.transcript):
-                if row.kind == "compaction" and not row.final:
-                    row.final = True
-                    row.text = (
-                        f"context compacted {event.tokens_before:,} → "
-                        f"{event.tokens_after:,} tokens"
-                        if event.success
-                        else "context compaction failed"
-                    )
-                    break
+            row = self._find(self._open_compaction_id)
+            self._open_compaction_id = None
+            if row is not None:
+                row.final = True
+                row.text = (
+                    f"context compacted {event.tokens_before:,} → " f"{event.tokens_after:,} tokens"
+                    if event.success
+                    else "context compaction failed"
+                )
         elif isinstance(event, RetryStartEvent):
             note = f"retrying ({event.attempt}): {_compact(event.error, 120)}"
             if event.fallback_model:

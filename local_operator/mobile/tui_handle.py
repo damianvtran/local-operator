@@ -50,7 +50,7 @@ class TuiSessionHandle(SessionHandle):
             pid=0,
             kind="tui",
             conversation_name=getattr(session, "conversation_name", "") or "",
-            cwd=str(getattr(session, "cwd", "") or _session_cwd(session)),
+            cwd=_session_cwd(session),
             model_label=session.model_label,
             model_selector=_selector(session),
             effort=_current_effort(session),
@@ -212,7 +212,12 @@ class TuiSessionHandle(SessionHandle):
     # -- internals ---------------------------------------------------------------------
 
     async def _on_app(self, fn: Callable[[], Any]) -> Any:
-        """Run ``fn`` on the Textual thread and await its result."""
+        """Run ``fn`` on the Textual thread and await its result, BOUNDED:
+        ``call_from_thread`` enqueues, and an app inside a modal's nested pump
+        or a blocked handler never runs the callback — an unbounded await here
+        would wedge this session's whole serialized dispatch behind one stuck
+        command. Ten seconds is generous for a UI hop and turns the wedge
+        into an error the phone can show."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
 
@@ -223,7 +228,7 @@ class TuiSessionHandle(SessionHandle):
                 loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
 
         self._app.call_from_thread(wrapped)
-        return await future
+        return await asyncio.wait_for(future, timeout=10.0)
 
     def _refresh_state(self) -> None:
         session = self._session()

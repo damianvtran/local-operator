@@ -48,11 +48,9 @@ from local_operator.mobile.types import (
 
 logger = logging.getLogger(__name__)
 
-#: One control connection at a time — the daemon is the only legitimate
-#: client, and a second one racing it would interleave repaints on the same
-#: socket. A new dial replaces the old, which is also the reconnect story:
-#: the daemon re-dials after any drop and the stale socket is evicted.
-_MAX_LINE_BYTES = 1 << 20  # a prompt payload past 1 MB is a bug, not a prompt
+#: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
+#: control socket reader enforces.
+_MAX_LINE_BYTES = 1 << 20
 
 
 class SessionHandle(Protocol):
@@ -145,7 +143,9 @@ class Registrant:
         await self._serve()
 
     def close(self) -> None:
-        """Unpublish and shut down. Safe from any thread, safe twice."""
+        """Unpublish and shut down. Safe from any thread, safe twice. In
+        in-process mode prefer :meth:`aclose` — it awaits the cleanup instead
+        of posting it onto a loop the caller may be about to tear down."""
         if self._closed.is_set():
             return
         self._closed.set()
@@ -160,6 +160,26 @@ class Registrant:
             self._publisher.close()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+
+    async def aclose(self) -> None:
+        """In-process mode shutdown, awaited on the owning loop: cancel the
+        heartbeat, close the server and the daemon connection, unpublish.
+        Posting this to a loop that is about to close (the child's amain
+        returns right after) is how heartbeats outlive their process — so the
+        child awaits it instead."""
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        if self._unsubscribe is not None:
+            try:
+                self._unsubscribe()
+            except Exception:  # noqa: BLE001
+                logger.debug("registrant unsubscribe failed", exc_info=True)
+        self._shutdown()
+        if self._server is not None:
+            await self._server.wait_closed()
+        if self._publisher is not None:
+            self._publisher.close()
 
     # -- the registrant's own loop -------------------------------------------
 
@@ -235,7 +255,13 @@ class Registrant:
         """One daemon connection. Auth is the first frame: ``{"key": ...}``
         within a short deadline, constant-time compared. Anything else closes
         without a reply — an open port that answers wrong keys with errors is
-        an oracle, however small."""
+        an oracle, however small.
+
+        One control connection at a time — the daemon is the only legitimate
+        client, and a second one racing it would interleave repaints on the
+        same socket. A new dial REPLACES the old, which is also the reconnect
+        story: the daemon re-dials after any drop and the stale socket is
+        evicted."""
         peer = writer.get_extra_info("peername")
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=5.0)

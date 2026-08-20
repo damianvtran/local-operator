@@ -72,6 +72,9 @@ class OwnedSessionHandle(SessionHandle):
         self._fold = ProjectionFold(self._projection)
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
+        # request_id -> the AskQuestion.id the harness is waiting on (the
+        # answer map's key — see ask_gate).
+        self._pending_question_ids: dict[str, str] = {}
         self._install_gates()
 
     # -- gates -----------------------------------------------------------------
@@ -104,6 +107,18 @@ class OwnedSessionHandle(SessionHandle):
             future: asyncio.Future[dict[str, list[str]] | None] = self._loop.create_future()
             self._pending_futures[request_id] = future
             first = questions[0] if questions else None
+            # The answer map is keyed by the QUESTION'S id, not our request id
+            # — AskUserFn's contract answers ``question.id -> choices``, and
+            # the harness validates the keys it gets back. Stash the mapping
+            # so ask_answer resolves with the right key.
+            self._pending_question_ids[request_id] = (
+                getattr(first, "id", "") if first is not None else ""
+            )
+            if len(questions) > 1:
+                logger.info(
+                    "mobile ask gate: %d questions, projecting the first only",
+                    len(questions),
+                )
             self._fold.set_pending(
                 PendingRequest(
                     request_id=request_id,
@@ -121,6 +136,7 @@ class OwnedSessionHandle(SessionHandle):
                 return None
             finally:
                 self._pending_futures.pop(request_id, None)
+                self._pending_question_ids.pop(request_id, None)
                 self._fold.set_pending(None)
                 self._notify()
 
@@ -217,10 +233,10 @@ class OwnedSessionHandle(SessionHandle):
         return "approved" if approved else "denied"
 
     async def ask_answer(self, request_id: str, value: str) -> str:
-        # AskUserFn answers map question id -> chosen strings; the phone's
-        # card carries one question at a time, so the single pending question
-        # id is the whole map's key space.
-        self._resolve_pending(request_id, {request_id: [value]} if value else None)
+        # Resolve with the QUESTION id the harness asked under — never our
+        # request id, which the harness never saw.
+        question_id = self._pending_question_ids.get(request_id, request_id)
+        self._resolve_pending(request_id, {question_id: [value]} if value else None)
         return "answered"
 
     async def refresh(self) -> None:

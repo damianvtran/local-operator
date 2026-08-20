@@ -51,7 +51,7 @@ async def amain() -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
-    registrant.close()
+    await registrant.aclose()
     return 0
 
 

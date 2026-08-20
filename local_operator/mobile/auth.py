@@ -81,6 +81,11 @@ def store_password(password: str) -> None:
     """Write the password to the Keychain via ``security -i`` over stdin —
     the value never touches argv, where ``ps`` could read it. Replaces any
     existing item (``-U``) so rotation is one call."""
+    if "\n" in password or "\r" in password:
+        # A newline would split the mini-shell command into two, writing a
+        # truncated password and evaluating the rest as a command. Generated
+        # passwords can't contain one; env-supplied ones can.
+        raise ValueError("password must not contain newlines")
     # ``security -i`` runs a tiny command REPL on stdin; quoting the value for
     # that mini-shell (never for /bin/sh) keeps the password off argv while
     # surviving spaces and quotes in generated passwords.
