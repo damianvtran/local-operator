@@ -451,6 +451,15 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("login", "Authenticate a provider", arguments=ArgumentMode.REQUIRED),
     # The worker reports the removal, naming the provider.
     SlashCommand("logout", "Remove stored provider credentials", arguments=ArgumentMode.REQUIRED),
+    # The listing (or the masked paste prompt) is the receipt. The argument is
+    # a KEY NAME, never the secret, so echoing it would only restate the
+    # notice that already names what was stored or forgotten.
+    SlashCommand(
+        "credential",
+        "Hand the agent a secret it can use but never read",
+        aliases=("cred",),
+        arguments=ArgumentMode.OPTIONAL,
+    ),
 ]
 
 
@@ -6337,6 +6346,8 @@ class OperatorApp(App[None]):
             self._cmd_login(arg, notice)
         elif command == "/logout":
             self._cmd_logout(arg, notice)
+        elif command == "/credential":
+            self._cmd_credential(arg, notice)
         else:
             # ``parts[0]``, not the lowered ``command``: with the echo gone this
             # line is the ONLY place the mistyped word appears, so it has to
@@ -8423,6 +8434,10 @@ class OperatorApp(App[None]):
             picker.set_choices(self._theme_choices(), highlight=theme_mod.current_theme())
             picker.set_notice("")
             return
+        if message.command in ("credential", "cred"):
+            picker.set_choices(self._credential_choices())
+            picker.set_notice("")
+            return
         if message.command == "effort":
             levels = self._effort_levels()
             picker.set_choices(self._effort_choices(levels))
@@ -8460,6 +8475,37 @@ class OperatorApp(App[None]):
         # picker it is in the user's eye-line, self-clearing, unrepeatable, and it
         # costs the transcript nothing.
         picker.set_notice(reason)
+
+    def _credential_choices(self) -> list[ArgumentChoice]:
+        """The verbs ``/credential`` offers, plus each stored key to forget.
+
+        Verbs first so a user who opened the list to store something is not
+        looking at a forget row. Stored keys are offered as ``--forget KEY``
+        rather than the bare name: completing a stored key into the buffer
+        would re-open the paste prompt for a key that is already held.
+        """
+        choices = [
+            ArgumentChoice(
+                "--forget-all",
+                "Forget every session credential",
+                alert=True,
+            ),
+        ]
+        store = getattr(self._session, "variables", None) if self._session is not None else None
+        names = (
+            store.credential_names()
+            if store is not None and hasattr(store, "credential_names")
+            else []
+        )
+        for name in names:
+            choices.append(
+                ArgumentChoice(
+                    f"--forget {name}",
+                    f"Forget {name}",
+                    alert=True,
+                )
+            )
+        return choices
 
     def _approval_choices(self) -> list[ArgumentChoice]:
         """The four rows ``/approvals`` offers: two modes × two scopes.
@@ -8720,6 +8766,60 @@ class OperatorApp(App[None]):
             return
         notice(f"logging in to {provider}…")
         self.run_worker(self._login_flow(provider), thread=False, group="login")
+
+    def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
+        """``/credential`` — list, store, or forget a session-only secret.
+
+        The value is captured through the same masked paste the login flow
+        already uses, so it never enters the composer, its history, or a
+        transcript entry. The listing and the forget verbs need no paste.
+        """
+        from local_operator.variables import (
+            format_credential_forget,
+            format_credential_forget_all,
+            format_credential_list,
+            parse_credential_command,
+        )
+
+        store = getattr(self._session, "variables", None) if self._session is not None else None
+        if store is None or not hasattr(store, "store_credential"):
+            self._system_notice("session is still starting…", "warning")
+            return
+        parsed = parse_credential_command(arg)
+        if parsed.action == "error":
+            self._system_notice(parsed.message, "warning")
+            return
+        if parsed.action == "list":
+            notice(format_credential_list(store.list_credentials()))
+            return
+        if parsed.action == "forget":
+            notice(format_credential_forget(store.forget_credential(parsed.key), parsed.key))
+            return
+        if parsed.action == "forget-all":
+            notice(format_credential_forget_all(store.clear_credentials()))
+            return
+        self.run_worker(
+            self._credential_store_flow(store, parsed.key), thread=False, group="credential"
+        )
+
+    async def _credential_store_flow(self, store: object, key: str) -> None:
+        """Masked paste for ``/credential <KEY>``, then store what arrived."""
+        from local_operator.variables import describe_store_failure
+
+        value = await self._request_login_key(key, secret=True, sole_path=True)
+        if value is None:
+            self._notice(f"Cancelled; {key} not stored.")
+            return
+        result = store.store_credential(key, value, "command")  # type: ignore[attr-defined]
+        if not result.ok or result.credential is None:
+            reason = result.reason or "empty-value"
+            self._notice(describe_store_failure(reason, key), "warning")
+            return
+        verb = "Replaced" if result.replaced else "Stored"
+        self._notice(
+            f"{verb} {result.credential.key}. Injected into every bash command "
+            "as an environment variable; the agent cannot read the value."
+        )
 
     def _login_callbacks(self, definition: object) -> LoginCallbacks:
         """Login hooks that render into the transcript instead of the terminal.

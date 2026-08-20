@@ -1468,6 +1468,16 @@ class Session:
         return self._goal_state.set(text)
 
     @property
+    def variables(self) -> Any:
+        """The session's variable store, including memory-only credentials.
+
+        Exposed so a front end can store, list and forget session credentials
+        without reaching into ``_variables``. ``None`` on a session that was
+        built without a store (embedded SDK callers, some test doubles).
+        """
+        return self._variables
+
+    @property
     def conversation_name(self) -> str:
         """The conversation's title ("" until one is set or generated)."""
         return self._conversation_name.text

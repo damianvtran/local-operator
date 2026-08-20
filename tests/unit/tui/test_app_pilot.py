@@ -161,6 +161,17 @@ class FakeSession:
         self._goal = (text or "").strip()
         return self._goal
 
+    @property
+    def variables(self) -> Any:
+        """Memory-only store for ``/credential``. Created on first use so
+        tests that never touch credentials pay nothing for the property."""
+        store = getattr(self, "_variables", None)
+        if store is None:
+            from local_operator.variables import VariableStore
+
+            store = self._variables = VariableStore(cwd="/tmp", env={})
+        return store
+
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 

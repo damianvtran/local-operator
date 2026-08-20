@@ -337,6 +337,24 @@ class VariableStoreProtocol(Protocol):
         """Resolve ``name`` or raise ``KeyError`` when unknown or denied."""
         ...
 
+    def store_credential(
+        self, raw_key: str, value: str, source: Literal["command", "ask"] = "command"
+    ) -> Any:
+        """Capture a session-only secret. See :class:`local_operator.variables.VariableStore`."""
+        ...
+
+    def forget_credential(self, raw_key: str) -> bool: ...
+
+    def clear_credentials(self) -> int: ...
+
+    def credential_names(self) -> list[str]: ...
+
+    def list_credentials(self) -> list[Any]: ...
+
+    def credential_env(self) -> dict[str, str]: ...
+
+    def redact(self, text: str) -> str: ...
+
 
 @runtime_checkable
 class BrowserSurfaceProtocol(Protocol):
@@ -466,7 +484,10 @@ class AskQuestion(BaseModel):
         description="Short stable key for this question; the answer is reported under it.",
     )
     question: str = Field(min_length=1, description="The question, as one sentence.")
-    options: list[AskOption] = Field(min_length=2, description="At least two answers to pick from.")
+    options: list[AskOption] = Field(
+        default_factory=list,
+        description="Answers to pick from. Required unless secret is true.",
+    )
     multi: bool = Field(
         default=False, description="True lets the user pick several options instead of one."
     )
@@ -474,9 +495,37 @@ class AskQuestion(BaseModel):
         default=None,
         description="0-based index of the option you recommend; it is preselected and marked.",
     )
+    secret: bool = Field(
+        default=False,
+        description=(
+            "Request a credential instead of a choice. The answer is stored in "
+            "session memory under this question's id and only the key name is returned."
+        ),
+    )
 
     @model_validator(mode="after")
-    def _recommended_in_range(self) -> "AskQuestion":
+    def _shape(self) -> "AskQuestion":
+        if self.secret:
+            # A secret question is a masked paste, not a picker. Options and
+            # multi-select have no meaning there, and a recommended option
+            # would preselect a choice nobody can see. The id IS the
+            # credential key, so it has to survive normalize_credential_key.
+            if self.options:
+                raise ValueError("a secret question has no options; the answer is a pasted value")
+            if self.multi:
+                raise ValueError("a secret question cannot be multi-select")
+            if self.recommended is not None:
+                raise ValueError("a secret question has no options to recommend")
+            from local_operator.variables import normalize_credential_key
+
+            if normalize_credential_key(self.id) is None:
+                raise ValueError(
+                    "a secret question's id must be a usable credential key "
+                    "(letters, digits, underscores)"
+                )
+            return self
+        if len(self.options) < 2:
+            raise ValueError("at least two answers to pick from")
         if self.recommended is not None and not 0 <= self.recommended < len(self.options):
             raise ValueError(
                 f"recommended must index options (0..{len(self.options) - 1}), "

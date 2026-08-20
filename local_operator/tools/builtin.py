@@ -1105,6 +1105,21 @@ def _bash_progress_line(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) 
     return "running"
 
 
+def _redact_tool_text(text: str, context: ToolContext | None) -> str:
+    """Strip stored session-credential values out of tool output.
+
+    A command that ``echo``s ``$GITHUB_TOKEN`` would otherwise put the secret
+    in the transcript, the provider request, and every later compaction.
+    Applied at every site that turns captured bytes into model-visible text.
+    """
+    store = context.variables if context is not None else None
+    redact = getattr(store, "redact", None)
+    if callable(redact):
+        redacted = redact(text)
+        return redacted if isinstance(redacted, str) else text
+    return text
+
+
 def _bash_output_summary(stdout: str, stderr: str) -> str:
     """The shared 'stdout/stderr' body used by updates and the final result."""
     parts = [
@@ -1176,6 +1191,16 @@ async def execute_bash(
 
     env = os.environ.copy()
     env.update(NON_INTERACTIVE_ENV)
+    # Session credentials ride the child environment so the agent can USE a
+    # secret it can never READ. Injected here rather than advertised as a
+    # bash ``env`` argument: a model-authored env map would have to carry
+    # the value (or a placeholder we do not have), which is the leak this
+    # store exists to prevent.
+    store = context.variables if context is not None else None
+    credential_env = getattr(store, "credential_env", None)
+    extra = credential_env() if callable(credential_env) else None
+    if isinstance(extra, dict):
+        env.update({str(name): str(value) for name, value in extra.items()})
 
     process = await asyncio.create_subprocess_exec(
         "/bin/sh",
@@ -1209,7 +1234,10 @@ async def execute_bash(
             # Third-party embedders may supply a manager predating live output;
             # peek degrades to "no output recorded" rather than breaking the run.
             return
-        appender(job_id, chunk.decode("utf-8", errors="replace"))
+        appender(
+            job_id,
+            _redact_tool_text(chunk.decode("utf-8", errors="replace"), context),
+        )
 
     async def _pump(stream: asyncio.StreamReader | None, sink: list[bytes]) -> None:
         # Both pipes were requested at spawn, so neither is ever None here;
@@ -1239,8 +1267,12 @@ async def execute_bash(
     def _emit_update() -> None:
         if on_update is None:
             return
-        stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-        stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        stdout = _redact_tool_text(
+            b"".join(stdout_chunks).decode("utf-8", errors="replace"), context
+        )
+        stderr = _redact_tool_text(
+            b"".join(stderr_chunks).decode("utf-8", errors="replace"), context
+        )
         on_update(
             AgentToolUpdate(
                 content=[TextContent(text=_bash_output_summary(stdout, stderr))],
@@ -1269,8 +1301,8 @@ async def execute_bash(
         implementation rather than two that drift.
         """
         partial = _bash_output_summary(
-            b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-            b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+            _redact_tool_text(b"".join(stdout_chunks).decode("utf-8", errors="replace"), context),
+            _redact_tool_text(b"".join(stderr_chunks).decode("utf-8", errors="replace"), context),
         )
         wait_task.cancel()
         if abort_waiter is not None and not abort_waiter.done():
@@ -1347,8 +1379,12 @@ async def execute_bash(
                 await cleanup(kill=True)
                 raise
 
-            out = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-            err = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+            out = _redact_tool_text(
+                b"".join(stdout_chunks).decode("utf-8", errors="replace"), context
+            )
+            err = _redact_tool_text(
+                b"".join(stderr_chunks).decode("utf-8", errors="replace"), context
+            )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
             if cancelled_bg:
@@ -1528,7 +1564,7 @@ async def execute_bash(
             tool_call_id,
             "bash",
             f"aborted ({(signal.reason or 'aborted') if signal else 'aborted'}): "
-            f"{params.command}\n{partial}",
+            f"{params.command}\n{_redact_tool_text(partial, context)}",
         )
 
     # Decoding and, for oversized output, spilling/eliding run in a thread:
@@ -1538,6 +1574,8 @@ async def execute_bash(
     # and the reason a batch of concurrent bash calls used to freeze the
     # frame at the moment they finished together.
     stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
+    stdout_raw = _redact_tool_text(stdout_raw, context)
+    stderr_raw = _redact_tool_text(stderr_raw, context)
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
@@ -6425,6 +6463,48 @@ ASK_UNANSWERED_TEXT = (
 )
 
 
+#: What a secret question reports when the user declined or the store refused.
+ASK_SECRET_NOT_PROVIDED = "<not provided>"
+
+
+def _report_secret_answers(
+    questions: list[AskQuestion],
+    answers: dict[str, list[str]],
+    context: ToolContext | None,
+) -> dict[str, list[str]]:
+    """Store secret answers and replace their values with the key name.
+
+    The host's picker still returns the pasted bytes so a non-TUI embedder
+    that cannot store them itself is not silently emptied. This is the last
+    hop before the result is written into the transcript, so it is also the
+    last hop that can keep those bytes out of the model's context.
+    """
+    store = context.variables if context is not None else None
+    store_fn = getattr(store, "store_credential", None)
+    reported: dict[str, list[str]] = {}
+    for question in questions:
+        chosen = list(answers.get(question.id, []))
+        if not question.secret:
+            reported[question.id] = chosen
+            continue
+        pasted = next((text.strip() for text in chosen if text.strip()), "")
+        if not pasted or not callable(store_fn):
+            reported[question.id] = [ASK_SECRET_NOT_PROVIDED]
+            continue
+        result = store_fn(question.id, pasted, "ask")
+        credential = getattr(result, "credential", None)
+        key = getattr(credential, "key", None)
+        if getattr(result, "ok", False) and isinstance(key, str):
+            reported[question.id] = [key]
+        else:
+            reported[question.id] = [ASK_SECRET_NOT_PROVIDED]
+    # Preserve any extra keys the host returned (should not happen) without
+    # inventing values for questions we already handled.
+    for key, value in answers.items():
+        reported.setdefault(key, list(value))
+    return reported
+
+
 def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> str:
     """The answers as text the model can act on, keyed by the ids it chose.
 
@@ -6468,7 +6548,10 @@ def build_ask_tool(context: ToolContext) -> AgentTool | None:
             "the consequence of each in its description, and mark the one you recommend. "
             "Every question also offers the user a free-text answer, so the options do "
             "not have to be exhaustive. Ask everything you need in ONE call: the user "
-            "answers the questions back to back rather than once per turn."
+            "answers the questions back to back rather than once per turn. "
+            "If you need a credential, password, or API key, set secret=true on that "
+            "question (options empty, id is the env-var name). The value is stored in "
+            "session memory and injected into bash; you will only ever see the key name."
         ),
         parameters=AskParams.model_json_schema(),
         # read tier: asking a question changes nothing. Gating it behind the
@@ -6524,9 +6607,13 @@ async def execute_ask(
         # user chose nothing, and splitting that into two results would give the
         # model a distinction it cannot act on differently.
         return _text(tool_call_id, "ask", ASK_UNANSWERED_TEXT)
+    # Secret answers are stored by the host and reported as the KEY NAME
+    # only. The raw value must never ride the tool result: that text is
+    # persisted to the transcript and replayed to the provider.
+    reported = _report_secret_answers(params.questions, answers, context)
     return _text(
         tool_call_id,
         "ask",
-        _ask_report(params.questions, answers),
-        details={"answers": {key: list(value) for key, value in answers.items()}},
+        _ask_report(params.questions, reported),
+        details={"answers": {key: list(value) for key, value in reported.items()}},
     )

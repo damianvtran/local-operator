@@ -31,6 +31,7 @@ from local_operator.tui.widgets.ask_picker import (
     OTHER_LABEL,
     PROMPT_HEIGHT_SHARE,
     RECOMMENDED_TAG,
+    SECRET_MASK,
     AskPickerScreen,
 )
 
@@ -79,6 +80,34 @@ class _AskHost(App[None]):
 
 
 # --- answering --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_secret_question_masks_the_typed_value_and_returns_it() -> None:
+    """A secret question is a paste field, not a picker. The painted label
+    must never contain the value; the settled answer must, so the host can
+    store it."""
+    secret = "ghp_must_not_paint"
+    question = AskQuestion(
+        id="GITHUB_TOKEN",
+        question="Paste the deploy token.",
+        options=[],
+        secret=True,
+    )
+    app = _AskHost([question])
+    async with app.run_test(size=(100, 30)) as pilot:
+        card = await app.open_picker()
+        await pilot.pause()
+        assert card.row_count == 1
+        for char in secret:
+            await pilot.press(char)
+        await pilot.pause()
+        labels = card.visible_rows
+        assert secret not in "".join(labels)
+        assert SECRET_MASK * len(secret) in "".join(labels)
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"GITHUB_TOKEN": [secret]}]
 
 
 @pytest.mark.asyncio
