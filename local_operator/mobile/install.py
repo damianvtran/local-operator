@@ -66,7 +66,9 @@ def _build_bundle() -> str | None:
         elif shutil.which("corepack") is not None:
             subprocess.run(
                 ["corepack", "enable"],
-                cwd=_WEB_DIR, capture_output=True, timeout=30,
+                cwd=_WEB_DIR,
+                capture_output=True,
+                timeout=30,
             )
             runner = ["corepack", "pnpm"]
         else:
