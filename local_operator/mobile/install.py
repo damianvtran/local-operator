@@ -33,6 +33,76 @@ from local_operator.paths import log_dir
 
 LABEL = "com.local-operator.mobile"
 
+#: The SPA the daemon serves. ``web/dist`` is gitignored, so a source
+#: checkout has no bundle until something builds it; a pip/uv wheel ships it
+#: via package-data but an in-place source install never does. Install must
+#: be able to make it, or every such machine shows "bundle not built".
+_WEB_DIR = Path(__file__).parent / "web"
+_DIST_INDEX = _WEB_DIR / "dist" / "index.html"
+
+
+def _bundle_state() -> str:
+    """built / buildable / missing-sources — what install can do about dist."""
+    if _DIST_INDEX.exists():
+        return "built"
+    if (_WEB_DIR / "package.json").exists():
+        return "buildable"
+    return "missing-sources"
+
+
+def _build_bundle() -> str | None:
+    """Build the SPA in place. Returns an error string, or None on success.
+
+    pnpm only — the lockfile and packageManager pin are pnpm's, and mixing
+    npm here would write a second, unreviewed lockfile. Corepack is tried
+    first so a machine with only Node (no global pnpm) still self-heals;
+    the packageManager field pins the exact pnpm corepack fetches.
+    """
+    if shutil.which("node") is None:
+        return "node is not installed; the bundle needs a one-time `pnpm build`"
+    try:
+        if shutil.which("pnpm") is not None:
+            runner = ["pnpm"]
+        elif shutil.which("corepack") is not None:
+            subprocess.run(
+                ["corepack", "enable"],
+                cwd=_WEB_DIR, capture_output=True, timeout=30,
+            )
+            runner = ["corepack", "pnpm"]
+        else:
+            return "neither pnpm nor corepack found; run `pnpm build` in local_operator/mobile/web"
+        for args in (["install", "--frozen-lockfile"], ["build"]):
+            result = subprocess.run(
+                [*runner, *args], cwd=_WEB_DIR, capture_output=True, text=True, timeout=600
+            )
+            if result.returncode != 0:
+                tail = (result.stderr or result.stdout).strip().splitlines()
+                return f"pnpm {' '.join(args)} failed: {tail[-1][:200] if tail else 'unknown'}"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"bundle build failed: {exc}"
+    return None if _DIST_INDEX.exists() else "build ran but dist/index.html is still missing"
+
+
+def ensure_bundle(*, build: bool = True) -> tuple[bool, str]:
+    """Guarantee the daemon has a UI to serve. (ok, detail-for-status).
+
+    The three states, in the order a fresh machine hits them: a wheel ships
+    dist and this is a no-op; a source checkout is buildable and we build
+    it; a broken install has neither and we say so rather than serving the
+    503 the daemon would show every authed GET.
+    """
+    state = _bundle_state()
+    if state == "built":
+        return True, "bundle present"
+    if state == "missing-sources":
+        return False, "bundle and web sources both missing from the install"
+    if not build:
+        return False, "bundle missing (web sources present; build skipped)"
+    error = _build_bundle()
+    if error is not None:
+        return False, error
+    return True, "built the web bundle"
+
 
 def plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -151,6 +221,14 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     else:
         steps.append("kept the existing portal password")
 
+    # The UI is half the product. A missing bundle means every authed GET
+    # 503s, so install builds it rather than leaving the phone on a dead
+    # page — the wheel normally ships it, a source checkout does not.
+    bundle_ok, bundle_detail = ensure_bundle(build=not dry_run)
+    steps.append(bundle_detail)
+    if not bundle_ok:
+        return {"ok": False, "steps": steps, "error": f"web bundle unavailable: {bundle_detail}"}
+
     plist_path().parent.mkdir(parents=True, exist_ok=True)
     if not dry_run:
         plist_path().write_bytes(plistlib.dumps(render_plist(port)))
@@ -232,6 +310,7 @@ def status(port: int = DEFAULT_PORT) -> dict[str, object]:
     return {
         "installed": plist_path().exists(),
         "password_set": load_password() is not None,
+        "bundle": _bundle_state(),
         "healthy": probe is not None,
         "gate_closed": gate_closed(port),
         "health": probe,

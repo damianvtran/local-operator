@@ -518,7 +518,12 @@ def build_app(daemon: MobileDaemon):
         path = _STATIC_DIR / "mark.png"
         if not path.exists():
             return PlainTextResponse("mark missing", status_code=404)
-        return FileResponse(path, media_type="image/png")
+        # no-store: a phone that loaded this while the wheel lacked the file
+        # cached the 404 and kept showing a broken image after the fix. The
+        # asset is tiny; the freshness guarantee is worth more than the cache.
+        response = FileResponse(path, media_type="image/png")
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def index(request: Request) -> Response:
         denied = gate(request)

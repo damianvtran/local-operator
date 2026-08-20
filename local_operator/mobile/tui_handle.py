@@ -237,6 +237,12 @@ class TuiSessionHandle(SessionHandle):
             model_selector=_selector(session),
             effort=_current_effort(session),
             effort_ladder=_ladder(session),
+            # Re-read the title on every push: it is generated in the
+            # background and lands (session.set_conversation_name) AFTER the
+            # projection was first built, so seeding it once at startup leaves
+            # the phone on "untitled" forever. Cheap attribute read; the fold
+            # already bumps the epoch only when something actually changed.
+            conversation_name=getattr(session, "conversation_name", "") or None,
             streaming=bool(getattr(session, "is_streaming", False)),
         )
 

@@ -61,6 +61,14 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
 	const [windowSize, setWindowSize] = useState(PAGE);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const pinnedRef = useRef(true);
+	/* The auto-scroll trigger. It must fire ONLY when the transcript actually
+	   grew or the tail streamed more text — never on a same-content re-render.
+	   The projection SSE sends a fresh `entries` array identity on every
+	   repaint, so an effect that depends on the array runs constantly; an
+	   expansion that re-rendered then snapped scrollTop to the very bottom
+	   and the tapped row flew off-screen (read as "the screen went blank"). */
+	const tail = entries[entries.length - 1];
+	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}`;
 
 	const visible =
 		entries.length > windowSize ? entries.slice(-windowSize) : entries;
@@ -72,7 +80,8 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
 		if (el && pinnedRef.current) {
 			el.scrollTop = el.scrollHeight;
 		}
-	}, [entries.length, entries[entries.length - 1]?.text]);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [growthSignal]);
 
 	const onScroll = () => {
 		const el = scrollRef.current;

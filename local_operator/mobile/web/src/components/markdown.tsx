@@ -93,10 +93,37 @@ function renderInline(text: string): ReactNode[] {
 /* ------------------------------------------------------------------ */
 
 interface Block {
-	kind: "code" | "heading" | "ul" | "ol" | "quote" | "hr" | "para";
+	kind: "code" | "heading" | "ul" | "ol" | "quote" | "hr" | "table" | "para";
 	level?: number;
 	lang?: string;
 	lines: string[];
+}
+
+/* A GFM table row: leading/trailing pipes, at least one inner pipe. */
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+/* The delimiter row under the header: |---|:--|--:| etc. */
+const TABLE_DELIM = /^\s*\|?[\s:|-]+\|[\s:|-]*$/;
+
+function splitTableRow(line: string): string[] {
+	/* Strip the outer pipes, then split; a \| escape is honoured as a
+	   literal pipe inside a cell. */
+	const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+	const cells: string[] = [];
+	let cur = "";
+	for (let i = 0; i < inner.length; i++) {
+		const ch = inner[i];
+		if (ch === "\\" && inner[i + 1] === "|") {
+			cur += "|";
+			i++;
+		} else if (ch === "|") {
+			cells.push(cur.trim());
+			cur = "";
+		} else {
+			cur += ch;
+		}
+	}
+	cells.push(cur.trim());
+	return cells;
 }
 
 function splitBlocks(text: string): Block[] {
@@ -166,8 +193,27 @@ function splitBlocks(text: string): Block[] {
 			continue;
 		}
 
+		/* GFM table: a pipe row whose NEXT line is the delimiter. Without the
+		   delimiter check a single prose line that happens to contain pipes
+		   would be misread as a table. */
+		if (
+			TABLE_ROW.test(line) &&
+			i + 1 < lines.length &&
+			TABLE_DELIM.test(lines[i + 1])
+		) {
+			const buf: string[] = [line];
+			i += 2; /* header + delimiter consumed; delimiter is structural */
+			while (i < lines.length && TABLE_ROW.test(lines[i])) {
+				buf.push(lines[i]);
+				i++;
+			}
+			blocks.push({ kind: "table", lines: buf });
+			continue;
+		}
+
 		/* Paragraph: consume until a blank line or a construct that starts
-		   another block. */
+		   another block. A pipe row whose next line is a delimiter starts a
+		   table, so the scanner stops there too. */
 		const buf: string[] = [];
 		while (
 			i < lines.length &&
@@ -177,7 +223,12 @@ function splitBlocks(text: string): Block[] {
 			!/^\s*[-*+]\s+/.test(lines[i]) &&
 			!/^\s*\d+[.)]\s+/.test(lines[i]) &&
 			!/^\s*>\s?/.test(lines[i]) &&
-			!/^\s*(-{3,}|\*{3,})\s*$/.test(lines[i])
+			!/^\s*(-{3,}|\*{3,})\s*$/.test(lines[i]) &&
+			!(
+				TABLE_ROW.test(lines[i]) &&
+				i + 1 < lines.length &&
+				TABLE_DELIM.test(lines[i + 1])
+			)
 		) {
 			buf.push(lines[i]);
 			i++;
@@ -256,6 +307,45 @@ export function Markdown({ text }: { text: string }) {
 								))}
 							</div>
 						);
+					case "table": {
+						const [header, ...rows] = b.lines;
+						const head = splitTableRow(header);
+						return (
+							<div
+								key={key()}
+								className="lo-scroll overflow-x-auto rounded-sm border border-hairline"
+							>
+								<table className="w-full border-collapse text-body-sm">
+									<thead>
+										<tr className="bg-sunken">
+											{head.map((cell) => (
+												<th
+													key={key()}
+													className="border-b border-hairline px-2 py-1 text-left font-semibold text-ink"
+												>
+													{renderInline(cell)}
+												</th>
+											))}
+										</tr>
+									</thead>
+									<tbody>
+										{rows.map((row) => (
+											<tr key={key()}>
+												{splitTableRow(row).map((cell) => (
+													<td
+														key={key()}
+														className="border-b border-hairline px-2 py-1 align-top text-ink-muted last:border-b-0"
+													>
+														{renderInline(cell)}
+													</td>
+												))}
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+						);
+					}
 					default:
 						return (
 							<p key={key()}>
