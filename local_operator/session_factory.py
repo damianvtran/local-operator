@@ -946,11 +946,13 @@ async def _prepare(
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
-    # Bound the ephemeral session store before this run adds to it. Startup
-    # is the only moment at which the live directory is unambiguous, which is
-    # what makes "never evict the session that is running" enforceable rather
-    # than a race. Best-effort by construction (see retention.sweep_sessions):
-    # reclaiming disk must never be the reason a session fails to start.
+    # Reap EMPTY session directories left by runs that exited before writing
+    # a turn. This is the only automated cleanup of sessions/ that exists and
+    # the only one that is safe to run automatically: a transcript — any
+    # directory holding content — is never deleted by the harness, only by an
+    # explicit user action. Best-effort by construction (see
+    # retention.sweep_sessions): cleanup must never be the reason a session
+    # fails to start.
     from local_operator.session.retention import sweep_from_config
 
     sweep_from_config(config_manager, Path(agent_registry.config_dir), transcript_dir)

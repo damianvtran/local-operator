@@ -150,7 +150,7 @@ remain in the credential store; never put tokens or keys in this mapping.
 - `effort`: `auto` (default false) enables the zero-token local prompt-complexity classifier; `allowMax` lets high-complexity prompts select a model's maximum effort (default stops one rung below max)
 - `variables`: non-secret named values exposed through the variable tools; environment values remain lower precedence
 - `tui`: terminal UI settings such as `theme`
-- `session_retention_max_sessions`, `session_retention_max_bytes`, `session_retention_max_age_days`: independent ephemeral-session ceilings; `0` disables that ceiling
+- `session_retention_max_sessions`, `session_retention_max_bytes`, `session_retention_max_age_days`: RETIRED. Session transcripts are never deleted automatically — only an explicit user action removes a session — so these ceilings no longer do anything at any value. A config still carrying a non-zero value logs a one-line warning at startup. The only automated cleanup under `sessions/` is the reaping of directories that contain nothing (no transcript), which lose nothing by removal.
 
 `conversation_length`, `detail_length`, and `max_learnings_history` remain readable for compatibility but are deprecated and do not govern the current compaction engine.
 
