@@ -449,6 +449,44 @@ async def test_wake_delivery_mid_turn_waits_for_the_running_tool(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_fresh_session_catchup_fold_continues_instead_of_resuming(tmp_path):
+    """A catch-up folded ahead of a FRESH session's first prompt interrupts no
+    work, so its guidance says 'continue with the user's request', not
+    'resume the work you were doing' (review round 1, m1)."""
+    import time as _time
+
+    from local_operator.harness.wake import WakeSchedule
+
+    now = int(_time.time() * 1000)
+    overdue = WakeSchedule(
+        id="w1", message="check the backup", next_due_at=now - 3_600_000, created_at=now - 4_000_000
+    )
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_custom("wake_schedules", _persisted_wakes_payload([overdue]))
+
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    # The catch-up is held behind the resume grace; expire it so the prompt
+    # folds the catch-up instead of running bare.
+    session._resume_grace_ends_ms = 0
+    await session.prompt("hello")
+
+    texts = [m.text for m in stream.requests[0].messages]
+    catchup_texts = [t for t in texts if "came due while it was down" in t]
+    assert catchup_texts, "the folded catch-up never reached the model"
+    assert "continue with the user's request" in catchup_texts[0]
+    assert "resume the work you were doing" not in catchup_texts[0]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_idle_wake_delivery_carries_no_resume_note(tmp_path):
     """A wake that opens its OWN turn has no interrupted work to return to,
     so the resume guidance stays out of its text."""

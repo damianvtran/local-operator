@@ -1092,7 +1092,11 @@ class AgentLoop:
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[None]] = []
-        peek = config.has_urgent_steering_messages or config.has_steering_messages
+        peek = (
+            config.has_urgent_steering_messages
+            if config.has_urgent_steering_messages is not None
+            else config.has_steering_messages
+        )
         poll_interruptible = config.interrupt_mode == "immediate" and peek is not None
         # Set by the abort watcher so the runners' cancellation handlers can
         # tell an abort apart from a steering interrupt and label their
@@ -1645,7 +1649,11 @@ class AgentLoop:
 
     @staticmethod
     def _peek_steering(config: LoopConfig) -> bool:
-        peek = config.has_urgent_steering_messages or config.has_steering_messages
+        peek = (
+            config.has_urgent_steering_messages
+            if config.has_urgent_steering_messages is not None
+            else config.has_steering_messages
+        )
         if peek is None:
             return False
         try:

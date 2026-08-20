@@ -1797,11 +1797,18 @@ class Session:
             # wakes first and the reply still answers the user.
             catchup = self._take_resume_catchup()
             if catchup is not None:
-                # Folded ahead of a real user prompt, the catch-up interrupts
-                # work it precedes — the same busy-path obligation applies, so
-                # the text carries the resume guidance here too.
+                # Folded ahead of a real user prompt, the catch-up precedes
+                # the work it shares the turn with — the same busy-path
+                # obligation applies, so the text carries the guidance here
+                # too. On a FRESH session this prompt starts the work rather
+                # than resuming it, so the note names that instead of
+                # claiming work was already under way.
+                fresh = not self._context.messages
                 catchup.details["text"] = self._append_busy_resume_note(
-                    str(catchup.details["text"])
+                    str(catchup.details["text"]),
+                    continue_what=(
+                        "continue with the user's request that follows" if fresh else None
+                    ),
                 )
             initial: list[AgentMessage] = (
                 [catchup, Message.user(text, images)]
@@ -4030,7 +4037,7 @@ class Session:
         self._spawn_background(self._prompt_messages([wake_message]))
 
     @staticmethod
-    def _append_busy_resume_note(text: str) -> str:
+    def _append_busy_resume_note(text: str, *, continue_what: str | None = None) -> str:
         """The busy-path suffix: what to do after the wake's task is handled.
 
         A wake that lands mid-turn interrupts NOTHING (courtesy delivery), so
@@ -4039,13 +4046,19 @@ class Session:
         fresh instruction and 'do the wake task, then go back' is exactly the
         behaviour a wake firing mid-task used to lose. Idle-path deliveries
         stay clean: they open their own turn, so there is no prior work to
-        resume."""
+        resume.
+
+        ``continue_what`` names the interrupted work when "the work you were
+        doing" is not literally true — a catch-up folded ahead of a FRESH
+        session's first prompt interrupts nothing yet, so it continues with
+        the user's request instead of resuming anything."""
+        continuation = continue_what or "resume the work you were doing when it fired"
         return (
             f"{text}\n\n"
             "(This wake fired while you were already working. It was held for a "
             "tool boundary so nothing in flight was interrupted: handle the "
-            "wake's task now, then resume the work you were doing when it "
-            "fired unless this wake makes it obsolete.)"
+            f"wake's task now, then {continuation} unless this wake makes it "
+            "obsolete.)"
         )
 
     def _missed_delivery_note(self, due: DueWake) -> str | None:
@@ -4151,6 +4164,9 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
+        # A courtesy wake still queued here was never delivered, so its count
+        # must not survive to misclassify a later enqueue on a reused Session.
+        self._courtesy_wake_count = 0
         try:
             # HC-14: abort the in-flight turn and await its completion (bounded)
             # before flushing — its persistence must land on a live transcript.
