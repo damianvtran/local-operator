@@ -7,6 +7,7 @@ or SDK transport is required.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -999,6 +1000,28 @@ class TestAuthRequiredHandling:
         other_group = ExceptionGroup("g", [other])
         assert _unwrap_auth_required(other_group) is other_group
 
+    def test_unwrap_auth_required_walks_nested_groups(self) -> None:
+        """The transport's anyio group can sit INSIDE the session's group, so
+        the auth error arrives double-wrapped; ``subgroup`` preserves that
+        nesting, and a depth-1 read returns the inner GROUP, not the leaf."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+        from local_operator.mcp.manager import _unwrap_auth_required
+
+        leaf = McpAuthRequiredError("https://srv.example/mcp")
+        nested = ExceptionGroup("outer", [ExceptionGroup("inner", [leaf])])
+        unwrapped = _unwrap_auth_required(nested)
+        assert isinstance(unwrapped, McpAuthRequiredError)
+        assert unwrapped.server_url == "https://srv.example/mcp"
+
+        # Triple depth, with sibling noise, still resolves to the leaf.
+        deep = ExceptionGroup(
+            "outermost",
+            [
+                ExceptionGroup("mid", [ExceptionGroup("in", [leaf])]),
+            ],
+        )
+        assert isinstance(_unwrap_auth_required(deep), McpAuthRequiredError)
+
     def test_fire_auth_required_calls_the_ui_sink(self) -> None:
         """The UI hook receives the server name and the actionable message."""
         from local_operator.mcp.auth import McpAuthRequiredError
@@ -1114,3 +1137,44 @@ class TestAuthRequiredHandling:
         assert scheduled["called"] is False
         # And the server must be marked as having abandoned auto-reconnect.
         assert manager.reconnect_suspended("dd") is True
+
+    @pytest.mark.asyncio
+    async def test_login_resets_the_breaker_and_scopes_the_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful ``/mcp login`` must (a) clear the auth suspension so the
+        server's NEXT disconnect auto-reconnects again, and (b) keep the widened
+        login timeout out of the persisted config — otherwise every later tool
+        call on the server inherits a 10-minute request budget."""
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"dd": {"type": "http", "url": "https://srv.example/mcp",'
+            ' "auth": {"type": "oauth"}}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        # Simulate the state an auth-abandoned reconnect leaves behind.
+        manager._reconnect_suspended.add("dd")
+        manager._reconnect_history["dd"] = deque([0.0])
+        manager._backoff_index["dd"] = 3
+
+        seen_timeout: list[float | None] = []
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            seen_timeout.append(cfg.timeout)
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        conn = await manager.connect_configured_server("dd", timeout_ms=600_000)
+
+        # (a) breaker state cleared — auto-reconnect lives again.
+        assert manager.reconnect_suspended("dd") is False
+        assert "dd" not in manager._reconnect_history
+        assert "dd" not in manager._backoff_index
+        # (b) the CONNECT saw the widened timeout…
+        assert seen_timeout == [600_000]
+        # …but neither the persisted config nor the live connection kept it.
+        stored = manager.get_server_config("dd")
+        assert stored is not None and stored.timeout is None
+        assert conn.config.timeout is None
+        await manager.disconnect_all()

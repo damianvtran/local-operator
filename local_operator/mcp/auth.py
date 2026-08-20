@@ -996,9 +996,22 @@ async def _discover_oauth_endpoints_uncached(
 def _lock_exclusive(fd: int) -> None:
     if os.name == "nt":  # pragma: no cover - platform specific
         import msvcrt
+        import time as _time
 
-        # ``LK_LOCK`` blocks (retrying up to ~10 s) until the byte is free.
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        # ``LK_LOCK`` blocks but gives up after ~10 s (it retries once per
+        # second, ten times, then raises OSError) — while a peer legitimately
+        # holds the lock for up to REFRESH_HTTP_TIMEOUT_S of network time.
+        # Retry in a loop to match the POSIX flock's indefinite-block
+        # semantics; the loop is bounded generously rather than forever so a
+        # leaked lock (killed process) cannot park a connect eternally.
+        deadline = _time.monotonic() + 60.0
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                if _time.monotonic() >= deadline:
+                    raise
     else:
         import fcntl
 
@@ -1132,16 +1145,27 @@ async def ensure_mcp_oauth_fresh(
 
     Returns the discovered endpoints so the provider can be primed with them
     (``None`` when discovery failed and the SDK should fall back to its own
-    defaults). This never raises and never opens a browser: when the grant
-    cannot be refreshed it simply leaves the stored token as-is, and the
-    provider's non-interactive redirect handler is what converts the resulting
-    grant attempt into an actionable :class:`McpAuthRequiredError` instead of a
-    login tab.
+    defaults). This never opens a browser, and a failed REFRESH never raises:
+    the stored token is simply left as-is, and the provider's non-interactive
+    redirect handler is what converts the resulting grant attempt into an
+    actionable :class:`McpAuthRequiredError` instead of a login tab. Lock
+    ACQUISITION can still raise ``OSError`` (unwritable config dir, exhausted
+    fds, the bounded Windows retry) — the manager's caller wraps this in a
+    broad catch, and any new caller must do the same or accept the raise.
+
+    ``cfg`` is accepted for signature stability (the manager passes it, and a
+    future per-server knob — e.g. opting out of proactive refresh — will need
+    it) but is not consulted today.
 
     The refresh is wrapped in a cross-process lock with a re-read after
-    acquiring it, so only one of several concurrently starting sessions spends
-    a rotating refresh token.
+    acquiring it, so only one of several concurrently STARTING sessions spends
+    a rotating refresh token. Scope honestly stated: the SDK's own in-flow 401
+    refresh (a token that dies mid-session) takes no such lock, so two
+    already-running sessions can still race a rotation there; that path fails
+    into the non-interactive handler (an actionable error, not a popup) and
+    the next startup heals it here.
     """
+    del cfg  # reserved — see docstring
     storage = McpTokenStorage(server_url, store)
     endpoints = await discover_oauth_endpoints(server_url)
 

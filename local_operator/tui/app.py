@@ -8509,7 +8509,15 @@ class OperatorApp(App[None]):
             self._system_notice(f"MCP server {name!r} does not use OAuth login.", "warning")
             return
         notice(f"logging in to MCP server {name}…")
-        self.run_worker(self._mcp_login_worker(manager, name), thread=False, group="mcp-login")
+        # ``exclusive=True``: two concurrent logins would both bind the same
+        # loopback redirect port and the second grant would fail mid-browser
+        # round trip; the newest request wins and cancels the stale one.
+        self.run_worker(
+            self._mcp_login_worker(manager, name),
+            thread=False,
+            group="mcp-login",
+            exclusive=True,
+        )
 
     async def _mcp_login_worker(self, manager: Any, name: str) -> None:
         """Run one interactive MCP OAuth exchange, reporting into the transcript.

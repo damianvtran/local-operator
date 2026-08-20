@@ -135,11 +135,15 @@ def _unwrap_auth_required(exc: BaseException) -> BaseException:
 
     The streamable-HTTP transport runs its auth flow inside an anyio TaskGroup,
     which wraps any exception the redirect handler raises in an
-    ``ExceptionGroup``. Callers that need to RECOGNISE an auth requirement (the
-    startup toast, the reconnect breaker, ``/mcp login``) would otherwise see
-    only ``"unhandled errors in a TaskGroup"`` and treat a recoverable grant as
-    an opaque transport failure. This returns the auth error when one is buried
-    in the group, else the original exception unchanged.
+    ``ExceptionGroup`` — and that group can itself be nested inside the
+    ``ClientSession`` task group's own group, so the auth error may arrive at
+    ANY depth. Callers that need to RECOGNISE an auth requirement (the startup
+    toast, the reconnect breaker, ``/mcp login``) would otherwise see only
+    ``"unhandled errors in a TaskGroup"`` and treat a recoverable grant as an
+    opaque transport failure. This walks the group's LEAVES (``subgroup``
+    preserves nesting structure, so ``matches.exceptions[0]`` can be another
+    group) and returns the first auth error found, else the original exception
+    unchanged.
     """
     if isinstance(exc, McpAuthRequiredError):
         return exc
@@ -148,9 +152,13 @@ def _unwrap_auth_required(exc: BaseException) -> BaseException:
         if matches is not None:
             # A connect raises at most ONE auth error, so the first leaf is the
             # whole story; flattening keeps the re-raise a single clean type.
-            first = next(iter(matches.exceptions), None)
-            if isinstance(first, McpAuthRequiredError):
-                return first
+            stack: list[BaseException] = [matches]
+            while stack:
+                candidate = stack.pop()
+                if isinstance(candidate, McpAuthRequiredError):
+                    return candidate
+                if isinstance(candidate, BaseExceptionGroup):
+                    stack.extend(candidate.exceptions)
     return exc
 
 
@@ -926,13 +934,28 @@ class McpManager:
         errors = validate_server_config(name, cfg)
         if errors:
             raise McpConnectionError("; ".join(errors))
-        if timeout_ms is not None:
-            cfg = cfg.model_copy(update={"timeout": timeout_ms})
 
+        # The PRISTINE config is what persists: the login-widened timeout below
+        # must scope to the one interactive connect, or every later tool call
+        # and reconnect on this server would inherit a 10-minute request budget
+        # (ServerConnection.config and _configs both feed resolve_mcp_timeout_s).
         self._configs[name] = cfg
         self._sources[name] = sources[name]
         self._disposed = False
-        conn = await self._connect_server(name, cfg, interactive=interactive)
+        connect_cfg = (
+            cfg.model_copy(update={"timeout": timeout_ms}) if timeout_ms is not None else cfg
+        )
+        conn = await self._connect_server(name, connect_cfg, interactive=interactive)
+        # The live connection must carry the pristine config too — tool calls
+        # read their timeout from conn.config, not from _configs.
+        conn.config = cfg
+        # An explicit login is the documented recovery from an auth-suspended
+        # breaker (see _reconnect's McpAuthRequiredError arm): clear the breaker
+        # state so the server's NEXT disconnect auto-reconnects again instead of
+        # being abandoned by the suspension this login just resolved.
+        self._reconnect_history.pop(name, None)
+        self._reconnect_suspended.discard(name)
+        self._backoff_index.pop(name, None)
         self._register_connection(conn)
         # A mid-session login adds tools the session booted without; notify
         # subscribers exactly like a successful reconnect does. A no-op when no
@@ -1240,6 +1263,22 @@ class McpManager:
                 await stack.aclose()
             except BaseException as ce:  # noqa: BLE001 — examined below, never lost
                 close_exc = ce
+            # A GENUINE external cancellation (dispose/reload/esc) keeps its
+            # priority even when the teardown surfaced a grouped auth error:
+            # the task itself was asked to cancel (``cancelling() > 0``), and
+            # converting that into an auth failure would toast + suspend a
+            # server for what was actually the user leaving. anyio's own
+            # internal delivery — the auth flow failing inside the transport's
+            # task group — raises CancelledError WITHOUT marking this task as
+            # cancelling, which is exactly what lets the two be told apart.
+            current = asyncio.current_task()
+            externally_cancelled = (
+                isinstance(exc, asyncio.CancelledError)
+                and current is not None
+                and current.cancelling() > 0
+            )
+            if externally_cancelled:
+                raise
             # An OAuth grant requirement is not a transport failure: surface it
             # as the clean type so callers (startup toast, reconnect breaker,
             # /mcp login) can recognise it. It can ride EITHER the original
