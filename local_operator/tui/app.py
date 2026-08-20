@@ -1780,7 +1780,12 @@ class OperatorApp(App[None]):
                     # itself was stashed on the assistant message by the loop
                     # precisely so this replay could show it.
                     payload = getattr(message, "provider_payload", None) or {}
-                    refusal = str(payload.get("refusal") or "") or "model refused the request"
+                    # The fallback keeps the marker grammar (D3): every other
+                    # refusal line ends in a parenthetical, and a user who has
+                    # learned that shape would read its absence as meaningful.
+                    refusal = str(payload.get("refusal") or "") or (
+                        "model refused the request (no details recorded)"
+                    )
                     self._append_block(NoticeBlock(refusal, "error"))
                     appended = True
                 elif not text and not tool_calls:

@@ -672,7 +672,7 @@ _FINISH_TO_STOP_REASON = {
 }
 
 
-def _refusal_error(marker: str, refusal_text: str) -> str:
+def _refusal_error(marker: str, refusal_text: str, *, streamed_text: bool = False) -> str:
     """The one visible line a refusal produces, always naming the wire marker.
 
     ``marker`` is the provider's own terminal signal (``finish_reason=
@@ -683,12 +683,20 @@ def _refusal_error(marker: str, refusal_text: str) -> str:
     frequently send NO prose at all — that silent case is the whole reason this
     line exists, so it must read as a diagnosis rather than an empty string.
 
+    ``streamed_text`` is whether the client forwarded any answer prose before
+    the refusal terminal (design review D1): Anthropic and Gemini safety stops
+    often cut a partial answer, and "sent no message" directly under a
+    partially-rendered reply asserts the opposite of what is on screen. The
+    line must describe the frame the user is looking at.
+
     Parentheses, not square brackets: this string reaches ``console.print`` in
     the headless renderer, where ``[marker]`` parses as rich markup and the
     diagnosis silently vanishes from its own error line.
     """
     if refusal_text:
         return f"model refused: {_capped(refusal_text)} ({marker})"
+    if streamed_text:
+        return f"model refused and cut the reply short ({marker})"
     return f"model refused and sent no message ({marker})"
 
 
@@ -1091,9 +1099,14 @@ class OpenAICompatClient:
             stop_reason = "refusal"
         error: str | None = None
         if stop_reason == "refusal":
-            error = _refusal_error(
-                f"finish_reason={finish_reason or 'stop'}", "".join(refusal_parts)
-            )
+            # Name what actually detected the refusal (design review D2): when
+            # the finish reason was an ordinary stop/length and the prose slot
+            # was the signal, a bare "(finish_reason=stop)" argues with the
+            # word "refused" and names a mechanism that did not fire.
+            marker = f"finish_reason={finish_reason or 'stop'}"
+            if finish_reason != "content_filter":
+                marker = f"delta.refusal, {marker}"
+            error = _refusal_error(marker, "".join(refusal_parts))
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,
@@ -1217,9 +1230,12 @@ class OpenAICompatClient:
                                 # Refusal prose truncated by the output cap is
                                 # still a refusal; a bare "length" terminal
                                 # dropped the collected prose (review R1-3).
+                                # The refusal slot is named as the detection
+                                # signal (D2): the incomplete reason alone
+                                # describes the truncation, not the refusal.
                                 terminal_stop = "refusal"
                                 terminal_error = _refusal_error(
-                                    f"incomplete_details.reason={reason}",
+                                    f"response.refusal, incomplete_details.reason={reason}",
                                     "".join(refusal_parts),
                                 )
                             else:
@@ -1592,6 +1608,7 @@ class AnthropicClient:
         url = f"{self._base_url}/v1/messages"
         stop_reason = "stop"
         usage = Usage()
+        streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
 
         async with self._http.stream(
@@ -1640,6 +1657,7 @@ class AnthropicClient:
                     if delta_type == "text_delta":
                         text = delta.get("text")
                         if text:
+                            streamed_text = True
                             yield StreamTextDelta(delta=text)
                     elif delta_type == "input_json_delta":
                         index = int(event.get("index", 0))
@@ -1671,8 +1689,9 @@ class AnthropicClient:
         if mapped == "refusal":
             # Anthropic sends no refusal prose alongside this stop_reason; any
             # text it did stream has already been forwarded, so the terminal
-            # line only needs to name the mechanism.
-            error = _refusal_error("stop_reason=refusal", "")
+            # line only needs to name the mechanism — and whether it cut a
+            # partially-streamed answer or produced nothing at all (D1).
+            error = _refusal_error("stop_reason=refusal", "", streamed_text=streamed_text)
         yield StreamUsageEvent(usage=usage)
         yield StreamEndEvent(stop_reason=mapped, usage=usage, error=error)
 
@@ -1822,6 +1841,7 @@ class GoogleClient:
         # never seen, while an error line with the verbatim marker stays true.
         refusal_marker: str | None = None
         defect_marker: str | None = None
+        streamed_text = False
         # Gemini returns one complete functionCall per part with no ids and
         # no part indexes, so the harness must mint both. They must be UNIQUE
         # per response: the loop dedups tool calls by id (first-wins), and a
@@ -1846,6 +1866,7 @@ class GoogleClient:
                     for part in (candidate.get("content") or {}).get("parts") or []:
                         text = part.get("text")
                         if text:
+                            streamed_text = True
                             yield StreamTextDelta(delta=text)
                         function_call = part.get("functionCall")
                         if function_call:
@@ -1898,8 +1919,11 @@ class GoogleClient:
         error: str | None = None
         if stop_reason == "refusal":
             # Gemini sends no refusal prose; any text it did stream has been
-            # forwarded already, so the line names the classifier that fired.
-            error = _refusal_error(refusal_marker or "finishReason=OTHER", "")
+            # forwarded already, so the line names the classifier that fired —
+            # and whether it cut a partial answer or produced nothing (D1).
+            error = _refusal_error(
+                refusal_marker or "finishReason=OTHER", "", streamed_text=streamed_text
+            )
         elif stop_reason == "error":
             error = f"model call failed ({defect_marker or 'unknown finishReason'})"
         yield StreamEndEvent(stop_reason=stop_reason, usage=usage, error=error)
@@ -1932,7 +1956,7 @@ class MockClient:
             yield StreamEndEvent(
                 stop_reason="refusal",
                 usage=Usage(input_tokens=10, output_tokens=0),
-                error=_refusal_error("mock refusal", "I can't help with that request."),
+                error=_refusal_error("stop_reason=mock_refusal", "I can't help with that request."),
             )
             return
         wants_tool = any("[tool]" in message.text for message in request.messages)

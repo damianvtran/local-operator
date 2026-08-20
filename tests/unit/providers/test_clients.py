@@ -2231,3 +2231,88 @@ class TestRefusalsAreSurfacedNotSwallowed:
         end = self._end(events)
         assert end.stop_reason == "error"
         assert end.error is not None and reason in end.error and "refused" not in end.error
+
+    async def test_anthropic_refusal_after_partial_prose_says_cut_short(self) -> None:
+        """Design review D1: 'sent no message' directly under a partially
+        rendered answer asserts the opposite of what is on screen. When text
+        streamed before the refusal terminal, the line says the reply was cut."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = _sse(
+                [
+                    {"type": "message_start", "message": {"usage": {"input_tokens": 7}}},
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "Here is the beginning of"},
+                    },
+                    {"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {}},
+                ]
+            )
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        client = AnthropicClient(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("anthropic", "claude-x"), messages=[Message.user("hi")]),
+                "sk-ant",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None
+        assert "cut the reply short" in end.error
+        assert "sent no message" not in end.error
+
+    async def test_google_refusal_after_partial_prose_says_cut_short(self) -> None:
+        """Same D1 state on the Gemini wire, where safety stops commonly cut a
+        partial answer."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"candidates": [{"content": {"parts": [{"text": "Starting to answ"}]}}]},
+                        {"candidates": [{"finishReason": "SAFETY"}]},
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+                "g-key",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "cut the reply short" in end.error
+
+    async def test_prose_slot_refusal_names_the_slot_not_just_the_finish(self) -> None:
+        """Design review D2: '(finish_reason=stop)' beside the word 'refused'
+        names a mechanism that did not fire. When the prose slot detected the
+        refusal, the marker names the slot."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [{"choices": [{"delta": {"refusal": "No."}, "finish_reason": "stop"}]}]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+        end = self._end(events)
+        assert end.error is not None and "delta.refusal" in end.error
