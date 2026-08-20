@@ -415,7 +415,7 @@ def build_app(daemon: MobileDaemon):
         Response,
         StreamingResponse,
     )
-    from starlette.routing import Mount, Route
+    from starlette.routing import BaseRoute, Mount, Route
 
     # -- auth helpers -----------------------------------------------------------
 
@@ -651,7 +651,7 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
         return JSONResponse({"models": models})
 
-    routes = [
+    routes: list[BaseRoute] = [
         Route("/healthz", healthz),
         Route("/login", login_page, methods=["GET"]),
         Route("/login", login_submit, methods=["POST"]),

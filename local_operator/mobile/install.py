@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -112,8 +113,7 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             "ok": False,
             "steps": [],
             "error": (
-                "install needs macOS launchd; "
-                "run `lop mobile serve` in the foreground elsewhere"
+                "install needs macOS launchd; " "run `lop mobile serve` in the foreground elsewhere"
             ),
         }
 

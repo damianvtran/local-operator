@@ -66,8 +66,10 @@ class SessionHandle(Protocol):
     notice.
     """
 
-    session_projection_seed: SessionProjection
-    """The projection skeleton: identity fields the registrant folds onto."""
+    @property
+    def session_projection_seed(self) -> SessionProjection:
+        """The projection skeleton: identity fields the registrant folds onto."""
+        ...
 
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
         """Feed the fold from the host's event stream; call ``on_projection``
@@ -215,12 +217,13 @@ class Registrant:
                 return
             try:
                 seed = self._handle.session_projection_seed
-                self._publisher and self._publisher.heartbeat(
-                    session_id=seed.session_id,
-                    conversation_name=seed.conversation_name,
-                    model_label=seed.model_label,
-                    cwd=seed.cwd,
-                )
+                if self._publisher is not None:
+                    self._publisher.heartbeat(
+                        session_id=seed.session_id,
+                        conversation_name=seed.conversation_name,
+                        model_label=seed.model_label,
+                        cwd=seed.cwd,
+                    )
             except Exception:  # noqa: BLE001 — a missed heartbeat is self-healing
                 logger.debug("registrant heartbeat failed", exc_info=True)
 
@@ -276,7 +279,7 @@ class Registrant:
                 pass
 
     async def _on_request(self, frame: dict[str, Any]) -> None:
-        op = frame.get("op")
+        op = str(frame.get("op") or "")
         req = frame.get("req")
         try:
             detail = await self._dispatch(op, frame)
