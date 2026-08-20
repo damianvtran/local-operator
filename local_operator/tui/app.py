@@ -8510,8 +8510,11 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command == "mcp":
-            picker.set_choices(self._mcp_argument_choices(editor))
+            # Clear BEFORE the fill: the builder may set a notice of its own
+            # (an unreadable credential store on the logout list), and a
+            # blanket clear after it would erase exactly that.
             picker.set_notice("")
+            picker.set_choices(self._mcp_argument_choices(editor))
             return
         if message.command in ("theme", "themes"):
             # Seeded on the CURRENT theme's row (F2): the highlight previews
@@ -8585,7 +8588,12 @@ class OperatorApp(App[None]):
             # have moved on in the tick the message spent queued.
             return
         if message.command == "mcp":
-            editor.picker.set_choices(self._mcp_argument_choices(editor))
+            picker = editor.picker
+            # Same self-clearing rule as every sibling fill, applied BEFORE
+            # for the same reason as the opening branch: the builder may set
+            # a notice of its own that must survive the refill.
+            picker.set_notice("")
+            picker.set_choices(self._mcp_argument_choices(editor))
 
     def _credential_choices(self) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.
@@ -9482,12 +9490,16 @@ class OperatorApp(App[None]):
             return []
         manager = getattr(self._session, "mcp_manager", None)
         if verb == "logout":
-            # Only what can actually be removed — the /logout rule. The store
-            # read degrades to the empty set when unreadable, and an empty
-            # list is then the honest answer to "what can I log out of". Rows
-            # are keyed by server NAME but the store is keyed by URL, so the
+            # Only what can actually be removed — the /logout rule. Rows are
+            # keyed by server NAME but the store is keyed by URL, so the
             # config (via the manager) supplies the mapping.
             stored = mcp_logged_out_servers()
+            if stored is None:
+                # An unreadable store is NOT the same answer as "no
+                # credentials anywhere": say so where the list would have
+                # been rather than rendering a bare empty one.
+                editor.picker.set_notice("credential store unreadable — cannot list logouts")
+                return []
             names = [
                 name
                 for name in names

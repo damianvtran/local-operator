@@ -547,11 +547,12 @@ def mcp_logout_server(
 
     Returns an error string on failure, ``None`` on success — the two callers
     (CLI and TUI) phrase their own output, so the helper reports outcomes,
-    not prose. Unknown names and non-OAuth configs are errors, not no-ops:
-    logging out of a server that holds no credential is a valid ask (the
-    store may still carry a stale row from a since-removed config write), but
-    a name the config does not know at all is a typo the user wants told
-    about.
+    not prose. All three failure shapes — unknown name, non-OAuth config,
+    nothing stored — are reported as errors, but they are DIFFERENT errors:
+    a name the config does not know is a typo the user wants told about,
+    while a known OAuth server holding no credential is a no-op worth
+    distinguishing from a successful removal (the caller's message says
+    which).
 
     The deletion goes through the REAL store (``_resolve_store(None)``), not
     the session manager's possibly-injected one: logout must remove the
@@ -567,30 +568,34 @@ def mcp_logout_server(
     auth = getattr(cfg, "auth", None)
     if auth is None or getattr(auth, "type", None) != "oauth":
         return f"MCP server {name!r} does not use OAuth login"
-    storage = McpTokenStorage(cfg.url, store)
+    # Only remote configs carry ``url``; a stdio config reaching here would
+    # have already failed the OAuth check above, so the getattr is a type
+    # narrowing rather than a guess.
+    storage = McpTokenStorage(getattr(cfg, "url", ""), store)
     if not storage.clear():
         return f"no stored credential for MCP server {name!r} — nothing to log out of"
     return None
 
 
-def mcp_logged_out_servers(store: StructuralAuthStore | None = None) -> set[str]:
-    """Server URLs that still hold an ``mcp-oauth`` credential row.
+def mcp_logged_out_servers(store: StructuralAuthStore | None = None) -> set[str] | None:
+    """Server URLs that still hold an ``mcp-oauth`` credential row, or
+    ``None`` when the store could not be read.
 
     Read-only companion to :func:`mcp_logout_server` so the ``/mcp logout``
     picker can offer only servers that actually have something to remove
     (mirroring how ``/logout`` offers only providers holding a credential).
-    An unreadable store degrades to the empty set: the list is then empty and
-    the picker's own notice says why, rather than offering rows whose removal
-    would fail.
+    ``None`` rather than the empty set on failure: an unreadable store is not
+    the same answer as "no credentials anywhere", and the picker needs the
+    difference to say so instead of rendering a bare empty list.
     """
     store = _resolve_store(store)
     if store is None:
-        return set()
+        return None
     try:
         rows = store.list_credentials(MCP_OAUTH_PROVIDER)
     except Exception:
         logger.debug("MCP credential listing failed", exc_info=True)
-        return set()
+        return None
     return {row.identity_key for row in rows if row.identity_key}
 
 

@@ -561,14 +561,14 @@ def test_mcp_logout_command_reports_removal(
     monkeypatch.setattr(
         "local_operator.mcp.auth.mcp_logout_server", lambda name, cwd: None
     )
-    assert cli.mcp_command(types.SimpleNamespace(mcp_command="logout", name="linear")) == 0
+    assert cli.mcp_command(argparse.Namespace(mcp_command="logout", name="linear")) == 0
     assert "'linear'" in capsys.readouterr().out
 
     monkeypatch.setattr(
         "local_operator.mcp.auth.mcp_logout_server",
         lambda name, cwd: "no stored credential for MCP server 'linear'",
     )
-    assert cli.mcp_command(types.SimpleNamespace(mcp_command="logout", name="linear")) == 1
+    assert cli.mcp_command(argparse.Namespace(mcp_command="logout", name="linear")) == 1
     assert "nothing" not in capsys.readouterr().out  # reason goes to stderr
 
 

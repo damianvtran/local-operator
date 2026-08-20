@@ -258,6 +258,21 @@ class TestMcpTokenStorage:
         storage._store = None
         assert storage.clear() is False
 
+    def test_clear_when_the_delete_itself_fails_reports_false_and_keeps_the_row(self) -> None:
+        """The case the reauth safety depends on: a FAILED delete must never
+        be reported as a successful logout — clear() is False and the row
+        survives, so the caller refuses to run a "fresh" grant on top of it."""
+
+        class RefusingStore(FakeAuthStore):
+            def delete_credential(self, credential_id: int) -> None:
+                raise RuntimeError("database is locked")
+
+        store = RefusingStore()
+        storage = McpTokenStorage("https://srv.example/mcp", store)
+        storage._write({"tokens": {"access_token": "a"}})
+        assert storage.clear() is False
+        assert len(store.list_credentials(MCP_OAUTH_PROVIDER)) == 1
+
 
 class TestRealAuthStoreConformance:
     """MCP-03: the real providers AuthStore satisfies the MCP adapter."""
@@ -386,7 +401,8 @@ class TestLogoutHelpers:
             lambda cwd: (self._configs(), {}),
         )
         assert "not configured" in (mcp_logout_server("linar", Path("/anywhere")) or "")
-        assert "does not use OAuth" in (mcp_logout_server("stdio", Path("/anywhere")) or "")
+        not_oauth = mcp_logout_server("stdio", Path("/anywhere")) or ""
+        assert "does not use OAuth" in not_oauth
 
     def test_logged_out_servers_keys_by_url(self) -> None:
         """The picker list is keyed by server NAME but the store by URL; the
@@ -397,12 +413,18 @@ class TestLogoutHelpers:
         )
         assert mcp_logged_out_servers(store) == {"https://mcp.linear.app/mcp"}
 
-    def test_logged_out_servers_degrades_to_empty(self) -> None:
+    def test_logged_out_servers_distinguishes_an_unreadable_store(self) -> None:
+        """None, not the empty set: an unreadable store is not the same
+        answer as "no credentials anywhere", and the picker needs the
+        difference to say so."""
+
         class ExplodingStore(FakeAuthStore):
-            def list_credentials(self, provider=None, include_disabled=False):  # type: ignore[no-untyped-def]
+            def list_credentials(  # type: ignore[no-untyped-def]
+                self, provider=None, include_disabled=False
+            ):
                 raise RuntimeError("database is locked")
 
-        assert mcp_logged_out_servers(ExplodingStore()) == set()
+        assert mcp_logged_out_servers(ExplodingStore()) is None
 
 
 class TestCallbackInputParsing:
