@@ -830,6 +830,7 @@ def _make_system_blocks_provider(
     goal_state: "GoalState | None" = None,
     user_instructions: str = "",
     repo_guidance: str = "",
+    variable_store: "VariableStore | None" = None,
 ) -> Callable[[], Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -842,7 +843,10 @@ def _make_system_blocks_provider(
 
     ``goal_state`` is the SAME holder the session facade exposes through
     ``set_goal``, which is how a ``/goal`` edit reaches the next turn's
-    prompt without rebuilding the session.
+    prompt without rebuilding the session. ``variable_store`` is the same
+    store the session injects into every tool context, so a ``/credential``
+    store reaches the next turn's ``<session-credentials>`` block the same
+    way.
 
     ``user_instructions`` is captured once by the caller and closed over
     rather than re-read here: it lands in the byte-stable head block, so
@@ -866,6 +870,11 @@ def _make_system_blocks_provider(
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
+        names = (
+            variable_store.credential_names()
+            if variable_store is not None and hasattr(variable_store, "credential_names")
+            else []
+        )
         return build_system_blocks(
             tools,
             knowledge_block,
@@ -874,6 +883,7 @@ def _make_system_blocks_provider(
             goal=goal,
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
+            credentials=names,
         )
 
     return provider
@@ -1100,6 +1110,7 @@ async def _prepare(
         goal_state=goal_state,
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
+        variable_store=variable_store,
     )
 
     session_kwargs: dict[str, Any] = dict(

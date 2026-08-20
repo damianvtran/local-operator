@@ -1089,7 +1089,11 @@ class BashParams(BaseModel):
     )
 
 
-def _bash_progress_line(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> str:
+def _bash_progress_line(
+    stdout_chunks: list[bytes],
+    stderr_chunks: list[bytes],
+    context: ToolContext | None = None,
+) -> str:
     """One short status line for a running background command.
 
     Reports the LAST non-empty line the command printed, which for the work
@@ -1101,8 +1105,25 @@ def _bash_progress_line(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) 
     tail = b"".join(stdout_chunks[-4:] + stderr_chunks[-4:]).decode("utf-8", errors="replace")
     for line in reversed(tail.splitlines()):
         if line.strip():
-            return line.strip()[:200]
+            return _redact_tool_text(line.strip()[:200], context)
     return "running"
+
+
+def _redact_tool_text(text: str, context: ToolContext | None) -> str:
+    """Strip stored session-credential values out of tool output.
+
+    The LOOP's ``redact_tool_result`` hook is the model-visible choke point;
+    this stays for the UIs that read live output BEFORE the result exists
+    (bash stream updates, background-job peek, the abort receipt). A command
+    that ``echo``s ``$GITHUB_TOKEN`` would otherwise paint the secret while
+    the command is still running.
+    """
+    store = context.variables if context is not None else None
+    redact = getattr(store, "redact", None)
+    if callable(redact):
+        redacted = redact(text)
+        return redacted if isinstance(redacted, str) else text
+    return text
 
 
 def _bash_output_summary(stdout: str, stderr: str) -> str:
@@ -1176,6 +1197,16 @@ async def execute_bash(
 
     env = os.environ.copy()
     env.update(NON_INTERACTIVE_ENV)
+    # Session credentials ride the child environment so the agent can USE a
+    # secret it can never READ. Injected here rather than advertised as a
+    # bash ``env`` argument: a model-authored env map would have to carry
+    # the value (or a placeholder we do not have), which is the leak this
+    # store exists to prevent.
+    store = context.variables if context is not None else None
+    credential_env = getattr(store, "credential_env", None)
+    extra = credential_env() if callable(credential_env) else None
+    if isinstance(extra, dict):
+        env.update({str(name): str(value) for name, value in extra.items()})
 
     process = await asyncio.create_subprocess_exec(
         "/bin/sh",
@@ -1209,7 +1240,10 @@ async def execute_bash(
             # Third-party embedders may supply a manager predating live output;
             # peek degrades to "no output recorded" rather than breaking the run.
             return
-        appender(job_id, chunk.decode("utf-8", errors="replace"))
+        appender(
+            job_id,
+            _redact_tool_text(chunk.decode("utf-8", errors="replace"), context),
+        )
 
     async def _pump(stream: asyncio.StreamReader | None, sink: list[bytes]) -> None:
         # Both pipes were requested at spawn, so neither is ever None here;
@@ -1239,8 +1273,12 @@ async def execute_bash(
     def _emit_update() -> None:
         if on_update is None:
             return
-        stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-        stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        stdout = _redact_tool_text(
+            b"".join(stdout_chunks).decode("utf-8", errors="replace"), context
+        )
+        stderr = _redact_tool_text(
+            b"".join(stderr_chunks).decode("utf-8", errors="replace"), context
+        )
         on_update(
             AgentToolUpdate(
                 content=[TextContent(text=_bash_output_summary(stdout, stderr))],
@@ -1269,8 +1307,8 @@ async def execute_bash(
         implementation rather than two that drift.
         """
         partial = _bash_output_summary(
-            b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-            b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+            _redact_tool_text(b"".join(stdout_chunks).decode("utf-8", errors="replace"), context),
+            _redact_tool_text(b"".join(stderr_chunks).decode("utf-8", errors="replace"), context),
         )
         wait_task.cancel()
         if abort_waiter is not None and not abort_waiter.done():
@@ -1338,7 +1376,7 @@ async def execute_bash(
                     # the OUTPUT has a dedicated bounded channel (the peek
                     # tail), and mirroring it into a field every renderer
                     # repaints per frame would pay for it many times over.
-                    report_progress(_bash_progress_line(stdout_chunks, stderr_chunks))
+                    report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
                 await cleanup(kill=cancelled_bg or timed_out_bg)
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
@@ -1347,8 +1385,12 @@ async def execute_bash(
                 await cleanup(kill=True)
                 raise
 
-            out = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-            err = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+            out = _redact_tool_text(
+                b"".join(stdout_chunks).decode("utf-8", errors="replace"), context
+            )
+            err = _redact_tool_text(
+                b"".join(stderr_chunks).decode("utf-8", errors="replace"), context
+            )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
             if cancelled_bg:
@@ -1528,7 +1570,7 @@ async def execute_bash(
             tool_call_id,
             "bash",
             f"aborted ({(signal.reason or 'aborted') if signal else 'aborted'}): "
-            f"{params.command}\n{partial}",
+            f"{params.command}\n{_redact_tool_text(partial, context)}",
         )
 
     # Decoding and, for oversized output, spilling/eliding run in a thread:
@@ -1538,6 +1580,8 @@ async def execute_bash(
     # and the reason a batch of concurrent bash calls used to freeze the
     # frame at the moment they finished together.
     stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
+    stdout_raw = _redact_tool_text(stdout_raw, context)
+    stderr_raw = _redact_tool_text(stderr_raw, context)
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
@@ -2915,24 +2959,44 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
             found = _load_ignore_rules(directory, rel_dir)
             if found:
                 local_rules = rules + [(rel_dir, found)]
+        # os.scandir, not Path.iterdir + per-entry Path.is_symlink/is_dir/
+        # is_file: a DirEntry carries the d_type the kernel already returned
+        # with the directory listing, so the symlink/dir/file classification
+        # below costs zero extra syscalls on the common path where iterdir
+        # paid three stat(2) calls PER ENTRY. On the 60k-entry trees this
+        # walk actually meets (a workspace with vendored checkouts) that is
+        # the difference between a scan and a stall — and this function runs
+        # under a worker thread on behalf of a TUI whose frame budget the
+        # caller is protecting, so raw walk speed is part of the contract.
+        # Sorting by name matches the old sorted(iterdir()) order exactly:
+        # within one directory, Path ordering IS name ordering.
         try:
-            entries = sorted(directory.iterdir())
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda e: e.name)
         except OSError:
             return
         for entry in entries:
-            if entry.is_symlink():
-                continue  # never follow links: cycles and out-of-tree escapes
+            try:
+                if entry.is_symlink():
+                    continue  # never follow links: cycles and out-of-tree escapes
+                is_dir = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
+            except OSError:
+                # An entry that vanished or cannot be classified mid-walk is
+                # skipped, matching the directory-level OSError handling: a
+                # concurrent delete is normal filesystem life, not an error.
+                continue
             rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
-            if entry.is_dir():
+            if is_dir:
                 if entry.name in _GREP_PRUNE_DIRS or entry.name.startswith("."):
                     continue
                 if respect_ignore and _ignored(rel, True, local_rules):
                     continue
-                _walk(entry, rel, local_rules)
-            elif entry.is_file():
+                _walk(Path(entry.path), rel, local_rules)
+            elif is_file:
                 if respect_ignore and _ignored(rel, False, local_rules):
                     continue
-                files.append(entry)
+                files.append(Path(entry.path))
 
     _walk(root, "", [])
     return files
@@ -2941,6 +3005,44 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
 def _walk_files(root: Path) -> list[Path]:
     """The grep file set: the ignore-aware walk."""
     return _walk_entries(root)
+
+
+def _grep_file_set(target: Path) -> tuple[list[Path], Path]:
+    """``(files, base)`` for one grep target, file or directory.
+
+    Synchronous by design: the walk is tens of thousands of scandir/stat
+    calls on a large tree, so every caller reaches this through
+    ``asyncio.to_thread``. Running it inline in ``execute_grep`` was the
+    freeze reported as "the session hangs on concurrent tool calls": under
+    Textual's eager task factory the runner coroutine executes synchronously
+    up to its first true suspension AT TASK-CREATION TIME, so a batch of
+    greps put every tree walk back-to-back on the render loop before the
+    first frame of the batch could paint (sampled live: 100% of main-thread
+    samples inside os_lstat/os_scandir/os_stat under task_eager_start).
+    """
+    if target.is_file():
+        return [target], target.parent
+    return _walk_files(target), target
+
+
+def _count_oversized_files(target: Path) -> int:
+    """How many files in the grep set exceed ``GREP_FILE_LIMIT_BYTES``.
+
+    The ripgrep engine applies ``--max-filesize`` silently, and the footer
+    contract promises the skipped count either way — this recovers it. It
+    re-walks the tree, which is exactly the filesystem load described on
+    ``_grep_file_set``, so it is synchronous and thread-hosted for the same
+    reason.
+    """
+    files, _base = _grep_file_set(target)
+    skipped = 0
+    for file_path in files:
+        try:
+            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
+                skipped += 1
+        except OSError:
+            continue
+    return skipped
 
 
 class GlobParams(BaseModel):
@@ -3428,15 +3530,26 @@ async def execute_grep(
     files_skipped = 0
     engine_note = ""
 
-    if target.is_file():
-        base = target.parent
-        files: list[Path] = [target]
-    else:
-        base = target
-        files = _walk_files(target)
+    # Engine choice needs only a stat of an explicitly named file, never the
+    # tree walk: the walk is deferred into the worker threads below so the
+    # event loop — which is also the TUI's render loop, and under Textual's
+    # eager task factory executes every runner in a batch synchronously up to
+    # its first true suspension — never pays a directory tree's worth of
+    # scandir/stat calls. Walking here inline was the observed freeze on
+    # concurrent grep/glob batches (main thread pinned in os_lstat/os_scandir
+    # under task_eager_start, one runner at a time, no frame in between).
+    target_is_file = target.is_file()
+    base = target.parent if target_is_file else target
+    use_rg = _use_ripgrep()
+    if use_rg and target_is_file:
+        try:
+            if target.stat().st_size > GREP_FILE_LIMIT_BYTES:
+                use_rg = False
+        except OSError:
+            use_rg = False
 
     scan_result = None
-    if _use_ripgrep() and not (target.is_file() and target.stat().st_size > GREP_FILE_LIMIT_BYTES):
+    if use_rg:
         scan_result = await _ripgrep_scan(
             params.pattern,
             target,
@@ -3450,31 +3563,54 @@ async def execute_grep(
         records, _count = scan_result
         engine_note = " (ripgrep)"
         # rg applies --max-filesize silently; recover the count the footer
-        # contract promises from the already-walked file list so both
-        # engines tell the model the same thing.
-        for f in files:
-            try:
-                if f.stat().st_size > GREP_FILE_LIMIT_BYTES:
-                    files_skipped += 1
-            except OSError:
-                continue
+        # contract promises. The walk+stat pass is the same filesystem load
+        # as the scan itself, so it rides a thread raced against abort.
+        # Skipped for a single named file: the engine gate above only keeps
+        # rg when that file is already under the cap, so the count is
+        # definitionally zero and a worker-thread hop to confirm it would be
+        # pure overhead on the most common grep shape (review F2).
+        if not target_is_file:
+            skipped_count, aborted = await _run_with_abort(
+                asyncio.to_thread(_count_oversized_files, target),
+                signal,
+                lambda: None,
+            )
+            if aborted:
+                return _error(tool_call_id, "grep", "Search aborted.")
+            # Non-None whenever aborted is False: _run_with_abort returns the
+            # coroutine's result on the non-abort arms, and the counter always
+            # returns an int. The assert states that contract for the type
+            # checker instead of an `or 0` that would silently launder a
+            # future internal failure into a zero (review N1).
+            assert skipped_count is not None
+            files_skipped = skipped_count
     else:
         if signal and signal.aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
-        # The scan is FILESYSTEM + REGEX work on model-controlled input;
-        # running it on the event loop would pin the CPU on a backtracking
-        # pattern or a large tree and make Ctrl+C unprocessable. It runs in a
-        # worker thread raced against the abort signal, with a wall-clock cap
-        # bounding the pathological-regex case (regexes are not classified).
+
+        # The walk and the scan are FILESYSTEM + REGEX work on
+        # model-controlled input; running either on the event loop would pin
+        # the CPU on a backtracking pattern or a large tree and make Ctrl+C
+        # unprocessable. Both run in one worker-thread hop raced against the
+        # abort signal, with a wall-clock cap bounding the
+        # pathological-regex case (regexes are not classified).
+        def _walk_and_scan() -> tuple[list[tuple[str, int, str, str]], int, int]:
+            files, scan_base = _grep_file_set(target)
+            return _python_grep_scan(files, scan_base, regex, params.include, params.context_lines)
+
         py_result, aborted = await _run_with_abort(
-            asyncio.to_thread(
-                _python_grep_scan, files, base, regex, params.include, params.context_lines
-            ),
+            asyncio.to_thread(_walk_and_scan),
             signal,
             lambda: None,
         )
         if aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
+        # Non-None whenever aborted is False (same contract as above): an
+        # exception inside the walk/scan propagates to _guard rather than
+        # returning None, so a None here could only mean a broken
+        # _run_with_abort — assert, never mislabel it "Search aborted."
+        # (review F1).
+        assert py_result is not None
         records, files_searched, files_skipped = py_result
 
     matches = [r for r in records if r[3] == "m"]
@@ -6429,6 +6565,48 @@ ASK_UNANSWERED_TEXT = (
 )
 
 
+#: What a secret question reports when the user declined or the store refused.
+ASK_SECRET_NOT_PROVIDED = "<not provided>"
+
+
+def _report_secret_answers(
+    questions: list[AskQuestion],
+    answers: dict[str, list[str]],
+    context: ToolContext | None,
+) -> dict[str, list[str]]:
+    """Store secret answers and replace their values with the key name.
+
+    The host's picker still returns the pasted bytes so a non-TUI embedder
+    that cannot store them itself is not silently emptied. This is the last
+    hop before the result is written into the transcript, so it is also the
+    last hop that can keep those bytes out of the model's context.
+    """
+    store = context.variables if context is not None else None
+    store_fn = getattr(store, "store_credential", None)
+    reported: dict[str, list[str]] = {}
+    for question in questions:
+        chosen = list(answers.get(question.id, []))
+        if not question.secret:
+            reported[question.id] = chosen
+            continue
+        pasted = next((text.strip() for text in chosen if text.strip()), "")
+        if not pasted or not callable(store_fn):
+            reported[question.id] = [ASK_SECRET_NOT_PROVIDED]
+            continue
+        result = store_fn(question.id, pasted, "ask")
+        credential = getattr(result, "credential", None)
+        key = getattr(credential, "key", None)
+        if getattr(result, "ok", False) and isinstance(key, str):
+            reported[question.id] = [key]
+        else:
+            reported[question.id] = [ASK_SECRET_NOT_PROVIDED]
+    # Preserve any extra keys the host returned (should not happen) without
+    # inventing values for questions we already handled.
+    for key, value in answers.items():
+        reported.setdefault(key, list(value))
+    return reported
+
+
 def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> str:
     """The answers as text the model can act on, keyed by the ids it chose.
 
@@ -6472,7 +6650,10 @@ def build_ask_tool(context: ToolContext) -> AgentTool | None:
             "the consequence of each in its description, and mark the one you recommend. "
             "Every question also offers the user a free-text answer, so the options do "
             "not have to be exhaustive. Ask everything you need in ONE call: the user "
-            "answers the questions back to back rather than once per turn."
+            "answers the questions back to back rather than once per turn. "
+            "If you need a credential, password, or API key, set secret=true on that "
+            "question (options empty, id is the env-var name). The value is stored in "
+            "session memory and injected into bash; you will only ever see the key name."
         ),
         parameters=AskParams.model_json_schema(),
         # read tier: asking a question changes nothing. Gating it behind the
@@ -6528,9 +6709,13 @@ async def execute_ask(
         # user chose nothing, and splitting that into two results would give the
         # model a distinction it cannot act on differently.
         return _text(tool_call_id, "ask", ASK_UNANSWERED_TEXT)
+    # Secret answers are stored by the host and reported as the KEY NAME
+    # only. The raw value must never ride the tool result: that text is
+    # persisted to the transcript and replayed to the provider.
+    reported = _report_secret_answers(params.questions, answers, context)
     return _text(
         tool_call_id,
         "ask",
-        _ask_report(params.questions, answers),
-        details={"answers": {key: list(value) for key, value in answers.items()}},
+        _ask_report(params.questions, reported),
+        details={"answers": {key: list(value) for key, value in reported.items()}},
     )

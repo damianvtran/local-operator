@@ -55,11 +55,18 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 		entry.error;
 
 	return (
-		<div>
+		<div
+			className={cn(
+				"rounded-sm px-1.5",
+				running && "bg-elevated",
+				entry.tool_state === "failed" && "bg-danger-wash",
+				entry.tool_state === "done" && "bg-surface",
+			)}
+		>
 			<button
 				type="button"
 				onClick={() => hasDetails && setOpen(!open)}
-				className="flex min-h-11 w-full items-center gap-2 text-left select-none"
+				className="flex min-h-8 w-full items-center gap-1.5 text-left select-none"
 			>
 				<span
 					className={cn(
@@ -107,7 +114,7 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 				) : null}
 			</button>
 			{open && hasDetails ? (
-				<div className="flex flex-col gap-2 pt-1 pb-2 pl-6">
+				<div className="flex flex-col gap-1.5 pb-1 pl-6">
 					{entry.intent ? (
 						<p className="text-body-sm text-ink-muted">
 							{entry.intent}

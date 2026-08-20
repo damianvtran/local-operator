@@ -32,8 +32,16 @@ export function Sheet({
 	}, [open, onClose]);
 
 	if (!open) return null;
+	/* In-flow overlay, not a portal: the cmux screenshot surface is the
+	   phone column, and a body portal paints outside it. The session
+	   column is `relative` and no longer uses transform, so `absolute
+	   inset-0` covers exactly the column. */
 	return (
-		<div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
+		<div
+			className="absolute inset-0 z-50"
+			role="dialog"
+			aria-modal="true"
+		>
 			<button
 				type="button"
 				aria-label="close"
@@ -49,7 +57,7 @@ export function Sheet({
 				)}
 			>
 				{title ? (
-					<div className="flex items-center justify-between px-4 pt-3 pb-2">
+					<div className="flex items-center justify-between px-3 pt-2 pb-1">
 						<span className="text-meta font-medium tracking-[0.08em] text-ink-muted">
 							{title}
 						</span>

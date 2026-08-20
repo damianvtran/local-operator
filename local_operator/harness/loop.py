@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -437,7 +437,12 @@ class AgentLoop:
                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
                             for call in assistant.tool_calls
                         ]
-                        self._append_results(context, placeholders, new_messages)
+                        self._append_results(
+                            context,
+                            placeholders,
+                            new_messages,
+                            redact=config.redact_tool_result,
+                        )
                         yield TurnEndEvent(message=assistant, tool_results=[])
                         aborted = stop_reason == "aborted" or bool(signal and signal.aborted)
                         yield AgentEndEvent(
@@ -456,13 +461,23 @@ class AgentLoop:
                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
                             for call in assistant.tool_calls
                         ]
-                        self._append_results(context, placeholders, new_messages)
+                        self._append_results(
+                            context,
+                            placeholders,
+                            new_messages,
+                            redact=config.redact_tool_result,
+                        )
                     elif assistant.tool_calls:
                         async for event in self._execute_tool_calls(
                             assistant.tool_calls, context, config, signal, tool_results
                         ):
                             yield event
-                        self._append_results(context, tool_results, new_messages)
+                        self._append_results(
+                            context,
+                            tool_results,
+                            new_messages,
+                            redact=config.redact_tool_result,
+                        )
 
                     if signal is not None and signal.aborted:
                         # The abort landed while the batch was running. Its
@@ -1547,12 +1562,23 @@ class AgentLoop:
             details={**(details or {}), "__synthetic": True},
         )
 
-    @staticmethod
     def _append_results(
-        context: LoopContext, results: list[ToolResult], new_messages: list[AgentMessage]
+        self,
+        context: LoopContext,
+        results: list[ToolResult],
+        new_messages: list[AgentMessage],
+        redact: Callable[[str], str] | None = None,
     ) -> None:
         for result in results:
             content: list[Content] = list(result.content)
+            # Redact BEFORE the empty-result backfill: a redacted secret is
+            # still text, so an image-only result is untouched and a genuinely
+            # empty one still gets the placeholder it needs to serialize.
+            if redact is not None:
+                content = [
+                    TextContent(text=redact(item.text)) if isinstance(item, TextContent) else item
+                    for item in content
+                ]
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results

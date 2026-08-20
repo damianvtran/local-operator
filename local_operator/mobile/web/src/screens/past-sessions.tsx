@@ -43,7 +43,7 @@ export function PastSessionsScreen() {
 				</button>
 				<h1 className="text-heading">past sessions</h1>
 			</header>
-			<main className="flex flex-1 flex-col gap-1 px-4 pb-4">
+			<main className="flex flex-1 flex-col gap-0.5 px-2 pb-3">
 				{error ? (
 					<p className="text-body-sm text-danger">{error}</p>
 				) : sessions === null ? (
@@ -58,7 +58,7 @@ export function PastSessionsScreen() {
 							<button
 								type="button"
 								onClick={() => copy(s.id)}
-								className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left active:bg-elevated"
+								className="flex min-h-8 w-full items-center gap-2 rounded-sm px-2 text-left active:bg-elevated"
 							>
 								<span className="min-w-0 flex-1">
 									<span className="block truncate text-body">

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.19.0"
+version = "0.19.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@radienthq.com" }]
@@ -142,6 +142,11 @@ local_operator = [
     # wheel, and ``task(agent="reviewer")`` silently degrades to an unguided
     # child on every non-source install.
     "agent_seeds/*.md",
+    # The phone control plane's built SPA. The daemon serves it from
+    # local_operator/mobile/web/dist/; without this a pip/uv install has
+    # no UI and every authed GET answers 503 "bundle not built".
+    "mobile/web/dist/*",
+    "mobile/web/dist/assets/*",
 ]
 
 [project.urls]

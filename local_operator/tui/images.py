@@ -80,8 +80,14 @@ MAX_LIVE_KITTY_IMAGES = 8
 #: the same height ceiling so a transcript of mixed screenshots reads as a
 #: ledger rather than a scrapbook, with width following each image's own
 #: aspect ratio under ``MAX_COLS``. Small images stay small (no upscaling).
-MAX_ROWS = 12
-MAX_COLS = 72
+#: The ceiling is legibility-driven: a UI screenshot's smallest text has to
+#: survive the downscale to stay readable, and 12 rows turned the browser
+#: tool's 1080p-ish captures into thumbnails where labels were guesswork.
+#: ``MAX_COLS`` stays under a typical full-screen terminal's text column, so
+#: on wide terminals this cap binds and on narrow ones the transcript width
+#: does — the image never grows past what the conversation can show.
+MAX_ROWS = 18
+MAX_COLS = 100
 
 #: Kitty Unicode placeholder base character (U+10EEEE, Plane 16 PUA).
 PLACEHOLDER = "\U0010eeee"
