@@ -901,6 +901,11 @@ class OperatorApp(App[None]):
         #: Whether a markdown ramp is on the console's theme stack, so a theme
         #: switch pops the previous one instead of stacking forever.
         self._markdown_theme_pushed = False
+        #: True once a preview has actually painted a candidate ramp — i.e.
+        #: offscreen blocks may be wearing skipped ink. It is what lets the
+        #: settle path skip the full sweep for a list that was opened and
+        #: closed without ever moving off the current theme.
+        self._theme_preview_painted = False
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
@@ -6661,6 +6666,9 @@ class OperatorApp(App[None]):
             self._system_notice(f"theme: already {spec.label}")
             return
         self._theme_before_preview = None
+        # A commit is a settle: the full sweep below covers whatever the
+        # preview skipped, so the painted flag is spent here too.
+        self._theme_preview_painted = False
         self._apply_theme(spec.name)
         persisted = self._persist_theme(spec.name)
         if spec.name == current:
@@ -6691,7 +6699,7 @@ class OperatorApp(App[None]):
         except Exception as error:  # noqa: BLE001 — reported to the user verbatim
             return str(error)
 
-    def _apply_theme(self, name: str) -> None:
+    def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
 
         One orchestrator, because the theme is spread across four systems that
@@ -6707,14 +6715,32 @@ class OperatorApp(App[None]):
 
         Bump-then-repaint order matters: caches key on the epoch, so painting
         first would faithfully reproduce the OLD colors out of every cache.
+
+        ``preview=True`` bounds the cost for the browsing path (review round 1,
+        F1). A full switch re-inks EVERY transcript block, which is linear in
+        session length — measured at ~219 ms on a 120-block transcript, ~152 ms
+        of it the sweep — and the preview pays this on every arrow key. A
+        preview therefore re-inks only the blocks whose rows are actually on
+        screen (the only ones a preview can show anybody) and leaves the rest
+        wearing the old ramp; they are corrected by the FULL sweep that runs
+        when the preview settles — every preview ends in a commit
+        (``_cmd_theme``) or a restore (``on_argument_highlight_changed``), and
+        both call this with ``preview=False``. Blocks scrolled INTO view
+        mid-preview still self-correct: their next rebuild (resize, expand)
+        reads the current theme, and the settle sweep is never more than one
+        keystroke away.
         """
         theme_mod.set_theme(name)
         try:
             # Pop the ramp the mount (or the previous switch) pushed before
             # pushing this one: a preview arrows through dozens of themes, and
             # push-without-pop grows the console's theme stack by one entry
-            # per row visited for the life of the process.
+            # per row visited for the life of the process. The flag is cleared
+            # between the two calls so a pop that succeeds followed by a push
+            # that raises cannot leave it claiming a ramp this code never
+            # pushed (F5).
             if self._markdown_theme_pushed:
+                self._markdown_theme_pushed = False
                 self.console.pop_theme()
             self.console.push_theme(brand_markdown_theme())
             self._markdown_theme_pushed = True
@@ -6722,9 +6748,9 @@ class OperatorApp(App[None]):
             pass  # headless consoles without a pushable theme keep defaults
         self.ansi_theme_dark = _brand_terminal_theme()
         self.refresh_css(animate=False)
-        self._repaint_themed_widgets()
+        self._repaint_themed_widgets(visible_only=preview)
 
-    def _repaint_themed_widgets(self) -> None:
+    def _repaint_themed_widgets(self, *, visible_only: bool = False) -> None:
         """Re-ink content that resolved its colors at BUILD time.
 
         The stylesheet pass handles everything painted through TCSS variables,
@@ -6743,10 +6769,19 @@ class OperatorApp(App[None]):
         * the status band re-renders now rather than on its next tick, so an
           idle band does not keep stale ink until the next turn;
         * the welcome view re-renders from its reactive state.
+
+        ``visible_only`` is the preview's cost bound (F1): re-ink only blocks
+        whose rows overlap the transcript viewport — the same predicate the
+        stop notice uses (:meth:`_is_on_screen`) — because a preview can only
+        ever be seen on the rows that are on screen. The settle sweep
+        (``visible_only=False``) still covers everything, so no block keeps
+        preview-skipped ink past the preview's own lifetime.
         """
         from local_operator.tui.widgets.transcript import TranscriptBlock
 
         for block in self.query(TranscriptBlock):
+            if visible_only and not self._is_on_screen(block):
+                continue
             try:
                 block.retheme()
             except Exception:
@@ -6805,18 +6840,39 @@ class OperatorApp(App[None]):
                 theme_mod.theme_spec(candidate)
             except KeyError:
                 return  # a row that is not a theme name cannot be tried on
-            if self._theme_before_preview is None:
-                self._theme_before_preview = theme_mod.current_theme()
+            # Stash only when a preview actually paints (the seeded first
+            # report names the CURRENT theme, which needs no restore and must
+            # not arm one): `current_theme` has not moved yet on the first
+            # differing candidate, so stashing at that moment still records
+            # the user's real theme.
             if candidate != theme_mod.current_theme():
-                self._apply_theme(candidate)
+                if self._theme_before_preview is None:
+                    self._theme_before_preview = theme_mod.current_theme()
+                # `preview=True` bounds the repaint to the visible rows (F1):
+                # this runs per arrow key, and the full-transcript sweep is
+                # deferred to the settle below, which is at most one keystroke
+                # away however the browse ends.
+                self._theme_preview_painted = True
+                self._apply_theme(candidate, preview=True)
             return
         # List closed or moved off the rows: put the real theme back. `/theme
         # <name>` clears the stash BEFORE applying, so a submit is not undone.
         restore = self._theme_before_preview
         if restore is not None:
             self._theme_before_preview = None
+            painted = self._theme_preview_painted
+            self._theme_preview_painted = False
             if restore != theme_mod.current_theme():
                 self._apply_theme(restore)
+            elif painted:
+                # The browse ended ON the real theme (arrowed away and back
+                # home). No switch to make, but the previews left offscreen
+                # blocks in a candidate ramp's ink (`preview=True` skips
+                # them), so the settle sweep still runs. `theme_epoch` is
+                # unchanged along this path, which is exactly why the sweep
+                # must be explicit rather than left to epoch-keyed caches. A
+                # list that never painted (opened, closed) skips it entirely.
+                self._repaint_themed_widgets()
 
     def action_cycle_effort(self) -> None:
         """``shift+tab`` — step one level up this model's ladder, wrapping.
@@ -8017,7 +8073,12 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command in ("theme", "themes"):
-            picker.set_choices(self._theme_choices())
+            # Seeded on the CURRENT theme's row (F2): the highlight previews
+            # live, so opening the list must not flash the screen to whatever
+            # theme happens to sort first — and a browse naturally starts from
+            # where the user already is, the same landing `/model` gives its
+            # empty query.
+            picker.set_choices(self._theme_choices(), highlight=theme_mod.current_theme())
             picker.set_notice("")
             return
         if message.command == "effort":
@@ -9974,10 +10035,9 @@ def _brand_terminal_theme() -> TerminalTheme:
         color("dim"),
         color("surface"),
     ]
-    tokens = {"bg": color("bg"), "fg": color("fg")}
     return TerminalTheme(
-        _hex_to_rgb(tokens["bg"]),
-        _hex_to_rgb(tokens["fg"]),
+        _hex_to_rgb(color("bg")),
+        _hex_to_rgb(color("fg")),
         [_hex_to_rgb(c) for c in ansi],
         [_hex_to_rgb(c) for c in bright],
     )

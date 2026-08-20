@@ -37,8 +37,14 @@ PALETTES: list[ThemeSpec] = [
             "faint": "#5a5b55",
             "edge": "#48493f",
             "edge-hi": "#5c5d50",
+            # The signature Monokai green is spent on ACCENT alone (review
+            # round 1, D2): with success and string on the same hex, a link,
+            # a ✓ and a quoted literal were one indistinguishable ink.
+            # Success takes a calmer leaf green (7.4:1 on bg) and string takes
+            # canonical Monokai's own string yellow #e6db74 — which is what
+            # the source palette actually paints literals with.
             "accent": "#a6e22e",
-            "success": "#a6e22e",
+            "success": "#98c379",
             "warning": "#fd971f",
             # Monokai Pro's red rather than classic #f92672: the classic pink
             # measures 3.47:1 on this surface — under the 4:1 state floor —
@@ -47,7 +53,7 @@ PALETTES: list[ThemeSpec] = [
             "danger": "#ff6188",
             "signal": "#66d9ef",
             "label": "#ae81ff",
-            "string": "#a6e22e",
+            "string": "#e6db74",  # canonical Monokai string yellow (see accent note)
             "tint-danger": "#3a2429",
             "tint-select": "#2c3624",
             "tint-select-hi": "#333f2a",
@@ -182,7 +188,7 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="tokyo-night",
         label="Tokyo Night",
-        description="Neon-lit indigo night, the VS Code favourite",
+        description="Neon-lit indigo night, the VS Code favorite",
         dark=True,
         tokens={
             "bg": "#1a1b26",  # canonical bg
@@ -260,7 +266,7 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="gruvbox",
         label="Gruvbox",
-        description="Retro groove — warm bread-crust browns and hard yellows",
+        description="Retro groove, warm bread-crust browns and hard yellows",
         dark=True,
         tokens={
             "bg": "#282828",  # canonical bg0
@@ -301,7 +307,7 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="nord",
         label="Nord",
-        description="Arctic bluish calm — frost accents on polar night",
+        description="Arctic bluish calm, frost accents on polar night",
         dark=True,
         tokens={
             "bg": "#2e3440",  # canonical nord0
@@ -384,7 +390,7 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="solarized-dark",
         label="Solarized Dark",
-        description="The deep teal lab classic, sixteen colors of discipline",
+        description="The deep teal lab classic, 16-color discipline",
         dark=True,
         tokens={
             "bg": "#002b36",  # canonical base03
@@ -412,7 +418,11 @@ PALETTES: list[ThemeSpec] = [
             "label": "#8489d4",
             # A maroon-leaning cast: on solarized's cool teal ground, a
             # neutral-red mix reads as plain gray, so the red channel leads.
-            "tint-danger": "#3a2c32",
+            # Darker than the first solve (#3a2c32, where the lifted red read
+            # 3.86:1 — under the 4.0 state floor; review round 1, D1). Sunk
+            # toward base03 with the maroon lead kept so the band still says
+            # "failed" rather than reading as a neutral elevation step.
+            "tint-danger": "#2a2028",
             "tint-select": "#0a3538",  # cyan cast
             "tint-select-hi": "#0f4044",
             "tint-attach": "#0b3547",

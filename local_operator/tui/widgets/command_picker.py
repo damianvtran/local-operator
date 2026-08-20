@@ -351,6 +351,9 @@ class CommandPicker(Static):
         #: Last name reported to ``_on_highlight``, so the observer hears each
         #: change once — mouse-move events arrive per cell, not per row.
         self._reported_highlight: str | None = None
+        #: True only while ``set_choices`` seeds a highlight: the interim
+        #: row-0 state must not reach the observer (see ``set_choices``).
+        self._suppress_report = False
         self._commands: list[SlashCommand] = []
         self._choices: list[ArgumentChoice] = []
         self._mode = PickerMode.COMMAND
@@ -377,18 +380,43 @@ class CommandPicker(Static):
         """Replace the offered command registry."""
         self._commands = list(commands)
 
-    def set_choices(self, choices: list[ArgumentChoice]) -> None:
+    def set_choices(self, choices: list[ArgumentChoice], highlight: str | None = None) -> None:
         """Replace the values offered for the current command's ARGUMENT.
 
         Re-derives the visible rows immediately, because the app fills these in
         answer to a posted message — one message-loop tick after the keystroke
         that opened the list. Without the resync the picker would sit closed on
         the empty set it was opened with until the user typed another character.
+
+        ``highlight`` seeds the selection onto the named row when the list
+        opens bare (empty query, nothing chosen by hand). It exists for lists
+        where the highlight has a SIDE EFFECT: ``/theme`` previews the
+        highlighted row live, so a list that opened on row 0 flashed every
+        non-default user to the default theme before they touched a key
+        (review round 1, F2). Seeding the row where the user already IS makes
+        the first report a no-op — and is where a browse should start anyway.
         """
         self._choices = list(choices)
         if self._mode is PickerMode.ARGUMENT:
             matches = argument_suggestions(self._query, self._choices)
-            self._apply(PickerMode.ARGUMENT, self._query, matches)
+            seeding = highlight is not None and not self._query and not self._chosen_by_hand
+            if seeding:
+                # Silence `_apply`'s own report: it fires for row 0 before the
+                # seed lands, and for a previewing list that one report IS the
+                # flash — the observer would try row 0 on and take it off
+                # again one message later.
+                self._suppress_report = True
+            try:
+                self._apply(PickerMode.ARGUMENT, self._query, matches)
+            finally:
+                self._suppress_report = False
+            if seeding:
+                names = [name for name, _ in self._matches]
+                if highlight in names and names.index(highlight) != self._selected:
+                    self._selected = names.index(highlight)
+                    self._scroll_to_selection()
+                    self._repaint()
+                self._report_highlight()
 
     def set_notice(self, text: str) -> None:
         """Say why an ARGUMENT list is empty, IN THE LIST'S OWN PLACE.
@@ -1042,7 +1070,7 @@ class CommandPicker(Static):
         De-duplicated on the name: a mouse crossing five cells of one row and
         a repaint that reproduced the same set both say nothing new.
         """
-        if self._on_highlight is None:
+        if self._on_highlight is None or self._suppress_report:
             return
         name: str | None = None
         if self._mode is PickerMode.ARGUMENT and self._matches:

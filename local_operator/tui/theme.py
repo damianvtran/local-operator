@@ -187,10 +187,14 @@ class ThemeSpec:
     """One selectable theme: identity, one-line pitch, and its full ramp.
 
     ``tokens`` maps every name in :data:`SEMANTIC_TOKENS` to a hex. ``dark``
-    drives the pieces that need a boolean polarity rather than a palette —
-    the ANSI terminal-theme mapping and Textual's own dark/light styling.
-    ``description`` is the picker row's one-liner, so it is written for a
-    user choosing between thirty rows, not for a changelog.
+    declares the ramp's POLARITY — whether elevation lightens (dark ground)
+    or darkens (paper ground) as it rises. Its consumer today is the palette
+    contrast gate, which checks the elevation ladder in the declared
+    direction; nothing at runtime branches on it (the ANSI mapping is built
+    from the active ramp's tokens whatever the polarity, and Textual's own
+    dark/light flag is left alone). ``description`` is the picker row's
+    one-liner, so it is written for a user choosing between thirty rows,
+    not for a changelog.
     """
 
     name: str
@@ -219,7 +223,7 @@ def _builtin_spec(name: str, label: str, description: str, dark: bool) -> ThemeS
 #: module importable from the palettes package without a cycle).
 _THEMES: dict[str, ThemeSpec] = {
     "dark": _builtin_spec(
-        "dark", "Operator Dark", "The island night — the Local Operator default", dark=True
+        "dark", "Operator Dark", "The island night, the Local Operator default", dark=True
     ),
     "light": _builtin_spec("light", "Operator Light", "Warm paper, brand ink", dark=False),
 }
@@ -238,11 +242,22 @@ def _registry() -> dict[str, ThemeSpec]:
     """
     global _palettes_loaded
     if not _palettes_loaded:
-        _palettes_loaded = True
         from local_operator.tui import palettes
 
+        # Latched only AFTER the fold completes (review round 1, F3): set
+        # before it, a partial registration failure would serve a silently
+        # truncated registry to every later caller — themes vanishing with no
+        # error, and a saved name in the missing tail reading as user error.
+        # The identity skip below is what makes the retry safe: the palette
+        # lists are module-level constants, so a second pass sees the SAME
+        # spec objects it already folded and skips them, reaching — and
+        # re-raising from — the palette that actually failed. Identity, not
+        # name: a name-based skip would also silence a genuine cross-family
+        # name collision, which must keep raising.
         for spec in palettes.all_palettes():
-            register_theme(spec)
+            if _THEMES.get(spec.name) is not spec:
+                register_theme(spec)
+        _palettes_loaded = True
     return _THEMES
 
 

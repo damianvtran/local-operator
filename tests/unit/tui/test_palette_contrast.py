@@ -100,6 +100,25 @@ def test_foreground_contrast_floors(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", _ALL_THEMES)
+def test_danger_reads_on_its_own_tint(name: str) -> None:
+    """The failed tool row pairs ``danger`` ink WITH the ``tint-danger`` band.
+
+    Review round 1 (D1) caught the gap: the state floors above check ``bg``
+    and ``surface``, but the one place danger ink always renders is the failed
+    row's own tinted ground (``tool_card.py`` paints the error reason in
+    ``danger`` on ``tint-danger``), and two palettes cleared every other floor
+    while dipping to 3.6–3.9:1 on exactly that pairing. Same 4.0 floor as the
+    other state checks.
+    """
+    tokens = theme.theme_spec(name).tokens
+    ratio = contrast(tokens["danger"], tokens["tint-danger"])
+    assert ratio >= 4.0, (
+        f"{name}: danger {tokens['danger']} on tint-danger {tokens['tint-danger']}: "
+        f"{ratio:.2f} < 4.0 — the failed row's error text is illegible on its own band"
+    )
+
+
+@pytest.mark.parametrize("name", _ALL_THEMES)
 def test_faint_sits_below_dim(name: str) -> None:
     tokens = theme.theme_spec(name).tokens
     assert contrast(tokens["faint"], tokens["bg"]) < contrast(tokens["dim"], tokens["bg"]), (

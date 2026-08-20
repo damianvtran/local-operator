@@ -72,7 +72,11 @@ PALETTES: list[ThemeSpec] = [
             "danger": "#dc322f",  # red, CANONICAL — it already clears 4:1
             "signal": "#0e8074",  # cyan, darkened from canonical #2aa198 (2.93:1)
             "label": "#5f64bb",  # violet, darkened from canonical #6c71c4 (3.57:1 surf)
-            "tint-danger": "#f6e0d2",  # warm wash toward red on base3
+            # Lighter than the first solve (#f6e0d2, where canonical red read
+            # 3.64:1 — under the 4.0 state floor on the one band that always
+            # carries it; review round 1, D1). Pulled toward base3 so the wash
+            # stays warm while the red clears 4.1:1.
+            "tint-danger": "#fcefe6",
             "tint-select": "#eaefd2",  # green-leaning cast (selection = the green family)
             "tint-select-hi": "#e0e7c2",
             "tint-attach": "#e4ecec",  # cool cyan cast — signal is the file hue
@@ -127,7 +131,7 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="paper",
         label="Paper",
-        description="Warm cream and brown ink — an open book in good light",
+        description="Warm cream and brown ink, an open book in good light",
         dark=False,
         tokens={
             "bg": "#f9f3e6",
@@ -206,7 +210,7 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="high-contrast-light",
         label="High Contrast Light",
-        description="Ink on near-white, every state 6:1+ — built for legibility",
+        description="Ink on near-white, every state 6:1+, built for legibility",
         dark=False,
         tokens={
             "bg": "#fcfcfc",

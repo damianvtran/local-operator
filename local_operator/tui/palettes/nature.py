@@ -39,7 +39,7 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="sage",
         label="Sage",
-        description="Parchment dark and sage green — a quiet Hyrule field at dusk",
+        description="Parchment dark and sage green, a quiet Hyrule field at dusk",
         dark=True,
         tokens={
             "bg": "#211b10",
@@ -54,7 +54,10 @@ PALETTES: list[ThemeSpec] = [
             "edge": "#43392a",
             "edge-hi": "#554936",
             "accent": "#a3c47f",  # sage green — soft, gray-leaning, the one signature
-            "success": "#94c479",
+            # A step greener and deeper than the accent (review round 1, D2:
+            # the first solve sat 21 RGB units away, close enough that a ✓ and
+            # the caret read as one hue). 7.4:1 on bg, 70 units off the accent.
+            "success": "#7fb968",
             "string": "#94c479",
             # Warm-ground re-solve: a cool theme's #e06c75-class red measures
             # ~3.5:1 on this beige; lifted to salmon to clear 4:1 both grounds.
@@ -254,30 +257,37 @@ PALETTES: list[ThemeSpec] = [
         label="Arctic",
         description="Blue-white on slate, lit by an aurora green",
         dark=True,
+        # Re-grounded in review round 1 (D3): the first solve's near-black slate
+        # sat 7 RGB units from ocean's ground, so two themes sold as different
+        # vibes were pixel-duplicates in a 34-row picker. The slate now sits a
+        # step lighter and bluer (bg 41 units from ocean's), which is also what
+        # the description promises — blue-white ON slate, not on deep sea. The
+        # aurora stays the accent alone (D2): success takes the kelp green so a
+        # ✓ and the caret stop sharing one hue.
         tokens={
-            "bg": "#131a22",
-            "surface": "#1b242e",
-            "raised": "#232e39",
-            "overlay": "#2b3844",
-            "sunken": "#0d1219",
+            "bg": "#1a2431",
+            "surface": "#232e3d",
+            "raised": "#2c3949",
+            "overlay": "#354455",
+            "sunken": "#121a25",
             "fg": "#e3ecf4",
             "muted": "#a9bcca",
             "dim": "#77909f",
             "faint": "#425666",
-            "edge": "#2a3d4d",
-            "edge-hi": "#374f62",
-            "accent": "#68e0a3",  # aurora
-            "success": "#68e0a3",
+            "edge": "#31435a",
+            "edge-hi": "#405671",
+            "accent": "#68e0a3",  # aurora — the one saturated thing in the ice
+            "success": "#6cc99b",
             "string": "#87ceab",
             "warning": "#dcb45e",
             "danger": "#ee8b8e",
             "signal": "#7fbde8",
             "label": "#b0a3e6",
-            "tint-danger": "#291f28",
-            "tint-select": "#152b28",  # aurora cast
-            "tint-select-hi": "#1a3531",
-            "tint-attach": "#1b2c40",
-            "tint-attach-hi": "#2b4560",
+            "tint-danger": "#32262e",
+            "tint-select": "#1c332f",  # aurora cast
+            "tint-select-hi": "#223d38",
+            "tint-attach": "#22344c",
+            "tint-attach-hi": "#334e6c",
         },
     ),
     # Rosewood — dark rosewood ground, dried-rose DANGER, brass warning (as
