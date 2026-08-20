@@ -80,6 +80,7 @@ from local_operator.logger import current_log_file
 from local_operator.model.effort import default_effort, next_effort
 from local_operator.session import naming
 from local_operator.session.protocol import SessionProtocol
+from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice, ArgumentMode, SlashCommand
 from local_operator.tui.costs import job_cost, turn_cost
@@ -139,6 +140,7 @@ from local_operator.tui.widgets.editor import (
     StopRequested,
     resolve_markers,
 )
+from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
@@ -1335,6 +1337,14 @@ class OperatorApp(App[None]):
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
         # as long as the boot takes.
         self._start_terminal_title()
+        # Inline images write kitty graphics APCs through the same driver door
+        # (`tui/images.py` docs the interleaving hazard). Installed with the
+        # same gate as the title: no driver or headless means no terminal to
+        # transmit to, and ImageBlock then falls back to half-cells or text on
+        # its own — the writer's absence is a mode signal, never an error.
+        driver = self._driver
+        if driver is not None and not self.is_headless:
+            images_mod.set_escape_writer(driver.write)
         # Same driver, same gating, one line later: the notifier is the title's
         # out-of-app counterpart (state vs edge — see `tui/notify.py`), and both
         # want the terminal available and the app non-headless.
@@ -1754,8 +1764,19 @@ class OperatorApp(App[None]):
                 text = getattr(message, "text", "") or ""
                 text = text.strip() if isinstance(text, str) else ""
                 if role == "user":
-                    if text:
-                        self._append_block(UserBlock(text))
+                    # The images ride the persisted message as base64 content
+                    # blocks — the same bytes the model saw — so a resumed
+                    # prompt replays WITH its pictures, not just the receipt
+                    # count. This is the resume half of the promise the live
+                    # path makes in `_submit_prompt`.
+                    replay_images = [
+                        block
+                        for block in (getattr(message, "content", None) or [])
+                        if isinstance(block, ImageContent)
+                    ]
+                    if text or replay_images:
+                        self._append_block(UserBlock(text, len(replay_images)))
+                        self._append_image_blocks(replay_images)
                         appended = True
                     continue
                 if role != "assistant":
@@ -1820,6 +1841,16 @@ class OperatorApp(App[None]):
             )
         else:
             card.restore(state="success", result_text=result_text, details=details)
+        # Same rule as `on_tool_ended`: a result carrying image blocks shows
+        # them under the settled card, so a resumed session's screenshots are
+        # back on screen exactly where the live session showed them.
+        self._append_image_blocks(
+            [
+                block
+                for block in (getattr(result, "content", None) or [])
+                if isinstance(block, ImageContent)
+            ]
+        )
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -4885,6 +4916,10 @@ class OperatorApp(App[None]):
         # session teardown would otherwise leave the user's shell wearing this
         # session's title.
         self._stop_terminal_title()
+        # The escape writer goes with the driver it wraps. ImageBlock unmounts
+        # delete their terminal-side images through it a moment before this
+        # runs (children unmount first), so clearing here strands nothing.
+        images_mod.set_escape_writer(None)
         if self._status is not None:
             self._status.dispose()
         if self._controller is not None:
@@ -4900,6 +4935,13 @@ class OperatorApp(App[None]):
     ) -> None:
         images = images or []
         self._append_block(UserBlock(text, len(images)))
+        # The pictures themselves, under the prompt that cites them. The
+        # receipt row above says the bytes went; these show WHICH bytes, which
+        # is the difference between "1 image attached" and knowing you pasted
+        # the right screenshot. Markers stay in the prompt text (they are what
+        # the user typed around); the images render in citation order, the
+        # same order `resolve_markers` sent them in.
+        self._append_image_blocks(images)
         if self._session is None:
             self._append_block(NoticeBlock("session is still starting…", "warning"))
             return
@@ -5964,6 +6006,25 @@ class OperatorApp(App[None]):
             transcript.append_block(block)
         if not ends_empty_state:
             self._sync_boot_layout()
+
+    def _append_image_blocks(self, images: list[ImageContent]) -> None:
+        """Mount one :class:`ImageBlock` per image, in order.
+
+        The single entry point for putting pictures on the transcript — the
+        prompt path, the tool-result path, and the resume replay all route
+        here so a rendering decision (caps, protocol, the unavailable
+        receipt) is made in exactly one place. Guarded per block: a block
+        whose bytes will not decode still mounts (as its unavailable
+        receipt), but a failure CONSTRUCTING one must not take down the
+        message dispatch that carried a perfectly good tool result.
+        """
+        for image in images:
+            try:
+                block = ImageBlock(image.data or None, image.mime_type)
+            except Exception:
+                logger.debug("image block construction failed", exc_info=True)
+                continue
+            self._append_block(block)
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
@@ -9142,6 +9203,13 @@ class OperatorApp(App[None]):
             card.mark_failed(_first_line(result_text), result_text, details)
         else:
             card.mark_done(result_text, details)
+        # A result that carries image blocks (a `read` of a PNG, a browser
+        # screenshot) shows them under the card, so the user watches the same
+        # pixels the model is about to reason over. After the card settles, so
+        # the picture lands beneath its own caption row rather than above it.
+        self._append_image_blocks(
+            [block for block in event.result.content if isinstance(block, ImageContent)]
+        )
 
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
