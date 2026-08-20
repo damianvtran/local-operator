@@ -810,15 +810,16 @@ class TestLoopbackCallbackServer:
 
         Closing the tab or abandoning the consent screen is indistinguishable
         from a slow human at the protocol level, so the interactive grant
-        carries its own idle clock. When it fires the flow settles as
-        ``McpLoginCancelledError`` — the message that tells the user the login
-        is over and how to start another — instead of leaving "logging in…"
-        unanswered in the transcript.
+        carries its own idle clock. When it fires, the flow raises a RAW
+        ``CancelledError`` — ordinary exceptions do not survive the SDK's
+        transport, and the cancellation shape is the channel that unwinds it
+        — after recording itself in the ABANDONED_GRANTS ledger, which is
+        where the manager learns to re-voice it as McpLoginCancelledError.
         """
         import asyncio
         import sys
 
-        from local_operator.mcp.auth import LoopbackAuthFlow, McpLoginCancelledError
+        from local_operator.mcp.auth import ABANDONED_GRANTS, LoopbackAuthFlow
 
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
         monkeypatch.setattr("webbrowser.open", lambda _url: False)
@@ -831,8 +832,10 @@ class TestLoopbackCallbackServer:
         flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
         await self._listening(flow)
 
-        with pytest.raises(McpLoginCancelledError, match="cancelled.*Run /mcp login again"):
-            await asyncio.wait_for(flow.callback_handler(), timeout=5)
+        with pytest.raises(asyncio.CancelledError):
+            await flow.callback_handler()
+        assert ABANDONED_GRANTS.pop(flow), "the abandonment must be recorded"
+        assert not ABANDONED_GRANTS.pop(flow), "a record is consumed once"
 
     @pytest.mark.asyncio
     async def test_a_cancelled_login_releases_the_port_and_says_so(self, monkeypatch) -> None:

@@ -850,6 +850,11 @@ class McpManager:
         # of the SDK's ``<server_base>/token`` guess. Keyed by URL because the
         # provider is rebuilt per connect while discovery is per server.
         self._oauth_endpoints: dict[str, Any] = {}
+        # Loopback flows of in-flight/last OAuth grants, keyed by server URL.
+        # An abandoned grant crosses the transport as a raw CancelledError;
+        # this is how the connect error path finds the flow whose
+        # ABANDONED_GRANTS ledger entry re-voices it.
+        self._oauth_flows: dict[str, Any] = {}
         self._epoch = 0
         self._disposed = False
 
@@ -1300,6 +1305,26 @@ class McpManager:
                     raise
                 assert isinstance(close_exc, asyncio.CancelledError)
                 raise close_exc
+            # An abandoned grant (browser closed, consent left unanswered,
+            # idle guard fired) arrives as a bare CancelledError with NO
+            # cancelling count: the flow raises it raw precisely because the
+            # SDK's transport swallows ordinary auth exceptions (see
+            # ``LoopbackAuthFlow.callback_handler``). The ABANDONED_GRANTS
+            # ledger is the channel the message actually travelled on; the
+            # externally_cancelled guard above has already kept a REAL task
+            # cancellation's priority, so a recorded abandonment here can be
+            # re-voiced as the receipt the user reads.
+            if isinstance(exc, asyncio.CancelledError):
+                from local_operator.mcp.auth import ABANDONED_GRANTS, McpLoginCancelledError
+
+                url = getattr(cfg, "url", None)
+                flow = self._oauth_flows.pop(url, None) if isinstance(url, str) else None
+                if flow is not None and ABANDONED_GRANTS.pop(flow):
+                    raise McpLoginCancelledError(
+                        "the browser never completed the authorization — the login "
+                        "was probably cancelled (tab closed, or the consent left "
+                        "unfinished). Run /mcp login again to retry."
+                    ) from exc
             # An OAuth grant requirement is not a transport failure: surface it
             # as the clean type so callers (startup toast, reconnect breaker,
             # /mcp login) can recognise it. It can ride EITHER the original
@@ -1361,14 +1386,20 @@ class McpManager:
                 streamable_http_client,
             )
 
+            oauth_provider = self._build_oauth_auth(cfg.url, cfg, interactive=interactive)
             http_client = create_mcp_http_client(
                 headers=dict(cfg.headers) or None,
-                auth=self._build_oauth_auth(cfg.url, cfg, interactive=interactive),
+                auth=oauth_provider,
             )
             streams_cm = streamable_http_client(cfg.url, http_client=http_client)
         elif isinstance(cfg, MCPSseServerConfig):
             from mcp.client.sse import sse_client
 
+            # SSE wires no auth into its client here (pre-existing gap), but
+            # the provider is still built so an OAuth config's loopback flow
+            # is recorded: the abandoned-grant check in ``_connect_server``
+            # reads it off the manager's per-URL map.
+            self._build_oauth_auth(cfg.url, cfg, interactive=interactive)
             streams_cm = sse_client(cfg.url, headers=dict(cfg.headers) or None)
         else:  # pragma: no cover - validation rejects unknown shapes
             raise McpConnectionError(f"unsupported MCP transport for {name!r}")
@@ -1420,7 +1451,7 @@ class McpManager:
         try:
             from local_operator.mcp.auth import build_oauth_provider
 
-            return build_oauth_provider(
+            provider = build_oauth_provider(
                 url,
                 cfg,
                 store=self._effective_auth_store(),
@@ -1434,6 +1465,15 @@ class McpManager:
                 exc_info=True,
             )
             return None
+        # Record the grant's flow by server URL: an abandoned grant crosses
+        # the transport as a raw CancelledError (the SDK swallows ordinary
+        # auth exceptions), and ``_connect_server``'s error path cannot reach
+        # the provider from there — this map is how it finds the flow to
+        # consult the ABANDONED_GRANTS ledger.
+        flow = getattr(provider, "_loopback_flow", None)
+        if flow is not None:
+            self._oauth_flows[url] = flow
+        return provider
 
     async def _ensure_oauth_fresh(self, name: str, cfg: MCPServerConfig) -> None:
         """Proactively refresh an OAuth grant before connecting (best-effort).

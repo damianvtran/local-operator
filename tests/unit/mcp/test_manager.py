@@ -1139,6 +1139,113 @@ class TestAuthRequiredHandling:
         assert manager.reconnect_suspended("dd") is True
 
     @pytest.mark.asyncio
+    async def test_an_abandoned_grant_survives_the_real_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The named cancel receipt must reach the caller through the SDK.
+
+        Regression for the review finding that settled this design: a named
+        exception raised out of ``callback_handler`` does NOT survive the
+        streamable-HTTP transport — the SDK's ``post_writer`` swallows it and
+        the caller gets an opaque ``CancelledError``. So the flow records the
+        abandonment in the ledger and raises a raw cancellation; this test
+        drives a full grant through the REAL ``streamable_http_client``
+        against a stub OAuth server and asserts the manager converts what
+        comes back into ``McpLoginCancelledError``.
+        """
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from local_operator.mcp.auth import McpLoginCancelledError
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig, MCPOAuthConfig
+
+        class StubOAuthServer(BaseHTTPRequestHandler):
+            """Just enough of an OAuth AS + MCP endpoint to reach the grant."""
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                return  # silence the access log
+
+            def _json(self, payload: dict[str, Any], status: int = 200) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:
+                if self.path.startswith("/.well-known/oauth-authorization-server"):
+                    assert isinstance(self.server, ThreadingHTTPServer)
+                    base = f"http://127.0.0.1:{self.server.server_port}"
+                    self._json(
+                        {
+                            "issuer": base,
+                            "authorization_endpoint": f"{base}/authorize",
+                            "token_endpoint": f"{base}/token",
+                            "registration_endpoint": f"{base}/register",
+                        }
+                    )
+                else:
+                    self._json({"error": "not found"}, status=404)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                if self.path == "/register":
+                    self._json(
+                        {
+                            "client_id": "stub-client",
+                            "client_secret": "stub-secret",
+                            "client_id_issued_at": 0,
+                        },
+                        status=201,
+                    )
+                elif self.path == "/token":
+                    # No stored grant and the refresh path is not what is under
+                    # test: refuse, so the SDK escalates to the browser grant.
+                    self._json({"error": "invalid_grant"}, status=400)
+                elif self.path.startswith("/mcp"):
+                    # Unreachable: the grant abandons before the MCP session
+                    # starts. Answer 401 anyway so a regression that SKIPS the
+                    # grant fails here loudly rather than hanging.
+                    self._json({"error": "unauthorized"}, status=401)
+                else:
+                    self._json({"error": "not found"}, status=404)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StubOAuthServer)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/mcp"
+            # An ephemeral loopback callback: the flow binds whatever is free,
+            # never the shared default port (parallel suites each run grants).
+            import socket
+
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                redirect_port = int(probe.getsockname()[1])
+            cfg = MCPHttpServerConfig(
+                url=url,
+                auth=MCPAuthConfig(type="oauth"),
+                oauth=MCPOAuthConfig(redirect_uri=f"http://127.0.0.1:{redirect_port}/callback"),
+            )
+            # An in-memory credential store: the grant must run against the
+            # real auth flow, never this machine's real auth.db.
+            from tests.unit.mcp.test_auth import FakeAuthStore
+
+            manager = McpManager(str(tmp_path))
+            manager.auth_store = cast(Any, FakeAuthStore())
+            monkeypatch.setattr("webbrowser.open", lambda _url: False)
+            # The idle guard is what fires when the browser never answers;
+            # shrink it so the grant abandons in test time.
+            monkeypatch.setattr("local_operator.mcp.auth.INTERACTIVE_GRANT_TIMEOUT_S", 0.3)
+            with pytest.raises(McpLoginCancelledError, match="browser never completed"):
+                await manager._connect_server("dd", cfg, interactive=True)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    @pytest.mark.asyncio
     async def test_login_resets_the_breaker_and_scopes_the_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
