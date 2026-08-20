@@ -46,6 +46,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModelChangeEvent,
     NoticeEvent,
     RetryEndEvent,
     RetryStartEvent,
@@ -235,6 +236,33 @@ class RetryStarted(Message):
         self.attempt = attempt
         self.error = error
         self.fallback_model = fallback_model
+
+
+class EffectiveModelChanged(Message):
+    """The model actually serving requests changed (fallback or recovery).
+
+    What the status band repaints its model segment from: ``provider`` and
+    ``model_id`` name the model now answering, ``is_fallback`` says whether it
+    is a fallback detour or the selected model back in force. Carried as data
+    rather than read off the session at handling time because the event
+    crosses the controller's thread boundary — by the time the app thread
+    handles it, the session may already be mid-way through the NEXT edge.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        model_id: str,
+        effort: str | None,
+        reason: str,
+        is_fallback: bool,
+    ) -> None:
+        super().__init__()
+        self.provider = provider
+        self.model_id = model_id
+        self.effort = effort
+        self.reason = reason
+        self.is_fallback = is_fallback
 
 
 class RetryEnded(Message):
@@ -540,6 +568,20 @@ class EventController:
     def _handle_retry_start(self, event: RetryStartEvent) -> None:
         self._post(RetryStarted(event.attempt, event.error, event.fallback_model))
 
+    def _handle_model_change(self, event: ModelChangeEvent) -> None:
+        # No generation guard: the route edge belongs to the session, not to a
+        # turn, and a fallback pinned by a stale turn's last request is still
+        # the route the next request will take.
+        self._post(
+            EffectiveModelChanged(
+                event.provider,
+                event.model_id,
+                event.effort,
+                event.reason,
+                event.is_fallback,
+            )
+        )
+
     def _handle_retry_end(self, event: RetryEndEvent) -> None:
         self._post(RetryEnded(event.success))
 
@@ -579,6 +621,7 @@ class EventController:
         "compaction_end": _handle_compaction_end,
         "retry_start": _handle_retry_start,
         "retry_end": _handle_retry_end,
+        "model_change": _handle_model_change,
         "subagent_start": _handle_subagent_start,
         "subagent_progress": _handle_subagent_progress,
         "subagent_end": _handle_subagent_end,

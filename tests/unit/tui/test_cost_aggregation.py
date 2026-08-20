@@ -76,6 +76,10 @@ class _Session(FakeSession):
     def model_label(self) -> str:
         return self._model_label
 
+    @property
+    def effective_model_label(self) -> str:
+        return self._model_label
+
 
 def _band_cost(app: OperatorApp) -> str:
     """What the status line is currently holding in its cost segment."""
