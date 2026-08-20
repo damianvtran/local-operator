@@ -1203,10 +1203,12 @@ class TestProactiveRefresh:
 
         async def discovery(url: str) -> DiscoveredOAuthEndpoints:
             return DiscoveredOAuthEndpoints(
-                oauth_metadata=OAuthMetadata(
-                    issuer="https://mcp.example.com/v1/mcp",
-                    authorization_endpoint="https://a/authorize",
-                    token_endpoint="https://a/token",
+                oauth_metadata=OAuthMetadata.model_validate(
+                    {
+                        "issuer": "https://mcp.example.com/v1/mcp",
+                        "authorization_endpoint": "https://a/authorize",
+                        "token_endpoint": "https://a/token",
+                    }
                 )
             )
 
@@ -1237,10 +1239,12 @@ class TestProviderEndpointPriming:
         await storage.set_tokens(OAuthToken(access_token="a", refresh_token="r", expires_in=3600))
         cfg = MCPHttpServerConfig(url=self.URL, auth=MCPAuthConfig(type="oauth"))
         endpoints = DiscoveredOAuthEndpoints(
-            oauth_metadata=OAuthMetadata(
-                issuer=self.URL,
-                authorization_endpoint="https://a/authorize",
-                token_endpoint="https://a/token",
+            oauth_metadata=OAuthMetadata.model_validate(
+                {
+                    "issuer": self.URL,
+                    "authorization_endpoint": "https://a/authorize",
+                    "token_endpoint": "https://a/token",
+                }
             )
         )
         provider = build_oauth_provider(self.URL, cfg, store=store, endpoints=endpoints)
