@@ -1634,7 +1634,8 @@ async def test_a_new_attachment_on_a_text_only_model_is_announced(tmp_path):
     session.subscribe(events.append)
 
     session.set_model(TEXT_ONLY_MODEL)
-    await asyncio.sleep(0.05)  # no images yet: nothing to announce
+    # No images yet: the latch stays unset, so the switch itself is quiet.
+    assert session._text_only_omission_announced is False
     assert [event for event in events if isinstance(event, NoticeEvent)] == []
 
     await session.prompt("look at this", [ImageContent(data="Zm9v")])
@@ -1656,7 +1657,10 @@ async def test_switching_to_a_text_only_model_without_images_stays_quiet(tmp_pat
     session.subscribe(events.append)
 
     session.set_model(TEXT_ONLY_MODEL)
-    await asyncio.sleep(0.05)  # the announce task, if any, runs immediately
+    # No images in the history: the latch stays unset and nothing is posted.
+    # Asserting the latch directly is deterministic where sleeping and counting
+    # notices only proves a negative (agent review round 1, NIT 1).
+    assert session._text_only_omission_announced is False
     assert [event for event in events if isinstance(event, NoticeEvent)] == []
     await session.dispose()
 
@@ -1685,6 +1689,133 @@ async def test_a_text_only_model_from_the_start_never_receives_images(tmp_path):
     await session.prompt("go")
     assert _image_blocks(stream.requests[0]) == 0
     await wait_for(lambda: any(isinstance(event, NoticeEvent) for event in events))
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_on_a_text_only_model_keeps_images_in_the_live_context(
+    tmp_path, monkeypatch
+):
+    """A compaction committed while on a text-only model must NOT bake the
+    omission into the live context (agent review round 1, MAJOR 1).
+
+    The summary request is stripped (the text-only model cannot take images),
+    but the KEPT window is rebuilt from the unstripped render, so switching
+    back to a vision model afterwards still restores the screenshots for the
+    kept messages — the non-sticky contract holds across a compaction."""
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = 0.80
+        threshold_tokens: int = Field(default=600_000)
+        auto_continue: bool = False
+        mid_turn_enabled: bool = False
+
+    compacted = {"done": False}
+    summary_requests: list[list[Message]] = []
+
+    def estimate_messages_tokens(messages):
+        return 5_000 if compacted["done"] else 90_000
+
+    def messages_tokens_upper_bound(messages):
+        return 5_500 if compacted["done"] else 95_000
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(
+        fake_api,
+        "prune_tool_outputs",
+        lambda messages, now_ts, last, **kw: (list(messages), False),
+    )
+    setattr(fake_api, "estimate_messages_tokens", estimate_messages_tokens)
+    setattr(fake_api, "messages_tokens_upper_bound", messages_tokens_upper_bound)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    # Cut after the FIRST entry: it is summarized away (and its image must
+    # NOT reach the summary request), while the second image-bearing message
+    # lands in the KEPT window — exactly the blocks the strip would have
+    # baked out of the live context.
+    setattr(fake_api, "find_cut_point", lambda messages, keep: 1)
+    setattr(
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: min(int(window * 0.8), 600_000),
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
+    setattr(
+        fake_api,
+        "should_compact",
+        lambda ctx_tokens, window, settings: ctx_tokens
+        > fake_api.resolve_threshold_tokens(window, settings),
+    )
+
+    async def summarize(messages, complete_fn):
+        compacted["done"] = True
+        summary_requests.append(list(messages))
+        return "SUMMARY"
+
+    setattr(fake_api, "summarize_messages", summarize)
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    setattr(fake_pkg, "api", fake_api)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    monkeypatch.setitem(
+        sys.modules,
+        "local_operator.compaction.thresholds",
+        types.ModuleType("local_operator.compaction.thresholds"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "local_operator.compaction.snapcompact",
+        types.ModuleType("local_operator.compaction.snapcompact"),
+    )
+
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")] for _ in range(2)]
+    )
+    session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[TextContent(text="first shot"), ImageContent(data="Zm9v")],
+            ),
+            Message(
+                role="user",
+                content=[TextContent(text="second shot"), ImageContent(data="Zm9v")],
+            ),
+        ]
+    )
+    session.set_model(TEXT_ONLY_MODEL)
+
+    await session.prompt("go")
+    # The pass ran and its summary request carried no image blocks.
+    assert compacted["done"]
+    assert summary_requests
+    assert not any(
+        isinstance(block, ImageContent)
+        for message in summary_requests[0]
+        for block in message.content
+    ), "the summary request was sent images the model cannot take"
+
+    # The kept window in the LIVE context still holds the image block...
+    kept_images = [
+        block
+        for message in session._context.messages
+        if isinstance(message, Message)
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+    assert kept_images, "the compaction baked the omission into the live context"
+    # ...so switching back to a vision model restores it on the wire.
+    session.set_model(MODEL)
+    await session.prompt("again")
+    assert _image_blocks(stream.requests[-1]) == 1
     await session.dispose()
 
 

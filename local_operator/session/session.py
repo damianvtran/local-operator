@@ -1072,7 +1072,9 @@ class Session:
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
 
-    def _render_history(self, messages: list[AgentMessage]) -> list[Message]:
+    def _render_history(
+        self, messages: list[AgentMessage], *, keep_images: bool = False
+    ) -> list[Message]:
         """The configured transcript→LLM conversion, minus anything the active
         model cannot be sent.
 
@@ -1094,7 +1096,10 @@ class Session:
           failure behind a session switched onto a text-only model while the
           history still carries screenshots. This one is NOT sticky: it reads
           the CURRENT spec, so switching back to a vision model restores the
-          images on the very next render.
+          images on the very next render. ``keep_images=True`` suspends ONLY
+          this strip (compaction's kept-window rebuild, which must not bake
+          the omission into the live context); the sticky provider strip and
+          the announcement still apply.
 
         Expired todo reminders are dropped here for the same reason: every path
         that reaches a provider has to be free of them.
@@ -1105,7 +1110,7 @@ class Session:
             # dropping first saves decoding a block that is about to become a
             # one-line notice.
             return _without_images(rendered)
-        if not self._model.supports_images:
+        if not self._model.supports_images and not keep_images:
             # ``rendered`` is the PRE-strip view here: exactly what the
             # omission is about to take away, and what the announcement
             # reports on.
@@ -1134,21 +1139,30 @@ class Session:
         render — so switching to a vision model restores the images without
         touching this latch.
 
-        ``_spawn_background`` because renders also happen from sync callers
-        (the usage breakdown) where no loop is running; the omission still
-        applies there, only the announcement is skipped.
+        ``_spawn_background`` because ``set_model`` is sync and the
+        announcement is advisory: the render already applies the omission, so
+        a notice that never runs costs nothing but the log line.
         """
         if self._text_only_omission_announced:
             return
         if rendered is None:
-            # The PRE-strip view: ``_render_history`` would hand back the
-            # stripped one for this spec, which never has anything to report.
-            rendered = _rebound_history_images(
-                self._convert_to_llm(self._live_todo_reminders(list(self._context.messages)))
-            )
+            # Presence check only: the plain convert output already carries
+            # every image block, and the rebound pass would spend a decode
+            # (and a Pillow re-encode for any oversized block) on a question
+            # the header sniff cannot answer. ``set_model`` calls this on the
+            # TUI event loop; a paste-heavy history must not stall a keypress.
+            rendered = self._convert_to_llm(self._live_todo_reminders(list(self._context.messages)))
         if not any(
             isinstance(block, ImageContent) for message in rendered for block in message.content
         ):
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop to carry the notice (a render from a sync caller, e.g.
+            # construction-time configuration). The omission still applies;
+            # only the announcement is skipped — and the latch stays unset so
+            # a later render WITH a loop can still announce.
             return
         self._text_only_omission_announced = True
         # ``model_label`` — the provider/model_id vocabulary the status band
@@ -1162,10 +1176,6 @@ class Session:
             label,
             self._image_drop_diagnostic(),
         )
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return
         self._spawn_background(
             self._emit(
                 NoticeEvent(
@@ -1211,7 +1221,7 @@ class Session:
 
         return [message for message in messages if not expired(message)]
 
-    def _render_for_compaction(self) -> list[Message]:
+    def _render_for_compaction(self, *, keep_images: bool = False) -> list[Message]:
         """The rendered history a compaction pass plans and commits against.
 
         :meth:`_render_history` minus the todo reminders, because a reminder is
@@ -1250,7 +1260,8 @@ class Session:
         movement or user turn.
         """
         return self._render_history(
-            [message for message in self._context.messages if not _is_todo_reminder(message)]
+            [message for message in self._context.messages if not _is_todo_reminder(message)],
+            keep_images=keep_images,
         )
 
     async def _degrade_if_image_rejected(self, error: BaseException | str) -> None:
@@ -3455,7 +3466,21 @@ class Session:
         await self._emit(CompactionStartEvent(reason=reason))
         try:
             to_summarize = plan.llm_history[: plan.cut]
-            kept = plan.llm_history[plan.cut :]
+            # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
+            # ``llm_history`` went through the capability strip (the summary
+            # request must not carry images a text-only model cannot take),
+            # but committing stripped messages into ``_context.messages``
+            # would bake the omission into the live session: the notice text
+            # would replace the image blocks for good, and switching back to
+            # a vision model would restore nothing for the kept window — the
+            # exact stickiness this degrade was written to avoid (agent review
+            # round 1, MAJOR 1). The transcript is untouched either way, so
+            # resume and ``/export`` keep their frames; this keeps the LIVE
+            # context honest too. The strip still applies to what the next
+            # request SENDS (``_render_history`` re-renders on the way out).
+            kept = self._render_for_compaction(keep_images=True)[plan.cut :]
+            if not kept:
+                kept = plan.llm_history[plan.cut :]
             summary, preserve_data = await self._produce_summary(
                 compaction_api, to_summarize, plan.strategy
             )
