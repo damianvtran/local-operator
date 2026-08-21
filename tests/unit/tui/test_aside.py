@@ -29,6 +29,7 @@ from local_operator.tui.widgets.aside_panel import AsidePanel, AsideTurn
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     DEFAULT_PLACEHOLDER,
+    SHELL_PLACEHOLDER,
     Editor,
 )
 from local_operator.tui.widgets.transcript import TranscriptView
@@ -150,6 +151,54 @@ async def test_the_aside_answers_from_the_live_conversation() -> None:
         assert sent.role == "user"
         assert "what did I ask you to do?" in sent.text
         assert "OFF" in sent.text and "RECORD" in sent.text
+
+
+@pytest.mark.asyncio
+async def test_closing_the_aside_returns_the_composer_to_bang_mode() -> None:
+    """The aside borrows the composer and disables bang-mode for the life of
+    the card, but the half-typed command comes back IN the mode it was typed
+    in — a `echo hi` returned to a composer that silently left bang-mode
+    would arm Enter with a shell command aimed at the model."""
+    session = AsideSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "echo hi":
+            await pilot.press("space" if key == " " else key)
+        assert editor.shell_mode is True
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert editor.shell_mode is False
+        await pilot.press("escape")  # the user's door out of the card
+        await pilot.pause()
+        assert editor.shell_mode is True
+        assert editor.text == "echo hi"
+        assert editor.placeholder == SHELL_PLACEHOLDER
+
+
+@pytest.mark.asyncio
+async def test_bang_inside_the_aside_is_the_start_of_a_question() -> None:
+    """Bang-mode is a main-chat gesture. A ``!`` typed into the aside is
+    the first character of a question, not a command — the card promised
+    off the record, and eating the bang would both break that and run a
+    shell command the user never asked the conversation to see."""
+    session = AsideSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _open_with_question(pilot, app, "why?")
+        editor.clear_content()
+        await pilot.press("!")
+        await pilot.pause()
+        assert editor.shell_mode is False
+        assert editor.text == "!"
+        assert editor.placeholder == ASIDE_PLACEHOLDER
 
 
 # -- the contract ----------------------------------------------------------

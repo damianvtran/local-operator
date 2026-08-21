@@ -247,9 +247,10 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #:
 #: Every entry names something THIS BUILD ANSWERS — a command in
 #: ``local_operator.tui.app.SLASH_COMMANDS``, a key in
-#: ``OperatorApp.BINDINGS``, or a tool the agent is actually handed — because a
-#: splash advertising a command the app rejects is worse than a blank row, and
-#: this is the one screen a first-run user reads word for word.
+#: ``OperatorApp.BINDINGS``, a composer gesture (bang-mode), or a tool the
+#: agent is actually handed — because a splash advertising a command the app
+#: rejects is worse than a blank row, and this is the one screen a first-run
+#: user reads word for word.
 #:
 #: Each one leads with the command or the verb so that the width tiers can
 #: truncate the tail and still leave something actionable behind; each is a
@@ -274,7 +275,7 @@ TIPS: tuple[str, ...] = (
     "Type as the agent works — it is sent at the next step",
     "esc stops the agent without ending the session",
     "Ask for parallel work and the agent fans out subagents",
-    "/mcp lists the MCP servers found in your mcp.json",
+    "! on an empty composer runs a shell command",
     "/goal sets the objective that /loop iterates toward",
 )
 

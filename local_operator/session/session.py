@@ -89,7 +89,9 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamUsageEvent,
     TextContent,
+    ToolCall,
     ToolContext,
+    ToolResult,
     Usage,
     WakeDeliveredEvent,
 )
@@ -986,6 +988,11 @@ class Session:
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._signal: AbortSignal | None = None
         self._is_streaming = False
+        #: Bang-mode receipts that completed while a turn or manual compaction
+        #: owned the message list. They cannot be spliced into a live provider
+        #: batch, but dropping them would make a visible command disappear on
+        #: resume. The owner flushes this FIFO before releasing `_turn_lock`.
+        self._pending_shell_records: list[tuple[str, ToolResult]] = []
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
         # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
         # automatic pass runs inside a turn and is covered by ``_is_streaming``;
@@ -1978,6 +1985,10 @@ class Session:
             )
         await self._turn_lock.acquire()
         try:
+            # Close the narrow completion-after-final-flush race: a shell
+            # receipt may have queued while the previous owner still held the
+            # lock. It must be visible before this prompt builds its request.
+            await self._flush_shell_records()
             # A fresh user prompt supersedes any earlier interrupt request.
             self._abort_requested = False
             if self._is_streaming:
@@ -2473,6 +2484,9 @@ class Session:
         if self._disposed:
             raise RuntimeError("session is disposed")
         async with self._turn_lock:
+            # Same shell-receipt boundary as prompt(): a wake turn must not
+            # build from context that omits a command already visible in TUI.
+            await self._flush_shell_records()
             # Same flush as prompt(): a wake-delivery turn is still a prompt
             # path, and the catch-up must not be stranded behind it.
             self._handle_missed_wakes()
@@ -2507,6 +2521,10 @@ class Session:
         finally:
             self._turn_task = None
             await self._flush_held_end()
+            # A bang-mode command may have completed while this turn owned the
+            # provider message list. Persist it before releasing `_turn_lock`,
+            # when no next prompt can build from a half-updated conversation.
+            await self._flush_shell_records()
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
@@ -3309,6 +3327,10 @@ class Session:
             return await self._run_compaction(planned, reason="manual")
         finally:
             self._compacting = False
+            # `record_shell` queues while manual compaction owns the message
+            # list. Fold those receipts into the newly compacted context before
+            # another prompt can acquire the lock and build its request.
+            await self._flush_shell_records()
             self._turn_lock.release()
 
     @staticmethod
@@ -3958,6 +3980,66 @@ class Session:
         # splice its own messages through the middle of them.
         self._context.messages.extend(messages)
 
+    async def record_shell(self, command: str, result: ToolResult) -> None:
+        """Persist a user-typed bang-mode command into the conversation.
+
+        The TUI runs the command itself (it is not a turn) and then asks the
+        session to remember it, so the next prompt — and a resume — can see
+        what just happened. omp and opencode both do this: a `! git status`
+        the user ran is context, not a secret.
+
+        A receipt that lands while a turn or manual compaction owns the message
+        list is QUEUED, never discarded: splicing it into a live provider batch
+        would produce an unsendable list, while dropping it would make a command
+        the user can see disappear on resume. The lock owner flushes the FIFO at
+        its safe boundary before another prompt can start.
+        """
+        if self._is_streaming or self._turn_lock.locked():
+            self._pending_shell_records.append((command, result))
+            return
+        # Serialize the idle write too. A prompt can otherwise acquire the lock
+        # while transcript.append_message is awaiting and build its request from
+        # a half-written synthetic exchange. Re-check the FIFO after acquisition
+        # to flush anything that raced us while we waited.
+        async with self._turn_lock:
+            # Queue-then-flush rather than a direct write: the FIFO pops only
+            # after a successful transcript write, so a failure here leaves the
+            # receipt for the next boundary instead of losing it.
+            self._pending_shell_records.append((command, result))
+            await self._flush_shell_records()
+
+    async def _persist_shell_record(self, command: str, result: ToolResult) -> None:
+        """Append one synthetic bash exchange to transcript and live context."""
+        # Synthetic assistant+tool pair rather than a single user dump: the
+        # TUI's resume replay already knows how to mount a ToolCard from a
+        # call and its result, and a wall of stdout attributed to the user
+        # would read as something they typed.
+        user = Message.user(f"! {command}")
+        assistant = Message.assistant("")
+        assistant.tool_calls = [
+            ToolCall(id=result.tool_call_id, name="bash", arguments={"command": command})
+        ]
+        tool = Message.tool_result(result)
+        messages = [user, assistant, tool]
+        for message in messages:
+            await self._transcript.append_message(message)
+        self._context.messages.extend(messages)
+
+    async def _flush_shell_records(self) -> None:
+        """Persist queued bang-mode receipts in completion order.
+
+        Called while ``_turn_lock`` is held at the turn, wake, compaction and
+        prompt boundaries, and once more from :meth:`dispose` after the app has
+        settled the shell worker — the lock serializes the boundary callers,
+        and teardown ordering serializes the dispose one. Pop AFTER each
+        successful write so a transcript failure leaves the unpersisted tail
+        available to the next boundary or dispose.
+        """
+        while self._pending_shell_records:
+            command, result = self._pending_shell_records[0]
+            await self._persist_shell_record(command, result)
+            self._pending_shell_records.pop(0)
+
     # -- wakes -------------------------------------------------------------------
 
     def _load_wake_schedules(self) -> None:
@@ -4430,6 +4512,12 @@ class Session:
             self._task_group = None
             await self.jobs.dispose()
             self._wake.dispose()
+            # A shell receipt can be queued behind a turn that was just aborted.
+            # Its normal turn-finally flush should already have run, but this
+            # last-resort pass keeps disposal durable if teardown reached here
+            # through a host path without a turn task.
+            if self._pending_shell_records:
+                await self._flush_shell_records()
             self._transcript.flush()
         finally:
             # ``finally``: host-owned resources must be released even when the
