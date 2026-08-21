@@ -806,6 +806,46 @@ async def test_esc_aborts_a_running_shell_command() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refused_second_command_comes_back_in_shell_mode() -> None:
+    """The refused line is handed back IN the mode it was submitted from: the
+    placeholder matches the buffer, and Enter re-runs it as a command once
+    the running one is settled — not as a prompt to the model."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "sleep 30":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if app._shell_card is not None:
+                break
+        assert app._shell_card is not None
+
+        await pilot.press("!")
+        for key in "echo second":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert editor.shell_mode is True
+        assert editor.text == "! echo second"
+        assert editor.placeholder == SHELL_PLACEHOLDER
+        await pilot.press("escape")  # leave the mode
+        await pilot.press("escape")  # abort the running command
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        # The aborted first command persists; the refused second did not run.
+        assert [c for c, _ in session.shell_records] == ["sleep 30"]
+
+
+@pytest.mark.asyncio
 async def test_reload_aborts_and_settles_shell_before_disposing_its_session() -> None:
     """A session swap cannot strand the bang-mode subprocess or let its
     completion write into a session that `/reload` already disposed."""

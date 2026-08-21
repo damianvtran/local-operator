@@ -286,11 +286,9 @@ async def test_record_shell_queues_mid_turn_and_flushes_before_the_next_prompt(t
         session._turn_lock.release()
 
     assert session._pending_shell_records == []
-    assert [m.role for m in session._context.messages if isinstance(m, Message)] == [
-        "user",
-        "assistant",
-        "tool",
-    ]
+    typed = [m for m in session._context.messages if isinstance(m, Message)]
+    assert typed == list(session._context.messages)  # every entry is a real message
+    assert [m.role for m in typed] == ["user", "assistant", "tool"]
     first = session._context.messages[0]
     assert isinstance(first, Message)
     assert first.text == "! echo hi"

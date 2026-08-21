@@ -73,6 +73,8 @@ from local_operator.harness.types import (
     AskQuestion,
     ImageContent,
     Message,
+    TextContent,
+    ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.logger import current_log_file
@@ -3412,6 +3414,10 @@ class OperatorApp(App[None]):
                 recorded = text if text.lstrip().startswith("!") else f"! {text}"
                 editor.forget_last_prompt(recorded)
                 editor.load_text(recorded)
+                # The line comes back IN the mode it was submitted from, so
+                # the placeholder matches the buffer and Enter re-runs it as a
+                # command once the running one is settled.
+                editor.set_shell_mode(True)
                 self._notice("a command is already running — esc to cancel it first", "warning")
                 return
             self._run_shell_command(text)
@@ -5481,6 +5487,17 @@ class OperatorApp(App[None]):
             if detail:
                 card.set_partial_detail(detail)
 
+        async def persist(result: ToolResult) -> None:
+            """One persistence hop; a spawn failure is still a completed
+            command, so the "never dropped" invariant covers it too."""
+            record = getattr(session, "record_shell", None) if session is not None else None
+            if not callable(record):
+                return
+            try:
+                await cast(Callable[..., Awaitable[None]], record)(command, result)
+            except Exception:
+                logger.debug("could not persist bang-mode result", exc_info=True)
+
         async def run_shell() -> None:
             try:
                 result = await execute_bash(
@@ -5491,8 +5508,16 @@ class OperatorApp(App[None]):
                     context,
                 )
             except Exception as error:  # surface, never crash the app
-                if self._shell_card is card:
+                if self._shell_card is card and not signal.aborted:
                     card.mark_failed(str(error), str(error))
+                await persist(
+                    ToolResult(
+                        tool_call_id=call_id,
+                        tool_name="bash",
+                        content=[TextContent(text=f"error: {error}")],
+                        is_error=True,
+                    )
+                )
                 return
             # Aborting paints the receipt immediately, but the worker remains
             # authoritative until the subprocess is reaped. Do not overwrite
@@ -5503,12 +5528,7 @@ class OperatorApp(App[None]):
                     card.mark_failed(_first_line(result.text), result.text, result.details)
                 else:
                     card.mark_done(result.text, result.details)
-            record = getattr(session, "record_shell", None) if session is not None else None
-            if callable(record):
-                try:
-                    await cast(Callable[..., Awaitable[None]], record)(command, result)
-                except Exception:
-                    logger.debug("could not persist bang-mode result", exc_info=True)
+            await persist(result)
 
         def _clear_shell_state() -> None:
             if self._shell_card is card:
