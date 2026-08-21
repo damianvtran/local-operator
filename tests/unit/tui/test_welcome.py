@@ -966,6 +966,16 @@ async def test_a_tick_never_re_measures_and_skips_the_colours_it_already_drew(
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 30)) as pilot:
         welcome = await _settled_welcome(pilot)
+        # The glow's own interval timer is a CONCURRENT writer to `_mark_color`
+        # (it fires every 80 ms while animation is on). Left running, a tick
+        # landing between the origin-set and the manual tick below either
+        # consumes the colour change (the manual tick then sees an unchanged
+        # colour and repaints nothing) or adds a repaint of its own — under a
+        # slow CI runner that turned this pin into a flake. The two properties
+        # under test are about what ONE tick does, so stop the timer and let the
+        # manual ticks be the only driver. Stopping also resets `_mark_color` to
+        # None, which is the deterministic starting state the first tick needs.
+        welcome._stop_pulse_timer()
         calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         original = welcome.refresh
 
