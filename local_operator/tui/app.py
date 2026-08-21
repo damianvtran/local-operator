@@ -1150,6 +1150,13 @@ class OperatorApp(App[None]):
         #: clear, so the event still arrives). Cleared on a session swap, where
         #: the messages died with the old session's queue and a stale entry
         #: would swallow the next conversation's first identical prompt.
+        #:
+        #: Known limit, inherent to matching by text: a prompt arriving from
+        #: ANOTHER front end with words identical to a still-pending steer
+        #: consumes that steer's entry — the foreign message stays unpainted
+        #: here and the steer's own event later paints the row. Rare (same
+        #: words, same window, two surfaces) and self-healing, but not
+        #: hazard-free, and the reader deserves to know.
         self._pending_user_echoes: list[str] = []
         #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
         #: keys. ``on_wake_delivered`` records each; the history replay skips a
@@ -5809,12 +5816,10 @@ class OperatorApp(App[None]):
                 self._append_block(NoticeBlock(str(error), "error"))
                 # A prompt that failed never announced itself, so its echo
                 # entry has no event coming. Left standing it would swallow
-                # the next identical prompt's event; `remove` is safe because
-                # a delivered announcement has already consumed the entry.
-                try:
-                    self._pending_user_echoes.remove(text)
-                except ValueError:
-                    pass
+                # the next identical prompt's event; `_consume_user_echo` is
+                # safe because a delivered announcement has already consumed
+                # the entry.
+                self._consume_user_echo(text)
             finally:
                 # agent_end usually flips this first; a redundant update is a
                 # no-op, and this covers sessions that end without agent_end.
@@ -8203,10 +8208,7 @@ class OperatorApp(App[None]):
                     notice(f"loop stopped: {error}", "error")
                     # Same stale-entry hazard as `_start_turn`: a failed
                     # prompt never announces, so take the entry back out.
-                    try:
-                        self._pending_user_echoes.remove(LOOP_PROMPT)
-                    except ValueError:
-                        pass
+                    self._consume_user_echo(LOOP_PROMPT)
                     break
                 finally:
                     if self._status is not None:
@@ -10720,17 +10722,32 @@ class OperatorApp(App[None]):
         boundary, so by the time its event lands the echo can sit arbitrarily
         far from the tail — the fixed three-block window this replaces painted
         every steered message twice once two tool cards landed in between
-        (issue: duplicated steering messages). Matched by text, first entry
-        wins: the engine drains FIFO and announces in drain order, the same
-        order the entries were registered in, so "the first matching entry"
-        and "the message this event announces" are the same one even when two
-        pending messages carry identical words."""
-        try:
-            self._pending_user_echoes.remove(message.prompt)
+        (issue: duplicated steering messages).
+
+        Matching is by text, not by position: events do NOT always arrive in
+        registration order (a steer an aborted turn left in the queue is
+        announced inside the NEXT turn, after that turn's own prompt echo),
+        and entries with identical text are indistinguishable — which is
+        fine, because either one consumed is the right row suppressed.
+        Correctness comes from "every event for a painted echo finds an
+        entry", not from any ordering guarantee."""
+        if self._consume_user_echo(message.prompt):
             return  # our own echo — the row is already painted
-        except ValueError:
-            pass  # not ours: a prompt from another front end, paint it
         self._append_block(UserBlock(message.prompt, message.image_count))
+
+    def _consume_user_echo(self, text: str) -> bool:
+        """Take one pending echo entry for ``text``; True if there was one.
+
+        The one spelling for the three sites that retire an entry: the
+        delivery handler (consume = suppress the repaint) and the two failed
+        ``prompt()`` paths (consume = drop an entry whose event is never
+        coming). ``remove``-by-value swallows the already-consumed case for
+        free."""
+        try:
+            self._pending_user_echoes.remove(text)
+            return True
+        except ValueError:
+            return False
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
         """A message opened — but nothing is MOUNTED until text actually arrives.

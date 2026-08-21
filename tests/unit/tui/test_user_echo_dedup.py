@@ -204,6 +204,57 @@ async def test_a_session_swap_drops_the_echoes_waiting_on_the_old_queue() -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_failed_prompt_does_not_swallow_the_next_identical_one() -> None:
+    """A prompt that raised never announced itself, so its entry must be
+    dropped on the way out — left standing it would silently consume the
+    event of the NEXT identical prompt, which this time really is new."""
+
+    class _Failing(FakeSession):
+        async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+            raise RuntimeError("boom")
+
+    app = OperatorApp(lambda: _factory(_Failing()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "same words twice")
+        assert app._pending_user_echoes == [], "the failed prompt's entry must be dropped"
+
+        assert len(_user_blocks(app, "same words twice")) == 1, "the submit's own row"
+
+        # The same words arrive as a real message (another front end, or a
+        # later working retry): the event must PAINT a second row. A stale
+        # entry would have consumed it and left the screen silent about a
+        # message the session did receive.
+        app.post_message(UserMessageStart("same words twice", 0))
+        await pilot.pause()
+        assert len(_user_blocks(app, "same words twice")) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_pending_echo_survives_clear_and_is_consumed_by_its_event() -> None:
+    """`/clear` empties the screen, not the engine's queue: a steer pending
+    across the clear still has its event coming, and the entry must survive
+    to suppress the repaint. The block is gone; the promise is not."""
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "survives the clear")
+        assert app._pending_user_echoes == ["survives the clear"]
+
+        app._clear_transcript()
+        await pilot.pause()
+        assert app._pending_user_echoes == [
+            "survives the clear"
+        ], "the clear removed the row but not the event that is still coming"
+
+        app.post_message(UserMessageStart("survives the clear", 0))
+        await pilot.pause()
+        assert app._pending_user_echoes == []
+        assert _user_blocks(app, "survives the clear") == [], "consumed, not repainted"
+
+
+@pytest.mark.asyncio
 async def test_the_loop_prompt_never_gets_a_user_row() -> None:
     """`/loop` deliberately paints a NOTICE per iteration, not a user row —
     LOOP_PROMPT is app-authored chrome. Its prompt() still announces a user

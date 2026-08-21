@@ -2567,7 +2567,16 @@ class Session:
                 # prompt invisible in the TUI. Emitting here, at the append
                 # point, is the single source both read. Wake/continuation
                 # internals are CustomMessage, so this stays user-authored only.
-                if isinstance(message, Message) and message.role == "user":
+                # The auto-continuation prompt is the one user-shaped Message
+                # that is harness chrome, not the user's words: announcing it
+                # would stack "context was just compacted" user rows on every
+                # front end for prompts the human never typed (the same
+                # exemption LOOP_PROMPT gets in the TUI).
+                if (
+                    isinstance(message, Message)
+                    and message.role == "user"
+                    and message.text != _CONTINUATION_PROMPT
+                ):
                     await self._emit(MessageStartEvent(message=message))
 
             blocks = self._system_blocks_provider()
