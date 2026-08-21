@@ -1862,6 +1862,13 @@ class SessionStreamFn:
                 else:
                     cache[cache_key] = "usable"
                     return "usable"
+            if any(row.id != selected.credential_id for row in api_key_rows):
+                # The read-only cascade exposes the winning key, not every
+                # lower-priority sibling's secret. A depleted selected key is
+                # therefore not proof the provider is empty when another
+                # enabled key row exists; fail open and let the stream's
+                # credential rotation walk that pool (review F5).
+                saw_unknown = True
         elif api_key_rows:
             # An unblocked OAuth row shadows lower API-key rows. The stream
             # reaches them after a provider-side quota error, but preflight

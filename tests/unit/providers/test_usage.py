@@ -150,11 +150,30 @@ def test_usage_health_exact_zero_balance_is_depleted_without_a_total() -> None:
         ],
     )
 
+    mixed = UsageReport(
+        provider="deepseek",
+        limits=[
+            UsageLimit(
+                id="deepseek:balance:usd",
+                label="Balance (USD)",
+                amount=UsageAmount(remaining=0.0, unit="usd"),
+                window="lifetime",
+            ),
+            UsageLimit(
+                id="deepseek:balance:cny",
+                label="Balance (CNY)",
+                amount=UsageAmount(remaining=10.0, unit="unknown"),
+                window="lifetime",
+            ),
+        ],
+    )
+
     health = usage_health(zero, "k3")
     assert health.state == "depleted"
     assert health.scope == "account"
     assert health.remaining_fraction == 0.0
     assert usage_health(positive, "k3").state == "unknown"
+    assert usage_health(mixed, "deepseek-chat").state == "unknown"
 
 
 def test_usage_health_depleted_reset_ignores_windows_merely_in_reserve() -> None:

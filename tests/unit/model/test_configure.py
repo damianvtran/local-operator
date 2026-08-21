@@ -1140,6 +1140,39 @@ async def test_blocked_depleted_oauth_does_not_hide_healthy_api_key(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_depleted_selected_api_key_does_not_hide_an_unprobed_sibling(tmp_path) -> None:
+    """One empty key is not proof every key on the provider is empty.
+
+    The credential store exposes only the selected secret. When another API
+    key row exists, a depleted selected key therefore fails open so the stream
+    rotation can reach the sibling instead of skipping the provider (review
+    F5)."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("kimi", {"key": "sk-empty", "source": "login"})
+    second = store.upsert_credential("kimi", {"key": "sk-funded", "source": "login"})
+    session = _session_hashing_to_first_row(2)
+    stream = create_stream_fn(store, {"retry": {"usageAwareFallback": True}}, session_id=session)
+
+    selected = await store.get_oauth_access("kimi", session, read_only=True)
+    assert selected is not None and selected.credential_id == first.id
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _kimi_usage(100.0),
+        ):
+            verdict = await stream._provider_quota_availability(
+                "kimi", "k3", reserve_percent=10, cache={}
+            )
+
+        assert second.id != selected.credential_id
+        assert verdict == "unknown"
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_transport_fallback_cooldown_skips_quota_probe(tmp_path) -> None:
     store = AuthStore(tmp_path / "auth.db")
     store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))

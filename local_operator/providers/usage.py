@@ -353,13 +353,17 @@ def usage_health(
         # denominator. Recognize only that boundary; positive amounts remain
         # unknown/fail-open rather than inventing a quota percentage (review
         # F3).
-        zero_balance = [
-            limit
-            for limit in relevant
-            if limit.amount.remaining is not None and limit.amount.remaining <= 0
-        ]
-        if not zero_balance:
+        balances = [limit for limit in relevant if limit.amount.remaining is not None]
+        # DeepSeek returns one row per currency. One empty wallet does not
+        # exhaust an account that still has funds in another, so exact-zero is
+        # definitive only when EVERY denominator-less balance row is non-
+        # positive. A mixed zero/positive report remains unknown rather than
+        # being skipped (review F6).
+        if not balances or any(
+            limit.amount.remaining is not None and limit.amount.remaining > 0 for limit in balances
+        ):
             return QuotaHealth("unknown")
+        zero_balance = balances
         reset_after = max(
             (
                 value
