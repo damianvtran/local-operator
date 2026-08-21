@@ -675,6 +675,11 @@ class ToolCard(ExpandableActionBlock):
         #: :meth:`restore` — and the running state has to refuse it too.
         self._started: float | None = time.monotonic()
         self._expanded = False
+        #: A host that knows the user ran this call TO SEE its output (the
+        #: composer's bang-mode) asks the card to open the moment it settles,
+        #: because a collapsed receipt hides exactly the bytes the command was
+        #: run for behind a click nobody asked for. Consumed once, at settle.
+        self._open_on_settle = False
         self._hovered = False
         #: True while the row holds keyboard focus. Tracked separately from
         #: hover: both light the hint, but a pointer leaving the row must not
@@ -714,6 +719,7 @@ class ToolCard(ExpandableActionBlock):
         self.remove_class("tool-running")
         self.add_class("tool-success")
         self._refresh_row()
+        self._apply_open_on_settle()
         self.finalize()
 
     def mark_failed(
@@ -738,6 +744,7 @@ class ToolCard(ExpandableActionBlock):
         self.remove_class("tool-running")
         self.add_class("tool-error")
         self._refresh_row()
+        self._apply_open_on_settle()
         self.finalize()
 
     def mark_interrupted(self) -> None:
@@ -760,7 +767,39 @@ class ToolCard(ExpandableActionBlock):
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
         self._refresh_row()
+        self._apply_open_on_settle()
         self.finalize()
+
+    def open_on_settle(self) -> None:
+        """Ask the card to open the moment it settles, once.
+
+        Bang-mode's contract: the user typed the command to read its output,
+        so the settled card starts expanded instead of collapsing the result
+        behind `⟨expand⟩`. A settle with nothing to reveal (empty output) is
+        a no-op — :meth:`can_expand` decides — and a user collapse after the
+        open is final, because the flag is consumed at the first settle.
+        """
+        self._open_on_settle = True
+
+    def _apply_open_on_settle(self) -> None:
+        """Honour :meth:`open_on_settle` now that a result is absorbed.
+
+        Runs between the settle's own `_refresh_row` and `finalize` so the
+        block is measured at its expanded height from its first frame. The
+        gap refresh mirrors what `toggle_expanded` does for a user toggle;
+        the transcript's sticky-bottom anchor follows the growth on its own.
+        """
+        if not self._open_on_settle:
+            return
+        self._open_on_settle = False
+        if self._expanded or not self.can_expand():
+            return
+        self._expanded = True
+        self.set_class(True, self.EXPANDED_CLASS)
+        self._refresh_row()
+        parent = self.parent if isinstance(self.parent, TranscriptView) else None
+        if parent is not None:
+            parent.refresh_gap_around(self)
 
     def _elapsed(self) -> float | None:
         """Seconds this call has been running, or ``None`` when unknowable.
@@ -823,6 +862,7 @@ class ToolCard(ExpandableActionBlock):
             self._absorb_result(result_text, details)
             self.add_class("tool-success")
         self._refresh_row()
+        self._apply_open_on_settle()
         self.finalize()
 
     def set_composing(self, argument_bytes: int, tool_name: str = "") -> None:

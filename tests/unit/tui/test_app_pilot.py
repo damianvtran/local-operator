@@ -860,6 +860,87 @@ async def test_a_signal_killed_command_marks_the_card_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_bang_card_settles_open() -> None:
+    """The user ran the command to READ its output, so the settled card is
+    already open — a collapsed receipt hides exactly the bytes the command
+    was run for behind a click nobody asked for."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "echo open-me":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert cards
+        assert cards[-1]._state == "success"
+        assert cards[-1].expanded is True
+        # The open is a settle-time decision, not a stuck mode: the flag is
+        # consumed, so a user collapse is final.
+        assert cards[-1]._open_on_settle is False
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_bang_card_opens_and_ordinary_calls_stay_shut() -> None:
+    """Resume parity for the open-on-settle contract: a bang receipt replays
+    open, while an agent-issued bash call in the same history stays a normal
+    collapsible row."""
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(
+            role="user", text="! echo hi", tool_calls=None, content=[], custom_type=None
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[
+                SimpleNamespace(id="shell-1", name="bash", arguments={"command": "echo hi"})
+            ],
+            custom_type=None,
+        ),
+        SimpleNamespace(
+            role="tool",
+            tool_call_id="shell-1",
+            text="exit code: 0\nhi",
+            is_error=False,
+            provider_payload=None,
+            content=[],
+        ),
+        SimpleNamespace(
+            role="user", text="what did I just run?", tool_calls=None, content=[], custom_type=None
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[SimpleNamespace(id="agent-1", name="bash", arguments={"command": "ls"})],
+            custom_type=None,
+        ),
+        SimpleNamespace(
+            role="tool",
+            tool_call_id="agent-1",
+            text="exit code: 0\nfile",
+            is_error=False,
+            provider_payload=None,
+            content=[],
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 2
+        assert cards[0].expanded is True  # the bang receipt
+        assert cards[1].expanded is False  # an ordinary agent call
+
+
+@pytest.mark.asyncio
 async def test_a_refused_second_command_comes_back_in_shell_mode() -> None:
     """The refused line is handed back IN the mode it was submitted from: the
     placeholder matches the buffer, and Enter re-runs it as a command once
