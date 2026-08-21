@@ -2061,8 +2061,19 @@ class Session:
         recallable (`SessionProtocol.recall_steering`) must be able to SEE
         the queue, and the queue itself is engine-internal. Identity of the
         entries is preserved, which is what hosts match on.
+
+        ``asyncio.Queue`` has no public peek, so the snapshot is a drain and
+        a rebuild through the get/put API — the same shape
+        :meth:`recall_steering` uses, minus the removal. The queue is a
+        handful of messages at most, and the loop only reads it at
+        boundaries, so the rebuild cannot race a drain.
         """
-        return list(self._steering_queue._queue)
+        snapshot: list[AgentMessage] = []
+        while not self._steering_queue.empty():
+            snapshot.append(self._steering_queue.get_nowait())
+        for message in snapshot:
+            self._steering_queue.put_nowait(message)
+        return snapshot
 
     def steer_message(self, message: Message) -> None:
         """Queue a caller-built steering message, sharing the caller's object.

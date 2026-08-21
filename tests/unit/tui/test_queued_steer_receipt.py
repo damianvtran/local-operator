@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import ImageContent, ModelSpec, SteeringDeliveredEvent
+from local_operator.harness.types import ModelSpec, SteeringDeliveredEvent
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (

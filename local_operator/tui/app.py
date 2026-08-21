@@ -1138,14 +1138,7 @@ class OperatorApp(App[None]):
         #: inert — a recall can never match them — and are dropped with the
         #: notice they share. Cleared wherever the blocks are removed (session
         #: swap, `/clear`) for the same reason `_queued_steer_notices` is.
-        self._held_steer_blocks: list[
-            tuple[Message, UserBlock, list[ImageBlock], NoticeBlock]
-        ] = []
-        #: The draft an Esc-recall displaced from the composer, restored on
-        #: the next turn end if the user never resends. None = no recall in
-        #: flight. A resend clears it: the user has moved on, and restoring a
-        #: draft over text they deliberately sent would be a second loss.
-        self._recall_stashed_draft: tuple[str, dict[int, Attachment]] | None = None
+        self._held_steer_blocks: list[tuple[Message, UserBlock, list[ImageBlock], NoticeBlock]] = []
         #: Rows whose turn ended before any boundary drained them: they now read
         #: `still queued — sends with your next message`, and the message really
         #: is still in the engine's queue, so the NEXT turn's first drain is the
@@ -2471,7 +2464,6 @@ class OperatorApp(App[None]):
         # watch the other front end paint it while this one stays silent.
         self._pending_user_echoes.clear()
         self._held_steer_blocks.clear()
-        self._recall_stashed_draft = None
         # The per-call accrual belongs to a turn on the session being replaced.
         # Left standing, the NEXT session's first `agent_end` would subtract the
         # dead conversation's already-billed calls from its own turn total and
@@ -3507,9 +3499,6 @@ class OperatorApp(App[None]):
         # screenshot pasted with no words still submits, carrying its marker.
         if not text and not message.shell:
             return
-        # Any submission is the user moving on: a draft an earlier Esc-recall
-        # displaced must not be restored over what they send next.
-        self._recall_stashed_draft = None
         # The aside owns the composer while it is up. EVERYTHING goes to it,
         # slash-shaped lines included: the card is a MODE, its footer says so
         # (`esc close · enter ask again`) and its placeholder says so, and a
@@ -4124,18 +4113,6 @@ class OperatorApp(App[None]):
             self._settle_ask_picker()
             return
 
-        # A queued steer the user takes back: Esc lifts the newest message
-        # still waiting in the engine's queue into the composer and removes
-        # its rows from the transcript, so "stop" also means "I want that
-        # back for a resend". After the ask-picker branch — answering the
-        # agent's question is not a stop — but before the escalation ladder,
-        # which only reports on children and returns: a recall must not be
-        # skipped by that press. No return afterwards: recalling is not
-        # stopping, and the press still means what Esc always means below
-        # (abort the turn, deny the prompt), so the resend the user is lining
-        # up goes now rather than queueing again.
-        self._recall_queued_steers()
-
         session = self._session
         now = time.monotonic()
 
@@ -4219,6 +4196,22 @@ class OperatorApp(App[None]):
         # from the keyboard. `_job_count` remains right for the status band,
         # which is reporting work in progress rather than work Esc can reach.
         children = self._running_subagents(session)
+
+        # A queued steer the user takes back: Esc lifts the newest message
+        # still waiting in the engine's queue into the composer and removes
+        # its rows from the transcript, so "stop" also means "I want that
+        # back for a resend". After every surface Esc closes first (the
+        # aside, the subagent view, the ask picker) and after the escalation
+        # press above, and gated off the children presses — those two are
+        # the children's contract and must not be stolen by a recall. It
+        # sits BEFORE the nothing-to-stop return because a turn that has
+        # already ended (the deferred state) is exactly when a user reaches
+        # for the cancel key. No return afterwards: recalling is not
+        # stopping, and the press still means what Esc always means below
+        # (abort the turn, deny the prompt), so the resend the user is
+        # lining up goes now rather than queueing again.
+        if not children:
+            self._recall_queued_steers()
 
         if not (pending or streaming or children):
             # A bang-mode command is the one remaining thing Esc can stop
@@ -5174,7 +5167,6 @@ class OperatorApp(App[None]):
         self._queued_steer_notices.clear()
         self._deferred_steer_notices.clear()
         self._held_steer_blocks.clear()
-        self._recall_stashed_draft = None
         # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
         # session has not started talking and the splash the clear just restored
         # must survive it. Going through ``_append_block`` rather than straight to
@@ -10475,7 +10467,6 @@ class OperatorApp(App[None]):
         # path regardless, because "held when the turn ended" is a fact this
         # handler can check and "which boundary the loop reached" is not.
         self._settle_queued_steer_notices_unsent()
-        self._restore_recall_stash()
         # LAST, and only after the turn's outcome is known, because the outcome
         # decides which of the three notifications this is:
         #
@@ -11107,11 +11098,13 @@ class OperatorApp(App[None]):
         so the identity match skips them by construction; a recall can never
         lift the scheduler's text into the composer.
 
-        A recall that cannot finish — no session, or a composer the app has
-        put read-only (the subagent view owns it) — must not cost the user
-        their message: `recall_steering` is only called once the composer has
-        accepted the text, so the queue keeps the message and the rows keep
-        promising, exactly as if Esc had not happened.
+        A recall that cannot finish — no session, a composer the app has put
+        read-only (the subagent view owns it), or a half-typed draft it would
+        have to displace — must not cost the user anything: `recall_steering`
+        is only called once the composer has accepted the text, so the queue
+        keeps the message and the rows keep promising, exactly as if Esc had
+        not happened. The message then rides the next boundary, which is the
+        behaviour the user had before they pressed Esc.
         """
         session = self._session
         if session is None or not self._held_steer_blocks:
@@ -11127,18 +11120,23 @@ class OperatorApp(App[None]):
             return
         message, user_block, image_blocks, notice = entry
         editor = self._editor()
+        if self._aside_is_open():
+            # The composer is the aside's while the card is up; Enter would
+            # send the recalled steer as an aside question. Esc closes the
+            # aside first (above), so the next press can recall.
+            return
         if editor.read_only:
             # The composer is refusing keys (the subagent view owns it); a
             # recall would strand the text between the queue and a field that
             # cannot show it. Leave everything as it is.
             return
-        # Stash the CURRENT draft first: the recall replaces whatever is half
-        # typed, and throwing that away on the cancel key is the exact loss
-        # `action_stop`'s docstring forbids. The aside's stash is the
-        # precedent; unlike it, this one is restored on the next turn end if
-        # the user never resends.
-        stashed_text = editor.text
-        stashed_attachments = editor.attachments()
+        # A half-typed draft is NOT displaced: throwing away what the user
+        # is typing on the cancel key is the exact loss `action_stop`'s
+        # docstring forbids, and the recalled text is not lost either way —
+        # it stays queued and rides the next boundary. The recall simply
+        # declines, and the user can Esc again once the buffer is empty.
+        if editor.text.strip():
+            return
         text = message.text
         attachments = self._attachments_for_recall(text, image_blocks)
         # The steer recorded itself in prompt history on submit; the recall
@@ -11182,38 +11180,7 @@ class OperatorApp(App[None]):
             if held is notice:
                 self._deferred_steer_notices.remove(held)
                 break
-        # The displaced draft rides the recall so a turn end that finds the
-        # composer still holding the recalled text can put it back; a resend
-        # clears the stash, because the user has moved on by then.
-        self._recall_stashed_draft = (stashed_text, stashed_attachments)
         editor.focus()
-
-    def _restore_recall_stash(self) -> None:
-        """Give a recall-displaced draft back when the recall went nowhere.
-
-        Runs at turn end, the moment a resend would have been delivered had
-        the user pressed Enter: if the composer still holds nothing, the
-        recall was abandoned and the draft it displaced returns; if it holds
-        the recalled text or anything newer, the stash is dropped, because
-        overwriting what the user typed or kept is the exact loss the stash
-        exists to prevent. While the aside or the subagent view owns the
-        composer the restore is deferred, not dropped — the next turn end
-        asks again.
-        """
-        if self._recall_stashed_draft is None:
-            return
-        if self._aside_is_open():
-            return  # the composer is the aside's; ask again at the next turn end
-        editor = self._editor()
-        if editor.read_only:
-            return  # the composer refuses the main chat right now; defer likewise
-        text, attachments = self._recall_stashed_draft
-        self._recall_stashed_draft = None
-        if editor.text.strip():
-            return  # the user typed or kept something after the recall
-        editor.load_text(text)
-        editor.adopt_attachments(attachments)
-        editor.move_cursor(editor._end_of_buffer())
 
     def _queue_holds(self, session: SessionProtocol, message: Message) -> bool:
         """True when the session's steering queue still holds ``message``.
@@ -11381,9 +11348,7 @@ class OperatorApp(App[None]):
         # steer's entry.
         settled_set = set(settled)
         self._held_steer_blocks = [
-            entry
-            for entry in self._held_steer_blocks
-            if entry[3] not in settled_set
+            entry for entry in self._held_steer_blocks if entry[3] not in settled_set
         ]
 
     def on_compaction_started(self, message: CompactionStarted) -> None:

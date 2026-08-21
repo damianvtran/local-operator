@@ -18,7 +18,12 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import AgentMessage, ImageContent, NoticeEvent, TextContent
+from local_operator.harness.types import (
+    AgentMessage,
+    ImageContent,
+    NoticeEvent,
+    TextContent,
+)
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
