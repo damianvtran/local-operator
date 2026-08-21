@@ -170,30 +170,43 @@ DIFF_FILES = ("inventory/pricing.py", "inventory/service.py", "tests/test_pricin
 # The planted defects. `match` is a case-insensitive regex against the
 # review's full text; each is anchored on vocabulary a real finding for that
 # defect almost cannot avoid, and quoted in the report so a match is auditable.
+# Matchers are anchored on the CONTRAST a genuine finding cannot avoid —
+# the buggy value next to the correct one, or the defect's own vocabulary —
+# so a review that quotes the code to EXONERATE it ("dividing by 10000 is
+# correct") cannot score. A single bare keyword like ``stock`` would fire on
+# praise as easily as on a finding; a bare ``10000`` fires on any quote of
+# the line.
 PLANTED: list[tuple[str, str, str]] = [
     (
         "percentage-off-by-100x",
         "MAJOR",
         # pct=10 means 10%; the diff divides by 10000 and prices at 0.1%.
-        r"(10000|10,?000|100x|two (orders of magnitude|zeros)|0\.1%|÷\s*100\b.*wrong|divide[sd]? by 10000)",
+        # The contrast anchors: wrong value beside right value, or the
+        # magnitude error stated outright.
+        r"(10000.{0,80}(instead of|should (be|have been))\s*(100\b|/100)|(instead of|should (be|have been)|not|versus)\s*100\b.{0,80}10000|100\s?[x×]|factor of 100|two orders of magnitude|100\s*times\s*(too\s*)?(small|little|less)|0\.1\s?%\s*(instead|not|rather)|wrong (factor|divisor|denominator|magnitude)|divisor.{0,20}wrong)",
     ),
     (
         "negative-discount-inflates-total",
         "MAJOR",
         # No validation on pct: pct=-50 CHARGES 150%.
-        r"negative.{0,40}(discount|pct|percent)|(discount|pct).{0,40}negative|no validation|unvalidated",
+        r"negative.{0,40}(discount|pct|percent)|(discount|pct|percent).{0,40}negative|no validation|unvalidated|(missing|without|lacks?).{0,20}validat",
     ),
     (
         "rounding-float-cents",
         "MINOR",
         # / returns float; the module's own contract says integer cents.
-        r"float|round|integer cents|int\(\)|//",
+        # Anchored on the TYPE problem, not the contract phrase: "float" near
+        # cents/rounding, or the fix idioms. A bare `round|integer cents`
+        # fires on any pricing finding that quotes the module docstring.
+        r"float.{0,40}(cent|round|int)|(cent|int).{0,40}float|round\(\)|//\s*(instead|division|rather)|integer\s+division",
     ),
     (
         "stock-never-decremented",
         "MAJOR",
         # place_order still ignores Product.stock; overselling stays possible.
-        r"stock",
+        # Vocabulary beyond the literal field name so a finding phrased as
+        # "inventory levels are never updated" still counts.
+        r"stock|oversell|inventory.{0,30}(never|not|without).{0,20}(decrement|updat|reduc|adjust)",
     ),
     (
         "lost-negative-quantity-guard",
@@ -420,10 +433,15 @@ def score_review(text: str) -> Score:
             missed.append(slug)
     # Severity discipline: the dropped negative-quantity guard is a BLOCKER
     # (silent refund path); finding it at MINOR is better than missing it but
-    # still a miscount the remediation round pays for.
+    # still a miscount the remediation round pays for. Anchored to a HEADING
+    # or enumeration context: a bare `BLOCKER` search passes on "no BLOCKERs"
+    # or on the classification legend the prompt itself asks for.
     if "lost-negative-quantity-guard" in found:
-        block = re.search(r"BLOCKER", text)
-        if not block:
+        raised = re.search(
+            r"(?m)^\s*#{1,4}\s*.*BLOCKER|^\s*[-*]?\s*\*?\*?BLOCKER\b.{0,10}[-—:]",
+            text,
+        )
+        if not raised:
             severity_notes.append("dropped-guard found but no BLOCKER raised at all")
     # Unrelated: any mention of the decoy files. Word boundary so a substring
     # elsewhere cannot false-positive.
@@ -474,6 +492,11 @@ def build_scaffold(root: Path) -> None:
     git("init", "-q", "-b", "main")
     git("add", "-A")
     git("commit", "-q", "-m", "base: inventory service")
+    # The planted diff must land on a WORK branch: committing it onto `main`
+    # makes `git diff main..HEAD` — the exact command REVIEW_PROMPT hands the
+    # reviewer — the empty diff, and the benchmark would then measure "model
+    # works around a broken instruction" instead of "model reviews a diff".
+    git("checkout", "-q", "-b", "work")
     for rel, content in DIFF_FILES_CONTENT.items():
         (root / rel).write_text(content, encoding="utf-8")
     git("add", "-A")
@@ -562,7 +585,9 @@ def print_report(results: list[ArmResult], pricings: dict[str, Pricing]) -> None
         s, sc = r.stats, r.score
         cover = f"{len(sc.found)}/{len(PLANTED)}" if sc else "n/a"
         unrel = str(len(sc.unrelated_files)) if sc else "n/a"
-        missed = ",".join(sc.missed) if sc else "(no review text)"
+        # exit_code distinguishes "model said nothing" from "run died" — a
+        # timeout (124) with no review text is a void measurement, not a 0/5.
+        missed = ",".join(sc.missed) if sc else f"(no review text; exit {r.exit_code})"
         print(
             f"{r.arm:<10} {r.run:>3} {s.turns:>5} {s.tool_calls:>5} {s.prompt_tokens:>9} "
             f"{s.output_tokens:>7} {s.warm_cache_rate * 100:>5.1f}% ${r.cost_usd:>8.4f} "
