@@ -132,6 +132,30 @@ SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 # Steering-interrupt poll interval for ``interruptible`` tools mid-run.
 STEERING_INTERRUPT_POLL_S = 0.25
+
+#: How many times an EMPTY ``length`` truncation (no text, no tool calls — the
+#: reasoning model that spent its whole output budget thinking) is retried one
+#: effort rung lower before the turn ends the ordinary way. Two covers the
+#: observed failure shape (a high rung, then the rung below it also silent)
+#: without burning the user's quota on a model that cannot answer today.
+MAX_EMPTY_TRUNCATION_RETRIES = 2
+
+
+def _lower_effort(model: "ModelSpec") -> str | None:
+    """The effort one rung below ``model.reasoning_effort`` on its own ladder.
+
+    ``None`` when the model has no ladder or already runs at its bottom rung:
+    there is no cheaper setting to retry at, and a retry at the SAME effort
+    would reproduce the same silent truncation, so the caller ends the turn
+    instead."""
+    ladder = list(model.reasoning_efforts)
+    current = model.reasoning_effort
+    if not ladder or current is None or current not in ladder:
+        return None
+    index = ladder.index(current)
+    return ladder[index - 1] if index > 0 else None
+
+
 # How long the batch waits for tools to unwind after an ABORT before it stops
 # waiting and settles the turn anyway. An abort is a user pressing Esc, so the
 # turn must end on a human timescale; a tool whose cleanup is slower than this
@@ -372,6 +396,19 @@ class AgentLoop:
         pending: list[AgentMessage] = []
         has_more_tool_calls = True  # forces the first model call
         reentries = 0  # outer-loop re-entries; capped by config
+        # A reasoning model can spend its ENTIRE output budget thinking and be
+        # cut off at ``length`` with nothing visible to show for it — the user
+        # then watches minutes of "thinking" end in silence (session f3c058d1:
+        # four consecutive empty 8192-token truncations on the fallback model).
+        # The loop retries such a turn a bounded number of times one effort rung
+        # lower, where the budget goes to output instead of thought; a turn
+        # that DID produce text or calls is truncated, not silent, and keeps
+        # the old pair-and-stop behaviour.
+        empty_truncation_retries = 0
+        # The effort ceiling an empty-truncation retreat imposed; rides on
+        # every request under it so the session's frozen auto-effort cannot
+        # raise the retry back to the rung that produced nothing.
+        effort_ceiling: str | None = None
 
         yield AgentStartEvent(generation=generation)
 
@@ -408,7 +445,9 @@ class AgentLoop:
                             return
 
                     assistant, stop_reason, stream_error = None, "stop", None
-                    async for event in self._model_turn(context, config, signal):
+                    async for event in self._model_turn(
+                        context, config, signal, effort_ceiling=effort_ceiling
+                    ):
                         if isinstance(event, _ModelTurnResult):
                             assistant, stop_reason, stream_error = (
                                 event.message,
@@ -456,6 +495,51 @@ class AgentLoop:
 
                     tool_results: list[ToolResult] = []
                     if stop_reason == "length":
+                        silent = not assistant.text and not assistant.tool_calls
+                        if silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES:
+                            lower = _lower_effort(config.model)
+                            if lower is not None:
+                                empty_truncation_retries += 1
+                                # The empty turn must not reach the retry's
+                                # wire history: an assistant message with no
+                                # content blocks is an illegal request on the
+                                # Anthropic wire, and replaying "I said
+                                # nothing" teaches the retry to say nothing.
+                                if context.messages and context.messages[-1] is assistant:
+                                    context.messages.pop()
+                                if new_messages and new_messages[-1] is assistant:
+                                    new_messages.pop()
+                                config.model = config.model.model_copy(
+                                    update={"reasoning_effort": lower}
+                                )
+                                effort_ceiling = lower
+                                yield NoticeEvent(
+                                    text=(
+                                        f"model spent its whole output budget "
+                                        f"thinking and produced nothing — "
+                                        f"retrying at effort {lower}"
+                                    ),
+                                    kind="warning",
+                                )
+                                has_more_tool_calls = True
+                                continue
+                        if silent:
+                            # No cheaper rung to retry at (or the retries are
+                            # spent): the turn is about to end with NOTHING on
+                            # screen — minutes of "thinking" and then silence,
+                            # the exact failure shape reported from session
+                            # f3c058d1. A notice is the minimum honest frame:
+                            # the user learns the budget went to reasoning,
+                            # not that the app froze.
+                            yield NoticeEvent(
+                                text=(
+                                    "the model spent its whole output budget "
+                                    "thinking and produced no visible output — "
+                                    "retry, or switch to a model with a larger "
+                                    "output budget"
+                                ),
+                                kind="warning",
+                            )
                         # Truncated: pair placeholders, do NOT execute.
                         placeholders = [
                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
@@ -612,6 +696,7 @@ class AgentLoop:
         context: LoopContext,
         config: LoopConfig,
         signal: AbortSignal | None,
+        effort_ceiling: str | None = None,
     ) -> AsyncIterator[AgentEvent | _ModelTurnResult]:
         """One provider call: build the request, stream it, assemble the
         assistant message, emitting message_start/update/end events.
@@ -636,6 +721,7 @@ class AgentLoop:
             system_blocks=list(context.system_blocks),
             messages=list(converted),
             tools=list(context.tools),
+            effort_ceiling=effort_ceiling,
         )
 
         assistant = Message(role="assistant")

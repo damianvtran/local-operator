@@ -2081,3 +2081,101 @@ class TestRefusalEndsTheRunVisibly:
         end = events[-1]
         assert isinstance(end, AgentEndEvent)
         assert end.error is not None and "refused" in end.error
+
+
+# ---------------------------------------------------------------------------
+# Empty truncation: the silent-turn failure (session f3c058d1)
+# ---------------------------------------------------------------------------
+
+
+def _laddered_model() -> ModelSpec:
+    return ModelSpec(
+        provider="test",
+        model_id="m",
+        reasoning_efforts=("low", "medium", "high"),
+        reasoning_effort="high",
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_length_truncation_retries_at_lower_effort():
+    """A length stop with NO text and NO calls is a silent turn: the loop
+    retries one rung lower instead of ending with nothing on screen."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],  # spent the budget thinking
+            [StreamTextDelta(delta="here is the answer"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=_laddered_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[0].model.reasoning_effort == "high"
+    assert stream.requests[1].model.reasoning_effort == "medium"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("retrying at effort medium" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and not end.aborted
+    # The empty assistant message must not survive into the context: it is an
+    # illegal wire block and teaches the retry to say nothing.
+    assert all(
+        not (m.role == "assistant" and not m.text and not m.tool_calls)
+        for m in context.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
+    """Retries are bounded; when they are spent the turn ends, but the user
+    sees WHY instead of minutes of thinking followed by silence."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],
+            [StreamEndEvent(stop_reason="length")],
+            [StreamEndEvent(stop_reason="length")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=_laddered_model()), None
+    ):
+        events.append(event)
+
+    # initial + two lower-rung retries; the third empty truncation ends it.
+    assert len(stream.requests) == 3
+    efforts = [r.model.reasoning_effort for r in stream.requests]
+    assert efforts == ["high", "medium", "low"]
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("no visible output" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+
+
+@pytest.mark.asyncio
+async def test_text_only_length_truncation_is_not_retried():
+    """A truncation that DID produce visible text is an ordinary truncation:
+    the turn ends, no effort step, no retry."""
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="partial"), StreamEndEvent(stop_reason="length")],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=_laddered_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent)]

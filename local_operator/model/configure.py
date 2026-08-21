@@ -2108,6 +2108,61 @@ class SessionStreamFn:
                     and (row is None or candidate.credential_type == row.credential_type)
                     and not self._auth_store.is_blocked(candidate.id, storage)
                 ]
+                if not siblings and health.state == "depleted":
+                    # No UNBLOCKED sibling can take this model, but blocked
+                    # rows are earlier verdicts, not facts: a block written
+                    # when the account was low (or by an older build that
+                    # blocked reserve accounts for days) can be hiding the
+                    # ONLY spendable quota for this model. The reported
+                    # incident was exactly that — two accounts blocked at
+                    # 8%/4% Fable while the one live account read 0% and the
+                    # session hopped providers. Probe the blocked rows before
+                    # leaving the provider; ``None`` means every account was
+                    # re-checked and genuinely cannot serve, which is the
+                    # only honest moment to fall back.
+                    blocked_rows = [
+                        candidate
+                        for candidate in self._auth_store.list_credentials(storage)
+                        if candidate.id != access.credential_id
+                        and candidate.id not in attempted_ids
+                        and (row is None or candidate.credential_type == row.credential_type)
+                        and self._auth_store.is_blocked(candidate.id, storage)
+                    ]
+                    recovered = await self._recover_blocked_accounts(
+                        model, storage, blocked_rows, retry
+                    )
+                    if recovered is not None:
+                        rec_health = recovered[0]
+                        if rec_health.state in ("healthy", "reserve"):
+                            # A blocked account holds spendable quota for
+                            # this model and the walk pinned the session to
+                            # it. Settle here: re-walking would let the
+                            # sibling-rotation step demote the recovered
+                            # account in favour of the depleted one it just
+                            # replaced.
+                            if rec_health.state == "reserve":
+                                await self._notice(
+                                    f"{model.provider} blocked account recovered "
+                                    f"({rec_health.remaining_fraction * 100:.0f}% remaining) "
+                                    f"for {model.model_id} — resuming {model.provider}",
+                                    "info",
+                                )
+                                await self._route_state.clear_settled("recovered account has quota")
+                            return
+                        # Recovered but depleted for this model: the shared
+                        # policy re-blocks and activates the fallback, naming
+                        # the quota in its notice.
+                        await self._apply_account_health(
+                            model,
+                            recovered[3],
+                            storage,
+                            rec_health,
+                            recovered[1],
+                            recovered[2],
+                            retry,
+                            attempted_ids,
+                        )
+                        return
                 if siblings:
                     if health.state == "depleted":
                         self._auth_store.block_credential(
@@ -2251,6 +2306,52 @@ class SessionStreamFn:
             await self._route_state.clear_settled("primary model still has quota")
             return False
 
+        if not siblings and health.state == "depleted":
+            # About to leave the provider on a depleted verdict while other
+            # accounts sit under blocks. Blocks are earlier verdicts — an
+            # older build's days-long reserve block can be hiding the only
+            # spendable quota left (the incident behind this split: two
+            # accounts blocked at 8%/4% while the live one read 0%). Probe
+            # the blocked rows before the hop; ``None`` means every account
+            # was re-checked and genuinely cannot serve.
+            blocked_rows = [
+                candidate
+                for candidate in self._auth_store.list_credentials(storage)
+                if candidate.id != access.credential_id
+                and candidate.id not in attempted_ids
+                and (row is None or candidate.credential_type == row.credential_type)
+                and self._auth_store.is_blocked(candidate.id, storage)
+            ]
+            recovered = await self._recover_blocked_accounts(model, storage, blocked_rows, retry)
+            if recovered is not None:
+                rec_health = recovered[0]
+                if rec_health.state in ("healthy", "reserve"):
+                    # A blocked account holds spendable quota and the walk
+                    # pinned the session to it: settle instead of leaving
+                    # the provider on the depleted account under verdict.
+                    if rec_health.state == "reserve":
+                        await self._notice(
+                            f"{model.provider} blocked account recovered "
+                            f"({rec_health.remaining_fraction * 100:.0f}% remaining) "
+                            f"— resuming {model.provider}",
+                            "info",
+                        )
+                        await self._route_state.clear_settled("recovered account has quota")
+                    return False
+                # Recovered but depleted: the shared policy re-blocks and
+                # activates the fallback; whether a sibling then takes over
+                # decides our return.
+                return await self._apply_account_health(
+                    model,
+                    recovered[3],
+                    storage,
+                    rec_health,
+                    recovered[1],
+                    recovered[2],
+                    retry,
+                    attempted_ids,
+                )
+
         if not siblings and fallback is None:
             await self._notice(
                 f"{model.provider} {condition}{remaining}; no configured fallback is available"
@@ -2348,6 +2449,8 @@ class SessionStreamFn:
         ``None`` means every account is genuinely out — only then is a
         provider fallback honest.
         """
+        from local_operator.providers.auth_store import OAuthAccess
+        from local_operator.providers.registry import get_provider_definition
         from local_operator.providers.usage import (
             fetch_usage,
             shared_tier_saturation,
@@ -2355,42 +2458,50 @@ class SessionStreamFn:
         )
 
         for row in rows:
-            self._auth_store.clear_block(row.id, storage)
+            # Probe the row's OWN refreshed token. Clearing the block and
+            # re-asking the cascade (the first shape of this walk) attributed
+            # the verdict to whatever the cascade returned — with a healthy
+            # unblocked sibling in the pool, EVERY probe resolved to that
+            # sibling, re-blocked the row just lifted, and the walk ended
+            # "nothing recovered" while blocked accounts held spendable
+            # quota. Reading the row directly makes the verdict about the
+            # row, and leaves the pool's blocks and stickiness untouched
+            # until a verdict says otherwise.
             try:
-                access = await self._auth_store.get_oauth_access(model.provider, self._session_id)
+                creds = await self._auth_store.ensure_oauth_fresh(row.id)
             except Exception:
-                access = None
-            if access is None or access.kind != "oauth" or access.credential_id != row.id:
-                # Only a verdict for the exact row just unblocked counts. The
-                # cascade can fall through to a different credential (an API
-                # key, or a sibling that outranked this one), and attributing
-                # that credential's quota to this row would unblock the wrong
-                # account. Stand the backoff back up and keep looking.
-                self._auth_store.block_credential(
-                    row.id, storage, block_ms=self.DEFAULT_USAGE_BLOCK_MS
-                )
+                creds = None
+            if creds is None:
+                continue  # refresh failed: the block stands, try the next row
+            definition = get_provider_definition(model.provider)
+            key_fn = definition.get_api_key if definition is not None else None
+            token = key_fn(creds) if key_fn else creds.get("access")
+            if not token:
                 continue
             report = await fetch_usage(
                 self._http,
                 model.provider,
-                access_token=access.access_token,
-                account_id=access.account_id,
+                access_token=token,
+                account_id=creds.get("account_id"),
             )
             if report is None:
-                self._auth_store.block_credential(
-                    row.id, storage, block_ms=self.DEFAULT_USAGE_BLOCK_MS
-                )
-                continue
+                continue  # unreachable quota endpoint: keep the block, move on
             health = usage_health(
                 report,
                 model.model_id,
                 reserve_percent=retry.usage_reserve_percent,
             )
             if health.state == "unknown":
-                self._auth_store.block_credential(
-                    row.id, storage, block_ms=self.DEFAULT_USAGE_BLOCK_MS
-                )
-                continue
+                continue  # unreadable: the block stands, try the next row
+            # A definite verdict about the row just probed. The block is a
+            # stale claim this probe has now superseded: lift it and pin the
+            # session to the exact credential the usage was read for, then
+            # hand the verdict to the caller's shared policy (settle, rotate,
+            # or block-again-and-fall-back). A depleted verdict is returned,
+            # not swallowed — the policy decides its fate, and the caller's
+            # fallback notice must name the quota, not the credential pool.
+            self._auth_store.clear_block(row.id, storage)
+            self._auth_store.pin_session_credential(model.provider, self._session_id, row.id)
             shared_remaining, tier_binding = shared_tier_saturation(
                 report,
                 reserve_percent=retry.usage_reserve_percent,
@@ -2401,8 +2512,15 @@ class SessionStreamFn:
                     "info",
                 )
                 self._route_state.clear()
-            # Low/depleted but answerable: hand it to the shared policy, which
-            # decides between spending shared headroom, rotating, and blocking.
+            access = OAuthAccess(
+                access_token=token,
+                credential_id=row.id,
+                account_id=creds.get("account_id"),
+                email=creds.get("email"),
+                org_id=creds.get("org_id"),
+                kind="oauth",
+                raw=creds,
+            )
             return health, shared_remaining, tier_binding, access
         return None
 
@@ -2469,6 +2587,17 @@ class SessionStreamFn:
         # to the run's snapshot. Applying the stored level blind would send a rung
         # the current model may not have (review F9).
         effort = self._effort_for(request.model)
+        # The harness loop steps the effort down one rung when a reasoning
+        # model spends its whole output budget thinking and produces nothing
+        # (empty ``length`` truncation); that retreat rides on the request as
+        # ``effort_ceiling``. The frozen override holds a classification
+        # steady — it must not raise the retry back to the rung that just
+        # produced silence.
+        ceiling = request.effort_ceiling
+        ladder = request.model.reasoning_efforts
+        if effort is not None and ceiling is not None and ceiling in ladder and effort in ladder:
+            if ladder.index(effort) > ladder.index(ceiling):
+                effort = ceiling
         if effort is not None:
             request = request.model_copy(
                 update={"model": request.model.model_copy(update={"reasoning_effort": effort})}
