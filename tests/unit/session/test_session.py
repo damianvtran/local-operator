@@ -1139,6 +1139,50 @@ async def test_compaction_continuation_emits_one_run_boundary(tmp_path, monkeypa
     assert seen.count("TurnStartEvent") == 2  # original turn + continuation
     assert len(stream.requests) == 2
 
+
+@pytest.mark.asyncio
+async def test_the_auto_continuation_prompt_is_never_announced_as_user(tmp_path, monkeypatch):
+    """The post-compaction continuation is harness chrome, not the user's words.
+
+    `_run_turn` announces every user Message with a MessageStartEvent so other
+    front ends can paint it — but the auto-continuation prompt is queued by
+    the session itself, and painting "context was just compacted" as a user
+    row on every surface would stack chrome rows for prompts the human never
+    typed. The gate is at the emit point, so deleting it must fail this test
+    even though the continuation still reaches the model either way.
+    """
+    from local_operator.session.session import _CONTINUATION_PROMPT
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="first"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="resumed"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    calls = {"n": 0}
+
+    async def fake_compact() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            session._continuation_queue.append(Message.user(_CONTINUATION_PROMPT))
+
+    monkeypatch.setattr(session, "_maybe_compact", fake_compact)
+
+    user_announcements: list[str] = []
+
+    def watch(event) -> None:
+        if isinstance(event, MessageStartEvent) and getattr(event.message, "role", None) == "user":
+            user_announcements.append(getattr(event.message, "text", ""))
+
+    session.subscribe(watch)
+    await session.prompt("do the thing")
+
+    # The prompt itself is announced; the continuation is not.
+    assert user_announcements == ["do the thing"]
+    # And the continuation still reached the model.
+    assert len(stream.requests) == 2
     await session.dispose()
 
 
