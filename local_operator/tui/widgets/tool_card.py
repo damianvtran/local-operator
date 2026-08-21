@@ -89,8 +89,6 @@ from typing import Any
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
-from textual.binding import Binding
-from textual.events import Key
 from textual.timer import Timer
 
 from local_operator.ansi import strip_control_sequences
@@ -99,7 +97,7 @@ from local_operator.tui.glyphs import display_name, tool_icon
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TOOL_NAME_COL_MAX,
-    TranscriptBlock,
+    ExpandableActionBlock,
     TranscriptView,
     wrap_cells,
 )
@@ -564,7 +562,7 @@ def _row_text() -> Text:
     return Text(no_wrap=True, overflow="ellipsis")
 
 
-class ToolCard(TranscriptBlock):
+class ToolCard(ExpandableActionBlock):
     """A tool execution: ONE row, on a state-tinted elevation step.
 
     Lifecycle: construct with ``tool_call_id``/``tool_name`` (running),
@@ -582,45 +580,9 @@ class ToolCard(TranscriptBlock):
     action and Up/Down walk the ledger from there.
     """
 
-    #: Adaptive spacing: every tool row takes a blank row above it, because
-    #: each row is a separate action (see `transcript.needs_gap_above`).
-    SPACING_KIND = "tool"
-    LEDGER_ROW = True
-    SPACING_AIRY = True
-
-    #: The keyboard half of the expand affordance. Enter and Space both
-    #: activate because both are what a user reaches for on a focused row and
-    #: neither means anything else here. Up/Down move between ACTIONS rather
-    #: than scrolling by a line: once focus is on a card the ledger is what
-    #: the arrows are addressing, and the transcript keeps the scroll keys
-    #: for when nothing in it is focused.
-    #:
-    #: Escape is deliberately absent — the app owns it as the "stop the turn"
-    #: binding, and a second meaning for the key that aborts work is the last
-    #: thing this row should introduce. With no binding here the key simply
-    #: bubbles from a focused row to the app, which is the wanted precedence.
-    BINDINGS = [
-        Binding("enter", "activate", "Expand/collapse", show=False),
-        Binding("space", "activate", "Expand/collapse", show=False),
-        Binding("up", "focus_previous_action", "Previous action", show=False),
-        Binding("down", "focus_next_action", "Next action", show=False),
-    ]
-
-    #: The keys above, flattened. ``on_key`` runs BEFORE Textual resolves a
-    #: focused widget's bindings, so the typing passthrough has to step aside
-    #: for the row's own keys explicitly: Space is both this row's toggle and
-    #: a printable character, and without this it typed a space into the
-    #: composer instead of expanding the row it was standing on. Derived from
-    #: BINDINGS rather than restated, so a fifth key cannot drift out of sync.
-    #: BINDINGS is typed as accepting bare tuples as well as Binding objects, so
-    #: the key name is read through a narrowing step rather than assumed.
-    _BOUND_KEYS = frozenset(
-        key.strip()
-        for binding in BINDINGS
-        for key in (binding.key if isinstance(binding, Binding) else binding[0]).split(",")
-    )
-
-    can_focus = True
+    #: Shared by every expandable action row; naming it here lets the base
+    #: toggle expansion without knowing this subclass's CSS selector.
+    EXPANDED_CLASS = "tool-expanded"
 
     def __init__(
         self,
@@ -1216,182 +1178,20 @@ class ToolCard(TranscriptBlock):
         """
         return bool(self._output) or bool(self._diff) or self._state == "running"
 
-    @property
-    def expanded(self) -> bool:
-        """True while the full output is revealed beneath the summary row."""
-        return self._expanded
-
-    def toggle_expanded(self) -> bool:
-        """Flip the expansion (no-op with nothing to show); returns the state.
-
-        Also nudges the transcript to re-decide the gap below this card: a
-        card that just grew from one row to twenty may change what the block
-        under it needs, and only the container can answer that.
-
-        An OPEN card can always be closed, even once ``can_expand`` has gone
-        false under it. That is reachable now that running cards open: expand a
-        live call, let it finish having printed nothing, and the gate that
-        guards opening would have refused to let it shut again — a card stuck
-        open is the same trap as a card that will not open.
-        """
-        if not self._expanded and not self.can_expand():
-            return self._expanded
-        self._expanded = not self._expanded
-        self.set_class(self._expanded, "tool-expanded")
+    def _after_toggle(self) -> None:
+        """An expand/collapse supersedes any earlier inert-row answer."""
         self._clear_notice(repaint=False)
-        self._refresh_row()
-        parent = self.parent
-        if isinstance(parent, TranscriptView):
-            parent.refresh_gap_after(self)
-        return self._expanded
 
-    def activate(self) -> bool:
-        """Run the row's one action; returns True when it expanded/collapsed.
+    def _on_inert_activation(self) -> None:
+        self._flash_notice()
 
-        The SINGLE entry point behind both the mouse and the keyboard, so the
-        two can never drift into answering a click and ignoring a keystroke.
-        With nothing to reveal it flashes an answer instead of returning
-        silently: an affordance the user has already been told about (the row
-        lights, the hint slot exists) must never absorb an activation without
-        a visible consequence.
-        """
-        if not self.can_expand():
-            self._flash_notice()
-            return False
-        self.toggle_expanded()
-        return True
+    def _has_activation_feedback(self) -> bool:
+        return bool(self._notice)
 
-    def action_activate(self) -> None:
-        """Enter/Space on a focused row."""
-        self.activate()
-
-    def action_focus_next_action(self) -> None:
-        """Down: the next focusable row, or out of the ledger entirely."""
-        self._move_focus(1)
-
-    def action_focus_previous_action(self) -> None:
-        """Up: the previous focusable row, or out of the ledger entirely."""
-        self._move_focus(-1)
-
-    def _move_focus(self, delta: int) -> None:
-        """Hand focus to a neighbouring card, else to the screen's tab order.
-
-        Falling through at the ends is what makes the ledger something a
-        keyboard can pass THROUGH rather than get stuck in: Down off the last
-        action reaches the composer, Up off the first reaches the transcript
-        itself, where the scroll keys mean what they always meant.
-        """
-        parent = self.parent
-        if isinstance(parent, TranscriptView) and parent.focus_neighbour(self, delta):
-            return
-        screen = self.screen
-        if delta > 0:
-            screen.focus_next()
-        else:
-            screen.focus_previous()
-
-    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Mouse affordance: the whole row is the target.
-
-        The event is only stopped when the click actually toggled something.
-        A click on an inert row still gets its answer, but it keeps bubbling
-        so the transcript's own click handling (selection, scroll anchoring)
-        is not swallowed by a row that had nothing to do.
-        """
-        if self.activate():
-            event.stop()
-
-    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Typing on a focused row goes to the COMPOSER, not into the void.
-
-        The row is a focus stop so the keyboard can reach the expander — but
-        it is not somewhere to type, and a transcript that silently swallows
-        a sentence is a worse trap than one that could never be focused. The
-        app has exactly one text input, so any printable key is unambiguous:
-        hand it the focus and re-post the keystroke there, and the user never
-        has to discover that a row had focus at all.
-
-        This runs BEFORE :attr:`BINDINGS` — Textual dispatches the focused
-        widget's message handlers first and only then resolves its bindings —
-        so the row's own keys are excluded here by hand. That is not a
-        formality: Space is a printable character, and without the exclusion
-        it typed a space into the composer instead of expanding the row the
-        user was standing on.
-
-        A FRESH ``Key`` is posted rather than the original: the event that
-        reached this handler is already part-way through Textual's dispatch
-        (bubbling, default-handling flags) and re-delivering it would be
-        re-entering a lifecycle it has half finished.
-        """
-        if event.key in self._BOUND_KEYS or not event.is_printable:
-            return
-        composer = self._composer()
-        if composer is None:
-            return
-        composer.focus()
-        composer.post_message(Key(event.key, event.character))
-        event.stop()
-        event.prevent_default()
-
-    def _composer(self):  # type: ignore[no-untyped-def]
-        """The app's one text input, or None when there is not one.
-
-        Imported lazily and queried defensively: the card is mounted in
-        harnesses that host a transcript and nothing else, and a missing
-        composer there must degrade to "the key does nothing" rather than
-        raise out of a key handler.
-        """
-        from local_operator.tui.widgets.editor import Editor
-
-        try:
-            return self.app.query_one(Editor)
-        except Exception:
-            return None
-
-    def on_enter(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Pointer over an expandable row: light the hint up to `dim`."""
-        self._set_hovered(True)
-
-    def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Pointer gone: the hint goes out again, unless focus is holding it."""
-        self._set_hovered(False)
-
-    def on_focus(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Keyboard on the row: show what Enter would do."""
-        self._set_focused(True)
-
-    def on_blur(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Focus elsewhere: the offer goes quiet, and so does any notice."""
-        self._set_focused(False)
-
-    def _set_hovered(self, hovered: bool) -> None:
-        """Repaint only when the hover state actually changes something.
-
-        A row with nothing to expand shows no hint, so hovering it costs
-        nothing — the transcript is a long list and the pointer crosses a
-        lot of rows on the way anywhere. The focus check is what keeps the
-        pointer from erasing a hint the keyboard put there.
-        """
-        if hovered == self._hovered or not self.can_expand():
-            self._hovered = hovered
-            return
-        self._hovered = hovered
-        if not self._focused:
-            self._refresh_row()
-
-    def _set_focused(self, focused: bool) -> None:
-        """Track keyboard focus; repaint only when it changes what the row says."""
-        if focused == self._focused:
-            return
-        self._focused = focused
-        had_notice = bool(self._notice)
-        if not focused:
-            # A notice is the answer to an activation on THIS row. Carrying it
-            # past the row losing focus would leave "no output" sitting on a
-            # card the user has moved away from, reading as a permanent state.
-            self._clear_notice(repaint=False)
-        if self.can_expand() or had_notice:
-            self._refresh_row()
+    def _clear_activation_feedback(self) -> None:
+        # A notice answers an activation on THIS row. Carrying it past blur
+        # would leave "no output" looking like a permanent state.
+        self._clear_notice(repaint=False)
 
     def _flash_notice(self) -> None:
         """Put the inert-row answer in the hint slot for a couple of seconds.

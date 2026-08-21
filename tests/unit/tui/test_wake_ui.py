@@ -11,12 +11,20 @@ empty) — plus the session event that carries a live fire to the front end.
 from __future__ import annotations
 
 import pytest
+from rich.text import Text
 from textual.app import App
 
 from local_operator.harness.types import WakeDeliveredEvent
 from local_operator.harness.wake import WakeSchedule
-from local_operator.tui.widgets.transcript import WakeBlock
+from local_operator.tui.widgets.tool_card import COLLAPSE_HINT, EXPAND_HINT
+from local_operator.tui.widgets.transcript import (
+    GAP_CLASS,
+    NoticeBlock,
+    TranscriptView,
+    WakeBlock,
+)
 from local_operator.tui.widgets.wake_panel import WakePanel
+from tests.unit.tui.conftest import StyledTranscriptApp
 
 LIVE_TEXT = (
     "(alarm) Scheduled wake w3 (3/8, every 1h) — "
@@ -29,37 +37,163 @@ CATCHUP_TEXT = (
 )
 
 
+def _wake_text(block: WakeBlock) -> Text:
+    """The applied Rich text, narrowed once for pyright and every assertion."""
+    rendered = block.renderable
+    assert isinstance(rendered, Text)
+    return rendered
+
+
 class TestWakeBlock:
     def test_collapsed_line_names_the_wake_and_hides_the_cancel_howto(self) -> None:
         block = WakeBlock(LIVE_TEXT)
-        rendered = str(block._build())
+        rendered = block._build_row(80).plain
         assert "w3" in rendered
+        assert "wake" in rendered  # the name column, matching the tool ledger
         assert "check the build" not in rendered  # the body stays collapsed
         # The cancel instruction is for the model, not the user reading the line.
         assert "cancel with wake(" not in rendered
-        assert "message" in rendered  # the collapsed line advertises the expansion
+        # The envelope prefix is the model's framing; the card's fill already
+        # says this is a delivery, so repeating "(alarm)" on the summary is
+        # the dim single-line the user could not find.
+        assert "(alarm)" not in rendered
+        # At rest the expand hint is silent — the fill and the icon are the
+        # affordance, the same contract as a settled tool row.
+        assert EXPAND_HINT not in rendered
+        assert "message" not in rendered
 
     def test_expand_reveals_the_full_message(self) -> None:
         block = WakeBlock(LIVE_TEXT)
         assert block.expanded is False
         assert block.toggle_expanded() is True
-        expanded = str(block._build())
+        expanded = block._build_content(80).plain
         assert "check the build" in expanded
+        assert "w3" in expanded  # the summary row stays
 
     def test_catchup_line_marks_the_folded_misses(self) -> None:
         block = WakeBlock(CATCHUP_TEXT, catchup=True)
-        rendered = str(block._build())
-        assert "Wake catch-up" in rendered
+        rendered = block._build_row(80).plain
+        assert "catch-up" in rendered
         assert "1 missed wake" in rendered
         assert "w1" in rendered
         # The model-facing "(alarm) The session resumed…" preamble must NOT
         # leak into the user-facing headline (review round 3, m3).
         assert "(alarm)" not in rendered
+        block.toggle_expanded()
+        expanded = block._build_content(80).plain
+        assert "check the backup" in expanded
+        assert "- w1" in expanded
 
     def test_activate_toggles_like_the_tool_ledger(self) -> None:
+        """``activate`` returns True when it toggled, matching ToolCard —
+        both expand and collapse are the row's one action, so both report
+        success. The old return was the new expanded state, which made a
+        collapse look like a no-op to any caller that checked the bool."""
         block = WakeBlock(LIVE_TEXT)
         assert block.activate() is True
-        assert block.activate() is False
+        assert block.expanded is True
+        assert block.activate() is True
+        assert block.expanded is False
+
+    def test_hint_appears_only_when_pointed_at_or_focused(self) -> None:
+        """Same two-pointer contract as ToolCard: at rest the fill is the
+        whole affordance; the hint lights under the pointer or the keyboard."""
+        block = WakeBlock(LIVE_TEXT)
+        assert EXPAND_HINT not in block._build_row(80).plain
+
+        block._set_hovered(True)
+        assert EXPAND_HINT in block._build_row(80).plain
+
+        block._set_hovered(False)
+        block._set_focused(True)
+        assert EXPAND_HINT in block._build_row(80).plain
+
+        block.toggle_expanded()
+        row = block._build_row(80).plain
+        assert COLLAPSE_HINT in row and EXPAND_HINT not in row
+
+    def test_the_pointer_leaving_does_not_put_out_a_focused_rows_hint(self) -> None:
+        block = WakeBlock(LIVE_TEXT)
+        block._set_focused(True)
+        block._set_hovered(True)
+        block._set_hovered(False)
+        assert EXPAND_HINT in block._build_row(80).plain
+
+    def test_collapsed_card_is_one_row_and_expanded_is_taller(self) -> None:
+        block = WakeBlock(LIVE_TEXT)
+        assert block.spans_multiple_rows() is False
+        block.toggle_expanded()
+        assert block.spans_multiple_rows() is True
+
+
+@pytest.mark.asyncio
+async def test_real_pointer_hover_and_click_use_the_tool_trace_contract() -> None:
+    """Exercise the actual Textual event path under the production sheet.
+
+    Unit calls to ``_set_hovered`` prove the row builder; this proves the
+    terminal receives a hand pointer, the real hover event reveals the hint,
+    and a click grows/collapses the card without losing the one-row gap below.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        wake = WakeBlock(LIVE_TEXT)
+        below = NoticeBlock("trying another account", "warning")
+        view.append_block(wake)
+        view.append_block(below)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert wake.size.height == 1
+        assert below.has_class(GAP_CLASS)
+        assert below.region.y - wake.region.y == 2
+        assert EXPAND_HINT not in _wake_text(wake).plain
+
+        landed = await pilot.hover(wake)
+        assert landed, "hover missed the wake card"
+        await pilot.pause()
+        assert app.screen._pointer_shape == "pointer"
+        assert EXPAND_HINT in _wake_text(wake).plain
+
+        await pilot.click(wake)
+        await pilot.pause()
+        assert wake.expanded is True
+        assert wake.size.height == 2
+        assert COLLAPSE_HINT in _wake_text(wake).plain
+        assert below.region.y - wake.region.y == 3
+
+        await pilot.click(wake)
+        await pilot.pause()
+        assert wake.expanded is False
+        assert wake.size.height == 1
+        assert below.region.y - wake.region.y == 2
+
+
+@pytest.mark.asyncio
+async def test_focused_wake_expands_and_collapses_on_enter_and_space() -> None:
+    """The keyboard half of the affordance is not optional: a terminal may
+    have no mouse reporting, and focus has to reveal what Enter will do."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        wake = WakeBlock(LIVE_TEXT)
+        view.append_block(wake)
+        await pilot.pause()
+
+        wake.focus()
+        await pilot.pause()
+        assert wake.has_focus
+        assert EXPAND_HINT in _wake_text(wake).plain
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert wake.expanded is True
+        assert COLLAPSE_HINT in _wake_text(wake).plain
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert wake.expanded is False
+        assert EXPAND_HINT in _wake_text(wake).plain
 
 
 def _schedule(wake_id: str, message: str, every_ms: int | None = None, **kw) -> WakeSchedule:
