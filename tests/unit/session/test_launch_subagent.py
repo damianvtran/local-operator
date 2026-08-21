@@ -131,8 +131,22 @@ def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatc
     manager = registry.create_agent(
         AgentEditFields(
             name="dashboard-release",
+            security_prompt=None,
+            hosting=None,
+            model=None,
             description="Release the dashboard",
+            tags=None,
             categories=["specialist"],
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
         )
     )
     registry.set_agent_system_prompt(manager.id, "Follow the dashboard release checklist.")

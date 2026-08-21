@@ -72,7 +72,12 @@ class TeamMember(BaseModel):
     """One roster slot: a named agent/role, possibly more than one copy."""
 
     role: str = Field(..., description="Role or specialist agent name.")
-    count: int = Field(1, ge=1, le=16, description="How many of this role to run.")
+    count: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description="How many of this role to run.",
+    )
 
     @field_validator("role")
     @classmethod
