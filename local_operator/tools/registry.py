@@ -18,8 +18,8 @@ from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
-from local_operator.tools.team_tool import build_team_tool
 from local_operator.tools.lsp import build_lsp_tool
+from local_operator.tools.team_tool import build_team_tool
 from local_operator.web_search.tool import build_web_search_tool
 
 #: Factory table: tool name -> builder (createIf convention). ``wake`` takes
