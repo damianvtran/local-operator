@@ -20,13 +20,38 @@ const GLYPH: Record<TranscriptEntry["tool_state"], string> = {
 	interrupted: "–",
 };
 
-function DiffBlock({ diff }: { diff: string }) {
+/** Normalize a details field to display lines. The fold emits args as a dict
+    and diff as a list of lines (the shapes the tools produce), while output
+    and partial are plain strings. Rendering must handle ALL of them: calling
+    .split() on a non-string throws a TypeError, React unmounts the tree, and
+    the user reads it as "tap → whole screen goes blank". */
+function toLines(value: unknown): string[] {
+	if (value == null) return [];
+	if (typeof value === "string") return value.split("\n");
+	if (Array.isArray(value)) return value.map((v) => String(v));
+	if (typeof value === "object") {
+		/* args dict — one "key: value" line per entry. */
+		return Object.entries(value as Record<string, unknown>).map(
+			([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`,
+		);
+	}
+	return [String(value)];
+}
+
+function DiffBlock({ diff }: { diff: string | string[] }) {
+	/* span rows, never <div> inside <pre>: <div> is not phrasing content, so
+	   the HTML parser hoists it out of the <pre> and the expansion repaints
+	   as a broken, layout-filling block — read on the phone as "the whole
+	   page went solid". whitespace-pre-wrap on the container plus block
+	   spans gives the same monospace, per-line-tinted result legally.
+	   toLines accepts the fold's list-of-lines form AND a pre-joined string. */
 	return (
-		<pre className="lo-scroll max-h-64 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm whitespace-pre">
-			{diff.split("\n").map((line, i) => (
-				<div
+		<div className="lo-scroll max-h-64 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap">
+			{toLines(diff).map((line, i) => (
+				<span
 					key={i}
 					className={cn(
+						"block",
 						line.startsWith("+") &&
 							!line.startsWith("+++") &&
 							"text-success",
@@ -37,22 +62,31 @@ function DiffBlock({ diff }: { diff: string }) {
 					)}
 				>
 					{line}
-				</div>
+				</span>
 			))}
-		</pre>
+		</div>
 	);
 }
+
+/** Tools whose expansion is the rendered diff, mirroring the TUI: a
+    write/edit carries its whole new content in args, and showing that
+    payload next to the diff says the same thing twice. For these the args
+    block is dropped and only the diff (+ any output) shows. */
+const DIFF_FIRST_TOOLS = new Set(["write", "edit", "apply_patch", "patch"]);
 
 export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 	const [open, setOpen] = useState(false);
 	const running =
 		entry.tool_state === "running" || entry.tool_state === "composing";
+	const isDiffFirst =
+		DIFF_FIRST_TOOLS.has(entry.tool_name.toLowerCase()) &&
+		entry.details.diff != null;
 	const hasDetails =
 		entry.intent ||
-		entry.details.args ||
 		entry.details.output ||
 		entry.details.diff ||
-		entry.error;
+		entry.error ||
+		(!isDiffFirst && entry.details.args);
 
 	return (
 		<div
@@ -114,7 +148,10 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 				) : null}
 			</button>
 			{open && hasDetails ? (
-				<div className="flex flex-col gap-1.5 pb-1 pl-6">
+				/* Cap the WHOLE expansion, not just its blocks: intent + error +
+				   args + diff + output stack, and unbounded they could still
+				   fill the viewport. The expansion scrolls as one region. */
+				<div className="lo-scroll flex max-h-96 flex-col gap-1.5 overflow-y-auto pb-1 pl-6">
 					{entry.intent ? (
 						<p className="text-body-sm text-ink-muted">
 							{entry.intent}
@@ -125,9 +162,14 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 							{entry.error}
 						</p>
 					) : null}
-					{entry.details.args ? (
-						<div className="rounded-sm bg-sunken p-2">
-							{entry.details.args.split("\n").map((line, i) => {
+					{entry.details.args && !isDiffFirst ? (
+						/* Hidden for write/edit: their args ARE the content the diff
+						   already shows, so the payload would be redundant (the
+						   TUI expands these to the diff alone). max-h + scroll:
+						   an UNBOUNDED args block renders its full height and
+						   fills the screen with the sunken ground. */
+						<div className="lo-scroll max-h-40 overflow-y-auto rounded-sm bg-sunken p-2">
+							{toLines(entry.details.args).map((line, i) => {
 								const sep = line.indexOf(":");
 								return (
 									<div
@@ -158,7 +200,7 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 					) : null}
 					{entry.details.output ? (
 						<pre className="lo-scroll max-h-48 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted">
-							{entry.details.output}
+							{toLines(entry.details.output).join("\n")}
 						</pre>
 					) : null}
 				</div>

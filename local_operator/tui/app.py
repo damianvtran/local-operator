@@ -110,6 +110,7 @@ from local_operator.tui.events import (
     TurnBoundaryStart,
     TurnEnded,
     TurnStarted,
+    UserMessageStart,
     WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
@@ -10168,6 +10169,22 @@ class OperatorApp(App[None]):
         self._tool_cards.clear()
         self._composing_cards.clear()
         return len(cards)
+
+    def on_user_message_start(self, message: UserMessageStart) -> None:
+        """A user prompt reached the session — paint it, unless it's already up.
+
+        The TUI's own prompt path paints its UserBlock the instant the user
+        hits send (``_submit_prompt``), so ITS user MessageStartEvent arrives
+        to a block already on screen. A prompt sent from the PHONE never
+        painted here — this is the mobile→TUI direction that was missing. Tell
+        them apart by the tail block: same text already leading means this
+        event is the TUI prompt's own echo, not a new one."""
+        transcript = self._transcript_view()
+        blocks = transcript.blocks()
+        for block in reversed(blocks[-3:]):
+            if isinstance(block, UserBlock) and block.text() == message.prompt:
+                return
+        self._append_block(UserBlock(message.prompt, message.image_count))
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
         """A message opened — but nothing is MOUNTED until text actually arrives.

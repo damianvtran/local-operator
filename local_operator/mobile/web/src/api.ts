@@ -13,6 +13,7 @@ import type {
 	PastSession,
 	SessionSummary,
 	SlashCommand,
+	TranscriptEntry,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -58,6 +59,27 @@ export function getPastSessions(): Promise<{ sessions: PastSession[] }> {
 	return request("/api/sessions/past");
 }
 
+/** Search past sessions by name, id, or conversation body (the /resume
+    picker's mechanism). Empty query returns the recent list. */
+export function searchSessions(
+	q: string,
+	limit = 40,
+): Promise<{ sessions: PastSession[]; query: string }> {
+	const params = new URLSearchParams({ q, limit: String(limit) });
+	return request(`/api/sessions/search?${params}`);
+}
+
+/** Reopen a past session as a new live session the phone attaches to. */
+export function resumeSession(
+	sessionId: string,
+): Promise<{ ok: boolean; pid: number; session_id: string }> {
+	return request("/api/sessions/resume", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ session_id: sessionId }),
+	});
+}
+
 export function startSession(input: {
 	cwd: string;
 	provider?: string;
@@ -79,4 +101,18 @@ export function sendCommand(
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(op),
 	});
+}
+
+/** Older transcript entries for lazy loading. ``before`` is the id of the
+    oldest entry the client already has; the daemon returns the page
+    immediately older than it (chronological within the page) plus whether
+    more history exists beyond. */
+export function getHistory(
+	pid: number,
+	before: string | null,
+	limit = 80,
+): Promise<{ entries: TranscriptEntry[]; has_more: boolean }> {
+	const q = new URLSearchParams({ limit: String(limit) });
+	if (before) q.set("before", before);
+	return request(`/api/sessions/${pid}/history?${q}`);
 }

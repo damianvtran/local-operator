@@ -10,7 +10,8 @@
     "check": "tsc -b --noEmit",
     "gen-themes": "node scripts/generate-theme-css.mjs",
     "check-themes": "node scripts/generate-theme-css.mjs --check",
-    "prebuild": "node scripts/generate-theme-css.mjs"
+    "inline-mark": "node scripts/inline-mark.mjs",
+    "prebuild": "node scripts/generate-theme-css.mjs && node scripts/inline-mark.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",

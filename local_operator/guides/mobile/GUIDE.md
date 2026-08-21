@@ -61,6 +61,17 @@ Idempotent. Generates a Keychain password if none exists (keeps an existing
 one — rotation never happens behind their back), writes the LaunchAgent,
 loads it, waits for `/healthz` and a closed auth gate.
 
+Install also makes sure the phone UI is actually servable. The wheel ships
+`local_operator/mobile/web/dist/` pre-built, but a source checkout or an
+editable install has none (`dist/` is gitignored). When the bundle is
+missing, `install` builds it in place (`pnpm install --frozen-lockfile &&
+pnpm build`, via corepack when there is no global pnpm) and **fails the
+install with a clear error if it cannot** — rather than leaving the daemon
+up with every authed GET answering 503 "bundle not built". `lop mobile
+status` reports the bundle state (`built` / `buildable` /
+`missing-sources`). If a machine shows that 503, the fix is `lop mobile
+install` again, not a hand-built bundle.
+
 On a machine without launchd (Linux, a container, a CI runner):
 
 ```bash
@@ -134,6 +145,10 @@ flag; check `lop mobile logs`.
 - **`auth gate: OPEN`.** The daemon is serving `/api` without a cookie.
   Stop. Do not share the URL. Check `lop mobile logs`; reinstall if the
   password never landed in the Keychain.
+- **Phone or login shows "mobile web bundle not built" (503).** The install
+  has no `dist/` (source checkout or editable install, where it is
+  gitignored). Run `lop mobile install` — it builds the bundle. Do not
+  hand-build and forget it; the next `install` is the self-healing path.
 - **Phone shows "connecting to session…".** The TUI (or a phone-spawned
   child) is not publishing, or the daemon has not redialed yet. `status`
   should show the pid; if it is `wedged`, the process is alive but its

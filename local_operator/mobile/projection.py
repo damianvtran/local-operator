@@ -34,6 +34,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -121,6 +122,80 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
         return 0, 0
 
 
+def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntry]:
+    """Fold a full message history into transcript entries, UNCAPPED.
+
+    The session-side ``ProjectionFold.fold_history`` caps to the live tail
+    (the phone's realtime view is a window, not the whole log). The daemon's
+    history endpoint needs the SAME render semantics over the FULL history so
+    it can serve the older pages the cap dropped — this is the lazy-load
+    source. Pure (no ProjectionFold state), so the daemon can call it per
+    request without touching the live fold.
+
+    Tool-result diffs ride in ``provider_payload["details"]`` (where the
+    harness stores them); rehydrated messages carry that payload, so the
+    write/edit rows expand to their diff exactly like the live ones.
+    """
+    entries: list[TranscriptEntry] = []
+    # tool_call_id -> its row, local to this fold (a fresh fold re-pairs).
+    tool_rows: dict[str, TranscriptEntry] = {}
+    tool_args: dict[str, dict[str, Any]] = {}
+    for message in history:
+        if isinstance(message, CustomMessage):
+            text = _message_text(message)
+            if text:
+                entries.append(
+                    TranscriptEntry(id=message.id, kind="notice", text=_compact(text, 400))
+                )
+            continue
+        if message.role == "user":
+            # An image-only prompt (composer allows "" text + images) must not
+            # round-trip through history as an EMPTY bubble. Render a receipt
+            # line naming the attachments, matching the live fold's receipt.
+            images = sum(1 for b in message.content if isinstance(b, ImageContent))
+            text = message.text
+            if not text.strip() and images:
+                text = f"[{images} image{'s' if images != 1 else ''} attached]"
+            entries.append(TranscriptEntry(id=message.id, kind="user", text=text))
+        elif message.role == "assistant":
+            if message.text:
+                entries.append(TranscriptEntry(id=message.id, kind="assistant", text=message.text))
+            for call in message.tool_calls:
+                entry = TranscriptEntry(
+                    id=f"{message.id}:{call.id}",
+                    kind="tool",
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    tool_state="done",
+                    summary=_summarize_args(call.name, call.arguments or {}),
+                )
+                entries.append(entry)
+                tool_rows[call.id] = entry
+                tool_args[call.id] = call.arguments or {}
+        elif message.role == "tool":
+            entry = tool_rows.get(message.tool_call_id or "")
+            if entry is not None:
+                entry.tool_state = "failed" if message.is_error else "done"
+                if message.is_error:
+                    entry.error = _compact(message.text, 200)
+                result_details = (message.provider_payload or {}).get("details")
+                entry.diff_added, entry.diff_removed = _diff_counts(result_details)
+                details: dict[str, Any] = {}
+                args = tool_args.get(message.tool_call_id or "", {})
+                if args:
+                    details["args"] = {
+                        k: _compact(str(v), TOOL_ARGS_CHARS) for k, v in args.items()
+                    }
+                if message.text:
+                    details["output"] = message.text[-TOOL_OUTPUT_TAIL_CHARS:]
+                if isinstance(result_details, dict):
+                    for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
+                        if key in result_details:
+                            details[key] = result_details[key]
+                entry.details = details
+    return entries
+
+
 class ProjectionFold:
     """Incremental fold of one session's events into a SessionProjection."""
 
@@ -141,6 +216,8 @@ class ProjectionFold:
         # (SubagentProgressEvent is never per-delta by contract).
         self._subagents: dict[str, SubagentRow] = {}
         self._subagent_started_at: dict[str, float] = {}
+        # The working line's clock origin and the label's current source.
+        self._activity_started_at: float | None = None
 
     # -- history -----------------------------------------------------------
 
@@ -191,7 +268,7 @@ class ProjectionFold:
                     )
         # A resumed fold starts clean: no streaming row, no half-run tools.
         self._open_message_id = None
-        self.projection.transcript = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
+        self.projection.transcript = self._cap_tail(entries)
         # Prune the correlation maps to the surviving tail: a long history
         # pairs every historical tool call, and keeping ids whose rows were
         # cut is dead weight per rebind (and a stale hit if a call id were
@@ -241,9 +318,7 @@ class ProjectionFold:
                 self._append(entry)
                 self._open_message_id = event.message.id
             elif isinstance(event.message, Message) and event.message.role == "user":
-                self._append(
-                    TranscriptEntry(id=event.message.id, kind="user", text=event.message.text)
-                )
+                self.absorb_user_event(event.message)
         elif isinstance(event, MessageUpdateEvent):
             if self._open_message_id and event.message.id == self._open_message_id:
                 row = self._find(self._open_message_id)
@@ -352,7 +427,99 @@ class ProjectionFold:
         # and ``extra="allow"`` on AgentEvent means matching must stay
         # structural, not exhaustive-by-name.
         self._sync_subagents()
+        self._derive_activity(event)
         self._bump()
+
+    # -- user turns --------------------------------------------------------------
+
+    def note_user_message(self, text: str, *, steer: bool = False) -> None:
+        """Append the user's own message to the transcript. Called by the
+        handle's prompt/steer path, because the harness only emits
+        MessageStartEvent for ASSISTANT messages — a live user prompt never
+        reaches the fold as an event, so without this the phone showed the
+        agent's reply with no sign of what the human asked (and, for a
+        phone-sent prompt, no echo of the tap at all)."""
+        self._append(
+            TranscriptEntry(
+                id=f"user-{time.time_ns()}",
+                kind="steer" if steer else "user",
+                text=text,
+                final=True,
+            )
+        )
+        self._bump()
+
+    def absorb_user_event(self, message: Message) -> bool:
+        """Fold a live user ``MessageStartEvent``. The session emits these for
+        user turns now, so a prompt from ANY front end reaches the fold — the
+        TUI→phone direction that was missing. Returns True when it added the
+        row; False when the row was already there (the handle's optimistic
+        ``note_user_message`` echo for a phone-sent prompt), so the same
+        message never appears twice on the phone."""
+        if not isinstance(message, Message) or message.role != "user":
+            return False
+        text = message.text
+        # De-dupe the optimistic echo: same text already sitting at the tail.
+        for entry in reversed(self.projection.transcript[-3:]):
+            if entry.kind in ("user", "steer") and entry.text == text:
+                return False
+        self._append(TranscriptEntry(id=message.id, kind="user", text=text, final=True))
+        return True
+
+    def note_prompt_rejected(self, reason: str) -> None:
+        """A quiet notice that a phone prompt did NOT land (the session
+        rejected it — busy or compacting). The user row is never echoed, so
+        without this the tap would look like it vanished into nothing."""
+        self._append(
+            TranscriptEntry(
+                id=f"rej-{time.time_ns()}",
+                kind="notice",
+                text=_compact(f"not sent: {reason}", 200),
+            )
+        )
+        self._bump()
+
+    # -- working line (TUI WorkingBlock's phone counterpart) -------------------
+
+    def _set_activity(self, label: str, *, restart_clock: bool = False) -> None:
+        """Update the working line's label, resetting its clock only when the
+        KIND of work changed. A tool finishing restarts the wait for the next
+        model call, so the clock belongs to the phase, not the turn."""
+        p = self.projection
+        if restart_clock or self._activity_started_at is None or p.activity != label:
+            self._activity_started_at = time.monotonic()
+        p.activity = label
+        p.activity_started_s = round(time.monotonic() - self._activity_started_at, 1)
+
+    def _derive_activity(self, event: AgentEvent) -> None:
+        """The label the TUI's WorkingBlock would show for this event, from the
+        SAME rule: a running tool's intent, else the stream phase, else
+        "thinking". Empty once the turn settles."""
+        p = self.projection
+        if isinstance(event, AgentStartEvent):
+            self._activity_started_at = time.monotonic()
+            self._set_activity("thinking")
+            return
+        if isinstance(event, (AgentEndEvent, TurnEndEvent)):
+            p.activity = ""
+            p.activity_started_s = 0.0
+            self._activity_started_at = None
+            return
+        if not p.streaming:
+            return
+        if isinstance(event, ToolCallComposeEvent):
+            self._set_activity(event.intent or f"dictating {event.tool_name}")
+        elif isinstance(event, ToolExecutionStartEvent):
+            self._set_activity(event.intent or f"running {event.tool_name}")
+        elif isinstance(event, ToolExecutionEndEvent):
+            # Back to waiting on the model: restart the clock for the gap.
+            self._set_activity("thinking", restart_clock=True)
+        elif isinstance(event, MessageStartEvent):
+            if isinstance(event.message, Message) and event.message.role == "assistant":
+                self._set_activity("responding")
+        elif isinstance(event, MessageUpdateEvent):
+            if p.activity in ("thinking", ""):
+                self._set_activity("responding")
 
     # -- todos / pending / state -------------------------------------------
 
@@ -440,11 +607,28 @@ class ProjectionFold:
 
     def _append(self, entry: TranscriptEntry) -> None:
         self.projection.transcript.append(entry)
-        # Cap by dropping from the front; the web client fetches history
-        # pages when the user scrolls past the tail.
-        overflow = len(self.projection.transcript) - PROJECTION_TRANSCRIPT_LIMIT
-        if overflow > 0:
-            del self.projection.transcript[:overflow]
+        self.projection.transcript = self._cap_tail(self.projection.transcript)
+
+    @staticmethod
+    def _cap_tail(entries: list[TranscriptEntry]) -> list[TranscriptEntry]:
+        """Trim to the render tail WITHOUT losing the opening user message.
+
+        A bare ``[-LIMIT:]`` drops the first user turn on any session longer
+        than the cap — and the opening prompt is the one row that names what
+        the whole conversation is about (and, per the field report, the row
+        that was always missing). Keep the transcript's first user message
+        pinned at the head, then fill the rest from the tail. The web client
+        still pages older history on scroll; this is about the projection
+        never omitting the conversation's own opening.
+        """
+        if len(entries) <= PROJECTION_TRANSCRIPT_LIMIT:
+            return entries
+        tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
+        first_user = next((e for e in entries if e.kind == "user"), None)
+        if first_user is not None and first_user not in tail:
+            # One pinned row + LIMIT-1 tail rows keeps the same bounded size.
+            return [first_user, *tail[:-1]]
+        return tail
 
     def _find(self, entry_id: str | None) -> TranscriptEntry | None:
         if not entry_id:

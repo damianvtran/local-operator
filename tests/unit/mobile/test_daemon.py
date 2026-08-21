@@ -42,10 +42,10 @@ class FakeHandle:
         self.calls.append((name, args, kwargs))
         return f"{name} ok"
 
-    async def prompt(self, text):  # noqa: ANN001, ANN202
+    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
         return await self._record("prompt", text)
 
-    async def steer(self, text):  # noqa: ANN001, ANN202
+    async def steer(self, text, images=None):  # noqa: ANN001, ANN202
         return await self._record("steer", text)
 
     async def abort(self):  # noqa: ANN202

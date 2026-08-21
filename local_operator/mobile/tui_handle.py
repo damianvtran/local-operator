@@ -30,13 +30,18 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.mobile.projection import ProjectionFold
-from local_operator.mobile.registrant import SessionHandle
+from local_operator.mobile.registrant import SessionHandle, image_blocks
 from local_operator.mobile.types import PendingRequest, SessionProjection
 
 if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
 
 logger = logging.getLogger(__name__)
+
+
+# Decode wire images via the shared mobile-contract helper (registrant.py);
+# kept as a module alias so existing call sites stay short.
+_image_blocks = image_blocks
 
 
 class TuiSessionHandle(SessionHandle):
@@ -122,18 +127,28 @@ class TuiSessionHandle(SessionHandle):
 
     # -- mutations: every one hops to the Textual thread ---------------------------
 
-    async def prompt(self, text: str) -> str:
+    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+        image_blocks = _image_blocks(images)
+
         def submit() -> None:
-            self._app._submit_prompt(text, [], None)
+            self._app._submit_prompt(text, image_blocks, None)
 
         await self._on_app(submit)
+        self._fold.note_user_message(text)
+        if self._on_projection is not None:
+            self._on_projection()
         return "prompt sent"
 
-    async def steer(self, text: str) -> str:
+    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+        image_blocks = _image_blocks(images)
+
         def do_steer() -> None:
-            self._session().steer(text)
+            self._session().steer(text, image_blocks)
 
         await self._on_app(do_steer)
+        self._fold.note_user_message(text, steer=True)
+        if self._on_projection is not None:
+            self._on_projection()
         return "steering queued"
 
     async def abort(self) -> str:
@@ -237,6 +252,12 @@ class TuiSessionHandle(SessionHandle):
             model_selector=_selector(session),
             effort=_current_effort(session),
             effort_ladder=_ladder(session),
+            # Re-read the title on every push: it is generated in the
+            # background and lands (session.set_conversation_name) AFTER the
+            # projection was first built, so seeding it once at startup leaves
+            # the phone on "untitled" forever. Cheap attribute read; the fold
+            # already bumps the epoch only when something actually changed.
+            conversation_name=getattr(session, "conversation_name", "") or None,
             streaming=bool(getattr(session, "is_streaming", False)),
         )
 

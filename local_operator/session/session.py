@@ -79,6 +79,7 @@ from local_operator.harness.types import (
     ImageContent,
     LoopConfig,
     Message,
+    MessageStartEvent,
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
@@ -2349,6 +2350,15 @@ class Session:
         try:
             for message in initial:
                 await self._transcript.append_message(message)
+                # Announce USER turns to every subscriber. The loop only emits
+                # MessageStartEvent for ASSISTANT messages, so without this a
+                # user prompt — from any front end — never reaches the other
+                # surfaces: a TUI prompt was invisible on the phone, a phone
+                # prompt invisible in the TUI. Emitting here, at the append
+                # point, is the single source both read. Wake/continuation
+                # internals are CustomMessage, so this stays user-authored only.
+                if isinstance(message, Message) and message.role == "user":
+                    await self._emit(MessageStartEvent(message=message))
 
             blocks = self._system_blocks_provider()
             if inspect.isawaitable(blocks):
@@ -2732,6 +2742,15 @@ class Session:
             # the conversation, and it is only in the conversation once it is on
             # disk and in the list being handed back to the loop.
             await self._emit(SteeringDeliveredEvent(count=len(messages)))
+            # Announce each delivered steer as a user MessageStartEvent too, so
+            # EVERY front end paints the steer TEXT — not only a count. A steer
+            # injected from the phone during a wake/continuation turn never
+            # passed through prompt()'s _run_turn announcement, so the TUI had
+            # no user row for it at all. Same event, same de-dup as a prompt:
+            # the steering front end's optimistic echo is matched by content.
+            for message in messages:
+                if isinstance(message, Message) and message.role == "user":
+                    await self._emit(MessageStartEvent(message=message))
         return messages
 
     def _has_urgent_steering(self) -> bool:

@@ -32,9 +32,14 @@ export type SubagentStatus =
 	| "parked";
 
 export interface TranscriptEntryDetails {
-	args?: string;
+	/* The fold serializes these in the shape the tool produced, NOT always
+	   strings: args rides through as a dict ({path, old_text, …}), diff as
+	   a list of unified-diff lines. Callers must normalize (see toLines in
+	   tool-row.tsx) — treating them as strings and calling .split() throws,
+	   which unmounts the whole tree and reads as "tap → blank screen". */
+	args?: string | Record<string, unknown>;
 	output?: string;
-	diff?: string;
+	diff?: string | string[];
 	partial?: string;
 }
 
@@ -101,6 +106,11 @@ export interface SessionProjection {
 	effort: string;
 	effort_ladder: string[];
 	streaming: boolean;
+	/** What the turn is doing right now, TUI-working-line style: "thinking",
+	    "responding", or a running tool's intent. Empty when idle. */
+	activity: string;
+	/** Seconds since the activity began (server-computed). */
+	activity_started_s: number;
 	/** Why streaming last stopped — "completed" | "aborted" | "" before the
 	    first turn ends. The resume affordance reads this, never an inference
 	    from the streaming flag flipping. */
@@ -155,6 +165,9 @@ export interface PastSession {
 	id: string;
 	name: string;
 	mtime: number;
+	/** True when this row matched only on what was SAID in the conversation,
+	    not its name/id — the UI marks these so the hit doesn't look arbitrary. */
+	body_match?: boolean;
 }
 
 export interface Directories {
@@ -164,9 +177,15 @@ export interface Directories {
 
 /* ---- command ops (POST /api/sessions/{pid}/command) ---------------------- */
 
+/** A pasted / dropped image, base64 — the wire form the handles decode. */
+export interface PromptImage {
+	data_b64: string;
+	mime_type: string;
+}
+
 export type CommandOp =
-	| { op: "prompt"; text: string }
-	| { op: "steer"; text: string }
+	| { op: "prompt"; text: string; images?: PromptImage[] }
+	| { op: "steer"; text: string; images?: PromptImage[] }
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
 	| { op: "set_effort"; effort: string }

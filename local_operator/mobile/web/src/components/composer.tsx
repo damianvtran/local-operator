@@ -13,7 +13,53 @@ import { getCommands, sendCommand } from "../api";
 import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
 import { useDraft } from "../store";
-import type { SessionProjection, SlashCommand } from "../types";
+import type { PromptImage, SessionProjection, SlashCommand } from "../types";
+
+/** One attached image, kept as the wire form plus a local object URL for the
+    thumbnail strip. */
+interface AttachedImage extends PromptImage {
+	/** Object URL for the thumbnail preview; revoked on remove/send. */
+	preview: string;
+}
+
+/* Read a pasted/dropped image File into the wire form. Oversize images are
+   downscaled first: a 12 MP phone photo is several MB of base64 that the
+   provider would reject anyway, and the rebound the session would do on the
+   way in costs the same pixels. 1568px matches the session's own bound. */
+const MAX_IMAGE_EDGE = 1568;
+async function fileToImage(file: File): Promise<AttachedImage | null> {
+	if (!file.type.startsWith("image/")) return null;
+	const preview = URL.createObjectURL(file);
+	try {
+		const bmp = await createImageBitmap(file);
+		let { width, height } = bmp;
+		const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(width, height));
+		width = Math.round(width * scale);
+		height = Math.round(height * scale);
+		const canvas = document.createElement("canvas");
+		canvas.width = width;
+		canvas.height = height;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) return null;
+		ctx.drawImage(bmp, 0, 0, width, height);
+		const blob: Blob | null = await new Promise((res) =>
+			canvas.toBlob(res, file.type === "image/png" ? "image/png" : "image/jpeg", 0.9),
+		);
+		if (!blob) return null;
+		const buf = await blob.arrayBuffer();
+		let bin = "";
+		const bytes = new Uint8Array(buf);
+		for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+		return {
+			data_b64: btoa(bin),
+			mime_type: blob.type,
+			preview,
+		};
+	} catch {
+		URL.revokeObjectURL(preview);
+		return null;
+	}
+}
 
 
 /** Detect "/cmd args" at the very start of the draft — the slash trigger. */
@@ -188,7 +234,10 @@ export function Composer({
 	const [slashOpen, setSlashOpen] = useState(false);
 	const [sending, setSending] = useState(false);
 	const [error, setError] = useState("");
+	const [images, setImages] = useState<AttachedImage[]>([]);
+	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
 
 	/* The resume affordance is driven by the WIRE fact (stop_reason), not an
 	   inference from the streaming flag: a turn that completes also flips
@@ -205,14 +254,41 @@ export function Composer({
 
 	const disabled = projection.ended;
 
+	const addFiles = async (files: Iterable<File>) => {
+		for (const f of files) {
+			const img = await fileToImage(f);
+			if (img) setImages((cur) => [...cur, img]);
+		}
+	};
+
+	/* The attach button's file picker. The pipeline is image-only today
+	   (paste/drop already are), so the input scopes to images; a non-image
+	   pick is ignored rather than sent as a broken base64 block. */
+	const onPickFiles = (list: FileList | null) => {
+		if (!list) return;
+		void addFiles(Array.from(list));
+		/* Reset so picking the SAME file twice still fires change. */
+		if (fileInputRef.current) fileInputRef.current.value = "";
+	};
+
+	const removeImage = (preview: string) => {
+		setImages((cur) => {
+			const hit = cur.find((i) => i.preview === preview);
+			if (hit) URL.revokeObjectURL(hit.preview);
+			return cur.filter((i) => i.preview !== preview);
+		});
+	};
+
 	const send = async (raw: string, op?: "prompt" | "steer") => {
 		const trimmed = raw.trim();
-		if (!trimmed || sending || disabled) return;
+		if ((!trimmed && images.length === 0) || sending || disabled) return;
 		setSending(true);
 		setError("");
 		try {
-			/* Slash input routes to the slash op rather than prompt. */
-			if (trimmed.startsWith("/") && !trimmed.includes("\n")) {
+			/* Slash input routes to the slash op rather than prompt — and only
+			   when there is no attachment, since a "/…" caption with an image
+			   is a prompt, not a command. */
+			if (trimmed.startsWith("/") && !trimmed.includes("\n") && images.length === 0) {
 				const space = trimmed.indexOf(" ");
 				const command =
 					space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
@@ -221,7 +297,15 @@ export function Composer({
 			} else {
 				const chosen =
 					op ?? (projection.streaming ? "steer" : "prompt");
-				await sendCommand(pid, { op: chosen, text: trimmed });
+				await sendCommand(pid, {
+					op: chosen,
+					text: trimmed,
+					images: images.length
+						? images.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
+						: undefined,
+				});
+				images.forEach((i) => URL.revokeObjectURL(i.preview));
+				setImages([]);
 			}
 			setText("");
 		} catch (e) {
@@ -275,18 +359,85 @@ export function Composer({
 
 			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 
-			<div className="flex items-end gap-2">
-				<div className="flex min-w-0 flex-1 items-end rounded-md border border-control bg-elevated px-3 py-2">
+			{images.length > 0 ? (
+				<div className="flex flex-wrap gap-1.5">
+					{images.map((img) => (
+						<button
+							key={img.preview}
+							type="button"
+							onClick={() => removeImage(img.preview)}
+							aria-label="remove attachment"
+							className="relative size-14 overflow-hidden rounded-sm border border-control"
+						>
+							<img
+								src={img.preview}
+								alt=""
+								className="size-full object-cover"
+							/>
+							<span className="absolute inset-0 flex items-center justify-center bg-scrim text-meta text-on-accent opacity-0 active:opacity-100">
+								remove
+							</span>
+						</button>
+					))}
+				</div>
+			) : null}
+
+			<div
+				className="flex items-end gap-2"
+				onDragOver={(e) => {
+					e.preventDefault();
+					if (!disabled) setDragOver(true);
+				}}
+				onDragLeave={() => setDragOver(false)}
+				onDrop={(e) => {
+					e.preventDefault();
+					setDragOver(false);
+					if (!disabled) void addFiles(e.dataTransfer.files);
+				}}
+			>
+				<input
+					ref={fileInputRef}
+					type="file"
+					accept="image/*"
+					multiple
+					className="hidden"
+					onChange={(e) => onPickFiles(e.target.files)}
+				/>
+				<button
+					type="button"
+					onClick={() => fileInputRef.current?.click()}
+					disabled={disabled}
+					aria-label="attach image"
+					className="flex size-11 shrink-0 items-center justify-center rounded-full border border-control text-ink-muted active:bg-elevated disabled:opacity-50"
+				>
+					{/* paperclip, drawn so it needs no icon font */}
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+					</svg>
+				</button>
+				<div
+					className={cn(
+						"flex min-w-0 flex-1 items-end rounded-md border bg-elevated px-3 py-2",
+						dragOver ? "border-accent" : "border-control",
+					)}
+				>
 					<textarea
 						ref={textareaRef}
 						value={text}
 						onChange={(e) => onChange(e.target.value)}
+						onPaste={(e) => {
+							const files = Array.from(e.clipboardData.files);
+							if (files.length > 0) {
+								e.preventDefault();
+								void addFiles(files);
+							}
+						}}
 						placeholder={
 							disabled
 								? "session ended"
 								: projection.streaming
 									? "steer this turn…"
-									: "message"
+									: "message…"
 						}
 						disabled={disabled}
 						rows={1}
@@ -317,7 +468,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={() => void send(text)}
-					disabled={!text.trim() || sending || disabled}
+					disabled={(!text.trim() && images.length === 0) || sending || disabled}
 					aria-label={projection.streaming ? "steer" : "send"}
 					className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
 				>

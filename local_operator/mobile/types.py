@@ -102,7 +102,7 @@ class SessionRecord:
 # Requests the daemon may send. Kept as Literal aliases rather than enums so
 # frames stay plain dicts — json.loads output needs no decoding step.
 ControlOp = Literal[
-    "prompt",  # {text} — a full user turn (or queue while streaming)
+    "prompt",  # {text, images?} — a full user turn (or queue while streaming)
     "steer",  # {text} — inject mid-turn
     "abort",  # {} — the stop button; never kills the session
     "set_model",  # {provider, model_id} — the model sheet's choice
@@ -231,6 +231,14 @@ class SessionProjection:
     effort: str = ""  # current rung; "" when the model has no ladder
     effort_ladder: list[str] = field(default_factory=list)
     streaming: bool = False
+    # What the turn is doing RIGHT NOW, TUI-working-line style: "thinking",
+    # "responding", or the running tool's intent ("auditing merged MRs").
+    # Folded from live events; empty when idle. The phone's working line
+    # reads this and never invents a label.
+    activity: str = ""
+    # Monotonic-ish seconds since the activity began, for the clock next to
+    # the label. Server-computed so every phone paints the same age.
+    activity_started_s: float = 0.0
     # Why streaming last stopped: "completed" (turn finished) or "aborted"
     # (the user/agent stopped it) — the phone's "interrupted — tap to resume"
     # affordance reads THIS, never an inference from streaming flipping,
