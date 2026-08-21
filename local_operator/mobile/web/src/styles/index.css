@@ -274,6 +274,26 @@ html :focus-visible {
 	animation: lo-pulse 1.2s ease-in-out infinite;
 }
 
+/* The lazy-load indicator: a thin accent segment sweeping a short track at
+   the top of the transcript. Subtle by design — it signals "older history is
+   being pulled in" without a button or a spinner's visual weight. */
+@keyframes lo-loadbar {
+	from {
+		transform: translateX(-100%);
+	}
+	to {
+		transform: translateX(300%);
+	}
+}
+.lo-loadbar-fill {
+	animation: lo-loadbar 1.1s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.lo-loadbar-fill {
+		animation: none;
+	}
+}
+
 /*
  * Sheet entrance: the only 240ms motion in the app, spent on something
  * entering the screen. The sheet rises from the bottom edge; the scrim fades.

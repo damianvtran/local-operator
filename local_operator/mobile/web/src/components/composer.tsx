@@ -237,6 +237,7 @@ export function Composer({
 	const [images, setImages] = useState<AttachedImage[]>([]);
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
 
 	/* The resume affordance is driven by the WIRE fact (stop_reason), not an
 	   inference from the streaming flag: a turn that completes also flips
@@ -258,6 +259,16 @@ export function Composer({
 			const img = await fileToImage(f);
 			if (img) setImages((cur) => [...cur, img]);
 		}
+	};
+
+	/* The attach button's file picker. The pipeline is image-only today
+	   (paste/drop already are), so the input scopes to images; a non-image
+	   pick is ignored rather than sent as a broken base64 block. */
+	const onPickFiles = (list: FileList | null) => {
+		if (!list) return;
+		void addFiles(Array.from(list));
+		/* Reset so picking the SAME file twice still fires change. */
+		if (fileInputRef.current) fileInputRef.current.value = "";
 	};
 
 	const removeImage = (preview: string) => {
@@ -384,6 +395,26 @@ export function Composer({
 					if (!disabled) void addFiles(e.dataTransfer.files);
 				}}
 			>
+				<input
+					ref={fileInputRef}
+					type="file"
+					accept="image/*"
+					multiple
+					className="hidden"
+					onChange={(e) => onPickFiles(e.target.files)}
+				/>
+				<button
+					type="button"
+					onClick={() => fileInputRef.current?.click()}
+					disabled={disabled}
+					aria-label="attach image"
+					className="flex size-11 shrink-0 items-center justify-center rounded-full border border-control text-ink-muted active:bg-elevated disabled:opacity-50"
+				>
+					{/* paperclip, drawn so it needs no icon font */}
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+					</svg>
+				</button>
 				<div
 					className={cn(
 						"flex min-w-0 flex-1 items-end rounded-md border bg-elevated px-3 py-2",
@@ -406,7 +437,7 @@ export function Composer({
 								? "session ended"
 								: projection.streaming
 									? "steer this turn…"
-									: "message — paste or drop an image"
+									: "Message…"
 						}
 						disabled={disabled}
 						rows={1}

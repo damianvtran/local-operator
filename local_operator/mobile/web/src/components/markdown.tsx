@@ -252,14 +252,17 @@ const HEADING_CLASSES = [
 export function Markdown({ text }: { text: string }) {
 	const blocks = splitBlocks(text);
 	return (
-		<div className="flex flex-col gap-1.5">
+		<div className="flex min-w-0 flex-col gap-1.5 break-words">
 			{blocks.map((b) => {
 				switch (b.kind) {
 					case "code":
 						return (
+							/* max-w-full keeps the block inside the column; its own
+							   overflow-x scrolls long lines rather than
+							   pushing the chat sideways. */
 							<pre
 								key={key()}
-								className="lo-scroll overflow-x-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre"
+								className="lo-scroll max-w-full overflow-x-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre"
 							>
 								{b.lines.join("\n")}
 							</pre>
@@ -313,7 +316,7 @@ export function Markdown({ text }: { text: string }) {
 						return (
 							<div
 								key={key()}
-								className="lo-scroll overflow-x-auto rounded-sm border border-hairline"
+								className="lo-scroll max-w-full overflow-x-auto rounded-sm border border-hairline"
 							>
 								<table className="w-full border-collapse text-body-sm">
 									<thead>

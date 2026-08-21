@@ -28,16 +28,16 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 			   is what the turn is on" signal (branding §7). Surface ground +
 			   hairline keeps it quiet next to the answer that follows. */
 			return (
-				<div className="flex justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5 text-body leading-normal whitespace-pre-wrap">
+				<div className="flex min-w-0 justify-end">
+					<div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5 text-body leading-normal break-words whitespace-pre-wrap">
 						{entry.text}
 					</div>
 				</div>
 			);
 		case "steer":
 			return (
-				<div className="flex justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted whitespace-pre-wrap">
+				<div className="flex min-w-0 justify-end">
+					<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words whitespace-pre-wrap">
 						{entry.text}
 					</div>
 				</div>
@@ -47,9 +47,11 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 			   transcript is the turn's ONE in-progress indicator (branding §7 —
 			   never two animations for the same thing). The streaming row just
 			   grows; the working line says it's alive, what it's doing, and for
-			   how long. */
+			   how long. min-w-0 + break-words keep a long URL/path/code span
+			   from pushing the row past the viewport (the horizontal-scroll
+			   report). */
 			return (
-				<div className="text-body leading-normal">
+				<div className="min-w-0 text-body leading-normal break-words">
 					<Markdown text={entry.text} />
 				</div>
 			);
@@ -58,7 +60,7 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 		case "notice":
 		case "compaction":
 			return (
-				<p className="text-meta text-ink-dim">
+				<p className="text-meta text-ink-dim break-words">
 					{entry.text}
 				</p>
 			);
@@ -174,26 +176,34 @@ export function Transcript({
 			ref={scrollRef}
 			onScroll={onScroll}
 			className={cn(
-				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2",
+				/* overflow-x-hidden as the backstop: break-words on the rows should
+				   wrap everything, but a table or pre that still overflows scrolls
+				   INSIDE itself, never the whole chat sideways. */
+				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
 			)}
 		>
-			{hasMore || loadingOlder ? (
-				<button
-					type="button"
-					onClick={() => void loadOlder()}
-					disabled={loadingOlder}
-					className="mx-auto rounded-sm border border-control bg-surface px-3 py-1.5 text-meta text-ink-muted active:bg-elevated disabled:opacity-60"
-				>
-					{loadingOlder ? "loading…" : "load earlier"}
-				</button>
+			{/* History loads automatically as the user scrolls up — no button. A
+			   subtle top indicator is the only chrome: a thin accent bar that
+			   fills while a page is in flight, plus a hairline when more history
+			   exists. Nothing tappable, nothing blocky. */}
+			{loadingOlder ? (
+				<div className="flex justify-center py-1" aria-hidden>
+					<span className="lo-loadbar h-0.5 w-16 overflow-hidden rounded-full bg-sunken">
+						<span className="lo-loadbar-fill block h-full w-1/2 rounded-full bg-accent" />
+					</span>
+				</div>
+			) : hasMore ? (
+				<div className="flex justify-center py-1" aria-hidden>
+					<span className="h-px w-10 bg-hairline" />
+				</div>
 			) : null}
 			{hiddenCount > 0 ? (
 				<button
 					type="button"
 					onClick={() => setWindowSize((n) => n + PAGE)}
-					className="mx-auto rounded-sm border border-control bg-surface px-3 py-1.5 text-meta text-ink-muted active:bg-elevated"
+					className="mx-auto text-meta text-ink-dim underline-offset-2 active:underline"
 				>
-					show more ({hiddenCount} loaded)
+					show {hiddenCount} more loaded
 				</button>
 			) : null}
 			{visible.map((e) => (
