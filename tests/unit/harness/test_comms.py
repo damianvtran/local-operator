@@ -2109,6 +2109,23 @@ async def test_peek_through_the_hub_tool_is_ranged_and_bounded(tmp_path, monkeyp
     await parent.dispose()
 
 
+def test_an_explicit_range_cannot_bypass_the_step_ceiling():
+    """The cap is "whatever the caller asks for": range='1-1000' against a
+    long transcript must not inject 1000 steps through the one op that
+    exists to bound context (review round 1, major)."""
+    from local_operator.harness.comms import PEEK_MAX_STEPS, _resolve_peek_range
+
+    for total in (PEEK_MAX_STEPS, PEEK_MAX_STEPS * 4, 1000):
+        lo, hi, error = _resolve_peek_range(total, start=1, end=total, steps=None)
+        assert error is None
+        assert (
+            hi - lo + 1 <= PEEK_MAX_STEPS
+        ), f"explicit range returned {hi - lo + 1} steps of a {total}-step transcript"
+    # The clamp keeps the requested HEAD and pages forward from there.
+    lo, hi, _error = _resolve_peek_range(200, start=100, end=200, steps=None)
+    assert (lo, hi) == (100, 100 + PEEK_MAX_STEPS - 1)
+
+
 def test_hub_peek_and_list_are_read_tier_while_control_stays_write():
     """Observing children must never prompt; controlling them still does."""
     from local_operator.tools.builtin import build_hub_tool

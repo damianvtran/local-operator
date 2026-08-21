@@ -1420,8 +1420,17 @@ def _resolve_peek_range(
     if start is not None and end is None:  # start only: default-sized window
         return start, min(start + PEEK_DEFAULT_STEPS - 1, total), None
     if start is not None and end is not None:
-        return start, min(end, total), None
-    return 1, total, None  # unreachable; keeps the checker honest
+        lo, hi = start, min(end, total)
+    else:  # unreachable; keeps the checker honest
+        lo, hi = 1, total
+    # The cap applies to EXPLICIT ranges as well as steps=: the docstring
+    # promises a hard ceiling "whatever the caller asks for", and a
+    # range='1-1000' against a long transcript would otherwise inject ~600k
+    # characters through the one op that exists to bound context. Keep the
+    # HEAD of the requested window — the caller asked to start there, and the
+    # renderer's continuation hint pages them forward from the clamp point
+    # (review round 1, major).
+    return lo, min(hi, lo + PEEK_MAX_STEPS - 1), None
 
 
 def _clip(text: str, limit: int = PEEK_STEP_CHARS) -> str:
