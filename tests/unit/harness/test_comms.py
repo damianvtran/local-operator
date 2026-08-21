@@ -2022,17 +2022,43 @@ async def test_two_concurrent_asks_cannot_both_pass_the_guard():
 # --- peek: ranged, read-only observation of a child's transcript ------------
 
 
-def test_peek_refuses_an_unknown_child():
+async def _until_peek(comms, job_id, want, timeout: float = 10.0):
+    """Poll an async peek until the child's transcript satisfies ``want``."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        window = await comms.peek(job_id, steps=50)
+        if want(window):
+            return window
+        if loop.time() > deadline:
+            raise AssertionError("timed out waiting for the child's transcript")
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_peek_refuses_an_unknown_child():
     comms, _jobs, _child, _parent = wire()
-    window = comms.peek("nope")
+    window = await comms.peek("nope")
     assert window.error is not None and "unknown subagent" in window.error
 
 
-def test_peek_reports_a_child_that_never_started():
+@pytest.mark.asyncio
+async def test_peek_reports_a_child_that_never_started():
     comms, _jobs, _child, _parent = wire(attach=False)
-    window = comms.peek("job-1")
+    window = await comms.peek("job-1")
     assert window.error is not None and "no transcript" in window.error
     assert window.total == 0
+
+
+@pytest.mark.asyncio
+async def test_peek_with_an_end_past_the_transcript_still_shows_the_tail():
+    """A public caller can pass end beyond the transcript; the window must
+    clamp to the last steps rather than collapse to lo > hi (round 2)."""
+    from local_operator.harness.comms import _resolve_peek_range
+
+    lo, hi, error = _resolve_peek_range(10, start=None, end=100, steps=None)
+    assert error is None
+    assert (lo, hi) == (6, 10)
 
 
 @pytest.mark.asyncio
@@ -2046,9 +2072,9 @@ async def test_peek_shows_a_running_childs_recent_steps(tmp_path, monkeypatch):
     comms = parent.subagent_comms
     await wait_for(lambda: comms.session_dir_of(job_id) is not None)
     # Let the child run a few tool steps so there is something to peek at.
-    await wait_for(lambda: comms.peek(job_id, steps=50).total >= 4)
+    await _until_peek(comms, job_id, lambda w: w.total >= 4)
 
-    window = comms.peek(job_id)  # default: last few steps
+    window = await comms.peek(job_id)  # default: last few steps
     assert window.error is None
     assert window.status == "running"
     assert window.total >= 4
@@ -2059,16 +2085,16 @@ async def test_peek_shows_a_running_childs_recent_steps(tmp_path, monkeypatch):
     # Ranges are stable 1-based positions: paging forward from the last seen
     # step yields exactly the steps after it.
     last = window.steps[-1].index
-    ahead = comms.peek(job_id, start=last + 1)
+    ahead = await comms.peek(job_id, start=last + 1)
     assert ahead.error is not None or all(step.index > last for step in ahead.steps)
 
     # steps= is the "last N" shorthand and clamps to the transcript.
-    three = comms.peek(job_id, steps=3)
+    three = await comms.peek(job_id, steps=3)
     assert len(three.steps) <= 3
     assert three.steps[-1].index == three.total
 
     # An out-of-range start is a legible error, not an empty dump.
-    beyond = comms.peek(job_id, start=window.total + 50)
+    beyond = await comms.peek(job_id, start=window.total + 50)
     assert beyond.error is not None and "nothing at step" in beyond.error
     await parent.dispose()
 
@@ -2081,7 +2107,7 @@ async def test_peek_through_the_hub_tool_is_ranged_and_bounded(tmp_path, monkeyp
     job_id = parent._launch_subagent(label="parser", prompt="Rewrite the parser.")
     comms = parent.subagent_comms
     await wait_for(lambda: comms.session_dir_of(job_id) is not None)
-    await wait_for(lambda: comms.peek(job_id, steps=50).total >= 4)
+    await _until_peek(comms, job_id, lambda w: w.total >= 4)
 
     result = await execute_hub(
         "call-1",

@@ -472,7 +472,7 @@ class SubagentComms:
             rows.append(self._describe(record, now))
         return rows
 
-    def peek(
+    async def peek(
         self,
         job_id: str,
         *,
@@ -526,9 +526,21 @@ class SubagentComms:
         # file at construction and drops malformed lines individually, so a
         # half-written final line of a RUNNING child degrades to "not there
         # yet" rather than an error.
+        #
+        # Off the event loop: construction parses the WHOLE file (rendering
+        # is O(window) but parsing is O(total)), and a long-lived review
+        # child's transcript is megabytes. The codebase's own precedent for
+        # this cost class (``compact_file``) keeps it off the shared loop.
         from local_operator.session.transcript import Transcript
 
-        entries = Transcript(record.session_dir).entries()
+        session_dir = record.session_dir
+
+        def _read() -> list[Any]:
+            # Construction is the expensive part (whole-file parse); it runs
+            # in the worker, not on the shared loop.
+            return Transcript(session_dir).entries()
+
+        entries = await asyncio.to_thread(_read)
         rendered = _render_transcript_steps(entries)
         total = len(rendered)
 
@@ -1416,7 +1428,11 @@ def _resolve_peek_range(
     if start is None and end is None:
         return max(1, total - PEEK_DEFAULT_STEPS + 1), total, None
     if end is not None and start is None:  # end only: a window ending there
-        return max(1, end - PEEK_DEFAULT_STEPS + 1), min(end, total), None
+        # Clamp BEFORE deriving lo: an end past the transcript (a public
+        # caller can pass one; the hub tool's parser cannot) would otherwise
+        # yield lo > hi and an empty window instead of the last steps.
+        end = min(end, total)
+        return max(1, end - PEEK_DEFAULT_STEPS + 1), end, None
     if start is not None and end is None:  # start only: default-sized window
         return start, min(start + PEEK_DEFAULT_STEPS - 1, total), None
     if start is not None and end is not None:

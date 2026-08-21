@@ -6370,7 +6370,7 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
     )
 
 
-def _hub_peek(tool_call_id: str, comms: Any, params: Any) -> ToolResult:
+async def _hub_peek(tool_call_id: str, comms: Any, params: Any, ids: list[str]) -> ToolResult:
     """Render ``hub op='peek'``: a bounded slice of one child's transcript.
 
     The parent's observation path that costs the child nothing: unlike
@@ -6379,13 +6379,8 @@ def _hub_peek(tool_call_id: str, comms: Any, params: Any) -> ToolResult:
     is deliberately small by default — the op exists so a parent can check
     progress without a transcript dump landing in its own context.
     """
-    ids, errors = _hub_targets(comms, params.to or [])
-    if not ids:
-        return _error(
-            tool_call_id,
-            "hub",
-            "; ".join(errors) or "no subagent matched; use op='list' to see them.",
-        )
+    # ``ids`` is the resolution ``_execute_hub_parent`` already validated;
+    # resolving twice would spend a second roster walk on the same answer.
     start: int | None = None
     end: int | None = None
     if params.range is not None:
@@ -6393,7 +6388,7 @@ def _hub_peek(tool_call_id: str, comms: Any, params: Any) -> ToolResult:
             start, end = _parse_line_range(params.range)
         except ValueError as exc:
             return _error(tool_call_id, "hub", str(exc))
-    window = comms.peek(ids[0], start=start, end=end, steps=params.steps)
+    window = await comms.peek(ids[0], start=start, end=end, steps=params.steps)
     if window.error is not None:
         return _error(tool_call_id, "hub", f"{window.label} ({window.job_id}): {window.error}")
 
@@ -6520,7 +6515,7 @@ async def _execute_hub_parent(
         )
 
     if params.op == "peek":
-        return _hub_peek(tool_call_id, comms, params)
+        return await _hub_peek(tool_call_id, comms, params, ids)
 
     message = params.message or ""
     if params.op == "ask":
