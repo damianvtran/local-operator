@@ -214,8 +214,12 @@ async def test_update_keeps_the_allowlist_it_was_not_asked_to_change(context, re
 
 @pytest.mark.asyncio
 async def test_update_keeps_the_effort_tier_and_delegation_flag(context, registry) -> None:
-    """C1, the same bug on the other two role fields."""
+    """C1, the same bug on the other two role fields. Manager ships with
+    may_delegate; its tier is set explicitly here because the packaged seeds
+    deliberately pin NO effort — a child inherits the session's model unless
+    the operator picks a tier — so the seed itself cannot supply one."""
     await call(context, op="install", name="manager")
+    await call(context, op="update", name="manager", effort="lo")
     before = resolve_profile("manager", registry=registry)
     assert before is not None and before.effort == "lo" and before.may_delegate
 
