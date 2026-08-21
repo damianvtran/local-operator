@@ -859,6 +859,17 @@ async def _build_child_session(
     # that cannot call ``edit`` cannot "helpfully" fix what it was asked to
     # review and thereby end up reviewing its own patch.
     restricted = profile is not None and bool(profile.tools)
+    # Captured BEFORE the allowlist filter: a restricted child must keep the
+    # ability to ANSWER its parent even when its role allowlist does not name
+    # ``hub`` (the installed reviewer profile is read/glob/grep/bash/todo).
+    # Without this, every ``hub op='ask'`` to such a child timed out BY
+    # DESIGN — the child saw the question, tried to answer with the one tool
+    # it knew for talking to the parent, got "Tool not found", and the parent
+    # burned its whole budget waiting for a reply that could never be sent.
+    # ``hub`` is a messaging surface, not a capability: it cannot edit, write
+    # or execute anything the allowlist denies, so sparing it weakens no
+    # boundary.
+    hub_tool = next((tool for tool in tools if tool.name == "hub"), None)
     if restricted:
         tools = filter_tools(tools, profile)
     elif agent == "scout":
@@ -866,6 +877,8 @@ async def _build_child_session(
         # promise must not depend on a seed file being present.
         tools = [tool for tool in tools if tool.name in SCOUT_TOOL_ALLOWLIST]
         restricted = True
+    if restricted and hub_tool is not None and not any(tool.name == "hub" for tool in tools):
+        tools = list(tools) + [hub_tool]
     # MCP tools execute arbitrary server calls, so a role filtered to an
     # allowlist never receives them: they are excluded wholesale rather than
     # trusted per tool, since the allowlist cannot name servers it has not met.

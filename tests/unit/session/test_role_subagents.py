@@ -156,7 +156,9 @@ async def test_the_operators_own_role_overrides_the_packaged_one(tmp_path, monke
     first_user = next(m for m in stream.requests[0].messages if m.role == "user")
     assert "ONLY CHECK THE MIGRATIONS." in first_user.text
     names = {tool.name for tool in stream.requests[0].tools}
-    assert names == {"read"}, f"the operator's allowlist should win, got {names}"
+    # The operator's allowlist wins; ``hub`` rides along as the one deliberate
+    # exception so a restricted child can still answer its parent's questions.
+    assert names == {"read", "hub"}, f"the operator's allowlist should win, got {names}"
     await parent.dispose()
 
 

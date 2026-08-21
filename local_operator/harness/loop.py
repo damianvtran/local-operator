@@ -956,8 +956,16 @@ class AgentLoop:
         tool = item.tool
 
         tool_context = context.tool_context
+        # A per-call tier override wins over the tool's static tier: a tool
+        # that is write-tier for its worst op (hub resume) still has read-only
+        # ops (hub list/peek) that must not prompt.
+        tier = (
+            tool.call_approval_tier(call.arguments)
+            if tool.call_approval_tier is not None
+            else tool.approval_tier
+        )
         if (
-            tool.approval_tier in ("write", "exec")
+            tier in ("write", "exec")
             and tool_context is not None
             and tool_context.request_approval is not None
         ):

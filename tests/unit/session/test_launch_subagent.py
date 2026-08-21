@@ -653,13 +653,56 @@ async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatc
     child = await build_child(parent, agent="scout")
 
     names = {tool.name for tool in child._tools}
-    assert names <= {"read", "glob", "grep", "list_variables", "read_variable"}
+    # hub survives the allowlist: it is the child's ONLY way to answer a
+    # parent question, and it cannot edit, write or execute anything.
+    assert names <= {"read", "glob", "grep", "list_variables", "read_variable", "hub"}
+    assert "hub" in names
     assert {"bash", "edit", "write", "task", "wait", "jobs", "wake"}.isdisjoint(names)
     assert (
         "scout mode" in getattr(child._context.messages[0], "text", "")
         if child._context.messages
         else True
     )
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_restricted_role_keeps_hub_so_it_can_answer(tmp_path, monkeypatch):
+    """A role allowlist that does not name ``hub`` must not silence the child.
+
+    The installed reviewer profile restricts tools to read/glob/grep/bash/todo
+    and used to lose ``hub`` to the filter, so every ``ask`` to a reviewer
+    timed out by design: the child saw the question, found no tool to answer
+    with, and the parent burned its budget. ``hub`` is a messaging surface,
+    not a capability — sparing it weakens no boundary the allowlist draws.
+    """
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    profile = AgentProfile(
+        name="reviewer",
+        description="reviews, never edits",
+        tools=("read", "glob", "grep", "bash", "todo"),
+    )
+    child = await subagent_mod._build_child_session(
+        label="sub",
+        prompt="review the diff",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-1",
+        agent="reviewer",
+        profile=profile,
+    )
+
+    names = {tool.name for tool in child._tools}
+    assert names <= {"read", "glob", "grep", "bash", "todo", "hub"}
+    assert "hub" in names
+    # The boundary itself is intact: nothing the allowlist denies survived.
+    assert {"edit", "write", "eval"}.isdisjoint(names)
     await child.dispose()
     await parent.dispose()
 

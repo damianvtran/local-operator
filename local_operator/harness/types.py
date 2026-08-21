@@ -723,6 +723,13 @@ class AgentTool(BaseModel):
     hidden: bool = False
     execute: ToolExecuteFn = Field(exclude=True)
     describe_approval: ApprovalDescribeFn | None = Field(default=None, exclude=True)
+    #: Per-CALL tier override. A tool whose tier is the highest of its ops
+    #: (``hub``: resume starts a session, so the tool is write-tier) still has
+    #: read-only ops (``list``, ``peek``) that must not prompt; this hook lets
+    #: the call's arguments pick the tier. ``None`` means the static tier.
+    call_approval_tier: Callable[[dict[str, Any]], Literal["read", "write", "exec"]] | None = Field(
+        default=None, exclude=True
+    )
 
 
 # ---------------------------------------------------------------------------
