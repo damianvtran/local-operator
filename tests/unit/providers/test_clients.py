@@ -302,7 +302,10 @@ async def test_openai_compat_error_finish_reason_without_error_object() -> None:
     end = events[-1]
     assert isinstance(end, StreamEndEvent)
     assert end.stop_reason == "error"
-    assert end.error is not None and "error" in end.error
+    # The incident text must name the failure, not merely contain the word
+    # "error" — a regression to a tautology like "error: error" would still
+    # pass a substring check.
+    assert end.error == "provider reported a mid-stream failure (finish_reason 'error')"
 
 
 async def test_openai_compat_tool_history_roundtrip() -> None:

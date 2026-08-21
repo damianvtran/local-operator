@@ -210,9 +210,13 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     journals it, and retries or rotates while the budget lasts.
 
     Simpler compatible servers send the error as a bare string instead of an
-    object; both shapes feed the same cascade, mirroring
-    :func:`_extract_error_message`'s slots without its response-body fallback
-    (the body is a live stream here and must not be read).
+    object. The message cascade follows :func:`_extract_error_message`'s slots
+    (message, detail, msg, then the ``metadata.raw`` upstream text) but not its
+    floors: that function's last resort is ``error.status``/``error.code`` and
+    its response-body fallback, neither of which belongs here — ``code`` is
+    already consumed as the status, and the body is a live stream that must
+    not be read. ``error_type`` plus a substantive default is the better
+    floor. The composed message is capped like every other error frame.
     """
     error = chunk.get("error")
     status: int | None = None
@@ -240,7 +244,7 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
         message = f"{error_type}: {message}"
     return ProviderError(
         status,
-        message,
+        _capped(message),
         retryable=status is None or status == 429 or status >= 500,
         auth_error=status in (401, 403),
     )
@@ -1227,8 +1231,9 @@ class OpenAICompatClient:
             error = _refusal_error(marker, "".join(refusal_parts), streamed_text=streamed_text)
         elif stop_reason == "error":
             # A wordless error end is exactly the silent-interruption defect:
-            # the loop journals `error` as the incident, so name the reason.
-            error = f"provider ended the stream with finish_reason '{finish_reason}'"
+            # the loop journals `error` as the incident, so name the failure,
+            # not just the wire field that signalled it.
+            error = f"provider reported a mid-stream failure (finish_reason '{finish_reason}')"
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,

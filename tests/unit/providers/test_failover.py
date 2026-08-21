@@ -4,6 +4,7 @@ streaming with fake clients/auth."""
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from collections.abc import AsyncIterator
@@ -23,6 +24,7 @@ from local_operator.harness.types import (
 from local_operator.model.configure import build_model_spec
 from local_operator.providers import failover as failover_module
 from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.clients import OpenAICompatClient
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
     CHAIN_EFFORT_LADDER,
@@ -1544,6 +1546,65 @@ class TestTransientFailuresAreRetriedOnEveryCallPath:
             )
         assert excinfo.value.kind == "timeout"
         assert str(excinfo.value) == "provider timeout: ReadTimeout"
+
+    async def test_an_openrouter_error_chunk_after_partial_output_arrives_named(self) -> None:
+        """The reported incident, end to end: visible deltas, then an in-band
+        error chunk on an HTTP 200 stream.
+
+        The real OpenAI-compatible client raises the named ``ProviderError``
+        from the error chunk; ``stream_with_failover`` has already forwarded
+        output, so it must re-raise it NAMED — no retry (which would duplicate
+        the visible deltas) and no silent wordless end. This is the exact
+        combination the client-level and driver-level tests each cover only
+        half of.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            lines = [
+                "data: "
+                + json.dumps({"choices": [{"delta": {"content": "Gate"}, "index": 0}]}),
+                "data: "
+                + json.dumps(
+                    {
+                        "id": "gen-9",
+                        "error": {
+                            "code": 429,
+                            "message": "Rate limit exceeded",
+                            "metadata": {"error_type": "rate_limit_exceeded"},
+                        },
+                        "choices": [
+                            {"index": 0, "delta": {"content": ""}, "finish_reason": "error"}
+                        ],
+                    }
+                ),
+                "data: [DONE]",
+            ]
+            return httpx.Response(
+                200,
+                content="\n\n".join(lines).encode() + b"\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return OpenAICompatClient("https://api.test.example/v1", http_client=http)
+
+        seen: list[Any] = []
+        with pytest.raises(ProviderError) as excinfo:
+            async for event in stream_with_failover(
+                _request(), FakeAuth({"openai": ["k"]}), {"retry": {"baseDelayMs": 1}}, client_for
+            ):
+                seen.append(event)
+        error = excinfo.value
+        assert error.status == 429
+        assert error.kind == "quota"
+        assert "Rate limit exceeded" in str(error)
+        # The visible delta was forwarded exactly once; nothing was replayed.
+        assert [e for e in seen if isinstance(e, StreamTextDelta)] == [
+            StreamTextDelta(delta="Gate")
+        ]
+        await http.aclose()
 
     async def test_the_one_shot_call_the_session_makes_is_marked_replayable(self) -> None:
         """Wiring, not policy: ``_one_shot_complete`` is the compaction summary
