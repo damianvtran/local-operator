@@ -806,6 +806,33 @@ async def test_esc_aborts_a_running_shell_command() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failing_command_marks_the_card_failed_and_persists_it_so() -> None:
+    """A nonzero exit is a FAILURE on the human-facing surface: the collapsed
+    card says ✗, and the persisted result carries is_error so a resumed
+    session restores the same mark (design round 1, D1)."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "exit 3":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        assert session.shell_records, "the failed command must still be persisted"
+        command, result = session.shell_records[0]
+        assert command == "exit 3"
+        assert result.is_error is True
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert cards and cards[-1]._state == "error"
+
+
+@pytest.mark.asyncio
 async def test_a_refused_second_command_comes_back_in_shell_mode() -> None:
     """The refused line is handed back IN the mode it was submitted from: the
     placeholder matches the buffer, and Enter re-runs it as a command once
