@@ -40,6 +40,7 @@ from local_operator.harness.types import (
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import (
     IMAGE_DROPPED_NOTICE,
+    IMAGE_OMITTED_TEXT_ONLY_NOTICE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     Session,
     _paired_prefix,
@@ -48,6 +49,12 @@ from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
+TEXT_ONLY_MODEL = ModelSpec(
+    provider="test",
+    model_id="Text Only Test",
+    context_window=100_000,
+    supports_images=False,
+)
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:
@@ -1532,6 +1539,100 @@ async def test_an_ordinary_failure_leaves_images_alone(tmp_path):
     await session.prompt("go")
     assert not session._images_rejected
     assert _image_blocks(stream.requests[0]) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_switching_to_a_text_only_model_omits_images_from_context(tmp_path):
+    """The reported failure: a session with screenshots in its history was
+    switched onto a model that cannot receive images, and every turn died with
+    the provider's no-image-endpoint refusal until the session was abandoned.
+
+    The render now omits the blocks for a model whose spec says
+    ``supports_images=False`` — proactively, not after a wasted 4xx — and the
+    switch announces WHY the model no longer sees the images. And because the
+    omission reads the CURRENT spec, switching back to a vision model restores
+    the images on the very next request: the transcript was never touched.
+    """
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")] for _ in range(2)]
+    )
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[TextContent(text="look at this"), ImageContent(data="Zm9v")],
+            )
+        ]
+    )
+
+    session.set_model(TEXT_ONLY_MODEL)
+    await wait_for(lambda: any(event.type == "notice" for event in events))
+
+    await session.prompt("what was in the image?")
+    request = stream.requests[-1]
+    assert _image_blocks(request) == 0, "the text-only model was sent the image"
+    sent = [
+        block.text
+        for message in request.messages
+        for block in message.content
+        if isinstance(block, TextContent)
+    ]
+    assert IMAGE_OMITTED_TEXT_ONLY_NOTICE in sent, "the model was left with a silent hole"
+    assert not session._images_rejected, "a capability switch must not trip the sticky degrade"
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert any(
+        "Text Only Test" in event.text and "does not accept images" in event.text
+        for event in notices
+    ), "the switch did not explain the omission"
+
+    # Switching back to a vision model restores the images: the omission was
+    # never written into the transcript.
+    session.set_model(MODEL)
+    await session.prompt("and now?")
+    assert _image_blocks(stream.requests[-1]) == 1, "the restore did not put the image back"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_switching_to_a_text_only_model_without_images_stays_quiet(tmp_path):
+    """The notice answers "where did my screenshots go"; a text-only
+    conversation has nothing to omit, so the switch must not apologise for
+    images nobody sent — that would be noise on every drop to a cheaper model.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    session.set_model(TEXT_ONLY_MODEL)
+    await asyncio.sleep(0.05)  # the announce task, if any, runs immediately
+    assert [event for event in events if isinstance(event, NoticeEvent)] == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_model_from_the_start_never_receives_images(tmp_path):
+    """A session BOOTED on a text-only model with a replayed vision history
+    (a resume of a session that ran on a vision model) omits the blocks from
+    its very first request — no switch and no refusal needed."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    transcript = Transcript(tmp_path / "sess")
+    session = Session(
+        model=TEXT_ONLY_MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    await session.seed_history(
+        [Message(role="user", content=[TextContent(text="hi"), ImageContent(data="Zm9v")])]
+    )
+    await session.prompt("go")
+    assert _image_blocks(stream.requests[0]) == 0
     await session.dispose()
 
 

@@ -6704,6 +6704,12 @@ class OperatorApp(App[None]):
         # The chosen effort rides along when the new model accepts it: a user
         # who dropped to `low` for cost did not mean "until I switch models".
         session.set_model(self._spec_with_chosen_effort(spec))
+        # A text-only model renders the history WITHOUT its images (see
+        # ``Session._render_history``), so the estimate painted for the vision
+        # model overstates what the new one actually carries. Re-measure so
+        # the band agrees with what the next request sends; the measure's own
+        # exact-count guard makes this a no-op once a turn has reported.
+        self._measure_preloaded_context(session)
         # A different model may well have a dial, so the per-model refusal latch
         # goes with the old one.
         self._effort_refusal_shown = None
