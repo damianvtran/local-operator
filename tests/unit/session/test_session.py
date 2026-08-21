@@ -147,7 +147,9 @@ async def test_prompt_full_turn_events_and_persistence(tmp_path):
     # every front end sees it, then the turn boundary opens.
     assert events[0].type == "message_start"
     assert isinstance(events[0], MessageStartEvent)
-    assert events[0].message.role == "user"
+    first_message = events[0].message
+    assert isinstance(first_message, Message)
+    assert first_message.role == "user"
     assert events[1].type == "agent_start"
     assert events[-1].type == "agent_end"
     assert isinstance(events[-1], AgentEndEvent)

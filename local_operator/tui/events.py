@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     ImageContent,
+    Message as HarnessMessage,
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
@@ -148,13 +149,14 @@ class AssistantMessageStart(Message):
 
 class UserMessageStart(Message):
     """A user message reached the session from ANY front end. Carries the
-    text (and image count) so the TUI can paint it — the mobile→TUI half of
+    prompt (and image count) so the TUI can paint it — the mobile→TUI half of
     keeping the two surfaces in step. The TUI's own prompt path already paints
-    its UserBlock optimistically, so the app de-dupes on arrival."""
+    its UserBlock optimistically, so the app de-dupes on arrival. The field is
+    ``prompt``, not ``text``: Textual's ``Message`` reserves ``text``."""
 
-    def __init__(self, text: str, image_count: int) -> None:
+    def __init__(self, prompt: str, image_count: int) -> None:
         super().__init__()
-        self.text = text
+        self.prompt = prompt
         self.image_count = image_count
 
 
@@ -509,10 +511,11 @@ class EventController:
         # assistant starts: an assistant start resets the stream buffer, a
         # user start carries the prompt for the app to paint.
         message = event.message
-        if getattr(message, "role", None) == "user":
-            images = [
-                b for b in (getattr(message, "content", None) or []) if isinstance(b, ImageContent)
-            ]
+        # Narrow to Message (not CustomMessage) before touching role/content:
+        # a user MessageStartEvent is always a Message, but the field's type
+        # is the AgentMessage union, so pyright needs the isinstance.
+        if isinstance(message, HarnessMessage) and message.role == "user":
+            images = [b for b in message.content if isinstance(b, ImageContent)]
             self._post(UserMessageStart(message.text, len(images)))
             return
         self._assistant_buffer = ""

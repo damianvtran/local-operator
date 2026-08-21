@@ -10163,9 +10163,9 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         blocks = transcript.blocks()
         for block in reversed(blocks[-3:]):
-            if isinstance(block, UserBlock) and block.text() == message.text:
+            if isinstance(block, UserBlock) and block.text() == message.prompt:
                 return
-        self._append_block(UserBlock(message.text, message.image_count))
+        self._append_block(UserBlock(message.prompt, message.image_count))
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
         """A message opened — but nothing is MOUNTED until text actually arrives.
