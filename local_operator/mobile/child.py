@@ -34,11 +34,12 @@ async def amain() -> int:
     cwd = os.environ.get("LOP_MOBILE_CHILD_CWD") or os.path.expanduser("~")
     provider = os.environ.get("LOP_MOBILE_CHILD_PROVIDER") or None
     model_id = os.environ.get("LOP_MOBILE_CHILD_MODEL") or None
+    resume = os.environ.get("LOP_MOBILE_CHILD_RESUME") or None
 
     loop = asyncio.get_running_loop()
     try:
         handle: OwnedSessionHandle = await spawn_owned_session(
-            loop, cwd=cwd, provider=provider, model_id=model_id
+            loop, cwd=cwd, provider=provider, model_id=model_id, resume=resume
         )
     except Exception:
         logger.exception("mobile child: session construction failed")

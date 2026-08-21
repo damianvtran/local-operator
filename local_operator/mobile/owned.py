@@ -23,11 +23,15 @@ import argparse
 import asyncio
 import logging
 import secrets
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.harness.types import AgentEvent
+
+if TYPE_CHECKING:
+    from local_operator.harness.types import ImageContent
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle
+from local_operator.mobile.registrant import image_blocks as _image_blocks
 from local_operator.mobile.types import PendingRequest, SessionProjection
 
 logger = logging.getLogger(__name__)
@@ -178,16 +182,50 @@ class OwnedSessionHandle(SessionHandle):
             logger.debug("owned session history fold failed", exc_info=True)
         return unsubscribe
 
-    async def prompt(self, text: str) -> str:
+    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
-        asyncio.ensure_future(self._session.prompt(text))
-        self._projection.streaming = True
+        image_blocks = _image_blocks(images)
+        # A rejected prompt must not leave a ghost user row on the phone, so
+        # the echo waits until Session.prompt has ACCEPTED the turn (the lock
+        # is the honest signal) — see _run_turn_task. Check the cheap guard up
+        # front so the common busy case answers immediately without a task.
+        if self._session.is_streaming or getattr(self._session, "_compacting", False):
+            return "not sent: session is busy — steer instead, or retry in a moment"
+        self._run_turn_task(text, image_blocks)
         return "prompt sent"
 
-    async def steer(self, text: str) -> str:
+    def _run_turn_task(self, text: str, image_blocks: list["ImageContent"]) -> None:
+        """Run the turn as a background task; a rejection surfaces as a notice,
+        never as a ghost user row.
+
+        The session emits MessageStartEvent for a user turn only AFTER the
+        turn lock is acquired (see Session._run_turn), so that event IS the
+        acceptance signal — the fold paints the row from it, and there is no
+        optimistic echo to undo. Session.prompt raises RuntimeError when a
+        turn started in the gap between the guard above and the lock; catching
+        it here keeps the un-awaited-future warning out of the log and gives
+        the phone a quiet "not sent" notice instead of a fake sent row.
+        """
+
+        async def run() -> None:
+            try:
+                await self._session.prompt(text, image_blocks)
+            except RuntimeError as exc:
+                self._projection.streaming = self._session.is_streaming
+                self._fold.note_prompt_rejected(str(exc))
+                self._notify()
+                logger.warning("mobile prompt rejected: %s", exc)
+
+        asyncio.ensure_future(run())
+
+    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
-        self._session.steer(text)
+        # Images ride the steer too — a screenshot sent mid-turn IS the
+        # correction, and session.steer already carries them.
+        self._session.steer(text, _image_blocks(images))
         self._projection.queued_count += 1
+        self._fold.note_user_message(text, steer=True)
+        self._notify()
         return "steering queued"
 
     async def abort(self) -> str:
@@ -307,8 +345,15 @@ async def spawn_owned_session(
     cwd: str,
     provider: str | None = None,
     model_id: str | None = None,
+    resume: str | None = None,
 ) -> OwnedSessionHandle:
-    """Build a fresh session for the phone with the CLI's composition root."""
+    """Build a session for the phone with the CLI's composition root.
+
+    ``resume`` names an existing session id to reopen: it flows into
+    ``args.resume`` exactly as the CLI's ``--resume`` does, so the factory
+    reuses that transcript directory and the session replays its history —
+    the phone's "open this past conversation" button.
+    """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
@@ -327,6 +372,7 @@ async def spawn_owned_session(
         agent_id=None,
         yolo=False,
         train=False,
+        resume=resume,
     )
     session = await create_session(
         args,

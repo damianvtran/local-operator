@@ -75,6 +75,20 @@ _DIST_DIR = _WEB_DIR / "dist"
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _mark_data_uri() -> str:
+    """The mark as a data URI — the login page and the SPA header inline it
+    rather than fetch ``/mark.png``, because over an identity-proxied tunnel
+    (Cloudflare Access) that fetch is itself gated: the pre-auth login page's
+    <img> got a 302-to-IdP HTML body and rendered the broken-image glyph.
+    An inline URI needs no request, so it renders behind Access and on the
+    unauthenticated login screen alike. 7 KB; one copy in each surface.
+    """
+    import base64
+
+    data = base64.b64encode((_STATIC_DIR / "mark.png").read_bytes()).decode()
+    return "data:image/png;base64," + data
+
+
 # ---------------------------------------------------------------------------
 # Session table
 # ---------------------------------------------------------------------------
@@ -245,6 +259,7 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
     # the source of truth, and the phone keys drafts and commands on it.
     projection.pid = record.pid
     projection.transcript = build(TranscriptEntry, data.get("transcript", []))
+    _pin_opening_user_message(projection, record)
     projection.todos = build(TodoItem, data.get("todos", []))
     projection.subagents = build(SubagentRow, data.get("subagents", []))
     pending = data.get("pending")
@@ -256,6 +271,126 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         else None
     )
     return projection
+
+
+def _pin_opening_user_message(projection: SessionProjection, record: SessionRecord) -> None:
+    """Guarantee the transcript opens with the conversation's first user
+    message, even when the SESSION that folded it is running older code.
+
+    Two independent gaps hid it: the harness never emits MessageStartEvent
+    for user messages (fixed in the handle), and the 80-entry tail cap drops
+    the opening prompt on any long session (fixed in the fold). Both fixes
+    live in the session's own process — so a session on an older binary
+    still pushes a wire projection with no user rows. The daemon can't fix
+    the session's fold, but it CAN repair the view: read the opening user
+    turn from the on-disk transcript (the same store /resume reads) and pin
+    it at the head. Idempotent — a projection that already opens with a user
+    row is left alone.
+    """
+    transcript = projection.transcript
+    if any(e.kind == "user" for e in transcript):
+        return
+    try:
+        from local_operator.paths import config_dir
+
+        path = config_dir() / "sessions" / record.session_id / "transcript.jsonl"
+        if not path.exists():
+            return
+        # Read only the head: the opening user turn is within the first few
+        # entries, and a 10 MB transcript should not be replayed per repaint.
+        import json as _json
+
+        with path.open() as fh:
+            # Scan a bounded head, not the whole file: the opening user turn
+            # is normally within the first few entries, but if it was pruned
+            # or compacted away the first surviving user message can sit
+            # arbitrarily deep, and this runs on every projection reload.
+            # Give up after MAX_SCAN lines — a session whose opening prompt
+            # no longer exists simply has nothing to pin.
+            MAX_SCAN = 400
+            for i, line in enumerate(fh):
+                if i >= MAX_SCAN:
+                    return
+                try:
+                    entry = _json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("type") != "message":
+                    continue
+                payload = entry.get("payload") or {}
+                if payload.get("role") != "user":
+                    continue
+                # Transcript text blocks are stored as {"text": ...} WITHOUT a
+                # "type" discriminator (the in-memory TextContent adds it), so
+                # match on the text key itself rather than a type field.
+                text = "".join(
+                    block["text"]
+                    for block in payload.get("content", [])
+                    if isinstance(block, dict) and isinstance(block.get("text"), str)
+                )
+                if not text.strip():
+                    continue
+                from local_operator.mobile.types import TranscriptEntry
+
+                projection.transcript = [
+                    TranscriptEntry(
+                        # The transcript persists message.id as the entry id,
+                        # so it is always present — use it, no pid fallback.
+                        id=entry["id"],
+                        kind="user",
+                        text=text,
+                        final=True,
+                    ),
+                    *transcript,
+                ]
+                return
+    except Exception:  # noqa: BLE001 — a missing/odd transcript must never break a repaint
+        return
+
+
+def _transcript_entry_json(entry: Any) -> dict[str, Any]:
+    """Serialize one mobile TranscriptEntry for the history payload."""
+    return entry.to_json()
+
+
+def _history_page(record: SessionRecord, before: str | None, limit: int) -> tuple[list[Any], bool]:
+    """Fold the session's full on-disk transcript and return the page of
+    entries immediately OLDER than ``before`` (chronological within the page)
+    plus whether more history exists beyond it.
+
+    Runs off the event loop (``asyncio.to_thread`` at the call site): folding
+    a long transcript rehydrates every message and is not loop-safe work.
+    """
+    from local_operator.mobile.projection import fold_messages_to_entries
+    from local_operator.paths import config_dir
+    from local_operator.session.transcript import Transcript
+
+    directory = config_dir() / "sessions" / record.session_id
+    if not (directory / "transcript.jsonl").exists():
+        return [], False
+    try:
+        transcript = Transcript(directory)
+        history = transcript.build_llm_history()
+        entries = fold_messages_to_entries(history)
+    except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
+        logger.exception("history fold failed for session %s", record.session_id)
+        return [], False
+
+    if before:
+        # A ``before`` that resolves to nothing means the client's anchor was
+        # pruned (a compaction between scrolls). Serving the newest page then
+        # would duplicate the client's live window — return empty and let the
+        # client treat it as end-of-history rather than loop on the same rows.
+        anchor = next((i for i, e in enumerate(entries) if e.id == before), None)
+        if anchor is None:
+            return [], False
+        cut = anchor
+    else:
+        cut = len(entries)
+    older = entries[:cut]
+    page = older[-limit:] if len(older) > limit else older
+    has_more = len(older) > len(page)
+    return page, has_more
 
 
 def _fan_out(entry: SessionEntry) -> None:
@@ -291,6 +426,9 @@ class MobileDaemon:
         self._pending_reqs: dict[tuple[int, Any], asyncio.Future[dict[str, Any]]] = {}
         self._dial_tasks: dict[int, asyncio.Task[None]] = {}
         self._slash_commands: list[dict[str, Any]] | None = None
+        # Session id -> pid of a resume spawn already in flight, so a retried
+        # resume POST returns the same child instead of forking a second.
+        self.resumes_in_flight: dict[str, int] = {}
 
     # -- scanning --------------------------------------------------------------
 
@@ -364,7 +502,11 @@ class MobileDaemon:
     # -- owned sessions ---------------------------------------------------------
 
     async def spawn_session(
-        self, cwd: str, provider: str | None = None, model_id: str | None = None
+        self,
+        cwd: str,
+        provider: str | None = None,
+        model_id: str | None = None,
+        resume: str | None = None,
     ) -> int:
         """Spawn a daemon-owned session in a supervised CHILD process and let
         discovery adopt it.
@@ -386,6 +528,8 @@ class MobileDaemon:
             env["LOP_MOBILE_CHILD_PROVIDER"] = provider
         if model_id:
             env["LOP_MOBILE_CHILD_MODEL"] = model_id
+        if resume:
+            env["LOP_MOBILE_CHILD_RESUME"] = resume
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -488,13 +632,18 @@ def build_app(daemon: MobileDaemon):
     async def login_page(request: Request) -> Response:
         if authed(request):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_LOGIN_HTML)
+        return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
 
     async def login_submit(request: Request) -> Response:
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
-            return HTMLResponse(_LOGIN_HTML.replace("<!--ERROR-->", _LOGIN_ERROR), status_code=401)
+            return HTMLResponse(
+                _LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()).replace(
+                    "<!--ERROR-->", _LOGIN_ERROR
+                ),
+                status_code=401,
+            )
         response = RedirectResponse("/", status_code=303)
         secure = request.url.scheme == "https"
         response.set_cookie(
@@ -518,7 +667,12 @@ def build_app(daemon: MobileDaemon):
         path = _STATIC_DIR / "mark.png"
         if not path.exists():
             return PlainTextResponse("mark missing", status_code=404)
-        return FileResponse(path, media_type="image/png")
+        # no-store: a phone that loaded this while the wheel lacked the file
+        # cached the 404 and kept showing a broken image after the fix. The
+        # asset is tiny; the freshness guarantee is worth more than the cache.
+        response = FileResponse(path, media_type="image/png")
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def index(request: Request) -> Response:
         denied = gate(request)
@@ -604,6 +758,37 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    async def api_session_history(request: Request) -> Response:
+        """Older transcript entries for lazy loading.
+
+        The live projection (SSE) is a tail WINDOW — the fold caps it, so a
+        long session's older messages never reach the phone. This endpoint
+        folds the session's FULL on-disk transcript with the same render
+        semantics and serves the pages the cap dropped, so scrolling up
+        back-fills history. ``before`` is the id of the oldest entry the
+        phone already has; the response is the page of entries immediately
+        OLDER than it (chronological within the page).
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        pid = int(request.path_params["pid"])
+        entry = daemon.table.entries.get(pid)
+        if entry is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        before = request.query_params.get("before")
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
+        except ValueError:
+            limit = 80
+        page, has_more = await asyncio.to_thread(_history_page, entry.record, before, limit)
+        return JSONResponse(
+            {
+                "entries": [_transcript_entry_json(e) for e in page],
+                "has_more": has_more,
+            }
+        )
+
     async def api_command(request: Request) -> Response:
         """The one mutation endpoint: {op, ...} → control frame. Keeping
         mutations on one route mirrors the registrant's dispatch and keeps
@@ -668,6 +853,73 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
         return JSONResponse({"ok": True, "pid": pid})
 
+    async def api_resume_session(request: Request) -> Response:
+        """Reopen a past session as a NEW live session the phone can attach to.
+
+        The old past-sessions flow made the user copy an id and run
+        ``/resume <id>`` by hand. This is the button: spawn a daemon-owned
+        child whose session resumes that transcript (the same ``--resume``
+        mechanism the CLI uses), so the conversation comes back live, open,
+        and able to take a command. The new session registers through
+        discovery like any other; the phone navigates to it by pid.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            return JSONResponse({"error": "session_id is required"}, status_code=400)
+        # Resolve to a real resumable directory first — spawning a child on a
+        # bad id would exit with an unhelpful construction failure.
+        from local_operator.paths import config_dir
+        from local_operator.resume import ResumeNotFound, resume_dir
+
+        try:
+            resume_dir(config_dir(), session_id)
+        except ResumeNotFound:
+            return JSONResponse({"error": f"no such past session: {session_id}"}, status_code=404)
+        # Server-side idempotency: a flapping phone on a slow tunnel can retry
+        # the POST, and only the client guarded the double-tap. One in-flight
+        # resume per session id — a retry returns the SAME spawn's pid instead
+        # of forking a second child resuming the same conversation.
+        existing = daemon.resumes_in_flight.get(session_id)
+        if existing is not None:
+            return JSONResponse({"ok": True, "pid": existing, "session_id": session_id})
+        # The transcript dir does not reliably record a cwd, so resume in the
+        # owner's home: always a valid directory under the spawn gate. The
+        # user can steer the reopened session to a directory from there.
+        try:
+            pid = await daemon.spawn_session(str(Path.home()), resume=session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("mobile resume spawn failed", exc_info=True)
+            return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+        daemon.resumes_in_flight[session_id] = pid
+        return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
+
+    async def api_search_sessions(request: Request) -> Response:
+        """Search past sessions by name, id, OR what was said in them.
+
+        The same mechanism the TUI's /resume picker uses: a cached digest per
+        session (search_index.build_index, re-digested only when a transcript
+        changes) plus a substring match over name/id (filter_rows semantics).
+        A row that matched only on its conversation body is marked so the
+        phone can say why it surfaced.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        query = request.query_params.get("q", "")
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "40")), 200))
+        except ValueError:
+            limit = 40
+        rows = await asyncio.to_thread(_search_sessions, query, limit)
+        return JSONResponse({"sessions": rows, "query": query})
+
     async def api_directories(request: Request) -> Response:
         """The new-session form's cwd picker: home plus the directories of
         recent sessions (where the user has been working lately)."""
@@ -709,7 +961,10 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/events", api_list_events),
         Route("/api/directories", api_directories),
         Route("/api/sessions/past", api_past_sessions),
+        Route("/api/sessions/resume", api_resume_session, methods=["POST"]),
+        Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{pid:int}/events", api_session_events),
+        Route("/api/sessions/{pid:int}/history", api_session_history),
         Route("/api/sessions/{pid:int}/command", api_command, methods=["POST"]),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
@@ -749,6 +1004,52 @@ def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
         ]
     except Exception:  # noqa: BLE001
         return []
+
+
+def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Past sessions matching ``query`` by name, id, or conversation body.
+
+    Mirrors the TUI picker's two channels: a name/id substring match, and a
+    body match through the cached search index (re-digested only for
+    transcripts that changed). A row that matched ONLY on its body is marked
+    ``body_match`` so the UI can say why it surfaced — otherwise it reads as a
+    result the filter had no reason to return.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import recent_session_rows
+    from local_operator.session.search_index import build_index, search_digests
+
+    cfg = config_dir()
+    rows = recent_session_rows(cfg, limit=200)
+    needle = query.strip().lower()
+    if not needle:
+        return [
+            {"id": r.id, "name": r.name, "mtime": r.mtime, "body_match": False}
+            for r in rows[:limit]
+        ]
+    try:
+        digests = build_index(cfg, [r.id for r in rows])
+        body_hits = search_digests(digests, needle)
+    except Exception:  # noqa: BLE001 — a broken index degrades to name/id only
+        body_hits = set()
+    out = []
+    for r in rows:
+        name_hit = needle in r.name.lower() or needle in r.id.lower()
+        body_hit = r.id in body_hits
+        if not (name_hit or body_hit):
+            continue
+        out.append(
+            {
+                "id": r.id,
+                "name": r.name,
+                "mtime": r.mtime,
+                # Marked only when the name/id did NOT explain the match.
+                "body_match": body_hit and not name_hit,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _recent_directories(limit: int = 8) -> list[str]:
@@ -940,7 +1241,7 @@ _LOGIN_HTML = """<!doctype html>
 <body>
 <form method="post" action="/login">
   <div class="lockup">
-    <img class="mark" src="/mark.png" width="72" height="72" alt="">
+    <img class="mark" src="__MARK_DATA_URI__" width="72" height="72" alt="">
     <h1>local operator</h1>
   </div>
   <!--ERROR-->
