@@ -73,7 +73,7 @@ from local_operator.tui.widgets.transcript import (
 )
 
 from .test_app_pilot import FakeSession, _factory
-from .test_transcript_selection import _cell, _composer_drag
+from .test_transcript_selection import _cell, _composer_copy_drag
 
 
 class SteerableSession(FakeSession):
@@ -2879,18 +2879,20 @@ async def test_the_expired_row_recounts_rather_than_restating_a_stale_number() -
 
 
 @pytest.mark.asyncio
-async def test_a_stale_highlight_does_not_divert_ctrl_c_from_the_draft() -> None:
-    """D17, design round 5. Gate on the GESTURE, not on the selection.
+async def test_a_stale_highlight_copies_but_cannot_arm_the_exit_ladder() -> None:
+    """D17, design round 5. A stale range is a copy now — and ONLY a copy.
 
-    A selection is state that persists until the caret moves, so "the composer
-    has a highlight" stays true long after any copy ended. Gating on it meant a
-    composer holding a stale range took the interrupt, ARMED the exit ladder,
-    and a second reflexive tap quit the app with the draft never filed — the
-    exact hazard this rung was added to remove, reintroduced by its own guard.
-
-    A real drag-copy is covered from the other side by
-    `test_a_composer_drag_still_leaves_ctrl_c_as_the_interrupt` in
-    `test_transcript_selection.py`, which this must not break.
+    This test used to assert that a stale highlight "does not divert Ctrl+C
+    from the draft". The explicit-copy gesture changed the answer at the
+    source: highlight-then-Ctrl+C IS the composer's copy now, so the press
+    takes the range — deliberately, because a live range means the user can
+    see what Ctrl+C will act on, which is the property the old selection
+    gate lacked. What D17 actually protects survives unchanged: no abort,
+    the draft untouched (it is not being scrapped, it is being quoted), the
+    exit ladder NOT armed, and the reflexive second tap still not an exit.
+    The draft rung this test used to exercise is covered on clean state by
+    `test_ctrl_c_with_no_selection_never_reaches_the_interrupt` in
+    `test_transcript_selection.py`.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -2912,15 +2914,18 @@ async def test_a_stale_highlight_does_not_divert_ctrl_c_from_the_draft() -> None
         await pilot.press("ctrl+c")
         await pilot.pause(0.1)
 
-        # The draft rung takes it: filed, not aborted, ladder NOT armed.
+        # The copy takes the key, and nothing else moves: no abort, the draft
+        # still there, and the ladder unarmed.
         assert session.aborts == [], "a stale highlight diverted the key to the interrupt"
-        assert editor.text == "", "the draft was not cleared"
-        assert "a half-typed prompt I do not want to lose" in editor.prompt_history()
+        assert editor.text == "a half-typed prompt I do not want to lose", "the draft was touched"
 
         # And the second press must not quit, which is the damage D17 named.
+        # The range is still live, so this press copies again — it must NOT
+        # have started counting rungs.
         await pilot.press("ctrl+c")
         await pilot.pause(0.1)
         assert app.is_running, "a second reflexive tap exited the app"
+        assert session.aborts == [], "the second tap became an abort"
 
 
 @pytest.mark.asyncio
@@ -2950,13 +2955,16 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
         await pilot.pause()
 
         # A REAL drag-copy, driven through the widget's own mouse path rather
-        # than by hand-setting flags. Round 19 (MAJOR-1) caught the hand-set
-        # stand-in going vacuous when `copy_in_flight` moved from `_copied` to
+        # than by hand-setting flags — armed first, since a composer drag only
+        # copies after an explicit copy has armed the release (a bare
+        # highlight is selection, not copy: the clobber this file's sibling
+        # tests removed). Round 19 (MAJOR-1) caught the hand-set stand-in
+        # going vacuous when `copy_in_flight` moved from `_copied` to
         # `_copy_gesture`: the stand-in never armed the deferral, so the test
         # verified that a caret move retires something already retired. Driving
         # the real gesture ties this guard to whatever predicate the widget
         # actually arms, so a future re-pointing cannot silently disarm it.
-        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 10))
+        await _composer_copy_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 10))
         assert editor.copy_in_flight, "the drag must arm the deferral for this test to bite"
         assert editor.selected_text, "the copy's own highlight must be on screen"
 
