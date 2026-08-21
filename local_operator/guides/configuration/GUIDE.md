@@ -122,11 +122,18 @@ values:
 
 This route keeps the configured primary first. At a new user-message boundary,
 Local Operator checks a provider's live OAuth quota when that provider exposes
-one. It rotates through usable accounts on the same provider before moving to
-the listed model routes. Reserve quota can select a lower-effort route without
-blocking the account; fully exhausted account-wide quota skips same-provider
-effort changes because they cannot restore capacity. Usage endpoints that are
-missing or unreachable fail open.
+one. It rotates through usable accounts on the same provider — including
+accounts whose remaining quota is under the reserve threshold — and only
+moves to the next listed provider once every account on the current one is
+at 0%. A model-tier cap (Anthropic's `7 day (Fable)` against `claude-fable-5`)
+is still per account: siblings on that provider are tried before the chain
+leaves it. Reserve quota can select a lower-effort route on the *same*
+provider without blocking the account; it is not a licence to hop providers
+while spendable quota remains. Fully exhausted account-wide quota skips
+same-provider effort changes because they cannot restore capacity. A
+fallback whose own provider is already at 0% is skipped so the cascade does
+not pin a maxed hop. Usage endpoints that are missing or unreachable fail
+open.
 
 Provider errors use the same ordered chain. A successful fallback stays pinned
 through tool calls and other model calls in that user message, and a cooldown

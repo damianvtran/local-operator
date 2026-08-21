@@ -1489,8 +1489,9 @@ class SessionStreamFn:
     Hard fallback stays pinned for the rest of a user message, so tool loops,
     compaction and naming do not re-send a warm prompt to a provider that just
     rejected it. Optional usage preflight runs once at the message boundary,
-    rotates through same-provider OAuth accounts first, then selects the first
-    configured provider/model/effort route with working auth.
+    rotates through same-provider OAuth accounts first (including accounts
+    under the reserve threshold), then selects the first configured
+    provider/model/effort route with working auth and remaining quota.
     """
 
     USAGE_CHECK_TTL_S = 60.0
@@ -1756,13 +1757,114 @@ class SessionStreamFn:
         except Exception:
             return False
 
+    async def _provider_quota_availability(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        reserve_percent: float,
+        cache: dict[str, str],
+    ) -> str:
+        """Whether ``provider`` still has spendable quota for ``model_id``.
+
+        ``usable`` means at least one account still has remaining > 0
+        (healthy *or* reserve — reserve is still spendable). ``depleted``
+        means every account that answered is at 0%. ``unknown`` is fail-open:
+        no endpoint, no report, or a fetch error, so the caller must not
+        skip the target on a missing signal.
+
+        Cached per provider+model for one preflight walk so a chain that
+        lists several models on the same host does not re-hit the usage
+        endpoint, while still letting a Fable hop and an Opus hop on the
+        same Anthropic pool disagree (their binding windows differ).
+        """
+        cache_key = f"{provider}/{model_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        from local_operator.providers.usage import (
+            fetch_usage,
+            usage_health,
+            usage_supported,
+        )
+
+        if not usage_supported(provider):
+            cache[cache_key] = "unknown"
+            return "unknown"
+
+        saw_depleted = False
+        saw_unknown = False
+        try:
+            accesses = await self._auth_store.list_oauth_accesses(provider)
+        except Exception:
+            accesses = []
+        for access in accesses:
+            try:
+                report = await fetch_usage(
+                    self._http,
+                    provider,
+                    access_token=access.access_token,
+                    account_id=access.account_id,
+                    oauth_creds=access.raw,
+                )
+            except Exception:
+                saw_unknown = True
+                continue
+            if report is None:
+                saw_unknown = True
+                continue
+            health = usage_health(report, model_id, reserve_percent=reserve_percent)
+            if health.state == "unknown":
+                saw_unknown = True
+                continue
+            if health.state != "depleted":
+                cache[cache_key] = "usable"
+                return "usable"
+            saw_depleted = True
+
+        if accesses:
+            # OAuth is the subscription the user is spending. Skip only when
+            # EVERY account answered depleted; a missing report is fail-open
+            # so an unread sibling cannot hide remaining quota.
+            availability = "depleted" if saw_depleted and not saw_unknown else "unknown"
+            cache[cache_key] = availability
+            return availability
+
+        # No OAuth rows; an API-key quota route (Z.AI, Kimi balance) may
+        # still have a number. One secret per provider, so a single probe
+        # is the whole answer.
+        try:
+            # read_only: a quota probe must not pin stickiness on a
+            # provider we may then skip as depleted.
+            api_key = await self._auth_store.get_api_key(provider, self._session_id, read_only=True)
+        except Exception:
+            api_key = None
+        if api_key:
+            try:
+                report = await fetch_usage(self._http, provider, api_key=api_key)
+            except Exception:
+                report = None
+            if report is not None:
+                health = usage_health(report, model_id, reserve_percent=reserve_percent)
+                if health.state == "depleted":
+                    cache[cache_key] = "depleted"
+                    return "depleted"
+                if health.state != "unknown":
+                    cache[cache_key] = "usable"
+                    return "usable"
+
+        cache[cache_key] = "unknown"
+        return "unknown"
+
     async def _first_available_fallback(
         self,
         model: ModelSpec,
         *,
         different_provider: bool = False,
+        reserve_percent: float = 10.0,
     ) -> Any | None:
-        """The first configured fallback with working auth, bench-aware.
+        """The first configured fallback with working auth, bench- and quota-aware.
 
         "First configured" alone is what replayed the waterfall on every
         message boundary: with the chain's head providers down, each quota
@@ -1773,17 +1875,27 @@ class SessionStreamFn:
         ``FailoverRouteState.mark_target_failed``) are therefore passed over
         here, so a session that has settled on a working fallback stays on it.
 
-        The bench is a preference, not a verdict: when EVERY authed candidate
-        is benched, the first of them is returned anyway — returning ``None``
-        would report "no configured fallback" to a user who has several, and
-        the stream walk's own retry machinery is the right place to discover
-        which bench has expired.
+        A target whose provider is *quota-depleted* is skipped the same way:
+        pinning a maxed Kimi/Qwen hop just to watch it fail (or, worse, to
+        treat its last 10% as another reason to hop) is how the cascade
+        burned past a provider that still had spendable quota. Reserve is
+        still usable — only a 0% remaining verdict skips. Unknown/unreachable
+        usage fails open, matching preflight's own contract.
+
+        The bench (and the depleted skip) is a preference, not a verdict:
+        when EVERY authed candidate is benched or depleted, the first of
+        them is returned anyway — returning ``None`` would report "no
+        configured fallback" to a user who has several, and the stream
+        walk's own retry machinery is the right place to discover which
+        bench has expired.
         """
         from local_operator.providers.failover import parse_selector
 
         first_benched: Any | None = None
+        first_depleted: Any | None = None
+        quota_cache: dict[str, str] = {}
         for target in self._fallback_targets(model):
-            provider, _model_id = parse_selector(target.selector)
+            provider, target_model = parse_selector(target.selector)
             if different_provider and provider == model.provider:
                 continue
             if not await self._target_has_auth(target):
@@ -1792,8 +1904,18 @@ class SessionStreamFn:
                 if first_benched is None:
                     first_benched = target
                 continue
+            availability = await self._provider_quota_availability(
+                provider,
+                target_model,
+                reserve_percent=reserve_percent,
+                cache=quota_cache,
+            )
+            if availability == "depleted":
+                if first_depleted is None:
+                    first_depleted = target
+                continue
             return target
-        return first_benched
+        return first_benched or first_depleted
 
     @staticmethod
     def _storage_provider(provider: str) -> str:
@@ -1895,6 +2017,7 @@ class SessionStreamFn:
                     fallback = await self._first_available_fallback(
                         model,
                         different_provider=True,
+                        reserve_percent=retry.usage_reserve_percent,
                     )
                     if fallback is not None:
                         await self._route_state.activate(
@@ -1943,8 +2066,57 @@ class SessionStreamFn:
                 else f" ({health.remaining_fraction * 100:.0f}% remaining)"
             )
             condition = "quota exhausted" if health.state == "depleted" else "quota low"
+            storage = self._storage_provider(model.provider)
             if health.scope != "account":
-                fallback = await self._first_available_fallback(model)
+                # A model-tier cap (Anthropic's ``7 day (Fable)`` against
+                # ``claude-fable-5``) is still per ACCOUNT. Jumping to the
+                # next provider here is what skipped three Anthropic logins
+                # that still had Fable headroom — the reported cascade that
+                # hopped Anthropic → Kimi (10% remaining) → Qwen (maxed) →
+                # Grok while Fable quota sat idle. Rotate siblings first;
+                # only the last account on this provider may leave it.
+                row = self._auth_store.get_credential(access.credential_id)
+                siblings = [
+                    candidate
+                    for candidate in self._auth_store.list_credentials(storage)
+                    if candidate.id != access.credential_id
+                    and (row is None or candidate.credential_type == row.credential_type)
+                    and not self._auth_store.is_blocked(candidate.id, storage)
+                ]
+                if siblings:
+                    if health.state == "depleted":
+                        self._auth_store.block_credential(
+                            access.credential_id,
+                            storage,
+                            block_ms=max(
+                                60_000,
+                                health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS,
+                            ),
+                        )
+                    else:
+                        self._auth_store.deprioritize_credential(
+                            model.provider, access.credential_id
+                        )
+                    await self._notice(
+                        f"{model.provider} {condition}{remaining} for {model.model_id} "
+                        f"— trying another {model.provider} account before provider fallback"
+                    )
+                    continue
+                if health.state == "reserve":
+                    # Last account, still holding this model's quota. Same
+                    # rule as the account-scope path: reserve is not a
+                    # licence to leave the provider.
+                    await self._notice(
+                        f"{model.provider} {condition}{remaining} for {model.model_id} "
+                        f"— continuing until {model.provider} quota is exhausted",
+                        "info",
+                    )
+                    self._route_state.clear()
+                    return
+                fallback = await self._first_available_fallback(
+                    model,
+                    reserve_percent=retry.usage_reserve_percent,
+                )
                 if fallback is None:
                     await self._notice(
                         f"{model.provider} {condition}{remaining} for {model.model_id}; "
@@ -1957,7 +2129,6 @@ class SessionStreamFn:
                 )
                 return
 
-            storage = self._storage_provider(model.provider)
             if await self._apply_account_health(
                 model,
                 access,
@@ -1993,8 +2164,10 @@ class SessionStreamFn:
         over to another provider — strands real shared headroom. Rotation is
         reserved for accounts whose SHARED windows are genuinely binding; a
         tier-only cap keeps the account in service, and the last account with
-        any shared headroom is always allowed to spend it down to zero before
-        a provider fallback is even considered.
+        any shared headroom — including remaining under the reserve
+        threshold — is always allowed to spend it down to zero before
+        a provider fallback is even considered. Reserve is a preference
+        between siblings of the same provider, not a hop to the next one.
         """
         from local_operator.providers.failover import parse_selector
 
@@ -2023,11 +2196,37 @@ class SessionStreamFn:
             # A different effort cannot revive a fully exhausted provider,
             # but it can preserve reserve quota by reducing token spend.
             different_provider=health.state == "depleted",
+            reserve_percent=retry.usage_reserve_percent,
         )
         if not siblings and fallback is None:
             await self._notice(
                 f"{model.provider} {condition}{remaining}; no configured fallback is available"
             )
+            return False
+
+        if not siblings and health.state == "reserve":
+            # Last account on this provider, still holding spendable quota.
+            # Crossing the reserve threshold used to hop to the next chain
+            # entry (Kimi at 10% remaining → Qwen maxed → Grok) while this
+            # account could still serve. Reserve is a preference BETWEEN
+            # siblings of the same provider, not a licence to leave the
+            # provider; spend it to zero, then fail over. A same-provider
+            # lower-effort hop is still allowed — it reduces token spend
+            # without abandoning remaining quota.
+            if fallback is not None:
+                fallback_provider, _model_id = parse_selector(fallback.selector)
+                if fallback_provider == model.provider:
+                    await self._route_state.activate(
+                        fallback,
+                        f"{model.provider} {condition}{remaining}",
+                    )
+                    return False
+            await self._notice(
+                f"{model.provider} {condition}{remaining} — continuing until "
+                f"{model.provider} quota is exhausted",
+                "info",
+            )
+            self._route_state.clear()
             return False
 
         if tier_binding and shared_above_reserve:
