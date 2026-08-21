@@ -428,7 +428,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("goal", "Show, set, or clear the session goal", echo=True),
     # Not an exception: LOOP_PROMPT is app-authored, not the user's words, and
     # `_loop_worker` already labels every iteration it starts (`· loop 1/3`), so
-    # no agent output here is left unattributed.
+    # no agent output here is left unattributed. `echo=False` suppresses the
+    # command's own slash-echo row; the live path additionally registers
+    # LOOP_PROMPT in `_pending_user_echoes` (in `_loop_worker`) so the
+    # session's user MessageStartEvent is consumed silently rather than
+    # painted — two different receipts for two different events (the typed
+    # command, and the prompt the turn later announces).
     SlashCommand("loop", "Iterate autonomously toward the goal"),
     # NOT an exception, and the reason IS the feature. The question does reach
     # the model, but only for one off-the-record request that never joins the
@@ -1943,6 +1948,12 @@ class OperatorApp(App[None]):
         # Indexing first is what lets each call render WITH its outcome instead
         # of as a second, orphaned row.
         results: dict[str, Any] = {}
+        # Harness chrome the LIVE path never paints as a user row, so replay
+        # must not either (see the `role == "user"` branch). Deferred once to
+        # the top of this method rather than inside the loop, matching the
+        # file's other lazy session.* imports.
+        from local_operator.session.session import _CONTINUATION_PROMPT
+
         for message in history:
             if getattr(message, "role", None) == "tool":
                 call_id = getattr(message, "tool_call_id", None)
@@ -1991,10 +2002,7 @@ class OperatorApp(App[None]):
                     # the auto-continuation prompt is never announced at all).
                     # Replay must make the same choice, or a resumed session
                     # shows rows the live one deliberately suppressed — the
-                    # live/replay divergence review round 2 pinned. Deferred
-                    # import, like the other session.* imports in this file.
-                    from local_operator.session.session import _CONTINUATION_PROMPT
-
+                    # live/replay divergence review round 2 pinned.
                     if text in (LOOP_PROMPT, _CONTINUATION_PROMPT):
                         continue
                     # The images ride the persisted message as base64 content

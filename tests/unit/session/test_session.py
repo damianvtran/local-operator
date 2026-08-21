@@ -1185,8 +1185,6 @@ async def test_the_auto_continuation_prompt_is_never_announced_as_user(tmp_path,
     assert len(stream.requests) == 2
     await session.dispose()
 
-    await session.dispose()
-
 
 @pytest.mark.asyncio
 async def test_aborted_run_end_is_never_held(tmp_path, monkeypatch):
