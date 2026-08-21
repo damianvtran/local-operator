@@ -1134,6 +1134,23 @@ class OperatorApp(App[None]):
         #: The two together are the FIFO the engine drains: these rows were
         #: queued first, so they settle first (see `on_steering_delivered`).
         self._deferred_steer_notices: list[NoticeBlock] = []
+        #: User-message texts this TUI has ALREADY painted (or deliberately
+        #: declined to paint) whose ``MessageStartEvent`` from the session is
+        #: still coming. ``on_user_message_start`` consumes a matching entry
+        #: instead of painting a second row. An explicit registry, not a scan
+        #: of the transcript tail: the session announces a STEER only when the
+        #: drain takes it, which is a later tool boundary, and every tool card
+        #: mounted in between pushed the echo out of any fixed-size window —
+        #: the tail scan this replaces painted every steered message twice the
+        #: moment two blocks landed between the echo and its delivery.
+        #:
+        #: Texts, not block references: the entry's job is to say "this event
+        #: is our own echo", and it must keep saying so after a `/clear` has
+        #: removed the block it described (the engine's queue survives the
+        #: clear, so the event still arrives). Cleared on a session swap, where
+        #: the messages died with the old session's queue and a stale entry
+        #: would swallow the next conversation's first identical prompt.
+        self._pending_user_echoes: list[str] = []
         #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
         #: keys. ``on_wake_delivered`` records each; the history replay skips a
         #: persisted ``wake_prompt`` whose key is already here — otherwise a
@@ -2401,6 +2418,12 @@ class OperatorApp(App[None]):
         # (the message left with the session).
         self._queued_steer_notices.clear()
         self._deferred_steer_notices.clear()
+        # The pending echoes go with them, and for the same reason: their
+        # messages died in the old session's queue, so their events are never
+        # coming. A stale entry would swallow the NEXT conversation's first
+        # identical prompt — a user who reopens with the same words would
+        # watch the other front end paint it while this one stays silent.
+        self._pending_user_echoes.clear()
         # The per-call accrual belongs to a turn on the session being replaced.
         # Left standing, the NEXT session's first `agent_end` would subtract the
         # dead conversation's already-billed calls from its own turn total and
@@ -5710,6 +5733,11 @@ class OperatorApp(App[None]):
             queued = NoticeBlock(QUEUED_STEER_NOTICE, "note")
             self._append_block(queued)
             self._queued_steer_notices.append(queued)
+            # The session will announce this steer as a user MessageStartEvent
+            # when the drain actually takes it (the mobile→TUI echo channel).
+            # The row is already on screen — registered here so that event is
+            # recognised as our own echo rather than painted again.
+            self._pending_user_echoes.append(text)
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
@@ -5757,6 +5785,13 @@ class OperatorApp(App[None]):
         session = self._session
         if session is None or self._status is None:
             return
+        # The turn's first append announces this prompt back as a user
+        # MessageStartEvent (`_run_turn` emits it for every front end). The
+        # echo is already painted — at submit, or before a compaction hold —
+        # so register it for `on_user_message_start` to consume rather than
+        # repaint. Here rather than in `_submit_prompt`, because this is the
+        # single dispatch point every prompt passes through, held or not.
+        self._pending_user_echoes.append(text)
         # Naming is deliberately NOT cancelled here. It used to be, because the
         # title call took the same provider lane the turn takes and a follow-up
         # had to be able to evict it. The call is now `isolated` and concurrent,
@@ -5772,6 +5807,14 @@ class OperatorApp(App[None]):
                     await session.prompt(text, images)
             except Exception as error:  # surface, never crash the app
                 self._append_block(NoticeBlock(str(error), "error"))
+                # A prompt that failed never announced itself, so its echo
+                # entry has no event coming. Left standing it would swallow
+                # the next identical prompt's event; `remove` is safe because
+                # a delivered announcement has already consumed the entry.
+                try:
+                    self._pending_user_echoes.remove(text)
+                except ValueError:
+                    pass
             finally:
                 # agent_end usually flips this first; a redundant update is a
                 # no-op, and this covers sessions that end without agent_end.
@@ -8147,10 +8190,23 @@ class OperatorApp(App[None]):
                 notice(f"loop {index + 1}/{iterations}", "note")
                 if self._status is not None:
                     self._status.update(streaming=True)
+                # LOOP_PROMPT is app-authored chrome and deliberately gets no
+                # user row (the notice above is its receipt) — but the session
+                # still announces it as a user MessageStartEvent like any other
+                # prompt. Register it so the event is consumed silently instead
+                # of painting the loudest mark in the transcript for words the
+                # user never typed.
+                self._pending_user_echoes.append(LOOP_PROMPT)
                 try:
                     await session.prompt(LOOP_PROMPT)
                 except Exception as error:  # surface and stop; never spin
                     notice(f"loop stopped: {error}", "error")
+                    # Same stale-entry hazard as `_start_turn`: a failed
+                    # prompt never announces, so take the entry back out.
+                    try:
+                        self._pending_user_echoes.remove(LOOP_PROMPT)
+                    except ValueError:
+                        pass
                     break
                 finally:
                     if self._status is not None:
@@ -10659,13 +10715,21 @@ class OperatorApp(App[None]):
         hits send (``_submit_prompt``), so ITS user MessageStartEvent arrives
         to a block already on screen. A prompt sent from the PHONE never
         painted here — this is the mobile→TUI direction that was missing. Tell
-        them apart by the tail block: same text already leading means this
-        event is the TUI prompt's own echo, not a new one."""
-        transcript = self._transcript_view()
-        blocks = transcript.blocks()
-        for block in reversed(blocks[-3:]):
-            if isinstance(block, UserBlock) and block.text() == message.prompt:
-                return
+        them apart by the registry, not by scanning the transcript tail: a
+        STEER is announced only when the drain takes it, at a later tool
+        boundary, so by the time its event lands the echo can sit arbitrarily
+        far from the tail — the fixed three-block window this replaces painted
+        every steered message twice once two tool cards landed in between
+        (issue: duplicated steering messages). Matched by text, first entry
+        wins: the engine drains FIFO and announces in drain order, the same
+        order the entries were registered in, so "the first matching entry"
+        and "the message this event announces" are the same one even when two
+        pending messages carry identical words."""
+        try:
+            self._pending_user_echoes.remove(message.prompt)
+            return  # our own echo — the row is already painted
+        except ValueError:
+            pass  # not ours: a prompt from another front end, paint it
         self._append_block(UserBlock(message.prompt, message.image_count))
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
