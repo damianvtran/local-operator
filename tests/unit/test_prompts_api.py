@@ -189,7 +189,7 @@ def test_the_system_prompt_names_user_run_bang_receipts() -> None:
     blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
     head = blocks[0]
     assert "bang-mode" in head
-    assert "the USER ran directly" in head or "USER ran directly" in head
+    assert "the USER ran directly" in head
     instructions, inventory, env_block, skills = blocks
 
     # block 0: stable instructions only
