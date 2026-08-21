@@ -167,46 +167,47 @@ def reindex(table):
 # Files the diff touches. Findings rooted anywhere else are `unrelated`.
 DIFF_FILES = ("inventory/pricing.py", "inventory/service.py", "tests/test_pricing.py")
 
-# The planted defects. `match` is a case-insensitive regex against the
-# review's full text; each is anchored on vocabulary a real finding for that
-# defect almost cannot avoid, and quoted in the report so a match is auditable.
-# Matchers are anchored on the CONTRAST a genuine finding cannot avoid —
-# the buggy value next to the correct one, or the defect's own vocabulary —
-# so a review that quotes the code to EXONERATE it ("dividing by 10000 is
-# correct") cannot score. A single bare keyword like ``stock`` would fire on
-# praise as easily as on a finding; a bare ``10000`` fires on any quote of
-# the line.
-PLANTED: list[tuple[str, str, str]] = [
+# The planted defects. Scoring a defect as FOUND takes BOTH of:
+#
+# 1. ``topic`` -- the defect's identifying vocabulary (what it is about), and
+# 2. ``assertion`` -- defect-asserting vocabulary (that something is WRONG:
+#    missing, removed, wrong, never, broken, ...).
+#
+# Keyword-only matching cannot tell a finding from an exoneration: "the
+# ValueError guard is preserved correctly" contains every keyword of the
+# dropped-guard defect. Review rounds 2 and 3 each reproduced the failure on
+# different matchers -- the fix is structural, not a tighter keyword list: a
+# bare ``stock`` or ``guard`` or ``10% off`` can never score on its own, and
+# review quotes of the code ("dividing by 10000 is correct") carry topic but
+# no assertion.
+PLANTED: list[tuple[str, str, str, str]] = [
     (
         "percentage-off-by-100x",
         "MAJOR",
         # pct=10 means 10%; the diff divides by 10000 and prices at 0.1%.
-        # The contrast anchors: wrong value beside right value, or the
-        # magnitude error stated outright.
-        r"(10000.{0,80}(instead of|should (be|have been))\s*(100\b|/100)|(instead of|should (be|have been)|not|versus)\s*100\b.{0,80}10000|100\s?[x×]|factor of 100|two orders of magnitude|100\s*times\s*(too\s*)?(small|little|less)|0\.1\s?%\s*(instead|not|rather)|wrong (factor|divisor|denominator|magnitude)|divisor.{0,20}wrong)",
+        r"10000|percent|pct\b|discount|divisor",
+        r"wrong|incorrect|instead of|should (be|have been)|100\s?[x\u00d7]|factor of 100|two orders of magnitude|0\.1\s?%|not 900|bug|broken|off by",
     ),
     (
         "negative-discount-inflates-total",
         "MAJOR",
         # No validation on pct: pct=-50 CHARGES 150%.
-        r"negative.{0,40}(discount|pct|percent)|(discount|pct|percent).{0,40}negative|no validation|unvalidated|(missing|without|lacks?).{0,20}validat",
+        r"negative|validat|pct|discount",
+        r"missing|no validation|unvalidated|(without|lacks?).{0,20}validat|inflat|nonsense|silent|wrong|accepts any|not (validated|checked|clamped)",
     ),
     (
         "rounding-float-cents",
         "MINOR",
         # / returns float; the module's own contract says integer cents.
-        # Anchored on the TYPE problem, not the contract phrase: "float" near
-        # cents/rounding, or the fix idioms. A bare `round|integer cents`
-        # fires on any pricing finding that quotes the module docstring.
-        r"float.{0,40}(cent|round|int)|(cent|int).{0,40}float|round\(\)|//\s*(instead|division|rather)|integer\s+division",
+        r"float|round|integer cents|int\(\)|//|true division",
+        r"break|violat|wrong|invariant|instead|should|bug|defect|returns a float|not an? int",
     ),
     (
         "stock-never-decremented",
         "MAJOR",
         # place_order still ignores Product.stock; overselling stays possible.
-        # Vocabulary beyond the literal field name so a finding phrased as
-        # "inventory levels are never updated" still counts.
-        r"stock|oversell|inventory.{0,30}(never|not|without).{0,20}(decrement|updat|reduc|adjust)",
+        r"stock|inventory|oversell",
+        r"never|not|missing|without|ignored|untrack|decrement|reduc|updat|oversell",
     ),
     (
         "lost-negative-quantity-guard",
@@ -214,8 +215,10 @@ PLANTED: list[tuple[str, str, str]] = [
         # The refactor dropped `quantity < 0 -> ValueError`; negative
         # quantities now produce negative (refund) totals silently.
         r"negative (quantity|quantities)|ValueError|guard|refund",
+        r"drop|remov|lost|gone|missing|no longer|silent|regress|delet",
     ),
 ]
+
 
 DIFF_FILES_CONTENT: dict[str, str] = {
     "inventory/pricing.py": '''"""Pricing math. All money is integer cents; callers never see floats."""
@@ -424,22 +427,52 @@ class Score:
         return len(self.found) / len(PLANTED)
 
 
+#: Phrases that mark a claim as ATTACKED or CLEARED rather than made.
+#: topic+assertion pairs both fire in "the tests attack the wrong factor in
+#: the discount path" — topic (discount) and assertion (wrong) with no defect
+#: being asserted by the reviewer at all. Deliberately NARROW: a global
+#: "no BLOCKERs" must not void a real finding elsewhere in the same review,
+#: so only defect-clearing verbs/phrases count, not severity-level negations.
+_ATTACK_WORDS = re.compile(
+    r"\b(attacks?|disputes?|refutes?|debunks?|no (bug|issue|defect|problem)|not a (bug|issue|defect|problem)|"
+    r"correct(ly)? (handles|manages|applies|computes|validates)|preserved correctly|fine as-is)\b",
+    re.IGNORECASE,
+)
+
+
 def score_review(text: str) -> Score:
     found, missed, severity_notes = [], [], []
-    for slug, _severity, pattern in PLANTED:
-        if re.search(pattern, text, re.IGNORECASE):
+    for slug, _severity, topic, assertion in PLANTED:
+        # Topic and assertion can sit in ADJACENT sentences of the same
+        # finding ("The guard was dropped from line_total. Negative inputs
+        # now produce negative totals."), so both match against the whole
+        # text; the exoneration guard is what keeps praise from scoring.
+        hit = (
+            re.search(topic, text, re.IGNORECASE)
+            and re.search(assertion, text, re.IGNORECASE)
+            and not _ATTACK_WORDS.search(text)
+        )
+        if hit:
             found.append(slug)
         else:
             missed.append(slug)
     # Severity discipline: the dropped negative-quantity guard is a BLOCKER
     # (silent refund path); finding it at MINOR is better than missing it but
-    # still a miscount the remediation round pays for. Anchored to a HEADING
-    # or enumeration context: a bare `BLOCKER` search passes on "no BLOCKERs"
-    # or on the classification legend the prompt itself asks for.
+    # still a miscount the remediation round pays for. A bare heading match
+    # is not enough: "## No BLOCKERs in this diff" and "- BLOCKER: none" are
+    # common shapes in real review output (the prompt asks for per-severity
+    # classification), so the note requires the guard's own TOPIC vocabulary
+    # within 400 chars after a BLOCKER heading.
     if "lost-negative-quantity-guard" in found:
+        guard_topic = dict((slug, topic) for slug, _sev, topic, _a in PLANTED)[
+            "lost-negative-quantity-guard"
+        ]
+        # The heading must not itself be a negation ("## No BLOCKERs") — the
+        # [^\n]* window between marker and newline would otherwise swallow it.
         raised = re.search(
-            r"(?m)^\s*#{1,4}\s*.*BLOCKER|^\s*[-*]?\s*\*?\*?BLOCKER\b.{0,10}[-—:]",
+            r"(?ms)^\s*#{1,4}\s*(?!.*\bno\b)(?!.*\bnone\b)[^\n]*BLOCKER[^\n]*\n.{0,400}(?:" + guard_topic + ")",
             text,
+            re.IGNORECASE,
         )
         if not raised:
             severity_notes.append("dropped-guard found but no BLOCKER raised at all")
@@ -513,6 +546,7 @@ class ArmResult:
     wall_s: float
     exit_code: int
     cost_usd: float
+    effort: str | None = None
 
 
 def run_arm(
@@ -523,6 +557,7 @@ def run_arm(
     hosting: str,
     pricing: Pricing,
     timeout: float,
+    effort: str | None = None,
 ) -> ArmResult:
     workdir = root / f"{arm}-run{run}"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -545,9 +580,45 @@ def run_arm(
         "reviewer",
         REVIEW_PROMPT,
     ]
+    env = None
+    if effort is not None:
+        # Reasoning effort has no CLI flag; the one sanctioned pin is a
+        # same-selector fallback-chain entry carrying an effort (documented
+        # in providers/failover.py: a mapping may repeat the current
+        # selector with a different effort — that is a real route). Pointing
+        # the run at its own config dir keeps the pin out of the operator's
+        # real config; the auth store is symlinked in so credentials resolve.
+        import yaml
+
+        run_config = workdir / "lop-config"
+        run_config.mkdir(exist_ok=True)
+        real_config = Path.home() / ".local-operator"
+        for name in ("auth.db", "auth.db-shm", "auth.db-wal", "credentials.env"):
+            target = real_config / name
+            if target.exists() and not (run_config / name).exists():
+                (run_config / name).symlink_to(target)
+        (run_config / "config.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "values": {
+                        "retry": {
+                            "fallbackChains": {
+                                f"{hosting}/{model}": [
+                                    {"provider": hosting, "model": model, "effort": effort}
+                                ]
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = {**os.environ, "LOCAL_OPERATOR_CONFIG_DIR": str(run_config)}
     start = time.monotonic()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, cwd=REPO, timeout=timeout)
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, cwd=REPO, timeout=timeout, env=env
+        )
         stdout, exit_code, stderr = proc.stdout, proc.returncode, proc.stderr
     except subprocess.TimeoutExpired as exc:
         stdout = (exc.stdout or b"").decode("utf-8", "replace") if exc.stdout else ""
@@ -570,6 +641,7 @@ def run_arm(
         wall_s=wall,
         exit_code=exit_code,
         cost_usd=pricing.cost(stats),
+        effort=effort,
     )
 
 
@@ -594,9 +666,9 @@ def print_report(results: list[ArmResult], pricings: dict[str, Pricing]) -> None
             f"{r.wall_s:>6.0f}s {cover:>6} {unrel:>5}  {missed}"
         )
     print()
-    print("ground truth (planted defects and the keyword each is matched on):")
-    for slug, severity, pattern in PLANTED:
-        print(f"  {severity:<8} {slug:<34} /{pattern}/")
+    print("ground truth (planted defects; found = topic AND assertion):")
+    for slug, severity, topic, assertion in PLANTED:
+        print(f"  {severity:<8} {slug:<34} topic=/{topic}/ assert=/{assertion}/")
 
 
 def main() -> int:
@@ -606,8 +678,13 @@ def main() -> int:
         "--arm",
         action="append",
         required=True,
-        metavar="NAME=MODEL",
-        help="One arm of the A/B, e.g. lo=deepseek/deepseek-v4-flash-0731 (repeatable).",
+        metavar="NAME=MODEL[:EFFORT]",
+        help=(
+            "One arm of the A/B, e.g. lo=deepseek/deepseek-v4-flash-0731 or "
+            "calm=openai/gpt-5.2:low (repeatable). The optional :EFFORT pins the "
+            "reasoning effort through a same-selector fallback-chain entry, the "
+            "one config path that carries effort for a named model."
+        ),
     )
     parser.add_argument("--runs", type=int, default=2, help="Runs per arm (default 2).")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
@@ -621,13 +698,14 @@ def main() -> int:
         print("OPENROUTER_API_KEY is not set; this benchmark only runs live.", file=sys.stderr)
         return 2
 
-    arms: list[tuple[str, str]] = []
+    arms: list[tuple[str, str, str | None]] = []
     for spec in args.arm:
-        name, sep, model = spec.partition("=")
+        name, sep, rest = spec.partition("=")
+        model, colon, effort = rest.partition(":")
         if not sep or not name or not model:
-            print(f"bad --arm {spec!r}: expected NAME=MODEL", file=sys.stderr)
+            print(f"bad --arm {spec!r}: expected NAME=MODEL[:EFFORT]", file=sys.stderr)
             return 2
-        arms.append((name, model))
+        arms.append((name, model, effort or None))
 
     root = args.out or Path(tempfile.mkdtemp(prefix="lo-bench-review-"))
     root.mkdir(parents=True, exist_ok=True)
@@ -637,10 +715,14 @@ def main() -> int:
     results: list[ArmResult] = []
     pricings: dict[str, Pricing] = {}
     try:
-        for name, model in arms:
+        for name, model, effort in arms:
             pricings[name] = resolve_pricing(args.hosting, model, api_key)
             for run in range(1, args.runs + 1):
-                print(f"running {name} ({model}) run {run}/{args.runs} ...", flush=True)
+                print(
+                    f"running {name} ({model}{'' if effort is None else f' effort={effort}'}) "
+                    f"run {run}/{args.runs} ...",
+                    flush=True,
+                )
                 results.append(
                     run_arm(
                         name,
@@ -650,6 +732,7 @@ def main() -> int:
                         hosting=args.hosting,
                         pricing=pricings[name],
                         timeout=args.timeout,
+                        effort=effort,
                     )
                 )
         print_report(results, pricings)
@@ -660,6 +743,7 @@ def main() -> int:
                         {
                             "arm": r.arm,
                             "model": r.model,
+                            "effort": r.effort,
                             "run": r.run,
                             "wall_s": r.wall_s,
                             "exit_code": r.exit_code,
