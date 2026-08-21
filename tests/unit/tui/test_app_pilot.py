@@ -26,6 +26,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
     COMPOSER_FOCUSED_CLASS,
+    COMPOSER_SHELL_CLASS,
     MODEL_SWITCH_MID_TURN_NOTICE,
     PERSIST_HINT,
     SLASH_COMMANDS,
@@ -36,7 +37,12 @@ from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.events import TurnEnded, TurnStarted
 from local_operator.tui.widgets.approval import ApprovalPrompt
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.editor import ASIDE_PLACEHOLDER, Editor
+from local_operator.tui.widgets.editor import (
+    ASIDE_PLACEHOLDER,
+    DEFAULT_PLACEHOLDER,
+    SHELL_PLACEHOLDER,
+    Editor,
+)
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -80,6 +86,10 @@ class FakeSession:
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.aborts: list[str] = []
+        #: Bang-mode commands this fake was asked to persist. A list of
+        #: ``(command, result)`` so a test can say the TUI recorded what ran
+        #: without standing up a real transcript.
+        self.shell_records: list[tuple[str, Any]] = []
         #: Reasons passed to `cancel_subagents`, and how many children the next
         #: call should report stopping. Staged by tests that exercise the Esc
         #: ladder's second press.
@@ -190,6 +200,9 @@ class FakeSession:
 
     async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
+
+    async def record_shell(self, command: str, result: Any) -> None:
+        self.shell_records.append((command, result))
 
     def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
@@ -569,6 +582,272 @@ async def test_shift_enter_inserts_newline_without_submit() -> None:
         # No submit happened; the buffer carries a newline.
         assert session.prompts == []
         assert editor.text == "a\nb"
+
+
+@pytest.mark.asyncio
+async def test_bang_on_empty_composer_enters_shell_mode() -> None:
+    """opencode's dedicated-mode half: ``!`` on an empty field is consumed,
+    the placeholder becomes the command invitation, and the dock class the
+    stylesheet reads for the chevron's string-green is on."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("!")
+        await pilot.pause()
+        assert editor.shell_mode is True
+        assert editor.text == ""
+        assert editor.placeholder == SHELL_PLACEHOLDER
+        assert app.query_one("#input-dock").has_class(COMPOSER_SHELL_CLASS)
+        assert chevron_colour(composer_cells(app)) == theme_mod.semantic_color("string").lower()
+        assert chevron_colour(composer_cells(app)) != theme_mod.semantic_color("accent").lower()
+
+
+@pytest.mark.asyncio
+async def test_bang_inside_a_draft_is_just_a_character() -> None:
+    """A ``!`` in `echo hi!` or mid-sentence is not a mode switch."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("h", "i", "!")
+        await pilot.pause()
+        assert editor.shell_mode is False
+        assert editor.text == "hi!"
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
+
+
+@pytest.mark.asyncio
+async def test_escape_and_empty_backspace_leave_shell_mode() -> None:
+    """opencode's exits: Esc keeps a draft, empty-buffer backspace is the
+    inverse of the bang that entered. Neither posts a stop."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("!")
+        await pilot.press("l", "s")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.shell_mode is False
+        assert editor.text == "ls"
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
+        assert not app.query_one("#input-dock").has_class(COMPOSER_SHELL_CLASS)
+        assert session.aborts == []
+
+        editor.clear_content()
+        await pilot.press("!")
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert editor.shell_mode is False
+        assert editor.text == ""
+        assert session.aborts == []
+
+
+@pytest.mark.asyncio
+async def test_shell_mode_submit_runs_the_command_not_a_prompt() -> None:
+    """Enter in bang-mode runs bash locally: a user row, a tool card, no
+    ``prompt()``, and the result is persisted so the next turn can see it."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("!")
+        for key in "echo bang-mode-ok":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        # The worker has to actually spawn /bin/sh; a couple of pauses is
+        # not a bound, so wait for the card to settle.
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        assert session.prompts == []
+        assert editor.shell_mode is False
+        assert editor.text == ""
+        transcript = app.query_one(TranscriptView)
+        blocks = transcript.blocks()
+        assert any(isinstance(block, UserBlock) for block in blocks)
+        cards = [block for block in blocks if isinstance(block, ToolCard)]
+        assert len(cards) == 1
+        assert cards[0].tool_name == "bash"
+        assert cards[0]._state == "success"
+        assert session.shell_records
+        command, result = session.shell_records[0]
+        assert command == "echo bang-mode-ok"
+        assert "bang-mode-ok" in result.text
+        # History stored WITH the bang so Up-arrow recall re-runs as a command.
+        assert editor.prompt_history()[-1] == "! echo bang-mode-ok"
+
+
+@pytest.mark.asyncio
+async def test_a_recalled_bang_line_still_runs_as_a_command() -> None:
+    """omp's submit-of-a-leading-bang half: history stores the bang, so Up
+    then Enter re-runs as a command even though dedicated mode is off.
+
+    ``!`` on an empty composer is consumed, so the only way a leading bang
+    lands in the buffer is a recall (or a paste). That is the path this
+    pins — without it, Up after ``! echo hi`` would send ``! echo hi`` as
+    a prompt.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("!")
+        for key in "echo first":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        assert len(session.shell_records) == 1
+        await pilot.press("up")
+        await pilot.pause()
+        assert editor.shell_mode is False
+        assert editor.text == "! echo first"
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if len(session.shell_records) >= 2:
+                break
+        assert session.prompts == []
+        assert [command for command, _ in session.shell_records] == [
+            "echo first",
+            "echo first",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_empty_shell_submit_is_a_noop() -> None:
+    """A user who entered bang-mode by accident and pressed Enter lands
+    back on the resting composer, not on a red notice."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("!")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.shell_mode is False
+        assert session.prompts == []
+        assert session.shell_records == []
+        assert app.query_one(TranscriptView).blocks() == []
+
+
+@pytest.mark.asyncio
+async def test_esc_aborts_a_running_shell_command() -> None:
+    """Esc on a live bang-mode command stops it the same way it stops a
+    turn: the card is interrupted on this press, not after the process
+    reaps."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("!")
+        for key in "sleep 30":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        # Wait until the card is on screen and still running — the whole
+        # point of this test is the in-flight state, not the settled one.
+        card = None
+        for _ in range(40):
+            await pilot.pause()
+            cards = [
+                block
+                for block in app.query_one(TranscriptView).blocks()
+                if isinstance(block, ToolCard)
+            ]
+            if cards:
+                card = cards[0]
+                if card._state == "running":
+                    break
+        assert card is not None
+        assert card._state == "running"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert card._state == "interrupted"
+        # The card stays owned until execute_bash has reaped the process and
+        # persisted its interrupted result. Clearing it on the key press made
+        # the receipt disappear on resume.
+        assert app._shell_card is card
+        for _ in range(40):
+            await pilot.pause()
+            if app._shell_card is None:
+                break
+        assert app._shell_card is None
+        assert session.shell_records
+        command, result = session.shell_records[0]
+        assert command == "sleep 30"
+        assert result.is_error is True
+        assert "interrupted" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_reload_aborts_and_settles_shell_before_disposing_its_session() -> None:
+    """A session swap cannot strand the bang-mode subprocess or let its
+    completion write into a session that `/reload` already disposed."""
+    first = FakeSession()
+    second = FakeSession()
+    order: list[str] = []
+
+    async def record_shell(command: str, result: Any) -> None:
+        assert first.disposed is False
+        order.append("recorded")
+        first.shell_records.append((command, result))
+
+    async def dispose() -> None:
+        order.append("disposed")
+        first.disposed = True
+
+    first.record_shell = record_shell  # type: ignore[method-assign]
+    first.dispose = dispose  # type: ignore[method-assign]
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "sleep 30":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if app._shell_card is not None:
+                break
+        assert app._shell_card is not None
+
+        app._session_factory = lambda: _factory(second)  # type: ignore[assignment]
+        await app._reload_session()
+        await pilot.pause()
+
+        assert order == ["recorded", "disposed"]
+        assert first.shell_records[0][0] == "sleep 30"
+        assert app._shell_worker is None
+        assert app._shell_card is None
+        assert app._session is second
 
 
 @pytest.mark.asyncio

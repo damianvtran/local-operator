@@ -394,6 +394,18 @@ ToolCard:focus, WakeBlock:focus {
     color: $lo-fg;
 }
 
+/* Bang-mode recolors the chevron, not the glyph. `composer_cells` finds the
+ * row by `❯`, and swapping the character would make every focus/caret test
+ * miss the composer the moment the mode was on. `string` is the ramp's
+ * command/success green — a step off the accent, so a shell-mode composer
+ * does not spend the "turn is live" ink (D5) and still reads as a different
+ * MODE from the resting field. Outranks the focus brightness: the mode is
+ * the louder fact, and a focused shell-mode chevron that went `fg` would
+ * look identical to a focused prompt. */
+#input-dock.-composer-shell #prompt-chevron {
+    color: $lo-string;
+}
+
 Editor {
     width: 1fr;
     height: auto;
