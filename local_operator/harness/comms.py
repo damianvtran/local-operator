@@ -78,6 +78,25 @@ MAX_RECORDS = 256
 
 DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "failed"]
 
+#: Default number of transcript steps ``peek`` returns when the caller does not
+#: ask for a range. Five is "what is it doing right now" — the question the op
+#: exists for — rather than "replay its reasoning", which is what the whole
+#: transcript is for and what makes a parent's context explode.
+PEEK_DEFAULT_STEPS = 5
+
+#: Hard ceiling on steps per peek, whatever the caller asks for. A parent that
+#: requests 500 steps is not making an informed choice about its own context
+#: budget; it is treating peek as a transcript dump. The char cap below is the
+#: real bound, but refusing absurd counts up front keeps the failure legible.
+PEEK_MAX_STEPS = 50
+
+#: Per-step character budget. Tool RESULTS are the bulk of any transcript (a
+#: single ``bash`` result can be 8 KiB on its own), and the parent peeking
+#: wants to know WHICH tool ran with WHAT outcome, not to re-read its output.
+#: Anything longer is elided in the middle, which keeps both the head (the
+#: command, the start of an answer) and the tail (the verdict, the error).
+PEEK_STEP_CHARS = 600
+
 
 @dataclass(frozen=True)
 class Delivery:
@@ -106,6 +125,40 @@ class Reply:
     text: str | None = None
     error: str | None = None
     timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class PeekStep:
+    """One rendered step of a child's transcript.
+
+    A "step" is one transcript message, numbered from 1 at the start of the
+    child's run so the numbers are STABLE: step 12 means the same thing on
+    every peek, which is what lets a parent range over "what happened since
+    last time" without the window sliding under it.
+    """
+
+    #: 1-based position in the child's transcript.
+    index: int
+    #: ``user`` | ``assistant`` | ``tool`` | ``hub`` | ``system``.
+    kind: str
+    #: One-line summary: the tool name and its intent, or the speaker.
+    heading: str
+    #: The body, already clipped to :data:`PEEK_STEP_CHARS`.
+    body: str
+
+
+@dataclass(frozen=True)
+class PeekWindow:
+    """The result of one ``peek``: a bounded slice of a child's transcript."""
+
+    job_id: str
+    label: str
+    status: str
+    #: Total steps in the child's transcript right now — the denominator that
+    #: tells a parent whether it is looking at the end or the middle.
+    total: int
+    steps: list[PeekStep] = field(default_factory=list)
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -418,6 +471,80 @@ class SubagentComms:
         for record in self._records.values():
             rows.append(self._describe(record, now))
         return rows
+
+    def peek(
+        self,
+        job_id: str,
+        *,
+        start: int | None = None,
+        end: int | None = None,
+        steps: int | None = None,
+    ) -> PeekWindow:
+        """Read a bounded slice of a child's transcript — ``hub op='peek'``.
+
+        The child's transcript is written incrementally (each tool batch lands
+        on disk at the batch boundary), so a RUNNING child can be read the same
+        way a settled one is: build a fresh ``Transcript`` off its session
+        directory and render a window of steps. This is the observation path
+        the parent's other surfaces do not cover: ``hub op='list'`` says a
+        child is running, ``wait`` blocks until it is not, and ``ask`` spends
+        the child's attention on a question — while peek answers "what is it
+        doing right now" without touching the child at all.
+
+        Ranges are 1-based inclusive step numbers, stable across calls, so a
+        parent can page forward (``start=<last seen + 1>``). ``steps`` is the
+        shorthand for "the last N", which is the common ask. All three are
+        clamped: the caller's context budget is the whole reason this op
+        exists, so an out-of-range request is an error about the range, not a
+        transcript dump.
+        """
+        record = self._records.get(job_id)
+        if record is None:
+            return PeekWindow(job_id, job_id, "gone", 0, error=f"unknown subagent {job_id!r}")
+        info = self._describe(record, time.time())
+        if record.session_dir is None:
+            return PeekWindow(
+                job_id,
+                record.label,
+                info.status,
+                0,
+                error="the subagent has not started yet, so it has no transcript to read",
+            )
+        transcript_file = record.session_dir / TRANSCRIPT_FILENAME
+        if not transcript_file.exists():
+            return PeekWindow(
+                job_id,
+                record.label,
+                info.status,
+                0,
+                error="the subagent's transcript is gone from disk",
+            )
+
+        # A FRESH reader, not the child's live Transcript object: the child
+        # owns an in-memory entry list that a parent must not share (and a
+        # settled child has no live object at all). ``Transcript`` loads the
+        # file at construction and drops malformed lines individually, so a
+        # half-written final line of a RUNNING child degrades to "not there
+        # yet" rather than an error.
+        from local_operator.session.transcript import Transcript
+
+        entries = Transcript(record.session_dir).entries()
+        rendered = _render_transcript_steps(entries)
+        total = len(rendered)
+
+        if total == 0:
+            return PeekWindow(job_id, record.label, info.status, 0)
+
+        lo, hi, error = _resolve_peek_range(total, start=start, end=end, steps=steps)
+        if error is not None:
+            return PeekWindow(job_id, record.label, info.status, total, error=error)
+        return PeekWindow(
+            job_id,
+            record.label,
+            info.status,
+            total,
+            steps=rendered[lo - 1 : hi],
+        )
 
     def _describe(self, record: _ChildRecord, now: float) -> ChildInfo:
         """Collapse a record plus its (possibly swept) job row into one row.
@@ -1244,3 +1371,174 @@ class SubagentComms:
         evictable.sort(key=lambda record: (record.settled_at is not None, record.settled_at or 0.0))
         for record in evictable[:overflow]:
             del self._records[record.job_id]
+
+
+# ---------------------------------------------------------------------------
+# peek rendering — a bounded, readable view of a child's transcript
+# ---------------------------------------------------------------------------
+
+
+def _resolve_peek_range(
+    total: int,
+    *,
+    start: int | None,
+    end: int | None,
+    steps: int | None,
+) -> tuple[int, int, str | None]:
+    """Turn the caller's range arguments into a clamped ``(lo, hi)`` window.
+
+    Step numbers are 1-based inclusive positions in the child's transcript,
+    stable across calls. The defaults answer the common ask — "the last few
+    steps" — while every explicit bound is checked so a sloppy range becomes a
+    legible error instead of an empty or runaway window.
+    """
+    if steps is not None:
+        if steps < 1:
+            return 0, 0, f"steps must be >= 1, got {steps}"
+        if steps > PEEK_MAX_STEPS:
+            return (
+                0,
+                0,
+                (
+                    f"steps={steps} is too many to peek at once (max {PEEK_MAX_STEPS}); "
+                    "range over the transcript in pages instead"
+                ),
+            )
+        return max(1, total - steps + 1), total, None
+
+    if start is not None and start < 1:
+        return 0, 0, f"start must be >= 1, got {start}"
+    if start is not None and start > total:
+        return 0, 0, (f"nothing at step {start}: the transcript has {total} step(s) right now")
+    if end is not None and start is not None and end < start:
+        return 0, 0, f"end must be >= start, got {start}-{end}"
+
+    if start is None and end is None:
+        return max(1, total - PEEK_DEFAULT_STEPS + 1), total, None
+    if end is not None and start is None:  # end only: a window ending there
+        return max(1, end - PEEK_DEFAULT_STEPS + 1), min(end, total), None
+    if start is not None and end is None:  # start only: default-sized window
+        return start, min(start + PEEK_DEFAULT_STEPS - 1, total), None
+    if start is not None and end is not None:
+        return start, min(end, total), None
+    return 1, total, None  # unreachable; keeps the checker honest
+
+
+def _clip(text: str, limit: int = PEEK_STEP_CHARS) -> str:
+    """Hold one step's body inside the budget, keeping head AND tail.
+
+    The head says what was asked or run; the tail says how it ended. A plain
+    head-truncation would leave every long ``bash`` result reading "exit
+    code: 0" with the interesting middle gone, and a head-only view of a
+    review verdict would show the preamble and hide the verdict.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 3
+    tail = limit - head
+    return text[:head] + f"\n[… {len(text) - limit} chars elided …]\n" + text[-tail:]
+
+
+def _blocks_text(blocks: Any) -> str:
+    """The readable text of a message's content blocks; images become a marker.
+
+    Image blocks appear in three shapes depending on where the media lives:
+    inline (``data``), externalized to the attachment store (``attachment``
+    digest — the shape a fresh reader of a large-image transcript sees), and
+    the typed ``ImageContent`` object. All three render as a marker; peek
+    never resolves the bytes.
+    """
+    parts: list[str] = []
+    for block in blocks or []:
+        if isinstance(block, dict):
+            if "text" in block:
+                parts.append(str(block["text"]))
+            elif "data" in block or "attachment" in block or block.get("type") == "image":
+                parts.append("[image]")
+        elif hasattr(block, "text"):
+            parts.append(block.text)
+    return "\n".join(part for part in parts if part)
+
+
+def _call_line(call: Any) -> str:
+    """One tool call as a single readable line: name, intent, key arguments."""
+    if isinstance(call, dict):
+        name = str(call.get("name", "?"))
+        args = call.get("arguments") or {}
+    else:
+        name = call.name
+        args = call.arguments or {}
+    if not isinstance(args, dict):
+        args = {}
+    intent = str(args.get("i") or "").strip()
+    head = f"{name}" + (f" — {intent}" if intent else "")
+    # The ONE argument that says what the call touches; enough to follow the
+    # child's trail without re-reading its arguments.
+    for key in ("path", "command", "pattern", "url", "query", "label", "prompt"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            one = " ".join(value.split())
+            return f"{head}: {key}={one[:120]}"
+    return head
+
+
+def _render_transcript_steps(entries: list[Any]) -> list[PeekStep]:
+    """Render transcript entries as numbered peek steps.
+
+    Only LLM-visible rows become steps — compaction markers and host
+    bookkeeping (wake schedules, checkpoints) are invisible to the child's
+    reasoning and would only spend the parent's context saying nothing. A
+    hub message renders by its direction so a parent reading its own child
+    sees the conversation, not raw JSON.
+    """
+    steps: list[PeekStep] = []
+    index = 0
+    for entry in entries:
+        payload = entry.payload or {}
+        if entry.type == "message":
+            index += 1
+            steps.append(_render_message_step(index, payload))
+        # compaction + custom bookkeeping: deliberately not a step.
+    return steps
+
+
+def _render_message_step(index: int, payload: dict[str, Any]) -> PeekStep:
+    if payload.get("kind") == "custom":
+        return _render_custom_step(index, payload)
+    role = str(payload.get("role", "user"))
+    if role == "assistant":
+        calls = payload.get("tool_calls") or []
+        heading = "assistant" + (
+            f" calls {', '.join(str(c.get('name')) for c in calls)}" if calls else ""
+        )
+        body = _blocks_text(payload.get("content"))
+        if calls and not body:
+            body = "\n".join(_call_line(c) for c in calls)
+        elif calls:
+            body = body + "\n" + "\n".join(_call_line(c) for c in calls)
+        return PeekStep(index, "assistant", heading, _clip(body))
+    if role == "tool":
+        name = str(payload.get("tool_name") or "tool")
+        err = " (error)" if payload.get("is_error") else ""
+        return PeekStep(
+            index, "tool", f"{name} result{err}", _clip(_blocks_text(payload.get("content")))
+        )
+    return PeekStep(index, "user", "user", _clip(_blocks_text(payload.get("content"))))
+
+
+def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
+    details = payload.get("details") or {}
+    custom_type = str(payload.get("custom_type", "custom"))
+    if custom_type == HUB_MESSAGE_TYPE:
+        direction = details.get("direction")
+        body = str(details.get("body") or details.get("text") or "")
+        if direction == "to_child":
+            sense = "question" if details.get("expects_reply") else "note"
+            return PeekStep(index, "hub", f"parent → child ({sense})", _clip(body))
+        if direction == "to_parent":
+            return PeekStep(index, "hub", "child → parent", _clip(body))
+        return PeekStep(index, "hub", "hub message", _clip(body))
+    if custom_type == "compaction_summary":
+        return PeekStep(index, "system", "compaction", _clip(str(details.get("summary", ""))))
+    return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))

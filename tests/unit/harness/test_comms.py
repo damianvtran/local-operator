@@ -2017,3 +2017,127 @@ async def test_two_concurrent_asks_cannot_both_pass_the_guard():
     assert len(served) == 1 and served[0].timed_out is True
     assert comms._records["job-1"].ask is None, "the surviving ask leaked its future"
     assert not comms._records["job-1"].pending_asks
+
+
+# --- peek: ranged, read-only observation of a child's transcript ------------
+
+
+def test_peek_refuses_an_unknown_child():
+    comms, _jobs, _child, _parent = wire()
+    window = comms.peek("nope")
+    assert window.error is not None and "unknown subagent" in window.error
+
+
+def test_peek_reports_a_child_that_never_started():
+    comms, _jobs, _child, _parent = wire(attach=False)
+    window = comms.peek("job-1")
+    assert window.error is not None and "no transcript" in window.error
+    assert window.total == 0
+
+
+@pytest.mark.asyncio
+async def test_peek_shows_a_running_childs_recent_steps(tmp_path, monkeypatch):
+    """The end-to-end claim: a RUNNING child's transcript is readable, ranged,
+    and stable — the parent sees what the child is doing without touching it."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_parent(tmp_path, ScriptedProvider())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="parser", prompt="Rewrite the parser.")
+    comms = parent.subagent_comms
+    await wait_for(lambda: comms.session_dir_of(job_id) is not None)
+    # Let the child run a few tool steps so there is something to peek at.
+    await wait_for(lambda: comms.peek(job_id, steps=50).total >= 4)
+
+    window = comms.peek(job_id)  # default: last few steps
+    assert window.error is None
+    assert window.status == "running"
+    assert window.total >= 4
+    assert window.steps, "a running child with a transcript must show steps"
+    kinds = {step.kind for step in window.steps}
+    assert "tool" in kinds, "the child's bash steps must be visible"
+
+    # Ranges are stable 1-based positions: paging forward from the last seen
+    # step yields exactly the steps after it.
+    last = window.steps[-1].index
+    ahead = comms.peek(job_id, start=last + 1)
+    assert ahead.error is not None or all(step.index > last for step in ahead.steps)
+
+    # steps= is the "last N" shorthand and clamps to the transcript.
+    three = comms.peek(job_id, steps=3)
+    assert len(three.steps) <= 3
+    assert three.steps[-1].index == three.total
+
+    # An out-of-range start is a legible error, not an empty dump.
+    beyond = comms.peek(job_id, start=window.total + 50)
+    assert beyond.error is not None and "nothing at step" in beyond.error
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peek_through_the_hub_tool_is_ranged_and_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_parent(tmp_path, ScriptedProvider())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="parser", prompt="Rewrite the parser.")
+    comms = parent.subagent_comms
+    await wait_for(lambda: comms.session_dir_of(job_id) is not None)
+    await wait_for(lambda: comms.peek(job_id, steps=50).total >= 4)
+
+    result = await execute_hub(
+        "call-1",
+        {"op": "peek", "to": [job_id], "steps": 2},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path), subagent_comms=comms),
+    )
+    text = body(result)
+    assert result.is_error is False
+    assert "2 of" in text and "transcript step(s)" in text
+    # A long tool result must be clipped, not dumped: the child's bash output
+    # is the bulk of any transcript and the one thing peek must not re-send.
+    assert len(text) < 4000
+
+    # A nonsense range is refused with a legible error.
+    bad = await execute_hub(
+        "call-2",
+        {"op": "peek", "to": [job_id], "range": "5-2"},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path), subagent_comms=comms),
+    )
+    assert bad.is_error is True
+    await parent.dispose()
+
+
+def test_hub_peek_and_list_are_read_tier_while_control_stays_write():
+    """Observing children must never prompt; controlling them still does."""
+    from local_operator.tools.builtin import build_hub_tool
+
+    comms, _jobs, _child, _parent = wire()
+
+    class Ctx:
+        subagent_comms = comms
+        job_id = None
+
+    tool = build_hub_tool(Ctx())  # type: ignore[arg-type]
+    assert tool is not None
+    assert tool.approval_tier == "write"
+    assert tool.call_approval_tier is not None
+    assert tool.call_approval_tier({"op": "peek"}) == "read"
+    assert tool.call_approval_tier({"op": "list"}) == "read"
+    assert tool.call_approval_tier({"op": "cancel", "to": ["job-1"]}) == "write"
+    assert tool.call_approval_tier({"op": "resume", "message": "x"}) == "write"
+
+
+def test_a_child_hub_reply_with_parent_shaped_args_still_reaches_the_parent():
+    """Children mirror the parent tool shape they see (``op``/``to``); the
+    child surface must drop those keys and deliver the message anyway."""
+    comms, _jobs, _child, parent = wire()
+    parent.received = []
+
+    from local_operator.tools.builtin import HubChildParams
+
+    params = HubChildParams(  # type: ignore[call-arg]
+        op="send", to=["parent"], message="review posted"
+    )
+    assert params.message == "review posted"

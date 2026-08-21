@@ -6090,14 +6090,16 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
 # hub — parent↔subagent messaging and control
 # ---------------------------------------------------------------------------
 # One tool, two shapes, chosen by who is being built for (see
-# ``build_hub_tool``). ONE tool rather than seven (list/send/ask/steer/pause/
-# cancel/resume) because they share a target and a body and differ only in
-# intent — seven entries would spend seven tool-schema slots and seven
-# descriptions on one concept, and the model would still have to learn which of
-# them means "and wait for the answer". Named ``hub`` after the surface the same ops have in
-# omp, whose shape this follows deliberately: ``to`` addresses one peer or
+# ``build_hub_tool``). ONE tool rather than eight (list/peek/send/ask/steer/
+# pause/cancel/resume) because they share a target and differ only in intent —
+# eight entries would spend eight tool-schema slots and eight descriptions on
+# one concept, and the model would still have to learn which of them means
+# "and wait for the answer". Named ``hub`` after the surface the same ops have
+# in omp, whose shape this follows deliberately: ``to`` addresses one peer or
 # ``"all"``, delivery returns per-recipient receipts, and asking is a send
-# that waits.
+# that waits. ``peek`` is the read-only member of the family: it observes a
+# child's transcript instead of acting on the child, which is why it needs no
+# message and never interrupts the child.
 #
 # The two shapes are not cosmetic. A parent may address, redirect, stop and
 # resume its children; a child has exactly one peer (its parent) and no
@@ -6158,15 +6160,18 @@ class HubParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "send", "ask", "steer", "pause", "cancel", "resume"] = Field(
+    op: Literal["list", "peek", "send", "ask", "steer", "pause", "cancel", "resume"] = Field(
         description=(
             "list: every subagent you launched with its status and whether it can be "
             "resumed — including finished, failed and paused ones the 'jobs' tool no "
-            "longer shows. send: a note, no reply waited for. ask: a question, blocks "
-            "for the subagent's answer. steer: change what it is doing (becomes part "
-            "of its instructions). pause: stop it now but keep it resumable. cancel: "
-            "stop it for good. resume: relaunch a stopped, paused or failed subagent "
-            "against its own transcript so it continues where it left off."
+            "longer shows. peek: READ the subagent's transcript (ranged, cheap) to see "
+            "its current progress without spending its attention — the fast way to "
+            "check on a running child. send: a note, no reply waited for. ask: a "
+            "question, blocks for the subagent's answer. steer: change what it is doing "
+            "(becomes part of its instructions). pause: stop it now but keep it "
+            "resumable. cancel: stop it for good. resume: relaunch a stopped, paused or "
+            "failed subagent against its own transcript so it continues where it left "
+            "off."
         )
     )
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
@@ -6185,8 +6190,8 @@ class HubParams(BaseModel):
         description=(
             "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
             'labels, or ["all"] for every running subagent. Several ids address '
-            "several subagents. 'ask' and 'resume' take exactly one. Omit for "
-            "op='list', which addresses nobody."
+            "several subagents. 'ask', 'resume' and 'peek' take exactly one. Omit "
+            "for op='list', which addresses nobody."
         ),
     )
 
@@ -6202,14 +6207,37 @@ class HubParams(BaseModel):
         default=None,
         description=(
             "The body. Required for send/ask/steer, and for resume (what to do next); "
-            "ignored by list/pause/cancel."
+            "ignored by list/peek/pause/cancel."
         ),
     )
     timeout_ms: int = Field(
-        default=120_000,
+        # The default is a BUDGET for a busy child to finish its current step
+        # and answer, not a round-trip latency: measured on real transcripts,
+        # a child that answers takes p50 ~3 minutes from injection to reply
+        # (it completes the tool batch it is in first). The old 120 s default
+        # was below that median, so the modal outcome of op='ask' was a
+        # timeout even when the child WAS answering. 300 s covers the p90 of
+        # answering children while staying inside the 600 s schema maximum.
+        default=300_000,
         gt=0,
         le=600_000,
         description="op='ask' only: how long to wait for the answer.",
+    )
+    range: str | None = Field(
+        default=None,
+        description=(
+            "op='peek' only: which transcript steps to read, as 'start-end' or "
+            "'start-' (1-based inclusive, stable across peeks). Omit for the last "
+            "few steps; use steps= for 'the last N'."
+        ),
+    )
+    steps: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "op='peek' only: shorthand for the last N steps (overrides range). "
+            "Omit for the default (5)."
+        ),
     )
 
 
@@ -6221,6 +6249,22 @@ class HubChildParams(BaseModel):
     message: str = Field(
         description="What to tell the parent agent. Answers its question when it asked one."
     )
+
+    # Children see the PARENT's hub tool in their own transcripts (the parent
+    # used it to launch and message them) and a large share of them mirror the
+    # shape back — ``{"op": "send", "message": ...}`` — which ``extra="forbid"``
+    # then rejects, so the reply never reaches the parent and the parent's
+    # ``ask`` burns to a timeout. Measured on real transcripts: 7 rejected
+    # answers against 0 accepted via the tool. The child surface genuinely has
+    # no ops, so the parent-shaped keys are dropped rather than honoured; the
+    # message still goes through, which is the whole intent.
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_parent_shaped_keys(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            parent_shaped = ("op", "to", "timeout_ms", "range", "steps")
+            return {k: v for k, v in value.items() if k not in parent_shaped}
+        return value
 
 
 def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
@@ -6326,6 +6370,67 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
     )
 
 
+def _hub_peek(tool_call_id: str, comms: Any, params: Any) -> ToolResult:
+    """Render ``hub op='peek'``: a bounded slice of one child's transcript.
+
+    The parent's observation path that costs the child nothing: unlike
+    ``ask``, it neither waits on the child nor spends the child's attention,
+    and unlike ``wait`` it does not block until the child settles. The window
+    is deliberately small by default — the op exists so a parent can check
+    progress without a transcript dump landing in its own context.
+    """
+    ids, errors = _hub_targets(comms, params.to or [])
+    if not ids:
+        return _error(
+            tool_call_id,
+            "hub",
+            "; ".join(errors) or "no subagent matched; use op='list' to see them.",
+        )
+    start: int | None = None
+    end: int | None = None
+    if params.range is not None:
+        try:
+            start, end = _parse_line_range(params.range)
+        except ValueError as exc:
+            return _error(tool_call_id, "hub", str(exc))
+    window = comms.peek(ids[0], start=start, end=end, steps=params.steps)
+    if window.error is not None:
+        return _error(tool_call_id, "hub", f"{window.label} ({window.job_id}): {window.error}")
+
+    lines = [
+        f"{window.label} ({window.job_id}) [{window.status}] — "
+        f"{len(window.steps)} of {window.total} transcript step(s):"
+    ]
+    for step in window.steps:
+        lines.append(f"{step.index:>4}  {step.heading}")
+        if step.body:
+            for body_line in step.body.splitlines():
+                lines.append(f"      {body_line}")
+    if window.steps:
+        first, last = window.steps[0].index, window.steps[-1].index
+        hints = []
+        if first > 1:
+            hints.append(f"range='1-{first - 1}' for earlier steps")
+        if last < window.total:
+            hints.append(f"range='{last + 1}-' to continue")
+        if hints:
+            lines.append("(" + "; ".join(hints) + ")")
+    else:
+        lines.append("(the transcript is empty so far)")
+    return _text(
+        tool_call_id,
+        "hub",
+        "\n".join(lines),
+        details={
+            "op": "peek",
+            "job_id": window.job_id,
+            "status": window.status,
+            "total": window.total,
+            "shown": [step.index for step in window.steps],
+        },
+    )
+
+
 def _hub_receipt_lines(deliveries: list[Any]) -> list[str]:
     return [
         (
@@ -6388,7 +6493,7 @@ async def _execute_hub_parent(
     if params.op == "list":
         return _hub_list(tool_call_id, comms)
 
-    if params.op not in ("cancel", "pause") and not (params.message or "").strip():
+    if params.op not in ("cancel", "pause", "peek") and not (params.message or "").strip():
         return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
 
     if not params.to:
@@ -6405,14 +6510,17 @@ async def _execute_hub_parent(
             "hub",
             "; ".join(errors) or "no subagent matched; use 'jobs' to list them.",
         )
-    # A question and a resume both have exactly one answer, so they refuse a
-    # fan-out rather than silently acting on the first match.
-    if params.op in ("ask", "resume") and len(ids) > 1:
+    # A question, a resume and a peek each have exactly one subject, so they
+    # refuse a fan-out rather than silently acting on the first match.
+    if params.op in ("ask", "resume", "peek") and len(ids) > 1:
         return _error(
             tool_call_id,
             "hub",
             f"op='{params.op}' addresses one subagent at a time; got {len(ids)}.",
         )
+
+    if params.op == "peek":
+        return _hub_peek(tool_call_id, comms, params)
 
     message = params.message or ""
     if params.op == "ask":
@@ -6424,7 +6532,9 @@ async def _execute_hub_parent(
                 tool_call_id,
                 "hub",
                 f"{reply.label} ({reply.job_id}) did not answer within {params.timeout_ms}ms; "
-                "it is still running and the question is in its context.",
+                "it is still running and the question is in its context. Read its "
+                "progress with hub op='peek' instead of asking again — peek costs "
+                "the child nothing.",
                 details={"op": "ask", "job_id": reply.job_id, "timed_out": True},
             )
         return _text(
@@ -6522,8 +6632,12 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
         # autonomous work. The gate is per TOOL, not per op, so the tier is
         # the highest any op needs — 'resume' starts a child session, which is
-        # exactly what 'task' asks the user to approve.
+        # exactly what 'task' asks the user to approve. The read-only ops
+        # (list, peek) downgrade per call so observing children never prompts.
         approval_tier="write",
+        call_approval_tier=lambda args: (
+            "read" if str(args.get("op") or "") in ("list", "peek") else "write"
+        ),
         # 'ask' blocks the turn on another agent's answer; running it beside
         # other tools would hold a shared slot for the whole timeout.
         concurrency="exclusive",
