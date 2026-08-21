@@ -27,6 +27,10 @@ class GoalState:
     """Mutable holder for the session's current goal (empty = unset)."""
 
     text: str = ""
+    #: Team brief stamped by ``/team``. Separate from ``text`` so attaching a
+    #: team cannot overwrite a standing ``/goal``, and clearing a goal cannot
+    #: drop the roster the manager is coordinating.
+    team_brief: str = ""
 
     def set(self, text: str) -> str:
         """Store a trimmed, length-capped goal and return what was stored."""

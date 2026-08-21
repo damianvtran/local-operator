@@ -165,6 +165,32 @@ def test_agents_create_positional(parser: argparse.ArgumentParser) -> None:
     assert args.name == "NewAgent"
 
 
+def test_teams_subcommands(parser: argparse.ArgumentParser) -> None:
+    assert parser.parse_args(["teams", "list"]).teams_command == "list"
+    created = parser.parse_args(
+        [
+            "teams",
+            "create",
+            "feature-release",
+            "--manager",
+            "manager",
+            "--member",
+            "coder",
+            "--member",
+            "reviewer:2",
+        ]
+    )
+    assert created.teams_command == "create"
+    assert created.name == "feature-release"
+    assert created.manager == "manager"
+    assert created.members == ["coder", "reviewer:2"]
+    shown = parser.parse_args(["teams", "show", "feature-release"])
+    assert shown.teams_command == "show"
+    deleted = parser.parse_args(["teams", "delete", "--name", "feature-release"])
+    assert deleted.teams_command == "delete"
+    assert deleted.name == "feature-release"
+
+
 @pytest.mark.parametrize(
     ("argv", "name", "agent_id"),
     [

@@ -622,6 +622,13 @@ class ToolContext(BaseModel):
     # the ``agent`` tool is then not advertised (createIf) and delegation falls
     # back to packaged starter profiles.
     agent_registry: Any = None
+    # The user's persistent team registry (``local_operator.teams``), behind
+    # the ``team`` tool and behind ``/team <name> <request>``. Typed ``Any``
+    # for the same reason ``agent_registry`` is: importing that module here
+    # would pull yaml persistence into every process that merely wants a
+    # tool type. ``None`` means the host keeps no teams: the ``team`` tool
+    # is then not advertised (createIf).
+    team_registry: Any = None
     # The session's background job manager. Declared as a Protocol because
     # the concrete class lives in ``harness.jobs``, which imports this
     # module (import cycle). The ``wait``/``job`` tools read it; ``None``

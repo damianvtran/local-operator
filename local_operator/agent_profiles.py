@@ -296,6 +296,20 @@ def is_role(agent: "AgentData") -> bool:
     return any(str(tag).strip().lower() == ROLE_TAG for tag in (agent.tags or []))
 
 
+def is_specialist(agent: "AgentData") -> bool:
+    """Whether the agent tool authored this row as a reusable specialist.
+
+    Ordinary conversational agents share the registry and must stay private to
+    ``agent list/show``. The category is the explicit marker written by
+    ``agent(op='create', kind='specialist')``; a name or a non-empty prompt is
+    not enough, because both are normal on private chat agents too.
+    """
+
+    return any(
+        str(category).strip().lower() == "specialist" for category in (agent.categories or [])
+    )
+
+
 def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentProfile:
     """Convert a registered agent into a role profile.
 

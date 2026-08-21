@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
+from rich.padding import Padding
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
@@ -477,6 +478,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "credential",
         "Hand the agent a secret it can use but never read; paste is masked",
         aliases=("cred",),
+        arguments=ArgumentMode.OPTIONAL,
+    ),
+    # NOT an echo. `/team <name> <request>` does reach the model, but as
+    # the request text itself via `_submit_prompt`, which already writes
+    # the user row. Echoing the slash line would duplicate it. Bare
+    # `/team` is a listing and the listing is the receipt.
+    SlashCommand(
+        "team",
+        "List teams, or send a request to a team's manager",
+        aliases=("teams",),
         arguments=ArgumentMode.OPTIONAL,
     ),
 ]
@@ -2552,6 +2563,128 @@ class OperatorApp(App[None]):
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
         notice("starting a new session…")
         self.run_worker(self._reload_session(), thread=False, group="session")
+
+    def _team_registry(self) -> Any | None:
+        """The session's team registry, or None when the host keeps none."""
+        session = self._session
+        return getattr(session, "team_registry", None) if session is not None else None
+
+    def _team_choices(self) -> list[ArgumentChoice]:
+        """Teams the ``/team`` argument list offers, one row per name."""
+        registry = self._team_registry()
+        if registry is None or not hasattr(registry, "list_teams"):
+            return []
+        try:
+            teams = list(registry.list_teams())
+        except Exception:
+            return []
+        choices: list[ArgumentChoice] = []
+        for team in teams:
+            slots = len(getattr(team, "members", ()) or ()) + 1
+            manager = getattr(team, "manager", "manager")
+            description = (getattr(team, "description", "") or "").strip() or "no description"
+            choices.append(
+                ArgumentChoice(
+                    team.name,
+                    description,
+                    detail=f"{slots} roles · led by {manager}",
+                )
+            )
+        return choices
+
+    def _team_list_block(self, teams: list[Any]) -> RichBlock:
+        """A structured roster list for bare ``/team``.
+
+        Each team gets its own name row, facts row, and optional description
+        row. Keeping fields on separate rows prevents a narrow terminal from
+        wrapping ``roles`` or the description into a position that reads as a
+        child of the next item — the flat debug-style line this replaces did
+        exactly that at both 100 and 60 columns.
+        """
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("teams", style=heading)]
+        for team in teams:
+            slots = len(team.members) + 1
+            rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
+            role_word = "role" if slots == 1 else "roles"
+            rows.append(
+                Padding(
+                    Text(f"Led by {team.manager} · {slots} {role_word}", style=body),
+                    (0, 0, 0, 4),
+                )
+            )
+            summary = (team.description or "").strip()
+            if summary:
+                rows.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
+        rows.append(Text())
+        rows.append(Text("Send: /team <name> <message>", style=body))
+        return RichBlock(Group(*rows))
+
+    def _cmd_team(self, arg: str, notice: NoticeFn) -> None:
+        """``/team`` — list; ``/team <name> <request>`` — talk to the manager.
+
+        Bare ``/team`` is a listing, so it does not echo. A named team with a
+        request attaches that team to this session (stamping the roster and
+        briefs onto the manager) and sends the request as a real user turn —
+        the one case besides ``/goal`` whose argument reaches the model.
+        """
+        session = self._session
+        if session is None:
+            self._system_notice("session is still starting…", "warning")
+            return
+        registry = self._team_registry()
+        if registry is None or not hasattr(registry, "list_teams"):
+            self._system_notice(
+                "teams are unavailable in this session. Ask the agent to create one.",
+                "warning",
+            )
+            return
+        if not arg:
+            try:
+                teams = list(registry.list_teams())
+            except Exception as exc:
+                self._system_notice(f"could not list teams: {exc}", "warning")
+                return
+            if not teams:
+                notice("no teams yet. Ask the agent to create one.")
+                return
+            self._append_block(self._team_list_block(teams))
+            return
+        name, _, request = arg.partition(" ")
+        name = name.strip()
+        request = request.strip()
+        try:
+            team = registry.get_team_by_name(name)
+        except Exception as exc:
+            self._system_notice(f"could not load team {name!r}: {exc}", "warning")
+            return
+        if team is None:
+            self._system_notice(
+                f"no team named {name!r}. Run /team to list teams, or ask the agent to create one.",
+                "warning",
+            )
+            return
+        attach = getattr(session, "attach_team", None)
+        if callable(attach):
+            try:
+                attach(team)
+            except Exception as exc:
+                self._system_notice(f"could not attach team {name!r}: {exc}", "warning")
+                return
+        if not request:
+            notice(
+                f"team {team.name} is ready. {team.manager} leads it. "
+                f"Send a request with /team {team.name} <message>."
+            )
+            return
+        # `_submit_prompt` writes the user row (the request is what the
+        # manager is told) and starts the turn. The slash line itself is
+        # not echoed: the request text is the transcript subject, and a
+        # second row restating `/team name …` would be the duplication
+        # the echo policy exists to prevent.
+        notice(f"sending to {team.name}. {team.manager} is coordinating.")
+        self._submit_prompt(request)
 
     # -- MCP status ---------------------------------------------------------
     def _wire_mcp_status(self, session: SessionProtocol) -> None:
@@ -6508,6 +6641,8 @@ class OperatorApp(App[None]):
             self._cmd_logout(arg, notice)
         elif command == "/credential":
             self._cmd_credential(arg, notice)
+        elif command == "/team":
+            self._cmd_team(arg, notice)
         else:
             # ``parts[0]``, not the lowered ``command``: with the echo gone this
             # line is the ONLY place the mistyped word appears, so it has to
@@ -8603,6 +8738,10 @@ class OperatorApp(App[None]):
             return
         if message.command in ("credential", "cred"):
             picker.set_choices(self._credential_choices())
+            picker.set_notice("")
+            return
+        if message.command in ("team", "teams"):
+            picker.set_choices(self._team_choices())
             picker.set_notice("")
             return
         if message.command == "effort":
