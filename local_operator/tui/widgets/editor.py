@@ -6,7 +6,8 @@ submit-on-Enter. The subclass inverts that and takes the terminal key idioms:
 - ``Enter`` submits (posts :class:`EditorSubmitted`); with the command picker
   open it first completes the highlighted command, THEN submits
 - ``Shift+Enter`` inserts a newline
-- ``Ctrl+C`` posts :class:`InterruptRequested` (abort the turn) — never exits
+- ``Ctrl+C`` copies a live range (posts :class:`EditorCopied`); with no range
+  it posts :class:`InterruptRequested` (abort the turn) — never exits
 - ``Ctrl+D`` on an EMPTY buffer quits; otherwise it falls through to delete
 - ``Up``/``Down`` move the picker's highlight while it is open; otherwise they
   cycle prompt history when the caret sits at the top/bottom edge of the
@@ -18,9 +19,13 @@ Key interception happens in :meth:`_on_key`, which runs BEFORE TextArea's
 document-insert path, so a handled key never reaches the buffer. Unhandled
 keys fall through to the stock editor behavior.
 
-Releasing a drag over the composer COPIES the highlighted text, the same rule
-the transcript follows and for the same reason — neither Ctrl+C nor cmd+C is
-available to bind here. See :meth:`Editor._copy_drag`.
+A drag over the composer SELECTS and does not copy. The transcript copies on
+release because a highlight there is read-only text being taken; in the
+composer a highlight is usually the first half of a retype or delete, so
+copying on release clobbered the clipboard with text the user was discarding.
+The copy gesture is explicit: highlight, then Ctrl+C — :meth:`_on_key` routes
+the press to :meth:`action_copy` while a real range is live. See
+:meth:`Editor._copy_drag` for why no other key can carry it.
 
 The caret is SOLID and never blinks, and on an EMPTY composer it gets a cell of
 its own to the left of the placeholder rather than inverting the placeholder's
@@ -63,6 +68,7 @@ from rich.cells import cell_len
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from textual import events
+from textual.actions import SkipAction
 from textual.content import Content
 from textual.expand_tabs import expand_tabs_inline
 from textual.geometry import Offset
@@ -365,7 +371,11 @@ class EditorCopyStale(Message):
 
 
 class EditorCopied(Message):
-    """Posted when a drag over the composer finishes on a real selection.
+    """Posted when a composer drag finishes on a real selection AND copy is armed.
+
+    Posted only by :meth:`Editor.action_copy` (the highlight-then-Ctrl+C
+    press). A drag never reaches this: drag-copy is the transcript's
+    gesture, not the composer's.
 
     Carries the text rather than leaving the app to re-read the widget: the
     selection is live state, and by the time a message is delivered a later
@@ -1051,7 +1061,22 @@ class Editor(TextArea):
             event.prevent_default()
             return
         if key == "ctrl+c":
-            self.post_message(InterruptRequested())
+            # A REAL RANGE makes this press a copy, ahead of its interrupt
+            # meaning. ``TextArea``'s ``ctrl+c`` binding never runs — the key
+            # is consumed here first — so the highlight-then-Ctrl+C sequence
+            # the field report names would otherwise be the one copy gesture
+            # with no effect at all. Only a real range qualifies: a selection
+            # is STATE that persists until the caret moves, but a collapsed
+            # caret is the resting state of the composer, and gating the
+            # interrupt on "some range is live" is D17's lost-draft bug this
+            # ordering exists to avoid. A stale LIVE range is safe to copy
+            # through: it has start != end, so it survives the checks in the
+            # app's interrupt rung that guard the exit ladder, and the press
+            # means "take this", not "scrap my draft".
+            if self.selected_text:
+                self.action_copy()
+            else:
+                self.post_message(InterruptRequested())
             event.stop()
             event.prevent_default()
             return
@@ -1534,9 +1559,12 @@ class Editor(TextArea):
         the base class still finalises ``_selecting`` and releases the mouse
         afterwards; it never touches the selection, so nothing overwrites this.
 
-        The release is also where a drag over the composer becomes a COPY, for
-        the same reason it is in the transcript — see :meth:`_copy_drag` and
-        ``OperatorApp.on_text_selected``.
+        A drag over the composer is NEVER a copy. Drag-copy is the
+        transcript's gesture, where a highlight is read-only text being taken;
+        in the composer a highlight is usually the first half of a replace or
+        delete, so copying on release clobbered the clipboard with text the
+        user was about to throw away. The copy gesture here is explicit:
+        highlight, then Ctrl+C — see :meth:`action_copy`.
         """
         pressed = self._pressed_marker
         self._pressed_marker = None
@@ -1549,17 +1577,30 @@ class Editor(TextArea):
             # clicked one marker, which means "act on this chip" (the gesture
             # exists so backspace can delete it whole), not "take a copy of
             # it". Copying here would put text on the clipboard and raise a
-            # receipt for it on a CLICK, which is precisely the noise
-            # :meth:`_copy_drag` avoids by ignoring collapsed selections.
+            # receipt for it on a CLICK, which is the same noise a drag-copy
+            # would be.
             return
-        self._copy_drag()
 
     def _copy_drag(self) -> None:
-        """Put a composer drag on the clipboard, exactly as the transcript does.
+        """A composer drag never copies. Kept as a named no-op so the tests
+        that used to drive this path still have a method to name, and so a
+        future reader looking for the old release-copies rule finds the
+        reason it is gone rather than a silent absence.
 
-        Reported from the field: text highlighted in the composer "doesn't copy
-        properly" — the drag paints a highlight and the clipboard keeps whatever
-        it held before. Both halves of the app's copy story miss this widget:
+        The release-copies rule was imported from the transcript, where it is
+        right: a highlight over an answer is read-only text being taken, and no
+        key can carry it (below). In the composer the same gesture is usually
+        the first half of an EDIT — drag a phrase to retype it, drag a word to
+        delete it — so a copy on release clobbered the user's clipboard with
+        text they were about to throw away. Reported: "when you highlight in
+        the composer it automatically copies … often you're just highlighting
+        to select and potentially cut/delete a part, the copy can end up
+        clearing something you have in the clipboard." So the release copies
+        NOTHING: a composer highlight is selection, not copy. The copy gesture
+        is explicit — highlight, then Ctrl+C — see :meth:`action_copy`.
+
+        Why no other key can substitute, and therefore why the transcript's
+        release-copies rule exists there at all:
 
         * **The release does not reach the app.** ``OperatorApp.on_text_selected``
           copies ``Screen.get_selected_text()``, but a ``TextArea`` never
@@ -1567,74 +1608,29 @@ class Editor(TextArea):
           ``app.clear_selection()`` on every caret move, and the mouse-down that
           begins a composer drag moves the caret — so ``Screen.selections`` is
           wiped on the first event of the gesture and stays empty for the rest
-          of it. Measured before this fix: after a drag over the composer,
-          ``editor.selected_text`` was ``'summarise the inges'`` while
-          ``screen.get_selected_text()`` was ``None`` and the clipboard was ``''``.
-          The base class also captures the mouse on press, so ``Screen``'s own
-          select machinery is bypassed and ``_select_state`` never leaves ``None``.
+          of it. The base class also captures the mouse on press, so ``Screen``'s
+          own select machinery is bypassed and ``_select_state`` never leaves
+          ``None``.
 
-        * **No key can rescue it.** ``TextArea`` binds ``ctrl+c,super+c`` to
-          ``action_copy``, and neither key arrives: cmd+C is eaten by the
-          terminal (Ghostty binds ``super+c=copy_to_clipboard:mixed`` without
-          ``performable:``), and Ctrl+C is consumed by :meth:`_on_key` as this
-          app's interrupt before any binding runs. That is deliberate — the
-          interrupt cannot become conditional on a live highlight — so the
-          composer is left with a highlight and no way to spend it.
+        * **No key can rescue it on its own.** ``TextArea`` binds
+          ``ctrl+c,super+c`` to ``action_copy``, and neither key arrives:
+          cmd+C is eaten by the terminal (Ghostty binds
+          ``super+c=copy_to_clipboard:mixed`` without ``performable:``), and
+          Ctrl+C is consumed by :meth:`_on_key` as this app's interrupt before
+          any binding runs. That is deliberate — the interrupt cannot become
+          conditional on a live highlight. :meth:`_on_key` therefore routes
+          the press to :meth:`action_copy` itself when a real range is live,
+          which is the one copy sequence the composer has.
 
-        The fix is the rule the transcript already states: **the release IS the
-        copy**. The gesture carries itself, the user gets the same toast, and no
-        key changes meaning.
-
-        Only a real range copies. A plain click leaves ``start == end`` and is
-        not a copy — nor is the marker click above, which the caller returns on
-        before reaching here because that selection is the app's, made so
-        backspace can delete the chip whole.
-
-        ``selected_text`` is the DOCUMENT's text, which is the right claim for
-        an input: what a user copies out of a field is what they typed and can
-        paste back, so an attachment marker copies as the ``[Image #1, …]`` text
-        that cites it — the same characters :meth:`_submit` would send, and the
-        ones that re-cite the image if pasted into another draft. In a read-only
-        composer (subagent view) that text is the app's rather than the user's,
-        and it copies too: what the field shows is what a drag over it takes.
-
-        Only THIS widget's own drag copies, which ``_selecting`` is the record
-        of — ``TextArea._on_mouse_down`` sets it and ``TextArea._on_mouse_up``
-        clears it, and this runs in between (review round 1, F1/F2). Without
-        that gate every mouse-up delivered here copies, and two of them are not
-        copy gestures at all:
-
-        * A drag that STARTS in the transcript and is released over the composer
-          — the ordinary way to select to the end of the answer, since the
-          composer is docked below it. ``TextArea`` leaves a selection live
-          after its own drag, so the composer still holds the last range the
-          user highlighted in it, and re-copying that range overwrites the
-          transcript copy the same release just made. Measured: the user dragged
-          the agent's answer and got their own draft, with a toast confirming
-          it.
-        * A bare mouse-up over a selection made with shift+arrows, which no
-          mouse gesture asked to copy.
-
-        A guard phrased as "did the PRESS land in this widget" would fix the
-        first and miss the second; ``_selecting`` answers the question that
-        actually matters, which is whether this widget is mid-drag.
+        An earlier version of this method copied on an ARMED release
+        (``copy_on_release``, set by an explicit copy so the next drag
+        matched the transcript's). That was a hidden mode whose lifetime
+        could not be stated correctly: the arm outlived the highlight that
+        authorised it (review round 1, F1) and nothing on screen showed it
+        was on (design round 1, D2). Dropped rather than patched — a
+        composer copy is always the explicit press, never a drag.
         """
-        if not self._selecting:
-            return
-        text = self.selected_text
-        if not text:
-            return
-        self._copied = True
-        self._copy_gesture = True
-        # WHICH range the copy took, so `watch_selection` can tell this copy's
-        # own highlight from any later one and retire the claim when it goes.
-        # Without that distinction a shift+arrow selection made after the copied
-        # range had been collapsed silently re-armed the app's Ctrl+C deferral,
-        # and the next two presses quit with the draft unfiled (D22, design
-        # round 7). `#:` is for attribute declarations, and this is an
-        # assignment in a method body (R17 NIT-1).
-        self._copied_selection = self.selection
-        self.post_message(EditorCopied(text))
+        return
 
     @property
     def copy_in_flight(self) -> bool:
@@ -1654,6 +1650,42 @@ class Editor(TextArea):
         predicates did.
         """
         return self._selecting or self._copy_gesture
+
+    def action_copy(self) -> None:
+        """Copy the live range. THE composer's copy gesture.
+
+        The composer cannot rely on Textual's binding reaching this method on
+        its own: cmd+C is eaten by the terminal and Ctrl+C is the app's
+        interrupt (see :meth:`_copy_drag`), so :meth:`_on_key` routes the
+        highlight-then-Ctrl+C sequence here directly. This override exists so
+        that path — and any other caller of the ``copy`` action — writes the
+        clipboard through the SAME message a transcript copy uses, rather than
+        ``super().action_copy()``: Textual's base writes silently, and this
+        app's rule is that a copy says so. One clipboard write and one receipt
+        for every gesture, or the toast becomes evidence about which key
+        carried it.
+
+        The gesture flags are deliberately NOT set here. ``_copy_gesture`` is
+        what defers Ctrl+C's interrupt meaning while a copy's highlight is on
+        screen, and a highlight outlives every gesture — it sits there until
+        the caret moves. A press is over the instant it lands, so leaving the
+        gesture armed after one would defer the NEXT press for as long as the
+        stale highlight happens to remain: the user presses Ctrl+C on a
+        minutes-old range expecting the draft rung and gets a re-copy instead,
+        with the exit ladder's second tap a lost draft away (D17/D20). The
+        receipt flag IS set — the toast it drives is a claim about the
+        clipboard, and editing the copied text falsifies it (D3).
+
+        A live range on a subsequent press copies AGAIN rather than
+        interrupting: that is the explicit-copy rule itself, not a leftover
+        deferral. Collapsing the caret (an arrow, a click) is what hands the
+        key back to the draft/interrupt rungs.
+        """
+        text = self.selected_text
+        if not text:
+            raise SkipAction()
+        self._copied = True
+        self.post_message(EditorCopied(text))
 
     def watch_selection(self, selection: Selection) -> None:
         """Retire the copy receipt's GESTURE claim when the highlight changes.
@@ -1877,13 +1909,13 @@ class Editor(TextArea):
         # touched. Both halves are measured BEFORE the edit, because afterwards
         # the range is gone and the citation positions have moved.
         touched = self._attachments_touched_by(edit)
-        # Select-to-overwrite is the commonest edit in any input, and after this
-        # widget started copying on release it also became a clipboard write:
-        # the user drags a word to replace it, types, and a receipt asserting a
-        # copy of characters that no longer exist sits on screen for another
-        # five seconds (design round 1, D3). The clipboard keeps what it took
-        # — that is what a copy IS, and silently un-copying would be worse —
-        # but the CLAIM is retired the moment its subject is edited away.
+        # Select-to-overwrite is the commonest edit in any input, and when it
+        # follows a copy it falsifies the copy's receipt: the user drags a word
+        # to replace it, types, and a receipt asserting a copy of characters
+        # that no longer exist sits on screen for another five seconds (design
+        # round 1, D3). The clipboard keeps what it took — that is what a copy
+        # IS, and silently un-copying would be worse — but the CLAIM is retired
+        # the moment its subject is edited away.
         stale_receipt = self._copied
         result = super().edit(edit)
         if stale_receipt:
