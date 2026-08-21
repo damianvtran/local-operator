@@ -2762,18 +2762,18 @@ class OperatorApp(App[None]):
         the screen selection on every caret move, and the mouse-down that starts
         the drag is a caret move — so :meth:`on_text_selected` sees nothing to
         copy and the highlight the user is looking at goes nowhere. The widget
-        therefore reports its own copies (``Editor._copy_drag``), and they land
+        therefore reports its own copies (``Editor.action_copy``), and they land
         HERE rather than writing the clipboard themselves so that both gestures
         share one clipboard write and one toast: a copy out of the input must be
         indistinguishable from a copy out of the transcript, or the receipt
-        becomes evidence about which widget you dragged over.
+        becomes evidence about which widget you copied from.
 
         A composer copy is always EXPLICIT now: the widget posts this only
-        after an armed gesture (``Editor.copy_on_release``), never for a bare
-        drag — a composer highlight is usually the first half of a retype or
-        delete, so copying it on release clobbered the clipboard with text the
-        user was about to discard. The transcript keeps release-copies, where a
-        highlight is read-only text being taken.
+        from highlight-then-Ctrl+C, never from a drag — a composer highlight
+        is usually the first half of a retype or delete, so copying it on
+        release clobbered the clipboard with text the user was about to
+        discard. The transcript keeps release-copies, where a highlight is
+        read-only text being taken.
 
         Only THIS path tags the card for later withdrawal: the composer's copy
         is the one an edit to the composer can falsify. A transcript copy goes
