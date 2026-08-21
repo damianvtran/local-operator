@@ -786,8 +786,10 @@ class ToolCard(ExpandableActionBlock):
 
         Runs between the settle's own `_refresh_row` and `finalize` so the
         block is measured at its expanded height from its first frame. The
-        gap refresh mirrors what `toggle_expanded` does for a user toggle;
-        the transcript's sticky-bottom anchor follows the growth on its own.
+        gap refresh is `refresh_gap_around` — the same call the live-growth
+        tick makes — because the height changes the spacing above as well as
+        below; the transcript's sticky-bottom anchor follows the growth on
+        its own.
         """
         if not self._open_on_settle:
             return

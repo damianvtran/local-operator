@@ -941,6 +941,121 @@ async def test_a_replayed_bang_card_opens_and_ordinary_calls_stay_shut() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_failing_bang_card_settles_open_too() -> None:
+    """Failure is exactly when the output matters most, so the open-on-settle
+    contract covers the error settle as well."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "exit 3":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert cards
+        assert cards[-1]._state == "error"
+        assert cards[-1].expanded is True
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_aborted_bang_card_stays_shut_and_dim() -> None:
+    """The user's own Esc must not come back as a red failure on resume: the
+    persisted abort result is an error-shaped message, but the live frame it
+    came from was the dim shut `interrupted` row (design round 1, D1)."""
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(
+            role="user", text="! sleep 30", tool_calls=None, content=[], custom_type=None
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[
+                SimpleNamespace(id="shell-1", name="bash", arguments={"command": "sleep 30"})
+            ],
+            custom_type=None,
+        ),
+        SimpleNamespace(
+            role="tool",
+            tool_call_id="shell-1",
+            text="aborted (interrupted): sleep 30",
+            is_error=True,
+            provider_payload=None,
+            content=[],
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1
+        assert cards[0]._state == "interrupted"
+        assert cards[0].expanded is False
+
+
+@pytest.mark.asyncio
+async def test_a_bang_call_with_no_recorded_result_stays_shut() -> None:
+    """A session killed between the call and its answer replays `interrupted`
+    with nothing absorbed — open-on-settle must not force such a card open."""
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(
+            role="user", text="! sleep 30", tool_calls=None, content=[], custom_type=None
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[
+                SimpleNamespace(id="shell-1", name="bash", arguments={"command": "sleep 30"})
+            ],
+            custom_type=None,
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1
+        assert cards[0]._state == "interrupted"
+        assert cards[0].expanded is False
+
+
+@pytest.mark.asyncio
+async def test_a_user_collapse_after_settle_is_final() -> None:
+    """Open-on-settle is a settle-time decision, not a stuck mode: the flag is
+    consumed at the first settle, so closing the card stays closed."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "echo hi":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert cards and cards[-1].expanded is True
+        cards[-1].toggle_expanded()
+        await pilot.pause()
+        assert cards[-1].expanded is False
+        for _ in range(10):
+            await pilot.pause()
+        assert cards[-1].expanded is False
+
+
+@pytest.mark.asyncio
 async def test_a_refused_second_command_comes_back_in_shell_mode() -> None:
     """The refused line is handed back IN the mode it was submitted from: the
     placeholder matches the buffer, and Enter re-runs it as a command once
