@@ -531,6 +531,14 @@ def _replayed_user_message(content: list[Content], entry_id: str | None) -> Mess
 #: reading a summary whose "the screenshots below" no longer has any below.
 IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been dropped]"
 
+#: Stands in for an image the ACTIVE model cannot receive, so a turn that
+#: follows a switch to a text-only model still makes sense. Distinct from
+#: :data:`IMAGE_DROPPED_NOTICE` on purpose: the provider refusal is a sticky
+#: session condition the user cannot undo, while this one lasts only as long
+#: as the current model does — switching back to a vision model restores the
+#: images, and the notice must not claim they are gone for good.
+IMAGE_OMITTED_TEXT_ONLY_NOTICE = "[image omitted: the current model does not accept images]"
+
 
 def _rebound_history_images(messages: list[Message]) -> list[Message]:
     """Shrink any image block in the rendered history that is over the cap.
@@ -582,19 +590,29 @@ def _rebound_history_images(messages: list[Message]) -> list[Message]:
     return out
 
 
-def _without_images(messages: list[Message]) -> list[Message]:
+def _without_images(messages: list[Message], *, model_incapable: bool = False) -> list[Message]:
     """Every message with its image blocks replaced by a one-line notice.
 
     Used after a provider has refused an image (see
-    :func:`~local_operator.providers.failover.is_image_rejection`). Applied to
-    the RENDERED history rather than to the transcript, so nothing is destroyed:
-    the archive keeps its frames, ``/export`` still has them, and a later
-    session on a provider that accepts them is unaffected.
+    :func:`~local_operator.providers.failover.is_image_rejection`), and when
+    the active model is KNOWN not to accept images (``model_incapable=True``:
+    the session was switched onto a text-only spec while the history still
+    carries image blocks). Applied to the RENDERED history rather than to the
+    transcript, so nothing is destroyed: the archive keeps its frames,
+    ``/export`` still has them, and a later session on a provider that accepts
+    them is unaffected.
+
+    The notice wording differs by cause (see
+    :data:`IMAGE_OMITTED_TEXT_ONLY_NOTICE`): a provider refusal is permanent
+    for the session, a model's incapacity is not, and a notice that apologised
+    as if the images were gone for good would lie to the model the moment a
+    vision model is switched back in.
 
     Consecutive images collapse to ONE notice. A snapcompact archive replays as
     fifty-odd frames between two text edges, and fifty identical apology lines
     would cost more context than the summary they are standing in for.
     """
+    notice = IMAGE_OMITTED_TEXT_ONLY_NOTICE if model_incapable else IMAGE_DROPPED_NOTICE
     out: list[Message] = []
     for message in messages:
         if not any(isinstance(block, ImageContent) for block in message.content):
@@ -603,9 +621,9 @@ def _without_images(messages: list[Message]) -> list[Message]:
         content: list[Content] = []
         for block in message.content:
             if isinstance(block, ImageContent):
-                if content and getattr(content[-1], "text", None) == IMAGE_DROPPED_NOTICE:
+                if content and getattr(content[-1], "text", None) == notice:
                     continue
-                content.append(TextContent(text=IMAGE_DROPPED_NOTICE))
+                content.append(TextContent(text=notice))
             else:
                 content.append(block)
         out.append(message.model_copy(update={"content": content}))
@@ -865,6 +883,13 @@ class Session:
         #: offending block is IN the history, so an un-degraded retry sends it
         #: again, and the session is otherwise unusable for good.
         self._images_rejected = False
+        #: Latch for the text-only-model omission announcement (see
+        #: :meth:`_render_history`). The omission itself is not sticky — it
+        #: reads the CURRENT spec every render — but its announcement is:
+        #: every render of an image-bearing history on a text-only model would
+        #: otherwise re-post the notice, and a transcript that repeats the same
+        #: warning on every turn is noise the user learns to ignore.
+        self._text_only_omission_announced = False
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
         self._yolo = yolo
         self._has_ui = has_ui
@@ -1057,15 +1082,34 @@ class Session:
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
 
-    def _render_history(self, messages: list[AgentMessage]) -> list[Message]:
-        """The configured transcript→LLM conversion, minus anything a provider
-        has already refused.
+    def _render_history(
+        self, messages: list[AgentMessage], *, keep_images: bool = False
+    ) -> list[Message]:
+        """The configured transcript→LLM conversion, minus anything the active
+        model cannot be sent.
 
         Every path that builds wire history goes through here rather than
-        calling ``_convert_to_llm`` directly, because the degrade has to hold
-        for ALL of them. Compaction is the one that matters most: it has to
-        send the history to summarise it, so a poisoned block makes even the
-        escape hatch fail (anthropics/claude-code#50708).
+        calling ``_convert_to_llm`` directly, because BOTH degrades have to
+        hold for ALL of them. Compaction is the one that matters most: it has
+        to send the history to summarise it, so a poisoned block makes even
+        the escape hatch fail (anthropics/claude-code#50708) — and the same
+        goes for a text-only model, whose refusal would otherwise brick the
+        session exactly the way a provider refusal did.
+
+        Two independent reasons strip images, checked in order of stickiness:
+
+        - ``_images_rejected``: a provider REFUSED an image block, so the
+          session never sends one again, whatever model it is on now.
+        - the active spec's ``supports_images``: the model is KNOWN not to
+          accept images (registry/discovery metadata), so the blocks are
+          omitted instead of spending a request on a guaranteed refusal — the
+          failure behind a session switched onto a text-only model while the
+          history still carries screenshots. This one is NOT sticky: it reads
+          the CURRENT spec, so switching back to a vision model restores the
+          images on the very next render. ``keep_images=True`` suspends ONLY
+          this strip (compaction's kept-window rebuild, which must not bake
+          the omission into the live context); the sticky provider strip and
+          the announcement still apply.
 
         Expired todo reminders are dropped here for the same reason: every path
         that reaches a provider has to be free of them.
@@ -1076,7 +1120,84 @@ class Session:
             # dropping first saves decoding a block that is about to become a
             # one-line notice.
             return _without_images(rendered)
+        if not self._model.supports_images and not keep_images:
+            # ``rendered`` is the PRE-strip view here: exactly what the
+            # omission is about to take away, and what the announcement
+            # reports on.
+            self._announce_text_only_omission_once(rendered)
+            return _without_images(rendered, model_incapable=True)
         return _rebound_history_images(rendered)
+
+    def _announce_text_only_omission_once(self, rendered: list[Message] | None = None) -> None:
+        """Say, once per session, that the active model is not seeing the
+        conversation's images.
+
+        Fires from the render rather than ONLY from ``set_model`` so EVERY
+        path that strips images explains itself: a mid-session switch, a
+        resume booted on a text-only default (the boot render runs in the
+        TUI's preloaded-context measurement, before any turn), a new image
+        attached after the switch. A switch-only notice left those paths
+        silent — a user who opened yesterday's screenshot-heavy session under
+        a new text-only default got answers that ignored the screenshots and
+        no line saying why (design review round 1, D1). ``set_model`` ALSO
+        calls this on a vision→text-only flip so a switch explains itself
+        immediately, without waiting for the next render.
+
+        The latch makes it once-per-session, not once-per-render: the render
+        runs on every provider call, and a repeating warning is noise. The
+        omission itself stays non-sticky — it reads the current spec on every
+        render — so switching to a vision model restores the images without
+        touching this latch.
+
+        ``_spawn_background`` because ``set_model`` is sync and the
+        announcement is advisory: the render already applies the omission, so
+        a notice that never runs costs nothing but the log line.
+        """
+        if self._text_only_omission_announced:
+            return
+        if rendered is None:
+            # Presence check only: the plain convert output already carries
+            # every image block, and the rebound pass would spend a decode
+            # (and a Pillow re-encode for any oversized block) on a question
+            # the header sniff cannot answer. ``set_model`` calls this on the
+            # TUI event loop; a paste-heavy history must not stall a keypress.
+            rendered = self._convert_to_llm(self._live_todo_reminders(list(self._context.messages)))
+        if not any(
+            isinstance(block, ImageContent) for message in rendered for block in message.content
+        ):
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop to carry the notice (a render from a sync caller, e.g.
+            # construction-time configuration). The omission still applies;
+            # only the announcement is skipped — and the latch stays unset so
+            # a later render WITH a loop can still announce.
+            return
+        self._text_only_omission_announced = True
+        # ``model_label`` — the provider/model_id vocabulary the status band
+        # and the switch receipt already use — rather than the display name:
+        # two names for the same object two lines apart read as two models
+        # (design review round 1, D3).
+        label = self.model_label
+        logger.warning(
+            "model %s does not accept images; omitting them from this session's "
+            "context while it is active (%s)",
+            label,
+            self._image_drop_diagnostic(),
+        )
+        self._spawn_background(
+            self._emit(
+                NoticeEvent(
+                    text=(
+                        f"{label} does not accept images — the images in this "
+                        "conversation are omitted from its context. Switch to a "
+                        "model that accepts images to see them again."
+                    ),
+                    kind="warning",
+                )
+            )
+        )
 
     def _live_todo_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
         """``messages`` without todo reminders the list has since outrun.
@@ -1110,7 +1231,7 @@ class Session:
 
         return [message for message in messages if not expired(message)]
 
-    def _render_for_compaction(self) -> list[Message]:
+    def _render_for_compaction(self, *, keep_images: bool = False) -> list[Message]:
         """The rendered history a compaction pass plans and commits against.
 
         :meth:`_render_history` minus the todo reminders, because a reminder is
@@ -1149,7 +1270,8 @@ class Session:
         movement or user turn.
         """
         return self._render_history(
-            [message for message in self._context.messages if not _is_todo_reminder(message)]
+            [message for message in self._context.messages if not _is_todo_reminder(message)],
+            keep_images=keep_images,
         )
 
     async def _degrade_if_image_rejected(self, error: BaseException | str) -> None:
@@ -1454,6 +1576,12 @@ class Session:
         """
         previous = self._model
         self._model = model
+        if previous.supports_images and not model.supports_images:
+            # A genuine move onto a text-only model (same-model knob changes
+            # copy the spec and cannot flip the capability): explain the
+            # omission now, through the same once-per-session latch the
+            # render uses, instead of waiting for the next render to say it.
+            self._announce_text_only_omission_once()
         if (previous.provider, previous.model_id) == (model.provider, model.model_id):
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
@@ -3403,7 +3531,21 @@ class Session:
         await self._emit(CompactionStartEvent(reason=reason))
         try:
             to_summarize = plan.llm_history[: plan.cut]
-            kept = plan.llm_history[plan.cut :]
+            # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
+            # ``llm_history`` went through the capability strip (the summary
+            # request must not carry images a text-only model cannot take),
+            # but committing stripped messages into ``_context.messages``
+            # would bake the omission into the live session: the notice text
+            # would replace the image blocks for good, and switching back to
+            # a vision model would restore nothing for the kept window — the
+            # exact stickiness this degrade was written to avoid (agent review
+            # round 1, MAJOR 1). The transcript is untouched either way, so
+            # resume and ``/export`` keep their frames; this keeps the LIVE
+            # context honest too. The strip still applies to what the next
+            # request SENDS (``_render_history`` re-renders on the way out).
+            kept = self._render_for_compaction(keep_images=True)[plan.cut :]
+            if not kept:
+                kept = plan.llm_history[plan.cut :]
             summary, preserve_data = await self._produce_summary(
                 compaction_api, to_summarize, plan.strategy
             )
