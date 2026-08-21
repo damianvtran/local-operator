@@ -833,6 +833,33 @@ async def test_a_failing_command_marks_the_card_failed_and_persists_it_so() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_signal_killed_command_marks_the_card_failed() -> None:
+    """A negative exit code (SIGKILL — the same shape a timeout's kill
+    produces) is a failure on the human-facing surface, not a `✓` with a
+    scary body (round 3 minor)."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "kill -9 $$":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        assert session.shell_records
+        command, result = session.shell_records[0]
+        assert command == "kill -9 $$"
+        assert result.is_error is True
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert cards and cards[-1]._state == "error"
+
+
+@pytest.mark.asyncio
 async def test_a_refused_second_command_comes_back_in_shell_mode() -> None:
     """The refused line is handed back IN the mode it was submitted from: the
     placeholder matches the buffer, and Enter re-runs it as a command once
