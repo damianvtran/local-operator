@@ -34,6 +34,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -148,7 +149,14 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
             continue
         if message.role == "user":
-            entries.append(TranscriptEntry(id=message.id, kind="user", text=message.text))
+            # An image-only prompt (composer allows "" text + images) must not
+            # round-trip through history as an EMPTY bubble. Render a receipt
+            # line naming the attachments, matching the live fold's receipt.
+            images = sum(1 for b in message.content if isinstance(b, ImageContent))
+            text = message.text
+            if not text.strip() and images:
+                text = f"[{images} image{'s' if images != 1 else ''} attached]"
+            entries.append(TranscriptEntry(id=message.id, kind="user", text=text))
         elif message.role == "assistant":
             if message.text:
                 entries.append(TranscriptEntry(id=message.id, kind="assistant", text=message.text))
@@ -457,6 +465,19 @@ class ProjectionFold:
                 return False
         self._append(TranscriptEntry(id=message.id, kind="user", text=text, final=True))
         return True
+
+    def note_prompt_rejected(self, reason: str) -> None:
+        """A quiet notice that a phone prompt did NOT land (the session
+        rejected it — busy or compacting). The user row is never echoed, so
+        without this the tap would look like it vanished into nothing."""
+        self._append(
+            TranscriptEntry(
+                id=f"rej-{time.time_ns()}",
+                kind="notice",
+                text=_compact(f"not sent: {reason}", 200),
+            )
+        )
+        self._bump()
 
     # -- working line (TUI WorkingBlock's phone counterpart) -------------------
 

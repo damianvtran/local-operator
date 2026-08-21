@@ -377,7 +377,14 @@ def _history_page(record: SessionRecord, before: str | None, limit: int) -> tupl
         return [], False
 
     if before:
-        cut = next((i for i, e in enumerate(entries) if e.id == before), len(entries))
+        # A ``before`` that resolves to nothing means the client's anchor was
+        # pruned (a compaction between scrolls). Serving the newest page then
+        # would duplicate the client's live window — return empty and let the
+        # client treat it as end-of-history rather than loop on the same rows.
+        anchor = next((i for i, e in enumerate(entries) if e.id == before), None)
+        if anchor is None:
+            return [], False
+        cut = anchor
     else:
         cut = len(entries)
     older = entries[:cut]
@@ -419,6 +426,9 @@ class MobileDaemon:
         self._pending_reqs: dict[tuple[int, Any], asyncio.Future[dict[str, Any]]] = {}
         self._dial_tasks: dict[int, asyncio.Task[None]] = {}
         self._slash_commands: list[dict[str, Any]] | None = None
+        # Session id -> pid of a resume spawn already in flight, so a retried
+        # resume POST returns the same child instead of forking a second.
+        self.resumes_in_flight: dict[str, int] = {}
 
     # -- scanning --------------------------------------------------------------
 
@@ -872,6 +882,13 @@ def build_app(daemon: MobileDaemon):
             resume_dir(config_dir(), session_id)
         except ResumeNotFound:
             return JSONResponse({"error": f"no such past session: {session_id}"}, status_code=404)
+        # Server-side idempotency: a flapping phone on a slow tunnel can retry
+        # the POST, and only the client guarded the double-tap. One in-flight
+        # resume per session id — a retry returns the SAME spawn's pid instead
+        # of forking a second child resuming the same conversation.
+        existing = daemon.resumes_in_flight.get(session_id)
+        if existing is not None:
+            return JSONResponse({"ok": True, "pid": existing, "session_id": session_id})
         # The transcript dir does not reliably record a cwd, so resume in the
         # owner's home: always a valid directory under the spawn gate. The
         # user can steer the reopened session to a directory from there.
@@ -880,6 +897,7 @@ def build_app(daemon: MobileDaemon):
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile resume spawn failed", exc_info=True)
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+        daemon.resumes_in_flight[session_id] = pid
         return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
 
     async def api_search_sessions(request: Request) -> Response:

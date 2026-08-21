@@ -2708,6 +2708,15 @@ class Session:
             # the conversation, and it is only in the conversation once it is on
             # disk and in the list being handed back to the loop.
             await self._emit(SteeringDeliveredEvent(count=len(messages)))
+            # Announce each delivered steer as a user MessageStartEvent too, so
+            # EVERY front end paints the steer TEXT — not only a count. A steer
+            # injected from the phone during a wake/continuation turn never
+            # passed through prompt()'s _run_turn announcement, so the TUI had
+            # no user row for it at all. Same event, same de-dup as a prompt:
+            # the steering front end's optimistic echo is matched by content.
+            for message in messages:
+                if isinstance(message, Message) and message.role == "user":
+                    await self._emit(MessageStartEvent(message=message))
         return messages
 
     async def _drain_asides(self) -> list[Aside]:

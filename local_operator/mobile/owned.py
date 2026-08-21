@@ -185,31 +185,34 @@ class OwnedSessionHandle(SessionHandle):
     async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
         image_blocks = _image_blocks(images)
-        # Await the rejection, not fire-and-forget: Session.prompt raises
-        # RuntimeError when the session is compacting (or a stale "not
-        # streaming" projection raced a live turn), and an un-awaited future
-        # would swallow that — the phone would echo the user's message as
-        # sent while the agent never received it. Check the guard up front,
-        # run the turn as a background task, and report rejections so the
-        # composer can show them.
+        # A rejected prompt must not leave a ghost user row on the phone, so
+        # the echo waits until Session.prompt has ACCEPTED the turn (the lock
+        # is the honest signal) — see _run_turn_task. Check the cheap guard up
+        # front so the common busy case answers immediately without a task.
         if self._session.is_streaming or getattr(self._session, "_compacting", False):
             return "not sent: session is busy — steer instead, or retry in a moment"
-        self._projection.streaming = True
-        self._fold.note_user_message(text)
-        self._notify()
         self._run_turn_task(text, image_blocks)
         return "prompt sent"
 
     def _run_turn_task(self, text: str, image_blocks: list["ImageContent"]) -> None:
-        """Run the turn as a background task and undo the premature echo if
-        the prompt is rejected after all (a turn could have started in the
-        gap between the guard above and the lock)."""
+        """Run the turn as a background task; a rejection surfaces as a notice,
+        never as a ghost user row.
+
+        The session emits MessageStartEvent for a user turn only AFTER the
+        turn lock is acquired (see Session._run_turn), so that event IS the
+        acceptance signal — the fold paints the row from it, and there is no
+        optimistic echo to undo. Session.prompt raises RuntimeError when a
+        turn started in the gap between the guard above and the lock; catching
+        it here keeps the un-awaited-future warning out of the log and gives
+        the phone a quiet "not sent" notice instead of a fake sent row.
+        """
 
         async def run() -> None:
             try:
                 await self._session.prompt(text, image_blocks)
             except RuntimeError as exc:
                 self._projection.streaming = self._session.is_streaming
+                self._fold.note_prompt_rejected(str(exc))
                 self._notify()
                 logger.warning("mobile prompt rejected: %s", exc)
 
