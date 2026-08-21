@@ -1141,6 +1141,12 @@ class OperatorApp(App[None]):
         #: the same conversation) would paint its receipt twice (review round
         #: 2, m2).
         self._live_wake_receipts: set[tuple[str, object]] = set()
+        #: A bang-mode user row (`! <command>`) seen by the history replay but
+        #: not yet paired with its bash card. The persisted shape is
+        #: user/assistant/tool, so the assistant message immediately after a
+        #: bang row carries the call whose card should open on settle — the
+        #: resume half of the open-on-settle contract the live path makes.
+        self._replay_bang_pending = False
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -1918,6 +1924,9 @@ class OperatorApp(App[None]):
                 call_id = getattr(message, "tool_call_id", None)
                 if call_id:
                     results[call_id] = message
+        # Fresh batch, fresh pairing: a flag left by an earlier replay (or a
+        # truncated one) must not open a card in this conversation.
+        self._replay_bang_pending = False
 
         appended = False
         transcript = self._transcript_view()
@@ -1967,9 +1976,22 @@ class OperatorApp(App[None]):
                         self._append_block(UserBlock(text, len(replay_images)))
                         self._append_image_blocks(replay_images, marker_text=text)
                         appended = True
+                    # A bang-mode receipt replays as open as it lived: the
+                    # user row is `! <command>` and the assistant message that
+                    # follows carries exactly one bash call. Remembered so the
+                    # call's card can open on settle, the same contract the
+                    # live path makes.
+                    if text.startswith("! "):
+                        self._replay_bang_pending = True
                     continue
                 if role != "assistant":
                     continue
+                # Consume the pending bang marker on EVERY assistant message:
+                # record_shell writes the call-bearing assistant immediately
+                # after the `!` row, and a later unrelated turn must never
+                # inherit the open-on-settle flag.
+                bang_pending = self._replay_bang_pending
+                self._replay_bang_pending = False
                 if text:
                     block = AssistantBlock()
                     block.update_text(text)
@@ -1978,7 +2000,16 @@ class OperatorApp(App[None]):
                     appended = True
                 tool_calls = getattr(message, "tool_calls", None) or []
                 for call in tool_calls:
-                    self._replay_tool_call(call, results)
+                    # Only the FIRST call of a bang assistant message is the
+                    # command's own card; the shape record_shell writes has
+                    # exactly one, so consuming here is exact in practice and
+                    # conservative in theory.
+                    open_settled = bool(
+                        bang_pending
+                        and tool_calls[0] is call
+                        and getattr(call, "name", "") == "bash"
+                    )
+                    self._replay_tool_call(call, results, open_on_settle=open_settled)
                     appended = True
                 stop = getattr(message, "stop_reason", None)
                 if stop == "refusal":
@@ -2016,7 +2047,9 @@ class OperatorApp(App[None]):
             # off the bottom of a viewport pinned to the replay's last frame.
             transcript.follow_tail()
 
-    def _replay_tool_call(self, call: Any, results: dict[str, Any]) -> None:
+    def _replay_tool_call(
+        self, call: Any, results: dict[str, Any], *, open_on_settle: bool = False
+    ) -> None:
         """Mount one settled tool row for a call from a previous session.
 
         The card is built exactly as a live one is — same constructor, same
@@ -2029,6 +2062,8 @@ class OperatorApp(App[None]):
             getattr(call, "name", "") or "",
             getattr(call, "arguments", None) or {},
         )
+        if open_on_settle:
+            card.open_on_settle()
         self._append_block(card)
         result = results.get(getattr(call, "id", "") or "")
         if result is None:
@@ -5464,6 +5499,10 @@ class OperatorApp(App[None]):
 
         call_id = f"shell-{time.monotonic_ns()}"
         card = ToolCard(call_id, "bash", {"command": command})
+        # The user ran this command TO SEE its output; a collapsed receipt
+        # hides exactly that behind a click nobody asked for. The card opens
+        # at its first settle (and stays a normal collapsible row after).
+        card.open_on_settle()
         self._append_block(UserBlock(f"! {command}"))
         self._append_block(card)
         signal = AbortSignal()
