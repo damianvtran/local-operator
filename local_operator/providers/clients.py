@@ -195,6 +195,57 @@ def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
     return raw.strip()[:500]
 
 
+def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
+    """An in-band mid-stream failure on an OpenAI-compatible stream.
+
+    Once a gateway has committed HTTP 200 it can no longer signal an upstream
+    failure via the status line, so OpenRouter delivers it INSIDE the stream:
+    a ``chat.completion.chunk`` carrying a top-level ``error`` object (``code``,
+    ``message``, ``metadata.error_type``) alongside ``finish_reason: "error"``.
+    The chunk parser used to read only ``choices`` and ``usage``, so the error
+    object was dropped and the terminal finish reason surfaced later as a
+    wordless ``stop_reason="error"`` — the turn died as a silent interruption:
+    no incident for the model, no retry, no failover, no credential rotation.
+    Raising here hands the failure to the failover driver, which names it,
+    journals it, and retries or rotates while the budget lasts.
+
+    Simpler compatible servers send the error as a bare string instead of an
+    object; both shapes feed the same cascade, mirroring
+    :func:`_extract_error_message`'s slots without its response-body fallback
+    (the body is a live stream here and must not be read).
+    """
+    error = chunk.get("error")
+    status: int | None = None
+    error_type = ""
+    if isinstance(error, Mapping):
+        message = _first_text(error.get("message"), error.get("detail"), error.get("msg"))
+        upstream = _openrouter_upstream_text(error)
+        if message and upstream and upstream not in message:
+            message = f"{message}: {upstream}"
+        else:
+            message = message or upstream
+        code = error.get("code")
+        if isinstance(code, int):
+            status = code
+        elif isinstance(code, str) and code.isdigit():
+            status = int(code)
+        metadata = error.get("metadata")
+        if isinstance(metadata, Mapping):
+            error_type = str(metadata.get("error_type") or "")
+    else:
+        message = _first_text(error)
+    if not message:
+        message = error_type or "provider ended the stream with an error"
+    elif error_type and error_type not in message:
+        message = f"{error_type}: {message}"
+    return ProviderError(
+        status,
+        message,
+        retryable=status is None or status == 429 or status >= 500,
+        auth_error=status in (401, 403),
+    )
+
+
 #: Ceiling on any advertised wait. A ``Retry-After`` is provider-supplied and
 #: reaches SQLite: a usage-limit failure feeds ``retry_after_ms_from_error``
 #: into ``AuthStore.rotate_sibling`` → ``block_credential(block_ms=...)``, which
@@ -715,6 +766,12 @@ _FINISH_TO_STOP_REASON = {
     # saw nothing and could not tell a refusal from a no-op, which matters
     # because the remedy (rephrase, or switch models) is theirs to choose.
     "content_filter": "refusal",
+    # OpenRouter terminates a mid-stream upstream failure with this finish
+    # reason. The accompanying chunk normally carries the top-level ``error``
+    # object the parser raises; when a gateway sends the reason WITHOUT the
+    # object, the end event below still names the failure instead of passing
+    # the raw word through as an exotic-but-successful stop reason.
+    "error": "error",
 }
 
 
@@ -1084,6 +1141,12 @@ class OpenAICompatClient:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if isinstance(chunk.get("error"), (Mapping, str)):
+                    # In-band mid-stream failure: the status line already said
+                    # 200, so this chunk is the only channel the failure has.
+                    # Raise it NAMED; swallowing it left turns dying as
+                    # wordless interruptions (see _compat_stream_error).
+                    raise _compat_stream_error(chunk)
                 if isinstance(chunk.get("usage"), Mapping):
                     raw = chunk["usage"]
                     details = raw.get("prompt_tokens_details") or {}
@@ -1162,6 +1225,10 @@ class OpenAICompatClient:
             # rendered and there is no refusal prose: "sent no message" under a
             # partial reply is the D1 contradiction again (review R3-1).
             error = _refusal_error(marker, "".join(refusal_parts), streamed_text=streamed_text)
+        elif stop_reason == "error":
+            # A wordless error end is exactly the silent-interruption defect:
+            # the loop journals `error` as the incident, so name the reason.
+            error = f"provider ended the stream with finish_reason '{finish_reason}'"
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,

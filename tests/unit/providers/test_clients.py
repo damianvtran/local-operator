@@ -159,6 +159,152 @@ async def test_openai_compat_text_tool_usage() -> None:
     assert end.usage is not None and end.usage.output_tokens == 7
 
 
+async def test_openai_compat_mid_stream_error_chunk_raises_named_error() -> None:
+    """OpenRouter mid-stream failures arrive in-band on HTTP 200.
+
+    The gateway commits 200 before the upstream dies, so the failure is a
+    ``chat.completion.chunk`` with a top-level ``error`` object and
+    ``finish_reason: "error"``. The parser must raise it NAMED (status,
+    message, retryability) so the failover driver can journal, retry and
+    rotate — the old behaviour dropped the object and the turn died as a
+    wordless interruption.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse(
+                [
+                    {"id": "gen-1", "choices": [{"delta": {"content": "Gate"}, "index": 0}]},
+                    {
+                        "id": "gen-1",
+                        "object": "chat.completion.chunk",
+                        "provider": "OpenAI",
+                        "error": {
+                            "code": 429,
+                            "message": "Rate limit exceeded",
+                            "metadata": {"error_type": "rate_limit_exceeded"},
+                        },
+                        "choices": [
+                            {"index": 0, "delta": {"content": ""}, "finish_reason": "error"}
+                        ],
+                    },
+                ]
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://api.test.example/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+    error = excinfo.value
+    assert error.status == 429
+    assert error.retryable is True
+    assert error.kind == "quota"
+    assert "Rate limit exceeded" in str(error)
+
+
+async def test_openai_compat_mid_stream_error_chunk_unwraps_upstream_raw() -> None:
+    """A 502-class chunk carries the upstream text in ``metadata.raw``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse(
+                [
+                    {
+                        "id": "gen-2",
+                        "error": {
+                            "code": 502,
+                            "message": "Provider returned error",
+                            "metadata": {
+                                "raw": json.dumps({"error": {"message": "upstream overloaded"}})
+                            },
+                        },
+                        "choices": [
+                            {"index": 0, "delta": {"content": ""}, "finish_reason": "error"}
+                        ],
+                    },
+                ]
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://api.test.example/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+    error = excinfo.value
+    assert error.status == 502
+    assert error.kind == "transient"
+    assert "Provider returned error" in str(error)
+    assert "upstream overloaded" in str(error)
+
+
+async def test_openai_compat_mid_stream_error_chunk_bare_string() -> None:
+    """Simpler compatible servers send the error as a bare string."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse([{"error": "upstream connection reset"}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://api.test.example/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+    assert "upstream connection reset" in str(excinfo.value)
+
+
+async def test_openai_compat_error_finish_reason_without_error_object() -> None:
+    """A bare ``finish_reason: "error"`` still names the failure.
+
+    Without the top-level error object the old parser passed the raw reason
+    through as an exotic stop reason and the loop recorded a wordless error
+    turn — no incident, no diagnosis. The end event now carries the reason in
+    ``error`` so the session journals it.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse(
+                [
+                    {"id": "gen-3", "choices": [{"delta": {"content": "x"}, "index": 0}]},
+                    {"id": "gen-3", "choices": [{"delta": {}, "finish_reason": "error"}]},
+                ]
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://api.test.example/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    events = await _collect(
+        client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+    )
+    end = events[-1]
+    assert isinstance(end, StreamEndEvent)
+    assert end.stop_reason == "error"
+    assert end.error is not None and "error" in end.error
+
+
 async def test_openai_compat_tool_history_roundtrip() -> None:
     """Assistant tool_calls and tool results serialize for replay.
 
