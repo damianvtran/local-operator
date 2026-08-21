@@ -73,7 +73,7 @@ from local_operator.tui.widgets.transcript import (
 )
 
 from .test_app_pilot import FakeSession, _factory
-from .test_transcript_selection import _cell, _composer_copy_drag
+from .test_transcript_selection import _cell, _composer_copy
 
 
 class SteerableSession(FakeSession):
@@ -2954,19 +2954,16 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
         await pilot.pause()
         await pilot.pause()
 
-        # A REAL drag-copy, driven through the widget's own mouse path rather
-        # than by hand-setting flags — armed first, since a composer drag only
-        # copies after an explicit copy has armed the release (a bare
-        # highlight is selection, not copy: the clobber this file's sibling
-        # tests removed). Round 19 (MAJOR-1) caught the hand-set stand-in
-        # going vacuous when `copy_in_flight` moved from `_copied` to
-        # `_copy_gesture`: the stand-in never armed the deferral, so the test
-        # verified that a caret move retires something already retired. Driving
-        # the real gesture ties this guard to whatever predicate the widget
-        # actually arms, so a future re-pointing cannot silently disarm it.
-        await _composer_copy_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 10))
-        assert editor.copy_in_flight, "the drag must arm the deferral for this test to bite"
+        # A REAL explicit copy, driven through the widget's own key path
+        # rather than by hand-setting flags. Round 19 (MAJOR-1) caught a
+        # hand-set stand-in going vacuous when `copy_in_flight` moved from
+        # `_copied` to `_copy_gesture`. The press itself does not claim the
+        # gesture flag (a highlight outlives the press, and deferring the
+        # next Ctrl+C for that long is D17/D20); what this test pins is that
+        # collapsing the highlight hands the key back to the draft.
+        await _composer_copy(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 10))
         assert editor.selected_text, "the copy's own highlight must be on screen"
+        assert editor._copied, "the receipt must be armed for this to mean anything"
 
         # Moving the caret collapses the highlight — the copy is over, and the
         # user can see that it is.
