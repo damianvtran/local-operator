@@ -72,6 +72,43 @@ def test_turn_cost_survives_a_broken_resolver() -> None:
         assert turn_cost("anthropic/opus", Usage(input_tokens=10)) is None
 
 
+def test_turn_cost_prefers_a_provider_reported_dollar() -> None:
+    """OpenRouter's precomputed bill is authoritative and must win verbatim over
+    the model's table price — the routed provider's actual rate is not the table."""
+    with _resolving(opus=_PRICED):
+        cost = turn_cost(
+            "anthropic/opus", Usage(input_tokens=1_000_000, output_tokens=100_000, usd_cost=0.0075)
+        )
+    assert cost == pytest.approx(0.0075)
+
+
+def test_turn_cost_reported_dollar_wins_even_without_a_table_price() -> None:
+    """The provider's bill is the fact the table is an estimate of, so it must
+    answer even when the model has no published price row — a turn the provider
+    billed must never read as unpriceable."""
+    usage = Usage(input_tokens=10, output_tokens=16, usd_cost=0.0000075)
+    assert turn_cost("openrouter/deepseek/deepseek-v4-flash-0731", usage) == pytest.approx(
+        0.0000075
+    )
+
+
+def test_turn_cost_never_renders_a_reported_credit() -> None:
+    """A negative reported amount is malformed provider data, not a refund: it
+    must fall back to the table estimate rather than paint an upside-down dollar
+    figure on the band."""
+    with _resolving(opus=_PRICED):
+        usage = Usage(input_tokens=1_000_000, output_tokens=0, usd_cost=-5.0)
+        assert turn_cost("anthropic/opus", usage) == pytest.approx(10.0)
+
+
+def test_turn_cost_reported_malformed_falls_back_to_estimate() -> None:
+    """A non-numeric reported amount from a rehydrated mapping must not degrade
+    the whole turn to unpriceable when a table price exists."""
+    with _resolving(opus=_PRICED):
+        usage = {"input_tokens": 1_000_000, "output_tokens": 0, "usd_cost": "not-a-number"}
+        assert turn_cost("anthropic/opus", usage) == pytest.approx(10.0)
+
+
 # ---------------------------------------------------------------------------
 # job_cost — one child
 # ---------------------------------------------------------------------------

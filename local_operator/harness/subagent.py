@@ -641,6 +641,19 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     total.output_tokens += usage.output_tokens
     total.cache_read_tokens += usage.cache_read_tokens
     total.cache_write_tokens += usage.cache_write_tokens
+    # A provider-reported dollar amount is summed the same way the token buckets
+    # are: a tool-using child's money is spread across its earlier calls, not
+    # its last one. ``None`` keeps the "not reported" meaning distinct from a
+    # real zero; a message that DID report folds its amount in, and messages
+    # that did not (mix-and-match is not a real provider today) leave it alone.
+    # Floored via the pricing helper so a malformed or negative amount cannot
+    # inflate a credit into the child's running total.
+    if usage.usd_cost is not None:
+        from local_operator.model.configure import _usage_cost
+
+        amount = _usage_cost(usage)
+        if amount is not None:
+            total.usd_cost = (total.usd_cost or 0.0) + amount
     if usage.context_tokens is not None:
         total.context_tokens = usage.context_tokens
 

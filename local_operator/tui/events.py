@@ -468,7 +468,8 @@ class EventController:
         # last one. context_tokens is a point-in-time size, taken from the
         # last message that reports it.
         usage = None
-        totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "usd": 0.0}
+        usd_reported = False
         context_tokens = 0
         for message in getattr(event, "messages", None) or []:
             message_usage = getattr(message, "usage", None)
@@ -478,6 +479,23 @@ class EventController:
             totals["output"] += getattr(message_usage, "output_tokens", 0) or 0
             totals["cache_read"] += getattr(message_usage, "cache_read_tokens", 0) or 0
             totals["cache_write"] += getattr(message_usage, "cache_write_tokens", 0) or 0
+            # A provider-reported dollar amount is SUMMED alongside the tokens,
+            # because a tool-using turn is many billed calls and the money for
+            # each lives on its own message. ``usd_reported`` tracks whether ANY
+            # message carried one so the aggregate keeps the model-vs-provider
+            # distinction: off (``None``) means no provider reported a figure and
+            # the estimate is the only answer; on with a real total means the
+            # provider was the authority for the whole turn. Floored through the
+            # shared pricing helper rather than a bare ``float()``: a negative or
+            # malformed figure must not inflate a credit into the running total.
+            reported = getattr(message_usage, "usd_cost", None)
+            if reported is not None:
+                from local_operator.model.configure import _usage_cost
+
+                amount = _usage_cost(message_usage)
+                if amount is not None:
+                    totals["usd"] += amount
+                    usd_reported = True
             usage = message_usage
             context_tokens = (
                 getattr(message_usage, "context_tokens", None)
@@ -491,6 +509,7 @@ class EventController:
                 cache_read_tokens=totals["cache_read"],
                 cache_write_tokens=totals["cache_write"],
                 context_tokens=context_tokens or None,
+                usd_cost=totals["usd"] if usd_reported else None,
             )
         self._post(
             TurnEnded(

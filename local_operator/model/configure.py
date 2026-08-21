@@ -2597,10 +2597,20 @@ def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
     arrives rehydrated from a serialized child event, where it is a plain mapping
     with the same field names.
 
+    When ``usage`` carries a provider-reported dollar amount
+    (``usd_cost``, e.g. OpenRouter's ``usage.cost``), that is returned verbatim
+    and the token arithmetic is skipped entirely. The provider already applied
+    per-route pricing, reasoning-token splits, cache discounts and any overrides
+    that a single flat table price cannot express, so a reconstruction here can
+    only be wronger than the number the provider printed on the bill.
+
     The caller is responsible for deciding whether ``model_info`` is priced at
     all; this returns 0.0 for a zero-priced model, which is arithmetically true
     and is exactly why a UI must not render it blindly.
     """
+    reported = _usage_cost(usage)
+    if reported is not None:
+        return reported
     read = _usage_field(usage, "cache_read_tokens")
     written = _usage_field(usage, "cache_write_tokens")
     plain = _usage_field(usage, "input_tokens")
@@ -2616,6 +2626,27 @@ def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
         read,
         written,
     )
+
+
+def _usage_cost(usage: Any) -> float | None:
+    """The provider-reported dollar cost on a ``Usage``, or ``None`` when absent.
+
+    Duck-typed for the same reason as :func:`_usage_field`: ``usage`` can be a
+    ``Usage`` model or a rehydrated mapping. ``None`` is "not reported" — a
+    caller must not collapse it into ``0.0`` ("billed as free"). Coerced and
+    floored so a malformed report (negative, non-numeric) degrades to the
+    estimate instead of aborting the pricing path.
+    """
+    value = (
+        usage.get("usd_cost") if isinstance(usage, Mapping) else getattr(usage, "usd_cost", None)
+    )
+    if value is None:
+        return None
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    return cost if cost >= 0 else None
 
 
 def _usage_field(usage: Any, name: str) -> int:
