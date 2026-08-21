@@ -1561,8 +1561,7 @@ class TestTransientFailuresAreRetriedOnEveryCallPath:
 
         def handler(request: httpx.Request) -> httpx.Response:
             lines = [
-                "data: "
-                + json.dumps({"choices": [{"delta": {"content": "Gate"}, "index": 0}]}),
+                "data: " + json.dumps({"choices": [{"delta": {"content": "Gate"}, "index": 0}]}),
                 "data: "
                 + json.dumps(
                     {
