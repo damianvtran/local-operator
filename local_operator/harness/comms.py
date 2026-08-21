@@ -56,7 +56,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     StaleAside,
 )
-from local_operator.session.transcript import TRANSCRIPT_FILENAME
+from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
 
 if TYPE_CHECKING:
     from local_operator.session.session import Session
@@ -535,7 +535,7 @@ class SubagentComms:
 
         session_dir = record.session_dir
 
-        def _read() -> list[Any]:
+        def _read() -> list[TranscriptEntry]:
             # Construction is the expensive part (whole-file parse); it runs
             # in the worker, not on the shared loop.
             return Transcript(session_dir).entries()
@@ -1420,6 +1420,8 @@ def _resolve_peek_range(
 
     if start is not None and start < 1:
         return 0, 0, f"start must be >= 1, got {start}"
+    if end is not None and end < 1:
+        return 0, 0, f"end must be >= 1, got {end}"
     if start is not None and start > total:
         return 0, 0, (f"nothing at step {start}: the transcript has {total} step(s) right now")
     if end is not None and start is not None and end < start:

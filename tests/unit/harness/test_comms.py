@@ -2059,6 +2059,10 @@ async def test_peek_with_an_end_past_the_transcript_still_shows_the_tail():
     lo, hi, error = _resolve_peek_range(10, start=None, end=100, steps=None)
     assert error is None
     assert (lo, hi) == (6, 10)
+    # A non-positive end is a range error, not an empty window (round 3).
+    for bad in (0, -3):
+        _lo, _hi, err = _resolve_peek_range(10, start=None, end=bad, steps=None)
+        assert err is not None and "end must be >= 1" in err
 
 
 @pytest.mark.asyncio
