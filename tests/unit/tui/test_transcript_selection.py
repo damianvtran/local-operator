@@ -1114,7 +1114,7 @@ async def test_releasing_a_composer_drag_copies_nothing_by_default() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ctrl_c_with_a_live_range_copies_it_and_arms_the_next_drag() -> None:
+async def test_ctrl_c_with_a_live_range_copies_it() -> None:
     """The composer's copy gesture is explicit: highlight, then Ctrl+C.
 
     The field report that put copy-on-release in the composer was right that
