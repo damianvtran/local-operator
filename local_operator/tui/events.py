@@ -44,7 +44,9 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     ImageContent,
-    Message as HarnessMessage,
+)
+from local_operator.harness.types import Message as HarnessMessage
+from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
