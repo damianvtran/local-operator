@@ -339,8 +339,15 @@ async def spawn_owned_session(
     cwd: str,
     provider: str | None = None,
     model_id: str | None = None,
+    resume: str | None = None,
 ) -> OwnedSessionHandle:
-    """Build a fresh session for the phone with the CLI's composition root."""
+    """Build a session for the phone with the CLI's composition root.
+
+    ``resume`` names an existing session id to reopen: it flows into
+    ``args.resume`` exactly as the CLI's ``--resume`` does, so the factory
+    reuses that transcript directory and the session replays its history —
+    the phone's "open this past conversation" button.
+    """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
@@ -359,6 +366,7 @@ async def spawn_owned_session(
         agent_id=None,
         yolo=False,
         train=False,
+        resume=resume,
     )
     session = await create_session(
         args,

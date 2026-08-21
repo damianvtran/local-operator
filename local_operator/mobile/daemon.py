@@ -492,7 +492,11 @@ class MobileDaemon:
     # -- owned sessions ---------------------------------------------------------
 
     async def spawn_session(
-        self, cwd: str, provider: str | None = None, model_id: str | None = None
+        self,
+        cwd: str,
+        provider: str | None = None,
+        model_id: str | None = None,
+        resume: str | None = None,
     ) -> int:
         """Spawn a daemon-owned session in a supervised CHILD process and let
         discovery adopt it.
@@ -514,6 +518,8 @@ class MobileDaemon:
             env["LOP_MOBILE_CHILD_PROVIDER"] = provider
         if model_id:
             env["LOP_MOBILE_CHILD_MODEL"] = model_id
+        if resume:
+            env["LOP_MOBILE_CHILD_RESUME"] = resume
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -837,6 +843,65 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
         return JSONResponse({"ok": True, "pid": pid})
 
+    async def api_resume_session(request: Request) -> Response:
+        """Reopen a past session as a NEW live session the phone can attach to.
+
+        The old past-sessions flow made the user copy an id and run
+        ``/resume <id>`` by hand. This is the button: spawn a daemon-owned
+        child whose session resumes that transcript (the same ``--resume``
+        mechanism the CLI uses), so the conversation comes back live, open,
+        and able to take a command. The new session registers through
+        discovery like any other; the phone navigates to it by pid.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            return JSONResponse({"error": "session_id is required"}, status_code=400)
+        # Resolve to a real resumable directory first — spawning a child on a
+        # bad id would exit with an unhelpful construction failure.
+        from local_operator.paths import config_dir
+        from local_operator.resume import ResumeNotFound, resume_dir
+
+        try:
+            resume_dir(config_dir(), session_id)
+        except ResumeNotFound:
+            return JSONResponse({"error": f"no such past session: {session_id}"}, status_code=404)
+        # The transcript dir does not reliably record a cwd, so resume in the
+        # owner's home: always a valid directory under the spawn gate. The
+        # user can steer the reopened session to a directory from there.
+        try:
+            pid = await daemon.spawn_session(str(Path.home()), resume=session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("mobile resume spawn failed", exc_info=True)
+            return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+        return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
+
+    async def api_search_sessions(request: Request) -> Response:
+        """Search past sessions by name, id, OR what was said in them.
+
+        The same mechanism the TUI's /resume picker uses: a cached digest per
+        session (search_index.build_index, re-digested only when a transcript
+        changes) plus a substring match over name/id (filter_rows semantics).
+        A row that matched only on its conversation body is marked so the
+        phone can say why it surfaced.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        query = request.query_params.get("q", "")
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "40")), 200))
+        except ValueError:
+            limit = 40
+        rows = await asyncio.to_thread(_search_sessions, query, limit)
+        return JSONResponse({"sessions": rows, "query": query})
+
     async def api_directories(request: Request) -> Response:
         """The new-session form's cwd picker: home plus the directories of
         recent sessions (where the user has been working lately)."""
@@ -878,6 +943,8 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/events", api_list_events),
         Route("/api/directories", api_directories),
         Route("/api/sessions/past", api_past_sessions),
+        Route("/api/sessions/resume", api_resume_session, methods=["POST"]),
+        Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{pid:int}/events", api_session_events),
         Route("/api/sessions/{pid:int}/history", api_session_history),
         Route("/api/sessions/{pid:int}/command", api_command, methods=["POST"]),
@@ -919,6 +986,52 @@ def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
         ]
     except Exception:  # noqa: BLE001
         return []
+
+
+def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Past sessions matching ``query`` by name, id, or conversation body.
+
+    Mirrors the TUI picker's two channels: a name/id substring match, and a
+    body match through the cached search index (re-digested only for
+    transcripts that changed). A row that matched ONLY on its body is marked
+    ``body_match`` so the UI can say why it surfaced — otherwise it reads as a
+    result the filter had no reason to return.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import recent_session_rows
+    from local_operator.session.search_index import build_index, search_digests
+
+    cfg = config_dir()
+    rows = recent_session_rows(cfg, limit=200)
+    needle = query.strip().lower()
+    if not needle:
+        return [
+            {"id": r.id, "name": r.name, "mtime": r.mtime, "body_match": False}
+            for r in rows[:limit]
+        ]
+    try:
+        digests = build_index(cfg, [r.id for r in rows])
+        body_hits = search_digests(digests, needle)
+    except Exception:  # noqa: BLE001 — a broken index degrades to name/id only
+        body_hits = set()
+    out = []
+    for r in rows:
+        name_hit = needle in r.name.lower() or needle in r.id.lower()
+        body_hit = r.id in body_hits
+        if not (name_hit or body_hit):
+            continue
+        out.append(
+            {
+                "id": r.id,
+                "name": r.name,
+                "mtime": r.mtime,
+                # Marked only when the name/id did NOT explain the match.
+                "body_match": body_hit and not name_hit,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _recent_directories(limit: int = 8) -> list[str]:

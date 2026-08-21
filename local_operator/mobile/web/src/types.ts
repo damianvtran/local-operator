@@ -165,6 +165,9 @@ export interface PastSession {
 	id: string;
 	name: string;
 	mtime: number;
+	/** True when this row matched only on what was SAID in the conversation,
+	    not its name/id — the UI marks these so the hit doesn't look arbitrary. */
+	body_match?: boolean;
 }
 
 export interface Directories {

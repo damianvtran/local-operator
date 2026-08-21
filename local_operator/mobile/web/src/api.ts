@@ -59,6 +59,27 @@ export function getPastSessions(): Promise<{ sessions: PastSession[] }> {
 	return request("/api/sessions/past");
 }
 
+/** Search past sessions by name, id, or conversation body (the /resume
+    picker's mechanism). Empty query returns the recent list. */
+export function searchSessions(
+	q: string,
+	limit = 40,
+): Promise<{ sessions: PastSession[]; query: string }> {
+	const params = new URLSearchParams({ q, limit: String(limit) });
+	return request(`/api/sessions/search?${params}`);
+}
+
+/** Reopen a past session as a new live session the phone attaches to. */
+export function resumeSession(
+	sessionId: string,
+): Promise<{ ok: boolean; pid: number; session_id: string }> {
+	return request("/api/sessions/resume", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ session_id: sessionId }),
+	});
+}
+
 export function startSession(input: {
 	cwd: string;
 	provider?: string;
