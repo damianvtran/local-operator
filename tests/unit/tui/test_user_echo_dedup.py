@@ -26,8 +26,13 @@ from typing import Any, Sequence
 import pytest
 
 from local_operator.harness.types import ImageContent
-from local_operator.tui.app import LOOP_PROMPT, OperatorApp
-from local_operator.tui.events import SteeringDelivered, UserMessageStart
+from local_operator.tui.app import (
+    DEFERRED_STEER_NOTICE,
+    LOOP_PROMPT,
+    SENT_STEER_NOTICE,
+    OperatorApp,
+)
+from local_operator.tui.events import SteeringDelivered, TurnEnded, UserMessageStart
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 
@@ -55,6 +60,15 @@ def _user_blocks(app: OperatorApp, text: str) -> list[UserBlock]:
         block
         for block in app.query_one(TranscriptView).blocks()
         if isinstance(block, UserBlock) and block.text() == text
+    ]
+
+
+def _notice_texts(app: OperatorApp) -> list[str]:
+    """Every notice row's text, in transcript order."""
+    return [
+        block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
     ]
 
 
@@ -252,6 +266,38 @@ async def test_a_pending_echo_survives_clear_and_is_consumed_by_its_event() -> N
         await pilot.pause()
         assert app._pending_user_echoes == []
         assert _user_blocks(app, "survives the clear") == [], "consumed, not repainted"
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_steer_is_settled_not_repainted_by_the_next_turns_echo() -> None:
+    """The one state where the registry and the receipt machinery overlap: a
+    steer whose turn ended before any drain defers its row ("still queued —
+    sends with your next message"), and its registry entry must SURVIVE the
+    turn end — the message really is still in the engine's queue. When the
+    next turn's drain announces it, the deferred row settles to `sent` and
+    the event is consumed by the entry, not painted as a second row."""
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "deferred across the turn")
+        assert app._pending_user_echoes == ["deferred across the turn"]
+
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        assert DEFERRED_STEER_NOTICE in _notice_texts(app)
+        assert app._pending_user_echoes == [
+            "deferred across the turn"
+        ], "the turn ended, but the message is still queued — the entry stays"
+
+        # The next turn's drain: the receipt settles the deferred row, and the
+        # announcement consumes the entry instead of repainting the message.
+        app.post_message(SteeringDelivered(1))
+        app.post_message(UserMessageStart("deferred across the turn", 0))
+        await pilot.pause()
+        texts = _notice_texts(app)
+        assert SENT_STEER_NOTICE in texts and DEFERRED_STEER_NOTICE not in texts
+        assert len(_user_blocks(app, "deferred across the turn")) == 1
 
 
 @pytest.mark.asyncio

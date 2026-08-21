@@ -2571,7 +2571,11 @@ class Session:
                 # that is harness chrome, not the user's words: announcing it
                 # would stack "context was just compacted" user rows on every
                 # front end for prompts the human never typed (the same
-                # exemption LOOP_PROMPT gets in the TUI).
+                # exemption LOOP_PROMPT gets in the TUI). Matching is by text
+                # equality, so a user who typed the continuation sentence
+                # verbatim would lose their announcement — vanishingly
+                # unlikely, and the TUI registry documents its equivalent
+                # inherent limit.
                 if (
                     isinstance(message, Message)
                     and message.role == "user"

@@ -1986,6 +1986,17 @@ class OperatorApp(App[None]):
                 text = getattr(message, "text", "") or ""
                 text = text.strip() if isinstance(text, str) else ""
                 if role == "user":
+                    # The live path never paints harness chrome as a user row
+                    # (LOOP_PROMPT is registered as a pending echo and consumed;
+                    # the auto-continuation prompt is never announced at all).
+                    # Replay must make the same choice, or a resumed session
+                    # shows rows the live one deliberately suppressed — the
+                    # live/replay divergence review round 2 pinned. Deferred
+                    # import, like the other session.* imports in this file.
+                    from local_operator.session.session import _CONTINUATION_PROMPT
+
+                    if text in (LOOP_PROMPT, _CONTINUATION_PROMPT):
+                        continue
                     # The images ride the persisted message as base64 content
                     # blocks — the same bytes the model saw — so a resumed
                     # prompt replays WITH its pictures, not just the receipt
