@@ -303,8 +303,12 @@ class TeamRegistry:
             if not manager:
                 raise ValueError("manager is required")
             current.manager = manager
-        if "members" in updates and updates["members"] is not None:
-            current.members = list(updates["members"])
+        if "members" in fields.model_fields_set and fields.members is not None:
+            # ``model_dump`` recursively turns Pydantic children into dicts.
+            # Keep the validated TeamMember objects: roster rendering and
+            # orchestration call ``member.role`` / ``member.count`` immediately
+            # after an update, before a reload can rehydrate them from YAML.
+            current.members = list(fields.members)
         if "instructions" in updates and updates["instructions"] is not None:
             current.instructions = _bounded(updates["instructions"])
         if "project" in updates and updates["project"] is not None:

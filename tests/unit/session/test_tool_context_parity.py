@@ -65,6 +65,10 @@ SENTINELS: dict[str, Any] = {
     # silently see no registry: role lookups would fall back to the packaged
     # starters and every profile the operator authored would be invisible.
     "agent_registry": object(),
+    # The team registry backs the ``team`` / ``team_delete`` tools and the
+    # ``/team`` slash command. Dropped on the way to the executor, teams would
+    # silently vanish from a session that was built with them.
+    "team_registry": object(),
 }
 
 #: ToolContext fields the Session takes under a DIFFERENT name. Kept tiny and

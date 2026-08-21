@@ -120,6 +120,57 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     await parent.dispose()
 
 
+def _agent_fields(**overrides):
+    from typing import Any
+
+    from local_operator.agents import AgentEditFields
+
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
+def test_subagent_only_loads_explicit_specialist_instructions(tmp_path):
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.subagent import _specialist_instructions
+
+    registry = AgentRegistry(tmp_path / "config")
+    private = registry.create_agent(
+        _agent_fields(name="private-chat", description="Personal notes")
+    )
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="dashboard-release",
+            description="Release the dashboard",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(private.id, "PRIVATE USER CONTEXT")
+    registry.set_agent_system_prompt(specialist.id, "Follow the release checklist.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    assert _specialist_instructions("private-chat", parent) == ""
+    assert _specialist_instructions("dashboard-release", parent) == "Follow the release checklist."
+
+
 def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatch):
     from datetime import datetime, timezone
 

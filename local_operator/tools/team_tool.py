@@ -52,10 +52,10 @@ _ROW_CAP = 160
 class TeamParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "show", "create", "update", "delete"] = Field(
+    op: Literal["list", "show", "create", "update"] = Field(
         description=(
             "list/show: what teams exist and what they say; create/update: "
-            "author or fix a team; delete: remove one."
+            "author or fix a team. Use team_delete for irreversible removal."
         )
     )
     name: str | None = Field(default=None, description="Team name (all ops but list).")
@@ -225,15 +225,15 @@ async def _op_write(
 async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
     registry = _registry(context)
     if registry is None:
-        return _error(tool_call_id, "team", "no team registry attached to this session.")
+        return _error(tool_call_id, "team_delete", "no team registry attached to this session.")
     team = registry.get_team_by_name(name)
     if team is None:
-        return _error(tool_call_id, "team", f"no team named {name!r} to delete.")
+        return _error(tool_call_id, "team_delete", f"no team named {name!r} to delete.")
     try:
         registry.delete_team(team.id)
     except Exception as exc:  # noqa: BLE001
-        return _error(tool_call_id, "team", f"could not delete team: {exc}")
-    return _text(tool_call_id, "team", f"deleted team {name!r}.")
+        return _error(tool_call_id, "team_delete", f"could not delete team: {exc}")
+    return _text(tool_call_id, "team_delete", f"deleted team {name!r}.")
 
 
 @_guard("team")
@@ -244,20 +244,18 @@ async def execute_team(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Discover, author, and remove reusable teams."""
+    """Discover and author reusable teams."""
     try:
         params = TeamParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "team", exc)
 
-    if params.op in {"show", "create", "update", "delete"} and not (params.name or "").strip():
+    if params.op in {"show", "create", "update"} and not (params.name or "").strip():
         return _error(tool_call_id, "team", f"op={params.op!r} needs 'name'.")
     if params.op == "list":
         return await _op_list(context, tool_call_id)
     if params.op == "show":
         return await _op_show(context, tool_call_id, str(params.name))
-    if params.op == "delete":
-        return await _op_delete(context, tool_call_id, str(params.name))
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
@@ -271,12 +269,60 @@ def build_team_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "Reusable teams: a manager plus members (roles or specialists, "
             "with counts), plus collaboration and project briefs layered on "
-            "top of each member's own instructions. Find, author, or delete "
-            "one; the user launches it with /team <name> <request>."
+            "top of each member's own instructions. Find or author one; use "
+            "team_delete for irreversible removal. The user launches it with "
+            "/team <name> <request>."
         ),
         parameters=TeamParams.model_json_schema(),
         approval_tier="read",
         concurrency="exclusive",
         interruptible=False,
         execute=execute_team,
+    )
+
+
+class TeamDeleteParams(BaseModel):
+    """Separate schema so irreversible removal can carry a write-tier gate."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(description="Existing team name to delete permanently.")
+
+
+async def execute_team_delete(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Delete one team after the loop has passed the write approval gate."""
+    try:
+        params = TeamDeleteParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "team_delete", exc)
+    name = params.name.strip()
+    if not name:
+        return _error(tool_call_id, "team_delete", "name must not be empty.")
+    return await _op_delete(context, tool_call_id, name)
+
+
+def build_team_delete_tool(context: ToolContext) -> AgentTool | None:
+    """createIf: destructive deletion exists only beside a real registry."""
+    if getattr(context, "team_registry", None) is None:
+        return None
+    return AgentTool(
+        name="team_delete",
+        label="Delete team",
+        description=(
+            "Permanently remove a saved team. This is separate from the team "
+            "authoring tool so deletion always asks for write approval."
+        ),
+        parameters=TeamDeleteParams.model_json_schema(),
+        approval_tier="write",
+        concurrency="exclusive",
+        interruptible=False,
+        describe_approval=lambda args, _cwd: (
+            f"Delete team {str(args.get('name') or '').strip()!r} permanently"
+        ),
+        execute=execute_team_delete,
     )

@@ -163,8 +163,13 @@ def _specialist_instructions(agent: str, parent_session: "Session") -> str:
     if registry is None or not hasattr(registry, "get_agent_by_name"):
         return ""
     try:
+        from local_operator.agent_profiles import is_specialist
+
         row = registry.get_agent_by_name(agent)
-        if row is None:
+        if row is None or not is_specialist(row):
+            # The registry also contains ordinary persistent chat agents. Their
+            # prompts can carry private user context and must never be injected
+            # into a delegated child merely because its name was supplied.
             return ""
         return (registry.get_agent_system_prompt(row.id) or "").strip()
     except Exception:  # noqa: BLE001 — guidance is enrichment

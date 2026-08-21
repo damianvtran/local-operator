@@ -54,7 +54,10 @@ Use the `team` tool:
 
 - `list` / `show` — what exists and what it says
 - `create` / `update` — author or fix a team
-- `delete` — remove one
+
+Permanent removal uses the separate `team_delete` tool. It is deliberately
+write-tier so the user sees and approves the destructive action; never route a
+delete through the read-tier authoring tool.
 
 Use the `agent` tool to author or install the members first. A team that names a role nobody has installed still launches; `task(agent='coder')` falls back to the packaged starter.
 
