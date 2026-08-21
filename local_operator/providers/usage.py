@@ -346,7 +346,40 @@ def usage_health(
         if fraction is not None:
             measured.append((limit, max(0.0, min(1.0, 1.0 - fraction))))
     if not measured:
-        return QuotaHealth("unknown")
+        # Balance-only endpoints (Moonshot/Kimi and DeepSeek) expose an
+        # absolute ``remaining`` amount but no total, so a positive balance
+        # cannot honestly be converted to a percentage. Exact zero is
+        # different: it is definitive exhaustion regardless of the missing
+        # denominator. Recognize only that boundary; positive amounts remain
+        # unknown/fail-open rather than inventing a quota percentage (review
+        # F3).
+        zero_balance = [
+            limit
+            for limit in relevant
+            if limit.amount.remaining is not None and limit.amount.remaining <= 0
+        ]
+        if not zero_balance:
+            return QuotaHealth("unknown")
+        reset_after = max(
+            (
+                value
+                for value in (limit.resets_in_ms(now_ms) for limit in zero_balance)
+                if value is not None
+            ),
+            default=None,
+        )
+        scope: Literal["account", "model", "unknown"]
+        if all(limit.tier and not limit.shared for limit in zero_balance):
+            scope = "model"
+        else:
+            scope = "account"
+        return QuotaHealth(
+            "depleted",
+            remaining_fraction=0.0,
+            reset_after_ms=reset_after,
+            scope=scope,
+            binding_labels=tuple(limit.label for limit in zero_balance),
+        )
 
     remaining = min(value for _limit, value in measured)
     threshold = min(100.0, max(0.0, float(reserve_percent))) / 100.0

@@ -1793,12 +1793,24 @@ class SessionStreamFn:
             cache[cache_key] = "unknown"
             return "unknown"
 
+        # Enumerate configured rows before asking for refreshed accesses.
+        # ``list_oauth_accesses`` deliberately omits a row whose refresh fails;
+        # without this comparison, one omitted/unknown account plus one depleted
+        # account looked like proof the WHOLE provider was depleted (review F1).
+        rows = self._auth_store.list_credentials(provider)
+        oauth_rows = [row for row in rows if row.credential_type == "oauth"]
+        api_key_rows = [row for row in rows if row.credential_type == "api_key"]
+
         saw_depleted = False
         saw_unknown = False
         try:
             accesses = await self._auth_store.list_oauth_accesses(provider)
         except Exception:
             accesses = []
+            saw_unknown = bool(oauth_rows)
+        if {access.credential_id for access in accesses} != {row.id for row in oauth_rows}:
+            saw_unknown = True
+
         for access in accesses:
             try:
                 report = await fetch_usage(
@@ -1823,39 +1835,43 @@ class SessionStreamFn:
                 return "usable"
             saw_depleted = True
 
-        if accesses:
-            # OAuth is the subscription the user is spending. Skip only when
-            # EVERY account answered depleted; a missing report is fail-open
-            # so an unread sibling cannot hide remaining quota.
-            availability = "depleted" if saw_depleted and not saw_unknown else "unknown"
-            cache[cache_key] = availability
-            return availability
-
-        # No OAuth rows; an API-key quota route (Z.AI, Kimi balance) may
-        # still have a number. One secret per provider, so a single probe
-        # is the whole answer.
+        # Probe the credential the wire cascade would ACTUALLY select now.
+        # Usage enumeration includes blocked OAuth rows for visibility, while
+        # routing correctly falls through to a healthy API key (review F4).
+        # ``read_only`` keeps this quota question from moving stickiness.
         try:
-            # read_only: a quota probe must not pin stickiness on a
-            # provider we may then skip as depleted.
-            api_key = await self._auth_store.get_api_key(provider, self._session_id, read_only=True)
+            selected = await self._auth_store.get_oauth_access(
+                provider, self._session_id, read_only=True
+            )
         except Exception:
-            api_key = None
-        if api_key:
+            selected = None
+            saw_unknown = True
+        if selected is not None and selected.kind == "api_key":
             try:
-                report = await fetch_usage(self._http, provider, api_key=api_key)
+                report = await fetch_usage(self._http, provider, api_key=selected.access_token)
             except Exception:
                 report = None
-            if report is not None:
+            if report is None:
+                saw_unknown = True
+            else:
                 health = usage_health(report, model_id, reserve_percent=reserve_percent)
                 if health.state == "depleted":
-                    cache[cache_key] = "depleted"
-                    return "depleted"
-                if health.state != "unknown":
+                    saw_depleted = True
+                elif health.state == "unknown":
+                    saw_unknown = True
+                else:
                     cache[cache_key] = "usable"
                     return "usable"
+        elif api_key_rows:
+            # An unblocked OAuth row shadows lower API-key rows. The stream
+            # reaches them after a provider-side quota error, but preflight
+            # cannot safely resolve a lower tier without changing routing.
+            # Unknown is fail-open: the key may still hold spendable balance.
+            saw_unknown = True
 
-        cache[cache_key] = "unknown"
-        return "unknown"
+        availability = "depleted" if saw_depleted and not saw_unknown else "unknown"
+        cache[cache_key] = availability
+        return availability
 
     async def _first_available_fallback(
         self,
@@ -2011,6 +2027,7 @@ class SessionStreamFn:
                             shared_remaining,
                             tier_binding,
                             retry,
+                            attempted_ids,
                         ):
                             continue
                         return
@@ -2080,6 +2097,7 @@ class SessionStreamFn:
                     candidate
                     for candidate in self._auth_store.list_credentials(storage)
                     if candidate.id != access.credential_id
+                    and candidate.id not in attempted_ids
                     and (row is None or candidate.credential_type == row.credential_type)
                     and not self._auth_store.is_blocked(candidate.id, storage)
                 ]
@@ -2111,7 +2129,7 @@ class SessionStreamFn:
                         f"— continuing until {model.provider} quota is exhausted",
                         "info",
                     )
-                    self._route_state.clear()
+                    await self._route_state.clear_settled("primary model still has quota")
                     return
                 fallback = await self._first_available_fallback(
                     model,
@@ -2137,6 +2155,7 @@ class SessionStreamFn:
                 shared_remaining,
                 tier_binding,
                 retry,
+                attempted_ids,
             ):
                 continue
             return
@@ -2150,6 +2169,7 @@ class SessionStreamFn:
         shared_remaining: float | None,
         tier_binding: bool,
         retry: Any,
+        attempted_ids: set[int],
     ) -> bool:
         """Act on a low/depleted account-scope verdict.
 
@@ -2188,6 +2208,7 @@ class SessionStreamFn:
             candidate
             for candidate in self._auth_store.list_credentials(storage)
             if candidate.id != access.credential_id
+            and candidate.id not in attempted_ids
             and (row is None or candidate.credential_type == row.credential_type)
             and not self._auth_store.is_blocked(candidate.id, storage)
         ]
@@ -2198,12 +2219,6 @@ class SessionStreamFn:
             different_provider=health.state == "depleted",
             reserve_percent=retry.usage_reserve_percent,
         )
-        if not siblings and fallback is None:
-            await self._notice(
-                f"{model.provider} {condition}{remaining}; no configured fallback is available"
-            )
-            return False
-
         if not siblings and health.state == "reserve":
             # Last account on this provider, still holding spendable quota.
             # Crossing the reserve threshold used to hop to the next chain
@@ -2226,7 +2241,13 @@ class SessionStreamFn:
                 f"{model.provider} quota is exhausted",
                 "info",
             )
-            self._route_state.clear()
+            await self._route_state.clear_settled("primary model still has quota")
+            return False
+
+        if not siblings and fallback is None:
+            await self._notice(
+                f"{model.provider} {condition}{remaining}; no configured fallback is available"
+            )
             return False
 
         if tier_binding and shared_above_reserve:

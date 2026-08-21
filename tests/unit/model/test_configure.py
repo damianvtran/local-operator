@@ -1039,6 +1039,107 @@ async def test_preflight_skips_a_fully_spent_fallback_to_the_next_usable(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_fallback_quota_is_unknown_when_an_oauth_account_is_omitted(tmp_path) -> None:
+    """One unread OAuth sibling prevents a provider-wide depleted verdict.
+
+    ``list_oauth_accesses`` omits refresh failures. If the one access it does
+    return is at 0%, the missing row is still UNKNOWN — not proof that every
+    account is depleted (agent review F1)."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(store, {"retry": {"usageAwareFallback": True}})
+
+    access = await store.get_oauth_access("anthropic", "session-a")
+    assert access is not None
+    survivor = first if access.credential_id == first.id else second
+
+    try:
+        with (
+            patch.object(store, "list_oauth_accesses", return_value=[access]),
+            patch(
+                "local_operator.providers.usage.fetch_usage",
+                side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+            ),
+        ):
+            verdict = await stream._provider_quota_availability(
+                "anthropic", "claude-opus-5", reserve_percent=10, cache={}
+            )
+
+        assert survivor.id in {first.id, second.id}
+        assert verdict == "unknown"
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_reserve_only_pool_settles_back_from_a_pinned_fallback(tmp_path) -> None:
+    """After every sibling is checked, reserve quota wins over the old pin.
+
+    Both Anthropic accounts have 5% Fable quota. The previous fallback must
+    clear after the second probe; attempted accounts are not counted as fresh
+    siblings that send the walk around once more (agent review F2)."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id=_session_hashing_to_first_row(2),
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+    stream._primary_selector = "anthropic/claude-fable-5"
+    await stream._route_state.activate(FallbackTarget("kimi/k3"), "previous failure", cooldown_ms=0)
+    # Permit the boundary probe of the primary while retaining the active pin.
+    stream._route_state.primary_retry_at_ms = 0
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_fable_usage(95.0),
+        ):
+            await stream.preflight_usage(model)
+
+        assert stream._route_state.active is None
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_depleted_oauth_does_not_hide_healthy_api_key(tmp_path) -> None:
+    """Availability follows the credential tier routing will actually use.
+
+    A blocked OAuth row is still enumerated for usage and reports 0%, but the
+    wire cascade falls through to the API key. Its healthy report prevents the
+    provider from being skipped (agent review F4)."""
+    store = AuthStore(tmp_path / "auth.db")
+    oauth = store.upsert_credential("kimi", _oauth("oauth-kimi", "kimi-a"))
+    store.block_credential(oauth.id, "kimi", block_ms=60_000)
+    api = store.upsert_credential("kimi", {"key": "sk-kimi", "source": "login"})
+    stream = create_stream_fn(store, {"retry": {"usageAwareFallback": True}})
+
+    selected = await store.get_oauth_access("kimi", "session-a", read_only=True)
+    assert selected is not None and selected.credential_id == api.id
+
+    async def usage_for_access(_client, provider, *, access_token=None, api_key=None, **_kwargs):
+        assert provider == "kimi"
+        return _kimi_usage(100.0 if access_token else 20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            verdict = await stream._provider_quota_availability(
+                "kimi", "k3", reserve_percent=10, cache={}
+            )
+
+        assert verdict == "usable"
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_transport_fallback_cooldown_skips_quota_probe(tmp_path) -> None:
     store = AuthStore(tmp_path / "auth.db")
     store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
