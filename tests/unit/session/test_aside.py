@@ -230,3 +230,72 @@ async def test_adopt_aside_is_refused_while_the_turn_lock_is_held(tmp_path) -> N
     finally:
         session._turn_lock.release()
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_record_shell_writes_a_user_call_and_result(tmp_path) -> None:
+    """A bang-mode command is context, not a secret: the next turn and a
+    resume both have to see it. Synthetic assistant+tool so the TUI's
+    existing replay path mounts a ToolCard rather than a wall of stdout
+    attributed to the user."""
+    from local_operator.harness.types import ToolResult
+
+    session = make_session(tmp_path, RecordingStream())
+    result = ToolResult(
+        tool_call_id="shell-1",
+        tool_name="bash",
+        content=[TextContent(text="exit code: 0\n--- stdout ---\nhi\n--- stderr ---\n(empty)")],
+    )
+
+    await session.record_shell("echo hi", result)
+
+    messages = session._context.messages
+    assert all(isinstance(m, Message) for m in messages)
+    typed = [m for m in messages if isinstance(m, Message)]
+    assert [m.role for m in typed] == ["user", "assistant", "tool"]
+    assert typed[0].text == "! echo hi"
+    assert typed[1].tool_calls[0].name == "bash"
+    assert typed[1].tool_calls[0].arguments == {"command": "echo hi"}
+    assert typed[2].tool_call_id == "shell-1"
+    assert typed[2].text.startswith("exit code: 0")
+    replayed = session._transcript.build_llm_history()
+    assert all(isinstance(m, Message) for m in replayed)
+    assert [m.role for m in replayed if isinstance(m, Message)] == ["user", "assistant", "tool"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_record_shell_queues_mid_turn_and_flushes_before_the_next_prompt(tmp_path) -> None:
+    """Splicing into a live tool batch is unsendable, but a visible command
+    must not disappear. The receipt waits behind the lock and becomes context
+    before the next prompt builds its request."""
+    from local_operator.harness.types import ToolResult
+
+    session = make_session(tmp_path, RecordingStream())
+    result = ToolResult(tool_call_id="shell-1", tool_name="bash", content=[TextContent(text="x")])
+    await session._turn_lock.acquire()
+    session._is_streaming = True
+    try:
+        await session.record_shell("echo hi", result)
+        assert session._context.messages == []
+        assert session._transcript.entries() == []
+        assert session._pending_shell_records == [("echo hi", result)]
+    finally:
+        session._is_streaming = False
+        await session._flush_shell_records()
+        session._turn_lock.release()
+
+    assert session._pending_shell_records == []
+    typed = [m for m in session._context.messages if isinstance(m, Message)]
+    assert typed == list(session._context.messages)  # every entry is a real message
+    assert [m.role for m in typed] == ["user", "assistant", "tool"]
+    first = session._context.messages[0]
+    assert isinstance(first, Message)
+    assert first.text == "! echo hi"
+    replayed = session._transcript.build_llm_history()
+    assert [m.role for m in replayed if isinstance(m, Message)] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    await session.dispose()

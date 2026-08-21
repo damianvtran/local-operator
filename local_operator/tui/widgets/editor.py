@@ -14,6 +14,13 @@ submit-on-Enter. The subclass inverts that and takes the terminal key idioms:
   buffer, and inside the text they keep their cursor-move meaning
 - ``Tab`` completes the highlighted command WITHOUT submitting
 - ``Esc`` dismisses the picker, leaving the typed text alone
+- ``!`` on an EMPTY composer enters shell mode (the bang is consumed, not
+  typed). Enter then runs the buffer as a local shell command instead of
+  sending a prompt; Esc or backspace on an empty shell-mode buffer leaves
+  the mode. omp and opencode both ship this gesture; the dedicated-mode
+  half is opencode's (caret-at-start ``!`` flips a mode, Esc/backspace
+  empty leaves it) and the submit-of-a-leading-bang half is omp's, so a
+  history recall of ``! ls`` still runs as a command.
 
 Key interception happens in :meth:`_on_key`, which runs BEFORE TextArea's
 document-insert path, so a handled key never reaches the buffer. Unhandled
@@ -338,6 +345,8 @@ class EditorSubmitted(Message):
         text: str,
         images: list[ImageContent] | None = None,
         attachments: Mapping[int, Attachment] | None = None,
+        *,
+        shell: bool = False,
     ) -> None:
         super().__init__()
         self.text = text
@@ -353,6 +362,12 @@ class EditorSubmitted(Message):
         #: widget sees an empty map and silently drops the images (review round
         #: 19). Restores need the numbers, which the ordered list has lost.
         self.attachments = dict(attachments or {})
+        #: True when this submit is a SHELL command, not a prompt. The editor
+        #: is the authority: it alone knows whether the bang-mode flag was on
+        #: at Enter, and the buffer is cleared before the app sees the
+        #: message, so the flag has to ride along the same way attachments do.
+        #: Defaulted so every existing construction site keeps working.
+        self.shell = shell
 
 
 class EditorCopyStale(Message):
@@ -413,6 +428,21 @@ class StopRequested(Message):
 
     def __init__(self) -> None:
         super().__init__()
+
+
+class ShellModeChanged(Message):
+    """Posted when bang-mode is entered or left.
+
+    The editor owns the mode (it is a property of the composer, like the
+    slash picker) and the app owns the chrome that has to follow it — the
+    dock class that recolors the chevron. The message is the seam: a
+    widget that reached into ``#input-dock`` would invert the dependency
+    this module is arranged around.
+    """
+
+    def __init__(self, active: bool) -> None:
+        super().__init__()
+        self.active = active
 
 
 class EditorQuit(Message):
@@ -514,6 +544,14 @@ READ_ONLY_PLACEHOLDER = "Read-only — press esc to reply"
 #: chrome and `esc` is never shed from it — and this says what typing here
 #: will do. Half the cells, so it also survives a narrow terminal.
 ASIDE_PLACEHOLDER = "Ask the aside…"
+
+#: What the composer says in bang-mode. The first clause is opencode's
+#: sentence — what typing here WILL DO — and the second names the way out,
+#: because entry is taught three ways (tip, placeholder, green chevron) while
+#: exit was taught by nothing on screen (design round 1, D2): the placeholder
+#: is the one surface guaranteed visible the moment the mode opens on an
+#: empty buffer, which is exactly when a first-timer looks for the door.
+SHELL_PLACEHOLDER = "Run a command… — esc to leave"
 
 
 class Editor(TextArea):
@@ -653,6 +691,19 @@ class Editor(TextArea):
         self._copy_gesture = False
         #: The selection `_copy_drag` took, while `_copy_gesture` holds.
         self._copied_selection: Selection | None = None
+        #: Bang-mode: Enter runs a local shell command instead of sending a
+        #: prompt. Owned here because it is a property of the COMPOSER (the
+        #: same way the slash picker is), not of the app: the key that enters
+        #: it is intercepted before TextArea inserts, and the key that leaves
+        #: it has to win over Esc-means-stop. The app follows via
+        #: :class:`ShellModeChanged`.
+        self._shell_mode = False
+        #: The aside turns this off for as long as it owns the composer: a
+        #: bang-mode command run from a card that promised "off the record"
+        #: would both break the promise and eat the ``!`` the user typed as
+        #: the start of a question. Default on; the main chat is the only
+        #: surface that runs commands.
+        self._allows_shell = True
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -844,6 +895,37 @@ class Editor(TextArea):
         """
         lowered = name.lower()
         return lowered in self.MODEL_COMMANDS or lowered in self._required_argument_commands
+
+    @property
+    def shell_mode(self) -> bool:
+        """Whether Enter will run a local shell command instead of a prompt."""
+        return self._shell_mode
+
+    def set_shell_mode(self, active: bool) -> None:
+        """Enter or leave bang-mode. No-op when already in that state.
+
+        The placeholder swap is the mode's own voice, the same way the aside
+        and the subagent page each have one. Restoring goes through
+        :data:`DEFAULT_PLACEHOLDER` rather than whatever was showing, because
+        the only other placeholders are modes that refuse this one (the aside
+        owns the composer; the subagent page is read-only) and a user leaving
+        bang-mode is returning to the resting composer.
+        """
+        if self._shell_mode == active:
+            return
+        self._shell_mode = active
+        self.placeholder = SHELL_PLACEHOLDER if active else DEFAULT_PLACEHOLDER
+        self.post_message(ShellModeChanged(active))
+
+    def set_allows_shell(self, allowed: bool) -> None:
+        """Whether bang-mode may be entered from this composer.
+
+        The aside turns this off; leaving bang-mode first so a mode that
+        started in the main chat cannot survive the card taking the field.
+        """
+        if not allowed:
+            self.set_shell_mode(False)
+        self._allows_shell = allowed
 
     def clear_content(self) -> None:
         """Empty the buffer and leave history navigation."""
@@ -1038,6 +1120,16 @@ class Editor(TextArea):
             # LAST escape branch on purpose: every picker case above has already
             # returned, so this is Esc with nothing on screen to dismiss.
             #
+            # Bang-mode takes it first, and keeps the draft. opencode's Esc in
+            # shell mode is "leave the mode", not "scrap the command": a user
+            # who typed `ls` and changed their mind still has `ls` to send as
+            # a prompt, and a user who entered the mode by accident is one
+            # keystroke from the resting composer. Stop is one Esc away after.
+            if self._shell_mode:
+                self.set_shell_mode(False)
+                event.stop()
+                event.prevent_default()
+                return
             # It has to be handled rather than left to bubble, because
             # ``TextArea`` binds Escape to ``blur``. That made Esc a silent trap:
             # the first press moved focus out of the composer (so the user's next
@@ -1085,6 +1177,22 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
+        # Bang-mode entry. Consumed rather than inserted, matching opencode:
+        # the bang is the MODE SWITCH, not the first character of the command,
+        # so the buffer the user then types is the command itself. Gated on an
+        # EMPTY buffer so a `!` in `echo hi!` or a mid-sentence `wow!` is just
+        # a character, and on `_allows_shell` so the aside cannot eat one.
+        if (
+            not self._shell_mode
+            and self._allows_shell
+            and not self.read_only
+            and not self.text
+            and event.character == "!"
+        ):
+            self.set_shell_mode(True)
+            event.stop()
+            event.prevent_default()
+            return
         if key == "up" and self._caret_at_top_edge() and self._history:
             self._navigate_history(-1)
             event.stop()
@@ -1104,17 +1212,40 @@ class Editor(TextArea):
     # -- submit -------------------------------------------------------------
     def _submit(self) -> None:
         text = self.text
+        # Bang-mode is a MODE, but a recalled `! ls` is TEXT that still means
+        # the same thing — omp's submit path, which treats a leading bang as
+        # the command even when the dedicated mode is off. Detected HERE so
+        # the history entry and the message agree about what was sent.
+        shell = self._shell_mode or (
+            self._allows_shell
+            and text.lstrip().startswith("!")
+            and not text.lstrip().startswith("/")
+        )
+        recorded = text
+        if shell and self._shell_mode and text.strip() and not text.lstrip().startswith("!"):
+            # History of a dedicated-mode submit is stored WITH the bang so
+            # Up-arrow recall re-runs as a command rather than as a prompt
+            # that happens to look like one. The buffer itself never held
+            # the bang (it was consumed on entry), so it is prefixed here.
+            recorded = f"! {text}"
         # Checked HERE, before the post, because that is the only place the
         # entry can be prevented rather than removed afterwards — see
         # :meth:`set_records_history`.
-        if text.strip() and self._records_history:
-            self._record_history(text)
+        if recorded.strip() and self._records_history:
+            self._record_history(recorded)
         self._picker.close()
         # Only the attachments the text STILL REFERS TO. The marker is the
         # authority: pasting three screenshots and deleting two must send one,
         # because the deleted markers are the user saying they changed their
         # mind, and silently sending all three is both surprising and expensive.
-        self.post_message(EditorSubmitted(text, self.referenced_images(), self._attachments))
+        self.post_message(
+            EditorSubmitted(text, self.referenced_images(), self._attachments, shell=shell)
+        )
+        # Leave the mode WITH the buffer: a submit that stayed in bang-mode
+        # would leave the placeholder saying "Run a command…" over an empty
+        # field the next Enter would treat as a no-op, which reads as a
+        # stuck mode. opencode resets to normal on submit for the same reason.
+        self.set_shell_mode(False)
         self.clear_content()
 
     def referenced_images(self) -> list[ImageContent]:
@@ -1362,6 +1493,13 @@ class Editor(TextArea):
                 del self._attachments[index]
 
     def action_delete_left(self) -> None:
+        # Empty-buffer backspace leaves bang-mode, matching opencode. The
+        # bang was consumed on entry, so there is no character to delete:
+        # the mode IS the character, and backspace on nothing is the
+        # honest inverse of the key that entered.
+        if self._shell_mode and not self.text:
+            self.set_shell_mode(False)
+            return
         if not self._delete_marker(before=True):
             super().action_delete_left()
 

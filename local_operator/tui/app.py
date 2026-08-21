@@ -73,6 +73,8 @@ from local_operator.harness.types import (
     AskQuestion,
     ImageContent,
     Message,
+    TextContent,
+    ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.logger import current_log_file
@@ -133,6 +135,7 @@ from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     DEFAULT_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
+    SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
     Attachment,
@@ -144,6 +147,7 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     ModelQueryOpened,
     RefreshArgumentChoices,
+    ShellModeChanged,
     StopRequested,
     resolve_markers,
 )
@@ -644,6 +648,14 @@ ASIDE_LAYOUT_CLASS = "aside"
 #: went off again. Flipped in exactly one place, see
 #: ``OperatorApp._sync_composer_focus``.
 COMPOSER_FOCUSED_CLASS = "-composer-focused"
+
+#: Class the input dock carries while bang-mode is on. The chevron stays the
+#: same glyph — ``composer_cells`` finds the row by it — and the class is
+#: what the stylesheet reads to paint it ``string`` rather than the focus
+#: brightness. ``string`` is the ramp's command/success green, a step off
+#: the accent, so a shell-mode composer does not spend the "turn is live"
+#: ink (D5) and still reads as a different MODE from the resting field.
+COMPOSER_SHELL_CLASS = "-composer-shell"
 
 #: How long after a terminal resize the floating overlay cards re-measure
 #: themselves. They are hosted in `width: auto` containers, so Textual sends
@@ -1191,6 +1203,20 @@ class OperatorApp(App[None]):
         # the turn boundary (never mid-turn, so a turn is never half-applied).
         self._loop_running: bool = False
         self._loop_cancelled: bool = False
+        #: AbortSignal for the in-flight bang-mode command, if any. Owned by
+        #: the app rather than the session because bang-mode is a TUI gesture
+        #: — the session's abort stops a TURN, and a user-typed `sleep 30`
+        #: is not one. Esc/Ctrl+C abort this the same way they abort a turn.
+        self._shell_signal: Any = None
+        #: The ToolCard currently painting a bang-mode run, so a second
+        #: submit cannot start another command over a live one (omp refuses
+        #: a second bash while one is running) and so Esc can mark it
+        #: interrupted rather than leaving a running row forever.
+        self._shell_card: ToolCard | None = None
+        #: Textual worker owning the command above. Kept separately from the
+        #: card/signal so a session swap can abort and AWAIT process reaping
+        #: before disposing the session captured by the worker.
+        self._shell_worker: Any = None
         # The one pending tool-approval prompt, if any. The TUI owns approvals
         # (see widgets/approval.py) because the default stdin gate deadlocks
         # under a full-screen app; `_approve_all` is the session-scoped "allow
@@ -1296,6 +1322,13 @@ class OperatorApp(App[None]):
         #: INSIDE the aside took number 1, so the restored marker resolved to
         #: the aside's image instead (review round 17).
         self._aside_draft_images: dict[int, Attachment] = {}
+        #: Whether bang-mode was ON when the aside borrowed the composer. The
+        #: aside disables the gesture for the life of the card, but the command
+        #: the user had half typed is stashed and returned verbatim — returning
+        #: it into a composer that silently left bang-mode would arm Enter with
+        #: a shell command aimed at the model. Restored in `_close_aside` with
+        #: the draft it belongs to.
+        self._aside_draft_shell_mode: bool = False
         # The reasoning-effort level the USER picked, or None while the model's
         # own default stands. Held on the app rather than only on the session
         # spec because the session is replaceable — `/new`, `/reload` and
@@ -2099,6 +2132,11 @@ class OperatorApp(App[None]):
         # outlives a turn: the flow runs as a worker, not inside the turn, so
         # nothing else here would ever settle it.
         self._settle_key_prompt()
+        # A bang-mode command captured THIS session for cwd, variables and
+        # durable history. Abort and await its worker before disposing that
+        # session, or `/new`/`/resume` can leave a subprocess writing into an
+        # unmounted card and a transcript whose owner has already gone away.
+        await self._settle_shell_command()
         # The working line belongs to the turn being thrown away. Left standing
         # it does two kinds of damage: the widget goes on animating a turn that
         # no longer exists, and the stale `_working_block` reference makes
@@ -3354,7 +3392,7 @@ class OperatorApp(App[None]):
         # Only `text` is checked: an attachment cannot exist without its
         # `[Image #N]` marker standing in the buffer, and a marker is text. A
         # screenshot pasted with no words still submits, carrying its marker.
-        if not text:
+        if not text and not message.shell:
             return
         # The aside owns the composer while it is up. EVERYTHING goes to it,
         # slash-shaped lines included: the card is a MODE, its footer says so
@@ -3365,6 +3403,24 @@ class OperatorApp(App[None]):
         # bargain a modal surface makes.
         if self._aside_is_open():
             self._ask_aside(text)
+            return
+        if message.shell:
+            if self._shell_card is not None:
+                # The editor already cleared and recorded. Hand the line back
+                # the same way `/btw` retracts the question that opened it:
+                # exact history pop, then restore the buffer so the user can
+                # retry (or Esc-abort the running one) without retyping.
+                editor = self._editor()
+                recorded = text if text.lstrip().startswith("!") else f"! {text}"
+                editor.forget_last_prompt(recorded)
+                editor.load_text(recorded)
+                # The line comes back IN the mode it was submitted from, so
+                # the placeholder matches the buffer and Enter re-runs it as a
+                # command once the running one is settled.
+                editor.set_shell_mode(True)
+                self._notice("a command is already running — esc to cancel it first", "warning")
+                return
+            self._run_shell_command(text)
             return
         if text.startswith("/"):
             # Nothing but dispatch. A slash command writes its own rows: the
@@ -3613,6 +3669,14 @@ class OperatorApp(App[None]):
             return
         dock.set_class(focused, COMPOSER_FOCUSED_CLASS)
 
+    def on_shell_mode_changed(self, message: ShellModeChanged) -> None:
+        """Follow the composer's bang-mode onto the dock class the sheet reads."""
+        try:
+            dock = self.query_one("#input-dock")
+        except NoMatches:
+            return
+        dock.set_class(message.active, COMPOSER_SHELL_CLASS)
+
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
         """Ctrl+C from the composer — the NORMAL path, since it holds focus.
 
@@ -3856,6 +3920,11 @@ class OperatorApp(App[None]):
         self._settle_key_prompt()
         if self._session is not None:
             self._session.abort("interrupted")
+        # A bang-mode command is not a turn, so aborting the session does
+        # not reach it. Same key, same meaning: stop the work in front of
+        # the user. After the session abort so a live turn and a live
+        # command both die on one press rather than racing.
+        self._abort_shell_command()
 
     def action_stop(self) -> None:
         """Esc: stop. One press, one meaning, wherever focus happens to be.
@@ -4024,6 +4093,12 @@ class OperatorApp(App[None]):
         children = self._running_subagents(session)
 
         if not (pending or streaming or children):
+            # A bang-mode command is the one remaining thing Esc can stop
+            # when no turn is running. Checked HERE rather than above the
+            # streaming test so a live turn still takes the first press —
+            # the command is local and cheap to re-run, the turn is not.
+            if self._abort_shell_command():
+                return
             # Nothing to stop. Explicitly NOT clearing the composer.
             return
 
@@ -5171,6 +5246,10 @@ class OperatorApp(App[None]):
         parked for ``on_unmount`` instead of dying with the frame
         (``_park_unadopted_session``).
         """
+        # Unlike paint-only workers, bang-mode owns a subprocess and a durable
+        # receipt. Abort and join it BEFORE the blanket cancellation: cancelling
+        # execute_bash directly can bypass its normal result/persistence path.
+        await self._settle_shell_command()
         self.workers.cancel_all()
         await super()._shutdown()
 
@@ -5336,6 +5415,10 @@ class OperatorApp(App[None]):
         # And the login key prompt, which is awaited by a worker rather than by
         # a turn and so is not covered by either of the two above.
         self._settle_key_prompt()
+        # `_shutdown` normally settled this before Textual pruned the tree.
+        # Keep unmount independently correct for reduced test hosts and any
+        # future path that calls the hook directly.
+        await self._settle_shell_command()
         # First, and synchronously: the restore is one write on a driver that
         # is still up, and everything below it can await. An exception in
         # session teardown would otherwise leave the user's shell wearing this
@@ -5351,6 +5434,187 @@ class OperatorApp(App[None]):
             self._controller.dispose()
         if self._session is not None:
             await self._session.dispose()
+
+    def _run_shell_command(self, text: str) -> None:
+        """Run a bang-mode command locally, without starting a turn.
+
+        The bang is a MODE SWITCH, not a prompt: omp and opencode both run
+        the command in-process and paint the result as a tool row, so the
+        next real prompt can see what just happened. Empty submit is a
+        no-op (the mode already left on Enter) rather than an error, because
+        a user who entered bang-mode by accident and pressed Enter should
+        land back on the resting composer, not on a red notice.
+        """
+        command = text.lstrip()
+        if command.startswith("!"):
+            # Recalled history stores the bang; dedicated-mode submit does
+            # not. Strip one leading bang (and its following space) so both
+            # paths run the same command. A second bang is part of the
+            # command (`!!` is a shell event, not our exclude-from-context
+            # — omp's `!!` is a different product and we do not ship it).
+            command = command[1:].lstrip()
+        if not command:
+            return
+        from local_operator.harness.types import (
+            AbortSignal,
+            AgentToolUpdate,
+            ToolContext,
+        )
+        from local_operator.tools.builtin import execute_bash
+
+        call_id = f"shell-{time.monotonic_ns()}"
+        card = ToolCard(call_id, "bash", {"command": command})
+        self._append_block(UserBlock(f"! {command}"))
+        self._append_block(card)
+        signal = AbortSignal()
+        self._shell_signal = signal
+        self._shell_card = card
+        session = self._session
+        cwd = os.getcwd()
+        session_cwd = getattr(session, "_cwd", None) if session is not None else None
+        if isinstance(session_cwd, str) and session_cwd:
+            cwd = session_cwd
+        context = ToolContext(
+            cwd=cwd,
+            session_id=getattr(session, "session_id", "") or "",
+            agent_id=getattr(session, "agent_id", "") or "",
+            has_ui=True,
+            variables=getattr(session, "variables", None),
+        )
+
+        def on_update(update: AgentToolUpdate) -> None:
+            detail = _partial_text(update)
+            if detail:
+                card.set_partial_detail(detail)
+
+        async def persist(result: ToolResult) -> None:
+            """One persistence hop; a spawn failure is still a completed
+            command, so the "never dropped" invariant covers it too."""
+            record = getattr(session, "record_shell", None) if session is not None else None
+            if not callable(record):
+                return
+            try:
+                await cast(Callable[..., Awaitable[None]], record)(command, result)
+            except Exception:
+                logger.debug("could not persist bang-mode result", exc_info=True)
+
+        def _nonzero_exit(res: ToolResult) -> bool:
+            # execute_bash reports a nonzero exit as a SUCCESSFUL tool result
+            # (the model is expected to read the code and recover), but the
+            # bang path's reader is a HUMAN whose collapsed card said `✓` on a
+            # command that failed (design round 1, D1). The header lines are
+            # the tool's stable contract — `exit code: N` opens every result,
+            # or `TIMEOUT after Ns` ahead of it when the deadline killed the
+            # process — so deriving the mark from them cannot disagree with
+            # the body. Scan the first lines, not just the first: the timeout
+            # notice is PREPENDED (round 3 minor).
+            for head in res.text.splitlines()[:3]:
+                if head.startswith("TIMEOUT after "):
+                    return True
+                if head.startswith("exit code: "):
+                    code = head[len("exit code: ") :].split(" ", 1)[0]
+                    return code.lstrip("-").isdigit() and code != "0"
+            return False
+
+        async def run_shell() -> None:
+            try:
+                result = await execute_bash(
+                    call_id,
+                    {"command": command},
+                    signal,
+                    on_update,
+                    context,
+                )
+            except Exception as error:  # surface, never crash the app
+                if self._shell_card is card and not signal.aborted:
+                    card.mark_failed(str(error), str(error))
+                await persist(
+                    ToolResult(
+                        tool_call_id=call_id,
+                        tool_name="bash",
+                        content=[TextContent(text=f"error: {error}")],
+                        is_error=True,
+                    )
+                )
+                return
+            if _nonzero_exit(result):
+                # A nonzero exit is a FAILURE on this surface. Persist it as
+                # one so a resumed session restores the same ✗ the live card
+                # showed — the replay derives its state off `is_error`.
+                result = result.model_copy(update={"is_error": True})
+            # Aborting paints the receipt immediately, but the worker remains
+            # authoritative until the subprocess is reaped. Do not overwrite
+            # that interrupted frame with execute_bash's abort result; DO still
+            # persist the result so the command cannot disappear on resume.
+            if self._shell_card is card and not signal.aborted:
+                if result.is_error:
+                    card.mark_failed(_first_line(result.text), result.text, result.details)
+                else:
+                    card.mark_done(result.text, result.details)
+            await persist(result)
+
+        def _clear_shell_state() -> None:
+            if self._shell_card is card:
+                self._shell_card = None
+            if self._shell_signal is signal:
+                self._shell_signal = None
+
+        worker: Any = None
+
+        async def run_and_clear() -> None:
+            try:
+                await run_shell()
+            finally:
+                _clear_shell_state()
+                if self._shell_worker is worker:
+                    self._shell_worker = None
+
+        worker = self.run_worker(run_and_clear(), thread=False, group="shell")
+        self._shell_worker = worker
+
+    def _abort_shell_command(self) -> bool:
+        """Abort the in-flight bang-mode command. True if there was one.
+
+        The card is marked interrupted HERE rather than waiting for
+        ``execute_bash`` to return an error, because the stop key's job is
+        to change the frame on this press: a running row that stayed
+        running until the process reaped would look like Esc did nothing.
+        """
+        signal = self._shell_signal
+        card = self._shell_card
+        if signal is None and card is None:
+            return False
+        if signal is not None and not signal.aborted:
+            signal.abort("interrupted")
+        if card is not None:
+            card.mark_interrupted()
+        # Keep the card/signal registered until execute_bash has reaped the
+        # process. This both refuses a second command during teardown and lets
+        # the worker persist the interrupted result before clearing ownership.
+        return True
+
+    async def _settle_shell_command(self) -> None:
+        """Abort and await the in-flight bang-mode worker, if any.
+
+        Session replacement calls this before disposal because the worker
+        captures that session for cwd, variables and history. Bounded process
+        teardown lives in ``execute_bash``; Worker.wait merely joins it here.
+        """
+        worker = self._shell_worker
+        if worker is None:
+            return
+        self._abort_shell_command()
+        try:
+            await worker.wait()
+        except BaseException:  # noqa: BLE001 — replacement must always proceed
+            logger.debug("settling bang-mode worker failed", exc_info=True)
+        finally:
+            if self._shell_worker is worker:
+                self._shell_worker = None
+            # Cancellation can skip the worker's own finally; release stale UI
+            # ownership here as the last word before the session is replaced.
+            self._shell_signal = None
+            self._shell_card = None
 
     def _submit_prompt(
         self,
@@ -6279,12 +6543,16 @@ class OperatorApp(App[None]):
         except Exception:
             return  # a stripped harness with no composer
         editor.read_only = read_only
-        # The placeholder is the composer's own voice, and while the mode is
-        # on it was still printing `Message Local Operator…` — an imperative
-        # invitation from a field that refuses every key, greyed to the point
-        # of being hard to read but present enough to invite. State the
-        # constraint where the hands are.
-        editor.placeholder = READ_ONLY_PLACEHOLDER if read_only else DEFAULT_PLACEHOLDER
+        # The placeholder is the composer's own voice. Read-only always
+        # wins (the subagent page refuses every key); giving the composer
+        # back restores whichever mode it was actually in, so bang-mode's
+        # invitation is not overwritten by the resting prompt.
+        if read_only:
+            editor.placeholder = READ_ONLY_PLACEHOLDER
+        elif editor.shell_mode:
+            editor.placeholder = SHELL_PLACEHOLDER
+        else:
+            editor.placeholder = DEFAULT_PLACEHOLDER
         # Not focusable while inert: a caret in a field that refuses every key
         # is the most misleading thing this mode could paint, and ↑↓ have to
         # reach the transcript that the hint says they scroll. The caret is
@@ -8407,6 +8675,14 @@ class OperatorApp(App[None]):
         # Taken BEFORE `clear_content`, which drops them.
         self._aside_draft_images = editor.attachments()
         editor.clear_content()
+        self._aside_draft_shell_mode = editor.shell_mode
+        # Bang-mode is a main-chat gesture. A `!` typed into the aside is
+        # the start of a question, and a command run from a card that
+        # promised "off the record" would both break the promise and eat
+        # the character. Returned in `_close_aside`. BEFORE the aside
+        # placeholder: leaving bang-mode restores the resting invitation,
+        # which would overwrite `Ask the aside…` if this ran after.
+        editor.set_allows_shell(False)
         editor.placeholder = ASIDE_PLACEHOLDER
         # The command list is borrowed too, and returned in `_close_aside`.
         # `on_editor_submitted` routes a slash-shaped line to the aside as a
@@ -8503,7 +8779,17 @@ class OperatorApp(App[None]):
         self._aside_draft = None
         self._aside_draft_images = {}
         editor = self._editor()
-        editor.placeholder = DEFAULT_PLACEHOLDER
+        editor.set_allows_shell(True)
+        # The stashed draft comes back into the mode it was typed in: a
+        # half-typed `!` command returned to a composer that silently left
+        # bang-mode would send the command to the model on the next Enter.
+        editor.set_shell_mode(self._aside_draft_shell_mode)
+        self._aside_draft_shell_mode = False
+        # `set_shell_mode` is a no-op when the state is unchanged — which is
+        # the common case (the aside was opened from the resting composer) —
+        # and then the aside's own placeholder would stay on screen. The mode
+        # decides the voice either way.
+        editor.placeholder = SHELL_PLACEHOLDER if editor.shell_mode else DEFAULT_PLACEHOLDER
         editor.load_text(draft or "")
         # AFTER `load_text`: adoption re-keys onto the markers now in the
         # buffer, so the text has to be there first.
