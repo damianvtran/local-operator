@@ -2023,7 +2023,9 @@ class SessionStreamFn:
                     # block an account that still serves other models. Fail over
                     # to another provider only after re-checking the blocks
                     # themselves: exhaust every login first.
-                    recovered = await self._recover_blocked_accounts(model, storage, rows, retry)
+                    recovered = await self._recover_blocked_accounts(
+                        model, storage, rows, retry, attempted_ids
+                    )
                     if recovered is not None:
                         health, shared_remaining, tier_binding, access = recovered
                         if health.state != "healthy" and await self._apply_account_health(
@@ -2129,7 +2131,7 @@ class SessionStreamFn:
                         and self._auth_store.is_blocked(candidate.id, storage)
                     ]
                     recovered = await self._recover_blocked_accounts(
-                        model, storage, blocked_rows, retry
+                        model, storage, blocked_rows, retry, attempted_ids
                     )
                     if recovered is not None:
                         rec_health = recovered[0]
@@ -2339,7 +2341,9 @@ class SessionStreamFn:
                 and (row is None or candidate.credential_type == row.credential_type)
                 and self._auth_store.is_blocked(candidate.id, storage)
             ]
-            recovered = await self._recover_blocked_accounts(model, storage, blocked_rows, retry)
+            recovered = await self._recover_blocked_accounts(
+                model, storage, blocked_rows, retry, attempted_ids
+            )
             if recovered is not None:
                 rec_health = recovered[0]
                 if rec_health.state in ("healthy", "reserve"):
@@ -2452,6 +2456,7 @@ class SessionStreamFn:
         storage: str,
         rows: list[Any],
         retry: Any,
+        attempted_ids: set[int],
     ) -> tuple[Any, float | None, bool, Any] | None:
         """Re-check blocked accounts before a provider failover.
 
@@ -2470,6 +2475,20 @@ class SessionStreamFn:
         whose re-probe says depleted. ``None`` means every blocked account
         was re-checked and none gave a verdict — only then is a provider
         fallback honest.
+
+        ``attempted_ids`` is the preflight's record of which credentials this
+        message boundary has already judged, and it is BOTH read and written
+        here. That is what terminates the walk. A depleted verdict sends the
+        caller back into ``_apply_account_health``, which re-blocks the row
+        and walks the blocked pool again; without recording the probe, the
+        row this frame just cleared is blocked again by the next frame and
+        re-enumerated by the one after, so two depleted blocked accounts
+        ping-pong A→B→A until the recursion limit kills the turn. Every row
+        the walk touches is recorded, whatever the outcome: a refresh failure
+        or an unreadable report is still a decision taken about that account
+        for this boundary, and re-probing it costs a network round trip to
+        reach the same answer. Rows are finite and the set only grows, so
+        each recursive step strictly shrinks the candidate pool.
         """
         from local_operator.providers.auth_store import OAuthAccess
         from local_operator.providers.registry import get_provider_definition
@@ -2480,6 +2499,14 @@ class SessionStreamFn:
         )
 
         for row in rows:
+            if row.id in attempted_ids:
+                continue  # already judged at this message boundary
+            # Recorded BEFORE the probe, so every exit below — refresh
+            # failure, missing token, unreachable endpoint, unreadable
+            # report, or a definite verdict — leaves this row out of the
+            # next enumeration. See the docstring: this is the walk's
+            # termination guarantee, not an optimisation.
+            attempted_ids.add(row.id)
             # Probe the row's OWN refreshed token. Clearing the block and
             # re-asking the cascade (the first shape of this walk) attributed
             # the verdict to whatever the cascade returned — with a healthy

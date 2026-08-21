@@ -2009,3 +2009,78 @@ async def test_recovery_walks_past_a_depleted_blocked_row_to_one_with_quota(
     finally:
         await stream.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_depleted_blocked_rows_do_not_ping_pong_the_recovery_walk(
+    tmp_path,
+) -> None:
+    """Review F5: the walk terminates, and a healthy row enumerated AFTER two
+    depleted ones is still reached.
+
+    The recursion is the point. A depleted re-probe hands the verdict back to
+    ``_apply_account_health``, which re-blocks that row and walks the blocked
+    pool again — so without recording which rows this boundary has already
+    judged, the row cleared in one frame is blocked again by the next and
+    re-enumerated by the one after. Two depleted blocked accounts ping-pong
+    A→B→A until ``RecursionError`` kills the turn, and it kills it inside
+    ``preflight_usage``, which ``__call__`` awaits unguarded.
+
+    This is the live shape of the reported incident, not a constructed one:
+    four Anthropic logins, the selected account model-depleted, two blocked
+    accounts genuinely out, and one blocked account still holding quota that
+    the crash meant nobody ever probed.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-live", "account-live"))
+    spent_a = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    spent_b = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    healthy = store.upsert_credential("anthropic", _oauth("oauth-c", "account-c"))
+    for row in (spent_a, spent_b, healthy):
+        store.block_credential(row.id, "anthropic", block_ms=3_600_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    reports = {
+        "oauth-live": _fable_report(0.0, 58.0, 100.0),  # selected: Fable spent
+        "oauth-a": _fable_report(0.0, 100.0, 100.0),  # blocked, truly out
+        "oauth-b": _fable_report(47.0, 100.0, 34.0),  # blocked, truly out
+        "oauth-c": _fable_report(10.0, 30.0, 5.0),  # blocked, but HEALTHY
+    }
+    probed: list[str] = []
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        assert access_token is not None
+        probed.append(access_token)
+        return reports[access_token]
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        # Terminated, and on the right account: no provider hop while an
+        # Anthropic login still holds quota for this model.
+        assert stream._route_state.active is None
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == healthy.id
+        assert not store.is_blocked(healthy.id, "anthropic")
+        assert store.is_blocked(spent_a.id, "anthropic")
+        assert store.is_blocked(spent_b.id, "anthropic")
+
+        # Each account is probed at most once per boundary. A count, not a
+        # bare "it did not crash": unbounded re-probing would still terminate
+        # by luck of ordering while spending a network round trip per frame.
+        assert sorted(probed) == ["oauth-a", "oauth-b", "oauth-c", "oauth-live"]
+    finally:
+        await stream.close()
+        store.close()
