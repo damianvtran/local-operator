@@ -108,7 +108,7 @@ def place_order(lines: list[tuple[Product, int]]) -> dict:
     total = order_total(lines)
     return {"status": "ok", "total_cents": total}
 ''',
-    "tests/test_pricing.py": '''import pytest
+    "tests/test_pricing.py": """import pytest
 
 from inventory.models import Product
 from inventory.pricing import line_total, order_total
@@ -134,7 +134,7 @@ def test_order_total_sums_lines():
 
 def test_place_order_reports_total():
     assert place_order([(make(), 1)])["total_cents"] == 1000
-''',
+""",
     # DECOY 1: smelly but UNTOUCHED by the diff. A reviewer citing this file
     # wandered off the diff — exactly the unrelated-finding failure.
     "legacy/importer.py": '''"""CSV importer scheduled for deletion. Known-ugly; do not touch."""
@@ -257,7 +257,7 @@ def place_order(lines: list[tuple[Product, int]], discount_pct: int = 0) -> dict
         total = order_total(lines)
     return {"status": "ok", "total_cents": total}
 ''',
-    "tests/test_pricing.py": '''import pytest
+    "tests/test_pricing.py": """import pytest
 
 from inventory.models import Product
 from inventory.pricing import discounted_total, line_total, order_total
@@ -282,7 +282,7 @@ def test_place_order_reports_total():
 
 def test_discounted_total_takes_ten_percent():
     assert discounted_total(make(), 1, 10) == 900
-''',
+""",
 }
 
 REVIEW_PROMPT = """Review the changes on this branch. Base is `main`; work is current HEAD.
