@@ -537,6 +537,15 @@ class ExpandableActionBlock(TranscriptBlock):
     def _on_inert_activation(self) -> None:
         """Subclass hook for visible feedback when nothing can expand."""
 
+    def retheme(self) -> None:
+        """Re-fit the row: ``_build_content`` resolves every ink at build time.
+
+        One of the two sanctioned re-entry points for a finalized block (the
+        other being resize): a theme switch must repaint settled ledger rows
+        in the new ink, so every expandable row shares the hook.
+        """
+        self._refresh_row()
+
     def _has_activation_feedback(self) -> bool:
         return False
 
@@ -567,7 +576,27 @@ class ExpandableActionBlock(TranscriptBlock):
             event.stop()
 
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Forward printable non-binding keys to the app's one composer."""
+        """Typing on a focused row goes to the COMPOSER, not into the void.
+
+        The row is a focus stop so the keyboard can reach the expander — but
+        it is not somewhere to type, and a transcript that silently swallows
+        a sentence is a worse trap than one that could never be focused. The
+        app has exactly one text input, so any printable key is unambiguous:
+        hand it the focus and re-post the keystroke there, and the user never
+        has to discover that a row had focus at all.
+
+        This runs BEFORE :attr:`BINDINGS` — Textual dispatches the focused
+        widget's message handlers first and only then resolves its bindings —
+        so the row's own keys are excluded by hand. That is not a formality:
+        Space is a printable character, and without the exclusion it typed a
+        space into the composer instead of expanding the row the user was
+        standing on.
+
+        A FRESH ``Key`` is posted rather than the original: the event that
+        reached this handler is already part-way through Textual's dispatch
+        (bubbling, default-handling flags) and re-delivering it would be
+        re-entering a lifecycle it has half finished.
+        """
         if event.key in self._BOUND_KEYS or not event.is_printable:
             return
         composer = self._composer()
@@ -579,6 +608,13 @@ class ExpandableActionBlock(TranscriptBlock):
         event.prevent_default()
 
     def _composer(self):  # type: ignore[no-untyped-def]
+        """The app's one text input, or None when there is not one.
+
+        Imported lazily and queried defensively: the row is mounted in
+        harnesses that host a transcript and nothing else, and a missing
+        composer there must degrade to "the key does nothing" rather than
+        raise out of a key handler.
+        """
         from local_operator.tui.widgets.editor import Editor
 
         try:
@@ -1130,7 +1166,6 @@ class WakeBlock(ExpandableActionBlock):
 
     def __init__(self, text: str, *, catchup: bool = False) -> None:
         super().__init__()
-        self.add_class("wake-block")
         self._text = text
         self._catchup = catchup
         self._expanded = False
@@ -1197,10 +1232,6 @@ class WakeBlock(ExpandableActionBlock):
             self.set_content(content, layout=moved)
         finally:
             self._finalized = was_finalized
-
-    def _build(self) -> RenderableType:
-        """Off-app / test entry: the card at its laid-out width, else 80."""
-        return self._build_content(self.size.width or 80)
 
     def _name_col(self, width: int) -> int:
         """The ledger's shared name column, in cells.

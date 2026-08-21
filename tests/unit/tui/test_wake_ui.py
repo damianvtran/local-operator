@@ -10,21 +10,32 @@ empty) — plus the session event that carries a live fire to the front end.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from rich.text import Text
 from textual.app import App
+from textual.selection import Selection
 
 from local_operator.harness.types import WakeDeliveredEvent
 from local_operator.harness.wake import WakeSchedule
-from local_operator.tui.widgets.tool_card import COLLAPSE_HINT, EXPAND_HINT
+from local_operator.tui.glyphs import tool_icon
+from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.tool_card import (
+    COLLAPSE_HINT,
+    EXPAND_HINT,
+    OUTPUT_INDENT,
+)
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
+    ExpandableActionBlock,
     NoticeBlock,
     TranscriptView,
     WakeBlock,
 )
 from local_operator.tui.widgets.wake_panel import WakePanel
 from tests.unit.tui.conftest import StyledTranscriptApp
+from tests.unit.tui.test_tool_card import _ComposerApp
 
 LIVE_TEXT = (
     "(alarm) Scheduled wake w3 (3/8, every 1h) — "
@@ -186,6 +197,87 @@ async def test_real_pointer_hover_and_click_use_the_tool_trace_contract() -> Non
         assert wake.expanded is False
         assert wake.size.height == 1
         assert below.region.y - wake.region.y == 2
+
+
+def test_retheme_is_the_shared_finalized_re_entry_point() -> None:
+    """A theme switch must repaint settled ledger rows in the new ink, and
+    both row kinds must share the one sanctioned hook (agent review round 1,
+    M1): the override lives on the base, not on each subclass."""
+    assert WakeBlock.retheme is ExpandableActionBlock.retheme
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    assert ToolCard.retheme is ExpandableActionBlock.retheme
+
+    block = WakeBlock(LIVE_TEXT)
+    builds = {"n": 0}
+    original = WakeBlock._refresh_row
+    block._refresh_row = (  # type: ignore[assignment]
+        lambda: (builds.__setitem__("n", builds["n"] + 1), original(block))[1]
+    )
+    block.retheme()
+    assert builds["n"] == 1
+
+
+def test_a_height_only_resize_rebuilds_nothing() -> None:
+    """Same guard as ToolCard's (TUI-017): an expansion raises a Resize back
+    into on_resize, and rebuilding an identical row was a third of all builds
+    on a measured replay."""
+    block = WakeBlock(LIVE_TEXT)
+    width = block._built_width
+    builds = {"n": 0}
+    original = WakeBlock._refresh_row
+    block._refresh_row = (  # type: ignore[assignment]
+        lambda: (builds.__setitem__("n", builds["n"] + 1), original(block))[1]
+    )
+    block.on_resize(SimpleNamespace(size=SimpleNamespace(width=width)))
+    assert builds["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_expanded_wake_copy_strips_the_icon_and_keeps_the_prompt() -> None:
+    """The wake row is a ledger row for selection too: the icon is chrome and
+    never reaches the clipboard, the summary row keeps its receipt, and the
+    expansion's prompt rows copy verbatim (agent review round 1, m2)."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        wake = WakeBlock(LIVE_TEXT)
+        view.append_block(wake)
+        await pilot.pause()
+        wake.toggle_expanded()
+        await pilot.pause()
+
+        assert wake.copy_gutter(0) == 2  # the icon field, like ToolCard
+        assert wake.copy_gutter(1) == OUTPUT_INDENT
+
+        app.screen.selections = {wake: Selection(None, None)}
+        copied = app.screen.get_selected_text()
+        assert copied is not None
+        rows = copied.split("\n")
+        assert rows[0].startswith("wake")
+        assert tool_icon("wake") not in copied
+        assert any("check the build" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_typing_on_a_focused_wake_reaches_the_composer_intact() -> None:
+    """The passthrough is inherited, not copied — but the contract still needs
+    a wake-row pin: a printable key on a focused wake must land in the
+    composer, first character included (agent review round 1, m2)."""
+    app = _ComposerApp()
+    async with app.run_test(size=(90, 12)) as pilot:
+        view = app.query_one(TranscriptView)
+        wake = WakeBlock(LIVE_TEXT)
+        view.append_block(wake)
+        wake.focus()
+        await pilot.pause()
+        assert app.focused is wake
+
+        await pilot.press(*"check")
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        assert editor.text == "check"
+        assert app.focused is editor
 
 
 @pytest.mark.asyncio
