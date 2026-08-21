@@ -1288,9 +1288,22 @@ class WakeBlock(ExpandableActionBlock):
         # line; truncate_cells is a guard against a future wrap that
         # overshoots, not the everyday path.
         for paragraph in message.splitlines() or [""]:
-            for wrapped in wrap_cells(paragraph, line_width) or [""]:
-                row.append("\n" + indent, style=dim)
-                row.append(truncate_cells(wrapped, line_width), style=dim)
+            if paragraph.startswith("- "):
+                # A catch-up bullet's wrapped continuation hangs two cells
+                # deeper than its "- " marker: at narrow widths a wrap that
+                # restarted at the marker column was only distinguishable
+                # from the NEXT schedule line by the missing dash (design
+                # review round 1, D3).
+                bullet_width = max(1, line_width - 2)
+                first = True
+                for wrapped in wrap_cells(paragraph[2:], bullet_width) or [""]:
+                    row.append("\n" + indent + ("- " if first else "  "), style=dim)
+                    row.append(truncate_cells(wrapped, bullet_width), style=dim)
+                    first = False
+            else:
+                for wrapped in wrap_cells(paragraph, line_width) or [""]:
+                    row.append("\n" + indent, style=dim)
+                    row.append(truncate_cells(wrapped, line_width), style=dim)
         return row
 
     def _summary(self) -> tuple[str, str]:

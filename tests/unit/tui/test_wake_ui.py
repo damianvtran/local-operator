@@ -70,6 +70,25 @@ class TestWakeBlock:
         assert "check the build" in expanded
         assert "w3" in expanded  # the summary row stays
 
+    def test_catchup_bullet_wraps_with_a_hanging_indent(self) -> None:
+        """A wrapped continuation hangs two cells deeper than the next
+        bullet's dash, so at narrow widths a fold never reads as a new
+        schedule line (design review round 1, D3)."""
+        long_message = "report the state of the build and every failing test"
+        text = (
+            "(alarm) Scheduled wake w1 (1).\n\n"
+            "- w1 (due 09:00): " + long_message + "\n"
+            "- w2 (due 10:00): next"
+        )
+        block = WakeBlock(text, catchup=True)
+        block.toggle_expanded()
+        lines = block._build_content(40).plain.splitlines()
+        bullet_rows = [i for i, line in enumerate(lines) if line.strip().startswith("- ")]
+        assert len(bullet_rows) == 2
+        continuation = lines[bullet_rows[0] + 1]
+        assert not continuation.strip().startswith("- ")
+        assert continuation.startswith(" " * 4)
+
     def test_catchup_line_marks_the_folded_misses(self) -> None:
         block = WakeBlock(CATCHUP_TEXT, catchup=True)
         rendered = block._build_row(80).plain
