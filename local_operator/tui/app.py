@@ -2074,6 +2074,14 @@ class OperatorApp(App[None]):
         result_text = getattr(result, "text", "") or ""
         payload = getattr(result, "provider_payload", None) or {}
         details = payload.get("details") if isinstance(payload, dict) else None
+        if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
+            # A user-stopped bang command persists as an error result (the
+            # model-facing shape), but the LIVE frame it came from was the dim
+            # shut `interrupted ⊘` row. Replaying it through the error branch
+            # would reopen the user's own Esc as a red failure (design round
+            # 1, D1). The aborted prefix is execute_bash's stable contract.
+            card.restore(state="interrupted")
+            return
         if getattr(result, "is_error", False):
             card.restore(
                 state="error",
