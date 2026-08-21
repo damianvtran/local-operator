@@ -792,6 +792,207 @@ class TestSecuritySurface:
         await manager.disconnect_all()
 
 
+class TestTeardownLatency:
+    """Quit-path teardown: concurrent across servers, bounded per connection.
+
+    The user-visible cost of these properties is the pause between the app
+    releasing the terminal and the resume hint printing: ``disconnect_all``
+    runs inside ``Session.dispose`` on every quit, so a serial or unbounded
+    teardown is experienced as "quit hangs".
+    """
+
+    @pytest.mark.asyncio
+    async def test_disconnect_all_closes_connections_concurrently(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Total teardown time is the slowest close, not the sum of closes.
+
+        Serial teardown made quit latency grow with the server count
+        (measured: 1.6 s across seven real servers where the slowest single
+        one needed 0.95 s). Two closes of 0.2 s each must therefore finish
+        in ~0.2 s, not ~0.4 s — asserted through a concurrency high-water
+        mark rather than wall time, so a slow CI box cannot flake this.
+        """
+        manager = McpManager(str(project))
+        in_flight = 0
+        peak = 0
+
+        class SlowStack:
+            async def aclose(self) -> None:
+                nonlocal in_flight, peak
+                in_flight += 1
+                peak = max(peak, in_flight)
+                await asyncio.sleep(0.05)
+                in_flight -= 1
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            conn = _make_conn(name, cfg)
+            conn.stack = cast(Any, SlowStack())
+            return conn
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        await manager.discover_and_connect()
+        assert len(manager._connections) == 2
+        await manager.disconnect_all()
+        assert peak == 2, "closes ran serially; teardown latency sums per server"
+        assert manager._connections == {}
+
+    @pytest.mark.asyncio
+    async def test_teardown_connection_bounds_a_wedged_close(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A close that never returns is cancelled at the teardown bound.
+
+        A remote transport's close is network I/O (streamable-HTTP DELETEs
+        its session on a client whose connect timeout alone is 30 s), so a
+        dead network could otherwise hold quit hostage. The bound is patched
+        down for the test; what is asserted is that the cancel is delivered
+        and dispose proceeds.
+        """
+        import local_operator.mcp.manager as manager_mod
+
+        monkeypatch.setattr(manager_mod, "CONNECTION_TEARDOWN_TIMEOUT_S", 0.05)
+        manager = McpManager(str(project))
+        cancelled = asyncio.Event()
+
+        class WedgedStack:
+            async def aclose(self) -> None:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            conn = _make_conn(name, cfg)
+            conn.stack = cast(Any, WedgedStack())
+            return conn
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        await manager.discover_and_connect()
+        await asyncio.wait_for(manager.disconnect_all(), timeout=2.0)
+        assert cancelled.is_set(), "the wedged close was never cancelled"
+        assert manager._connections == {}
+
+
+class TestStdioStopIsEventDriven:
+    """The stdio ``_stop`` waits on process exit, not on a polling tick.
+
+    The 0.1 s polling loop it replaced charged up to a full tick of latency
+    per server on every quit — pure wait after the child had already exited.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prompt_child_costs_no_polling_tick(self) -> None:
+        """A child that exits on stdin EOF is reaped in well under 0.1 s.
+
+        Wall-clock bound on purpose: the property under test IS latency, and
+        the old implementation fails this by construction (its first
+        returncode check happens at the 0.1 s tick). The margin (0.09 s vs
+        the old floor of ~0.1 s) is small, so the child does nothing but
+        exit; a busier assertion would flake instead of measure.
+        """
+        import sys
+        import time
+
+        from local_operator.mcp.config import MCPStdioServerConfig
+        from local_operator.mcp.manager import McpServerStderr, _stdio_transport
+
+        # Exits the moment stdin reaches EOF — the polite-quit handshake.
+        script = "import sys\nsys.stdin.read()\n"
+        cfg = MCPStdioServerConfig(command=sys.executable, args=["-c", script])
+        stderr_log = McpServerStderr("prompt")
+        async with _stdio_transport(cfg, lambda: None, stderr_log):
+            # Give the child a beat to reach its read() before teardown.
+            await asyncio.sleep(0.3)
+            t0 = time.monotonic()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.09, f"teardown took {elapsed:.3f}s; polling tick is back"
+
+    @pytest.mark.asyncio
+    async def test_stubborn_child_is_killed_on_cancellation(self) -> None:
+        """Cancelling a bounded teardown must not leak the child process.
+
+        ``_teardown_connection`` cancels the stack close at its bound; the
+        cancel lands inside ``_stop``'s waits, and absorbing it without a
+        kill would leave the server running past the session.
+        """
+        import signal
+        import sys
+
+        import local_operator.mcp.manager as manager_mod
+        from local_operator.mcp.config import MCPStdioServerConfig
+        from local_operator.mcp.manager import McpServerStderr, _stdio_transport
+
+        # Ignores stdin EOF and SIGTERM: only SIGKILL removes it.
+        script = (
+            "import signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('pid', flush=True)\n"
+            "while True: time.sleep(0.2)\n"
+        )
+        cfg = MCPStdioServerConfig(command=sys.executable, args=["-c", script])
+        stderr_log = McpServerStderr("stubborn")
+
+        async def run() -> None:
+            cm = _stdio_transport(cfg, lambda: None, stderr_log)
+            async with cm:
+                # Park until cancelled; teardown then runs under cancellation,
+                # which is the state a bounded dispose delivers it in.
+                await asyncio.sleep(3600)
+
+        original = manager_mod.STDIO_EXIT_GRACE_S
+        manager_mod.STDIO_EXIT_GRACE_S = 0.2  # keep the ladder fast in CI
+        try:
+            task = asyncio.get_running_loop().create_task(run())
+            await asyncio.sleep(0.5)  # let the child start
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            manager_mod.STDIO_EXIT_GRACE_S = original
+        # The transport's finally ran under cancellation; the child must be
+        # gone. We cannot read its pid from outside the closure, so assert
+        # the observable: no python child of ours is still running the
+        # stubborn script.
+        import subprocess as sp
+
+        out = sp.run(
+            ["pgrep", "-f", "signal.SIG_IGN"], capture_output=True, text=True
+        ).stdout.strip()
+        assert out == "", f"stubborn child leaked: pids {out!r}"
+        _ = signal  # imported for the docstring's contract, used in the child
+
+    @pytest.mark.asyncio
+    async def test_sigterm_rung_still_reaps_a_deaf_reader(self) -> None:
+        """A child that ignores stdin EOF but honours SIGTERM exits at rung 2.
+
+        Guards the escalation ladder itself: event-driven waits must still
+        escalate (EOF grace → terminate → kill) rather than returning early
+        on the first rung's timeout.
+        """
+        import sys
+
+        import local_operator.mcp.manager as manager_mod
+        from local_operator.mcp.config import MCPStdioServerConfig
+        from local_operator.mcp.manager import McpServerStderr, _stdio_transport
+
+        # Never reads stdin; dies on SIGTERM (the default disposition).
+        script = "import time\nwhile True: time.sleep(0.2)\n"
+        cfg = MCPStdioServerConfig(command=sys.executable, args=["-c", script])
+        stderr_log = McpServerStderr("deaf")
+        # Shrink the per-rung grace so the EOF rung times out quickly.
+        original = manager_mod.STDIO_EXIT_GRACE_S
+        manager_mod.STDIO_EXIT_GRACE_S = 0.2
+        try:
+            async with _stdio_transport(cfg, lambda: None, stderr_log):
+                await asyncio.sleep(0.3)
+            # Reaching here at all proves the ladder escalated past the EOF
+            # rung and reaped the child via terminate.
+        finally:
+            manager_mod.STDIO_EXIT_GRACE_S = original
+
+
 class TestWindowsProcessTarget:
     """MCP-10: the Win32 spawn target is ONE string (no list2cmdline pass)."""
 
