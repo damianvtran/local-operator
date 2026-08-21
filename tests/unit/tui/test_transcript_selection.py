@@ -62,8 +62,8 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual import events
 from textual.content import Content
-from textual.geometry import Offset
 from textual.document._document import Selection as DocumentSelection
+from textual.geometry import Offset
 from textual.selection import Selection
 from textual.visual import RichVisual
 
