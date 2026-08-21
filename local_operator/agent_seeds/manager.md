@@ -3,7 +3,6 @@ name: manager
 description: "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom."
 when_to_use: "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report."
 tools: read, glob, grep, list_variables, read_variable, bash, todo
-effort: lo
 delegate: yes
 ---
 
