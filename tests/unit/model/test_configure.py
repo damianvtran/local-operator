@@ -1899,6 +1899,7 @@ async def test_preflight_recovers_a_blocked_sibling_holding_model_quota(tmp_path
     }
 
     async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        assert access_token is not None
         return reports[access_token]
 
     try:

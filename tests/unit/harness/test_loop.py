@@ -2127,6 +2127,7 @@ async def test_empty_length_truncation_retries_at_lower_effort():
     assert all(
         not (m.role == "assistant" and not m.text and not m.tool_calls)
         for m in context.messages
+        if isinstance(m, Message)
     )
 
 
