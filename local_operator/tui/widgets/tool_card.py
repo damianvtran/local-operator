@@ -590,6 +590,7 @@ class ToolCard(ExpandableActionBlock):
         tool_name: str,
         args: dict[str, object] | None = None,
         intent: str | None = None,
+        user_run: bool = False,
     ) -> None:
         super().__init__()
         self.tool_call_id = tool_call_id
@@ -680,6 +681,17 @@ class ToolCard(ExpandableActionBlock):
         #: because a collapsed receipt hides exactly the bytes the command was
         #: run for behind a click nobody asked for. Consumed once, at settle.
         self._open_on_settle = False
+        #: The call was typed by the USER (bang-mode), not issued by the model.
+        #: Without a visible say-so the receipt is byte-identical to an
+        #: agent-run bash row, so a reader scrolling back cannot tell their
+        #: own commands from the agent's, and the model reading the context
+        #: cannot tell a command it ran from one that "just appeared". The
+        #: row answers with a `you:` chip ahead of the summary; the system
+        #: prompt answers for the model. A user-run command is also one the
+        #: user ran to SEE, so the flag implies open-on-settle.
+        self.user_run = user_run
+        if user_run:
+            self._open_on_settle = True
         self._hovered = False
         #: True while the row holds keyboard focus. Tracked separately from
         #: hover: both light the hint, but a pointer leaving the row must not
@@ -1742,6 +1754,20 @@ class ToolCard(ExpandableActionBlock):
         # `begin_running` now clears the field, and this makes the invariant
         # checkable from the render side too, so the next way to leave it set
         # cannot reopen the same hole.
+        # A user-run receipt leads with a five-cell attribution chip. It sits
+        # INSIDE the summary budget so the truncation ladder keeps it ahead of
+        # the command — scrolling back to find your own `! git status` works
+        # exactly when the row is narrow enough to hide everything else.
+        if self.user_run:
+            chip = "you: "
+            chip_cells = cell_len(chip)
+            if chip_cells < budget:
+                row_chip = chip
+                budget -= chip_cells
+            else:
+                row_chip = ""
+        else:
+            row_chip = ""
         composed = self._compose_facts and self._state in ("composing", "interrupted")
         if composed:
             # The label is shed WHOLE before the facts are touched, the same
@@ -1781,6 +1807,16 @@ class ToolCard(ExpandableActionBlock):
         row.append(icon + " ", style=icon_style)
         row.append(name, style=name_style)
         row.append(" ", style=dim)
+        if row_chip:
+            # Chrome quieter than the fact while live (the summary is
+            # `muted` there); one step BRIGHTER than the fact once settled,
+            # when the summary drops to `dim` — the attribution is the thing
+            # a reader scrolling back is hunting for, and a chip that faded
+            # to the same ink as the command stopped separating the two
+            # (design round 1, D1). It survives every shed rung because the
+            # budget above already paid for it.
+            chip_style = muted if not running else dim
+            row.append(row_chip, style=chip_style)
         row.append(summary, style=summary_style)
 
         # ONE right-aligned tail: the slot and the status share a single pad,
