@@ -43,6 +43,10 @@ from local_operator.harness.types import (
     AgentEvent,
     CompactionEndEvent,
     CompactionStartEvent,
+    ImageContent,
+)
+from local_operator.harness.types import Message as HarnessMessage
+from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
@@ -143,6 +147,19 @@ class AssistantDelta(Message):
 
 class AssistantMessageStart(Message):
     """A new assistant message began streaming."""
+
+
+class UserMessageStart(Message):
+    """A user message reached the session from ANY front end. Carries the
+    prompt (and image count) so the TUI can paint it — the mobile→TUI half of
+    keeping the two surfaces in step. The TUI's own prompt path already paints
+    its UserBlock optimistically, so the app de-dupes on arrival. The field is
+    ``prompt``, not ``text``: Textual's ``Message`` reserves ``text``."""
+
+    def __init__(self, prompt: str, image_count: int) -> None:
+        super().__init__()
+        self.prompt = prompt
+        self.image_count = image_count
 
 
 class AssistantMessageEnd(Message):
@@ -491,6 +508,18 @@ class EventController:
         self._post(TurnBoundaryEnd())
 
     def _handle_message_start(self, event: MessageStartEvent) -> None:
+        # User turns reach here too now (the session emits MessageStartEvent
+        # for them so every front end stays in step). Route them apart from
+        # assistant starts: an assistant start resets the stream buffer, a
+        # user start carries the prompt for the app to paint.
+        message = event.message
+        # Narrow to Message (not CustomMessage) before touching role/content:
+        # a user MessageStartEvent is always a Message, but the field's type
+        # is the AgentMessage union, so pyright needs the isinstance.
+        if isinstance(message, HarnessMessage) and message.role == "user":
+            images = [b for b in message.content if isinstance(b, ImageContent)]
+            self._post(UserMessageStart(message.text, len(images)))
+            return
         self._assistant_buffer = ""
         self._assistant_seen = ""
         self._post(AssistantMessageStart())

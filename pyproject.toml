@@ -147,6 +147,31 @@ local_operator = [
     # no UI and every authed GET answers 503 "bundle not built".
     "mobile/web/dist/*",
     "mobile/web/dist/assets/*",
+    # The web SOURCES too: dist/ is gitignored, so a source snapshot (git
+    # archive, sdist) has no built bundle, and the dist globs above then match
+    # nothing — which used to drop the WHOLE web tree and make the 503
+    # unrecoverable (no package.json to rebuild from). Shipping the sources
+    # lets the daemon's self-heal (`lop mobile install`) rebuild the bundle on
+    # any host with Node; the build inputs (node_modules, lockfile-resolved
+    # deps) are never packaged.
+    "mobile/web/package.json",
+    "mobile/web/pnpm-lock.yaml",
+    "mobile/web/pnpm-workspace.yaml",
+    "mobile/web/index.html",
+    "mobile/web/tsconfig*.json",
+    "mobile/web/vite.config.ts",
+    "mobile/web/scripts/*.mjs",
+    "mobile/web/public/*",
+    # setuptools package-data does not recurse with `**` here, so the source
+    # tree is enumerated by directory. New src subdirectories need a line.
+    "mobile/web/src/*.ts",
+    "mobile/web/src/*.tsx",
+    "mobile/web/src/components/*.tsx",
+    "mobile/web/src/components/ui/*.tsx",
+    "mobile/web/src/lib/*.ts",
+    "mobile/web/src/screens/*.tsx",
+    "mobile/web/src/styles/*.css",
+    "mobile/web/src/themes/*.ts",
     # The login page's LO mark, served unauthenticated at /mark.png from
     # mobile/static/. Missing it shows a broken image on sign-in.
     "mobile/static/*",

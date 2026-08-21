@@ -17,6 +17,7 @@ import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
+import { WorkingLine } from "../components/working-line";
 import { cn } from "../lib/cn";
 import { navigate } from "../router";
 import { retainProjectionStream, useProjection } from "../store";
@@ -121,7 +122,16 @@ export function SessionScreen({ pid }: { pid: number }) {
 		>
 			<Header projection={projection} />
 
-			<Transcript entries={projection.transcript} />
+			<Transcript pid={pid} entries={projection.transcript} />
+
+			{/* The aggregate working line — pinned at the foot of the transcript
+			    like the TUI's WorkingBlock, above the panels and composer. */}
+			{projection.streaming ? (
+				<WorkingLine
+					activity={projection.activity}
+					startedS={projection.activity_started_s}
+				/>
+			) : null}
 
 			{projection.todos.length > 0 ? (
 				<TodosPanel todos={projection.todos} />
