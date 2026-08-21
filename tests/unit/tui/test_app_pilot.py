@@ -941,6 +941,87 @@ async def test_a_replayed_bang_card_opens_and_ordinary_calls_stay_shut() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_bang_card_says_who_ran_it() -> None:
+    """A user-run receipt is visually distinguishable from an agent-run bash
+    row: the summary leads with a `you:` chip, live and after resume, and the
+    chip survives truncation at narrow widths."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "echo attribution":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if session.shell_records:
+                break
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert cards
+        assert cards[-1].user_run is True
+        assert "you:" in cards[-1]._build_row(80).plain
+        # The chip is inside the summary budget, so a narrow row keeps it.
+        assert "you:" in cards[-1]._build_row(40).plain
+        # An ordinary agent card carries no chip.
+        plain = ToolCard("x", "bash", {"command": "ls"})
+        assert "you:" not in plain._build_row(80).plain
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_bang_card_says_who_ran_it() -> None:
+    """Resume parity for the attribution: the replayed bang row carries the
+    same `you:` chip the live one showed, and an ordinary bash call does not."""
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(
+            role="user", text="! echo hi", tool_calls=None, content=[], custom_type=None
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[
+                SimpleNamespace(id="shell-1", name="bash", arguments={"command": "echo hi"})
+            ],
+            custom_type=None,
+        ),
+        SimpleNamespace(
+            role="tool",
+            tool_call_id="shell-1",
+            text="exit code: 0\nhi",
+            is_error=False,
+            provider_payload=None,
+            content=[],
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[SimpleNamespace(id="agent-1", name="bash", arguments={"command": "ls"})],
+            custom_type=None,
+        ),
+        SimpleNamespace(
+            role="tool",
+            tool_call_id="agent-1",
+            text="exit code: 0\nfile",
+            is_error=False,
+            provider_payload=None,
+            content=[],
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 2
+        assert cards[0].user_run is True
+        assert "you:" in cards[0]._build_row(80).plain
+        assert cards[1].user_run is False
+        assert "you:" not in cards[1]._build_row(80).plain
+
+
+@pytest.mark.asyncio
 async def test_a_failing_bang_card_settles_open_too() -> None:
     """Failure is exactly when the output matters most, so the open-on-settle
     contract covers the error settle as well."""
