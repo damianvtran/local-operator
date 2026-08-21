@@ -92,6 +92,23 @@ def test_turn_cost_reported_dollar_wins_even_without_a_table_price() -> None:
     )
 
 
+def test_turn_cost_never_renders_a_reported_credit() -> None:
+    """A negative reported amount is malformed provider data, not a refund: it
+    must fall back to the table estimate rather than paint an upside-down dollar
+    figure on the band."""
+    with _resolving(opus=_PRICED):
+        usage = Usage(input_tokens=1_000_000, output_tokens=0, usd_cost=-5.0)
+        assert turn_cost("anthropic/opus", usage) == pytest.approx(10.0)
+
+
+def test_turn_cost_reported_malformed_falls_back_to_estimate() -> None:
+    """A non-numeric reported amount from a rehydrated mapping must not degrade
+    the whole turn to unpriceable when a table price exists."""
+    with _resolving(opus=_PRICED):
+        usage = {"input_tokens": 1_000_000, "output_tokens": 0, "usd_cost": "not-a-number"}
+        assert turn_cost("anthropic/opus", usage) == pytest.approx(10.0)
+
+
 # ---------------------------------------------------------------------------
 # job_cost — one child
 # ---------------------------------------------------------------------------

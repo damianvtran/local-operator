@@ -485,11 +485,17 @@ class EventController:
             # message carried one so the aggregate keeps the model-vs-provider
             # distinction: off (``None``) means no provider reported a figure and
             # the estimate is the only answer; on with a real total means the
-            # provider was the authority for the whole turn.
+            # provider was the authority for the whole turn. Floored through the
+            # shared pricing helper rather than a bare ``float()``: a negative or
+            # malformed figure must not inflate a credit into the running total.
             reported = getattr(message_usage, "usd_cost", None)
             if reported is not None:
-                totals["usd"] += float(reported)
-                usd_reported = True
+                from local_operator.model.configure import _usage_cost
+
+                amount = _usage_cost(message_usage)
+                if amount is not None:
+                    totals["usd"] += amount
+                    usd_reported = True
             usage = message_usage
             context_tokens = (
                 getattr(message_usage, "context_tokens", None)
