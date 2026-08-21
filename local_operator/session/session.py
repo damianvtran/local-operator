@@ -4002,8 +4002,11 @@ class Session:
         # a half-written synthetic exchange. Re-check the FIFO after acquisition
         # to flush anything that raced us while we waited.
         async with self._turn_lock:
+            # Queue-then-flush rather than a direct write: the FIFO pops only
+            # after a successful transcript write, so a failure here leaves the
+            # receipt for the next boundary instead of losing it.
+            self._pending_shell_records.append((command, result))
             await self._flush_shell_records()
-            await self._persist_shell_record(command, result)
 
     async def _persist_shell_record(self, command: str, result: ToolResult) -> None:
         """Append one synthetic bash exchange to transcript and live context."""
@@ -4025,9 +4028,12 @@ class Session:
     async def _flush_shell_records(self) -> None:
         """Persist queued bang-mode receipts in completion order.
 
-        Called only by the turn/compaction owner while it still holds
-        ``_turn_lock``. Pop AFTER each successful write so a transcript failure
-        leaves the unpersisted tail available to the next boundary or dispose.
+        Called while ``_turn_lock`` is held at the turn, wake, compaction and
+        prompt boundaries, and once more from :meth:`dispose` after the app has
+        settled the shell worker — the lock serializes the boundary callers,
+        and teardown ordering serializes the dispose one. Pop AFTER each
+        successful write so a transcript failure leaves the unpersisted tail
+        available to the next boundary or dispose.
         """
         while self._pending_shell_records:
             command, result = self._pending_shell_records[0]
