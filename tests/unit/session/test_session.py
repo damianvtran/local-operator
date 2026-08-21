@@ -1570,9 +1570,11 @@ async def test_switching_to_a_text_only_model_omits_images_from_context(tmp_path
     )
 
     session.set_model(TEXT_ONLY_MODEL)
-    await wait_for(lambda: any(event.type == "notice" for event in events))
 
     await session.prompt("what was in the image?")
+    # The announcement rides the first render that strips the blocks, so it
+    # lands right after the turn that triggered it.
+    await wait_for(lambda: any(isinstance(event, NoticeEvent) for event in events))
     request = stream.requests[-1]
     assert _image_blocks(request) == 0, "the text-only model was sent the image"
     sent = [
@@ -1598,6 +1600,51 @@ async def test_switching_to_a_text_only_model_omits_images_from_context(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_the_text_only_omission_notice_fires_exactly_once(tmp_path):
+    """The announcement is latched: the render runs on every provider call, so
+    an unlatched notice would repaint the same warning on every turn until the
+    user learns to ignore it. One explanation per session is the contract."""
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")] for _ in range(2)]
+    )
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.seed_history(
+        [Message(role="user", content=[TextContent(text="look"), ImageContent(data="Zm9v")])]
+    )
+
+    session.set_model(TEXT_ONLY_MODEL)
+    await session.prompt("one")
+    await session.prompt("two")
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert len(notices) == 1, f"the omission was announced {len(notices)} times"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_new_attachment_on_a_text_only_model_is_announced(tmp_path):
+    """A screenshot pasted AFTER the switch must not vanish silently: the
+    first render that carries it posts the omission notice, so the transcript
+    answers "where did my image go" right under the prompt that cites it
+    (design review round 1, D2)."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    session.set_model(TEXT_ONLY_MODEL)
+    await asyncio.sleep(0.05)  # no images yet: nothing to announce
+    assert [event for event in events if isinstance(event, NoticeEvent)] == []
+
+    await session.prompt("look at this", [ImageContent(data="Zm9v")])
+    assert _image_blocks(stream.requests[-1]) == 0
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert len(notices) == 1 and "does not accept images" in notices[0].text
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_switching_to_a_text_only_model_without_images_stays_quiet(tmp_path):
     """The notice answers "where did my screenshots go"; a text-only
     conversation has nothing to omit, so the switch must not apologise for
@@ -1618,7 +1665,9 @@ async def test_switching_to_a_text_only_model_without_images_stays_quiet(tmp_pat
 async def test_a_text_only_model_from_the_start_never_receives_images(tmp_path):
     """A session BOOTED on a text-only model with a replayed vision history
     (a resume of a session that ran on a vision model) omits the blocks from
-    its very first request — no switch and no refusal needed."""
+    its very first request — no switch and no refusal needed — and the
+    announcement still lands: the render-latch notice covers the boot path
+    the switch-only notice left silent (design review round 1, D1)."""
     stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     transcript = Transcript(tmp_path / "sess")
     session = Session(
@@ -1628,11 +1677,14 @@ async def test_a_text_only_model_from_the_start_never_receives_images(tmp_path):
         transcript=transcript,
         system_blocks_provider=lambda: ["stable", "env"],
     )
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
     await session.seed_history(
         [Message(role="user", content=[TextContent(text="hi"), ImageContent(data="Zm9v")])]
     )
     await session.prompt("go")
     assert _image_blocks(stream.requests[0]) == 0
+    await wait_for(lambda: any(isinstance(event, NoticeEvent) for event in events))
     await session.dispose()
 
 

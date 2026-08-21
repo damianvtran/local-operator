@@ -873,6 +873,13 @@ class Session:
         #: offending block is IN the history, so an un-degraded retry sends it
         #: again, and the session is otherwise unusable for good.
         self._images_rejected = False
+        #: Latch for the text-only-model omission announcement (see
+        #: :meth:`_render_history`). The omission itself is not sticky — it
+        #: reads the CURRENT spec every render — but its announcement is:
+        #: every render of an image-bearing history on a text-only model would
+        #: otherwise re-post the notice, and a transcript that repeats the same
+        #: warning on every turn is noise the user learns to ignore.
+        self._text_only_omission_announced = False
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
         self._yolo = yolo
         self._has_ui = has_ui
@@ -1099,8 +1106,78 @@ class Session:
             # one-line notice.
             return _without_images(rendered)
         if not self._model.supports_images:
+            # ``rendered`` is the PRE-strip view here: exactly what the
+            # omission is about to take away, and what the announcement
+            # reports on.
+            self._announce_text_only_omission_once(rendered)
             return _without_images(rendered, model_incapable=True)
         return _rebound_history_images(rendered)
+
+    def _announce_text_only_omission_once(self, rendered: list[Message] | None = None) -> None:
+        """Say, once per session, that the active model is not seeing the
+        conversation's images.
+
+        Fires from the render rather than ONLY from ``set_model`` so EVERY
+        path that strips images explains itself: a mid-session switch, a
+        resume booted on a text-only default (the boot render runs in the
+        TUI's preloaded-context measurement, before any turn), a new image
+        attached after the switch. A switch-only notice left those paths
+        silent — a user who opened yesterday's screenshot-heavy session under
+        a new text-only default got answers that ignored the screenshots and
+        no line saying why (design review round 1, D1). ``set_model`` ALSO
+        calls this on a vision→text-only flip so a switch explains itself
+        immediately, without waiting for the next render.
+
+        The latch makes it once-per-session, not once-per-render: the render
+        runs on every provider call, and a repeating warning is noise. The
+        omission itself stays non-sticky — it reads the current spec on every
+        render — so switching to a vision model restores the images without
+        touching this latch.
+
+        ``_spawn_background`` because renders also happen from sync callers
+        (the usage breakdown) where no loop is running; the omission still
+        applies there, only the announcement is skipped.
+        """
+        if self._text_only_omission_announced:
+            return
+        if rendered is None:
+            # The PRE-strip view: ``_render_history`` would hand back the
+            # stripped one for this spec, which never has anything to report.
+            rendered = _rebound_history_images(
+                self._convert_to_llm(self._live_todo_reminders(list(self._context.messages)))
+            )
+        if not any(
+            isinstance(block, ImageContent) for message in rendered for block in message.content
+        ):
+            return
+        self._text_only_omission_announced = True
+        # ``model_label`` — the provider/model_id vocabulary the status band
+        # and the switch receipt already use — rather than the display name:
+        # two names for the same object two lines apart read as two models
+        # (design review round 1, D3).
+        label = self.model_label
+        logger.warning(
+            "model %s does not accept images; omitting them from this session's "
+            "context while it is active (%s)",
+            label,
+            self._image_drop_diagnostic(),
+        )
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._spawn_background(
+            self._emit(
+                NoticeEvent(
+                    text=(
+                        f"{label} does not accept images — the images in this "
+                        "conversation are omitted from its context. Switch to a "
+                        "model that accepts images to see them again."
+                    ),
+                    kind="warning",
+                )
+            )
+        )
 
     def _live_todo_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
         """``messages`` without todo reminders the list has since outrun.
@@ -1220,64 +1297,6 @@ class Session:
                 kind="warning",
             )
         )
-
-    def _degrade_for_text_only_model(self, model: ModelSpec) -> None:
-        """Schedule the notice that a fresh spec cannot receive the session's
-        images — iff the history actually carries any.
-
-        The check runs over the render the omission is about to act on —
-        convert plus rebound, BEFORE the strip — so the notice fires exactly
-        when the omission takes effect, and never on a text-only conversation
-        (a notice about images nobody sent is noise on every switch to a
-        cheaper model). It cannot ask :meth:`_render_history` itself: for this
-        spec that view already has the blocks stripped.
-
-        ``_spawn_background`` rather than ``await``: ``set_model`` is sync on
-        :class:`~local_operator.session.protocol.SessionProtocol` — every
-        host calls it without awaiting — and the notice is advisory. The
-        render itself already omits the blocks, so a notice that never runs
-        (a host with no loop, a session disposed mid-switch) costs nothing
-        but the line in the transcript.
-        """
-
-        async def announce() -> None:
-            # The PRE-omission render: ``_render_history`` itself strips the
-            # image blocks for this spec, so asking it would always find
-            # nothing to report on. The convert+rebound view is exactly what
-            # the omission is about to take away.
-            rendered = _rebound_history_images(
-                self._convert_to_llm(self._live_todo_reminders(list(self._context.messages)))
-            )
-            if not any(
-                isinstance(block, ImageContent) for message in rendered for block in message.content
-            ):
-                return
-            label = model.display_name or model.model_id
-            logger.warning(
-                "model %s does not accept images; omitting them from this session's "
-                "context while it is active (%s)",
-                label,
-                self._image_drop_diagnostic(),
-            )
-            await self._emit(
-                NoticeEvent(
-                    text=(
-                        f"{label} does not accept images — the images in this "
-                        "conversation are omitted from its context while it is "
-                        "active. Switch back to a vision model to restore them."
-                    ),
-                    kind="warning",
-                )
-            )
-
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # No loop to carry the notice (a host that swaps specs outside a
-            # running loop, e.g. construction-time configuration). The render
-            # still omits the images; only the announcement is lost.
-            return
-        self._spawn_background(announce())
 
     def _image_drop_diagnostic(self) -> str:
         """Structure of the images this degrade is about to drop, for the log.
@@ -1537,15 +1556,11 @@ class Session:
         previous = self._model
         self._model = model
         if previous.supports_images and not model.supports_images:
-            # Landing on a model that cannot receive images while the history
-            # still carries them must not surface as a provider 4xx on the next
-            # turn: the render already omits the blocks (see
-            # :meth:`_render_history`), and the user who just switched deserves
-            # to hear WHY the model no longer sees the screenshots. Same-model
-            # knob changes (``/effort``, the server's sampling overrides) copy
-            # the spec and cannot flip the capability, so this fires only on a
-            # genuine move onto a text-only model.
-            self._degrade_for_text_only_model(model)
+            # A genuine move onto a text-only model (same-model knob changes
+            # copy the spec and cannot flip the capability): explain the
+            # omission now, through the same once-per-session latch the
+            # render uses, instead of waiting for the next render to say it.
+            self._announce_text_only_omission_once()
         if (previous.provider, previous.model_id) == (model.provider, model.model_id):
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
