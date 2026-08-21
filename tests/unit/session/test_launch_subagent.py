@@ -121,6 +121,41 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monkeypatch):
+    """A manager session's children inherit collaboration and project context
+    without the manager restating them in the task prompt."""
+    from datetime import datetime, timezone
+
+    from local_operator.teams import Team, TeamMember
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream)
+    parent.attach_team(
+        Team(
+            id="t1",
+            name="feature-release",
+            created_date=datetime.now(timezone.utc),
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions="Review before merge.",
+            project="user-dashboard",
+        )
+    )
+    events: list[AgentEvent] = []
+    parent.subscribe(events.append)
+    parent._launch_subagent(label="code", prompt="implement the button", agent="coder")
+    await wait_for(lambda: any(e.type == "subagent_end" for e in events))
+    child_prompt = stream.requests[0].messages[0].text
+    assert "[team: feature-release]" in child_prompt
+    assert "You are coder on this team" in child_prompt
+    assert "Review before merge." in child_prompt
+    assert "user-dashboard" in child_prompt
+    assert "implement the button" in child_prompt
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_launch_subagent_is_wired_as_subagent_launcher(tmp_path, monkeypatch):
     """The ToolContext built for a turn carries _launch_subagent as the
     subagent_launcher, so the task tool can call it."""

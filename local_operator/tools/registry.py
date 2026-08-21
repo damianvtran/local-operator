@@ -18,6 +18,7 @@ from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
+from local_operator.tools.team_tool import build_team_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.web_search.tool import build_web_search_tool
 
@@ -46,6 +47,7 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "read_variable": lambda _context: builtin.build_read_variable_tool(),
     "browser": lambda _context: builtin.build_browser_tool(_context),
     "agent": lambda context: build_agent_tool(context),
+    "team": lambda context: build_team_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -73,6 +75,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "read_variable",
     "browser",
     "agent",
+    "team",
 ]
 
 

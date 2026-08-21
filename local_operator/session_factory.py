@@ -870,6 +870,7 @@ def _make_system_blocks_provider(
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
+        team_brief = goal_state.team_brief if goal_state is not None else ""
         names = (
             variable_store.credential_names()
             if variable_store is not None and hasattr(variable_store, "credential_names")
@@ -884,6 +885,7 @@ def _make_system_blocks_provider(
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
             credentials=names,
+            team_brief=team_brief,
         )
 
     return provider
@@ -1043,6 +1045,9 @@ async def _prepare(
     # nothing else — `list_variables` advertised itself and then read a bare
     # process-env store, in every session.
     variable_store = _build_variable_store(effective_cwd, config_manager)
+    from local_operator.teams import TeamRegistry
+
+    team_registry = TeamRegistry(config_dir)
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,
@@ -1053,6 +1058,7 @@ async def _prepare(
         # Role profiles and the ``agent`` tool are backed by this registry; a
         # host without one keeps working off the packaged starters.
         agent_registry=agent_registry,
+        team_registry=team_registry,
         web_search_settings=config_manager.get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
@@ -1134,6 +1140,7 @@ async def _prepare(
         goal_state=goal_state,
         variables=variable_store,
         agent_registry=agent_registry,
+        team_registry=team_registry,
     )
     return _SessionPlan(
         session_kwargs=session_kwargs,

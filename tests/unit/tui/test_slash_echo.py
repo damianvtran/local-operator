@@ -16,6 +16,7 @@ to keep a default for the picker fixtures that have no opinion at all.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -71,6 +72,9 @@ ECHO_POLICY = {
     # The listing or the masked paste is the receipt; the argument is a key
     # name, never the secret, so a user row would only restate the notice.
     "credential": False,
+    # The listing is the receipt; a named request is sent as a real user
+    # turn by `_submit_prompt`, which already writes the row.
+    "team": False,
 }
 
 
@@ -207,6 +211,65 @@ async def test_a_panel_opening_command_leaves_no_user_row() -> None:
         panel_open = app.query_one(UsagePanel).display
     assert rows == [], rows
     assert panel_open is True
+
+
+@pytest.mark.asyncio
+async def test_bare_team_lists_without_a_user_row() -> None:
+    """`/team` is a listing; the listing is the receipt."""
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path("/tmp/lo-team-test-unused"))
+    # In-memory: point the registry at a throwaway dir via the session.
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    registry = TeamRegistry(Path(tmp))
+    registry.create_team(
+        TeamEditFields(
+            name="feature-release",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            description="Ship a change",
+        )
+    )
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/team")
+        rows = _user_rows(app)
+        notices = _notice_texts(app)
+    assert rows == [], rows
+    assert any("feature-release" in body for body in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_team_request_attaches_and_sends() -> None:
+    """`/team <name> <request>` stamps the team and sends the request as a turn."""
+    import tempfile
+
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(
+        TeamEditFields(
+            name="feature-release",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/team feature-release ship the dashboard")
+        rows = _user_rows(app)
+    assert session.attached_teams, "the team must be attached before the turn"
+    assert session.attached_teams[0].name == "feature-release"
+    assert session.prompts == ["ship the dashboard"]
+    assert rows == ["ship the dashboard"], rows
 
 
 @pytest.mark.asyncio

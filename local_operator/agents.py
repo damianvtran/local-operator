@@ -1458,14 +1458,20 @@ class AgentRegistry:
                     shutil.rmtree(agent_dir)
                 agent_dir.mkdir(parents=True, exist_ok=True)
 
-                # Copy all files from the extracted directory to the agent directory
+                # Copy instruction files only. Conversation history, execution
+                # traces, learnings, schedules and pickled context are private
+                # to whoever authored the archive — even a hub listing that
+                # still carries them from an older build must not land in the
+                # importer's registry. ``context.pkl`` is also untrusted
+                # serialized code.
                 extracted_agent_dir = agent_yml_path.parent
                 for item in extracted_agent_dir.iterdir():
                     if item.is_file():
-                        if item.name == "context.pkl":
+                        if item.name in self._EXPORT_SKIP_NAMES:
                             logging.info(
-                                "Skipping imported context.pkl for security reasons "
-                                f"(agent: {agent_id})"
+                                "Skipping imported %s (agent: %s)",
+                                item.name,
+                                agent_id,
                             )
                             continue
                         shutil.copy2(item, agent_dir)
@@ -1473,54 +1479,12 @@ class AgentRegistry:
                 # Create a new AgentData object directly from the data
                 agent_data = AgentData.model_validate(agent_data)
 
-                # Save the agent to the registry
+                # Save the agent to the registry. Conversation / learnings are
+                # intentionally NOT seeded: an imported profile is an
+                # instruction set, and pretending it has a prior conversation
+                # with the importer is how private history used to leak across
+                # the hub.
                 self.save_agent(agent_data)
-
-                # Update conversation history and learnings to reflect import
-                # event so that the agent has continuity
-                agent_state = self.load_agent_state(agent_data.id)
-                now = datetime.now(timezone.utc)
-
-                # Add a record to execution history to mark the import
-                import_execution_record = CodeExecutionResult(
-                    message=(
-                        "This is an imported agent. The conversation above is from the agent's training and was voluntarily submitted to the agent hub by another user. Agent conversations are private and never shared without your permission. Send a message to continue and have the agent do something for you."  # noqa: E501
-                    ),
-                    status=ProcessResponseStatus.SUCCESS,
-                    execution_type=ExecutionType.INFO,
-                    role=ConversationRole.SYSTEM,
-                    timestamp=now,
-                    stdout="",
-                    stderr="",
-                    logging="",
-                    code="",
-                    formatted_print="",
-                    files=[],
-                    action=None,
-                )
-                agent_state.execution_history.append(import_execution_record)
-
-                # Existing import message for the agent's internal context
-                import_message_for_agent = "<system>You were just imported to a new device. I might be a different user, or the same user than the person you were just talking to. I might ask you to do something that is the same or different than the conversation before this. Make sure to use your learnings and the conversation history to replicate what you've learned and give me a consistent experience. Don't acknowledge this message directly, it is just for your reference.</system>"  # noqa: E501
-                agent_state.conversation.append(
-                    ConversationRecord(
-                        content=import_message_for_agent,
-                        role=ConversationRole.USER,
-                        timestamp=now,
-                        should_summarize=False,
-                        ephemeral=False,
-                        summarized=False,
-                        is_system_prompt=False,
-                        files=None,
-                        should_cache=False,
-                    )
-                )
-
-                # Existing learnings message
-                learnings_message = "I was just imported to a new device. The user might be the same or different than the user that I was just talking to. I'm expected to provide a consistent experience to the user that I was just talking to, so I will need to use learnings and conversation history to replicate the same results for a potentially different topic."  # noqa: E501
-                agent_state.learnings.append(learnings_message)
-
-                self.save_agent_state(agent_data.id, agent_state)
 
                 # Return the agent data
                 return agent_data
@@ -1599,9 +1563,32 @@ class AgentRegistry:
             radient_client.download_agent_from_marketplace(agent_id, zip_path)
             return self.import_agent(zip_path)
 
+    #: Files that carry conversation, execution, or pickled runtime state.
+    #: They never belong in a published archive: a Radient hub listing is a
+    #: SHARE of the instruction set, not of the operator's private history,
+    #: and ``context.pkl`` is untrusted serialized code. Import already
+    #: skipped the pickle; export now refuses to ship any of these so a
+    #: desktop UI that zips the agent directory cannot leak them either.
+    _EXPORT_SKIP_NAMES = frozenset(
+        {
+            "conversation.jsonl",
+            "execution_history.jsonl",
+            "learnings.jsonl",
+            "schedules.jsonl",
+            "context.pkl",
+            "current_plan.txt",
+            "instruction_details.txt",
+        }
+    )
+
     def export_agent(self, agent_id: str) -> Tuple[Path, str]:
         """
-        Export an agent's state files as a ZIP file.
+        Export an agent's instruction set as a ZIP file.
+
+        Conversation history, execution traces, learnings, schedules, and
+        pickled runtime context are stripped. A published agent is the
+        profile (``agent.yml`` + ``system_prompt.md`` and any other
+        instruction files), not the operator's private sessions.
 
         Args:
             agent_id (str): The unique identifier of the agent to export
@@ -1627,10 +1614,24 @@ class AgentRegistry:
             agent_dir = self.agents_dir / agent_id
 
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                # Add all files from the agent directory to the ZIP file
                 for item in agent_dir.iterdir():
-                    if item.is_file():
-                        zip_file.write(item, arcname=item.name)
+                    if not item.is_file():
+                        continue
+                    if item.name in self._EXPORT_SKIP_NAMES:
+                        continue
+                    if item.name == "agent.yml":
+                        # last_message is a slice of the conversation and
+                        # must not ride in a published archive. Rewrite a
+                        # copy rather than mutating the live profile.
+                        payload = yaml.safe_load(item.read_text(encoding="utf-8")) or {}
+                        if isinstance(payload, dict):
+                            payload["last_message"] = ""
+                        zip_file.writestr(
+                            "agent.yml",
+                            yaml.safe_dump(payload, default_flow_style=False),
+                        )
+                        continue
+                    zip_file.write(item, arcname=item.name)
 
             return zip_path, filename
         except Exception as e:

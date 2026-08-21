@@ -318,6 +318,42 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="ID of the agent to pull from Radient",
     )
 
+    # Teams command
+    teams_parser = subparsers.add_parser("teams", help="Manage teams", parents=[parent_parser])
+    teams_subparsers = teams_parser.add_subparsers(dest="teams_command")
+    teams_subparsers.add_parser("list", help="List all teams", parents=[parent_parser])
+    teams_create = teams_subparsers.add_parser(
+        "create", help="Create a new team", parents=[parent_parser]
+    )
+    teams_create.add_argument("name", type=str, help="Name of the team to create")
+    teams_create.add_argument(
+        "--manager",
+        type=str,
+        default="manager",
+        help="Role or specialist who orchestrates (default: manager)",
+    )
+    teams_create.add_argument(
+        "--member",
+        action="append",
+        default=[],
+        dest="members",
+        help="Roster slot as role or role:count (repeatable)",
+    )
+    teams_create.add_argument("--description", type=str, default="", help="One-line description")
+    teams_show = teams_subparsers.add_parser(
+        "show", help="Show a team's roster and briefs", parents=[parent_parser]
+    )
+    teams_show.add_argument("name", type=str, help="Name of the team to show")
+    teams_delete = teams_subparsers.add_parser(
+        "delete", help="Delete a team by name", parents=[parent_parser]
+    )
+    teams_delete.add_argument(
+        "--name",
+        type=str,
+        required=True,
+        help="Name of the team to delete",
+    )
+
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
         "serve", help="Start the FastAPI server", parents=[parent_parser]
@@ -925,6 +961,89 @@ def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
     print(f"\033[1;32m│ Version: {agent.version}\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+    return 0
+
+
+def teams_list_command(team_registry: Any) -> int:
+    """List all teams."""
+    teams = team_registry.list_teams()
+    if not teams:
+        print("\n\033[1;33mNo teams found.\033[0m")
+        return 0
+    print("\n\033[1;32m╭─ Teams ─────────────────────────────────────\033[0m")
+    for i, team in enumerate(teams):
+        is_last = i == len(teams) - 1
+        branch = "└──" if is_last else "├──"
+        left = "│  " if is_last else "│ │"
+        print(f"\033[1;32m│ {branch} {team.name}\033[0m")
+        print(f"\033[1;32m{left}   • Manager: {team.manager}\033[0m")
+        print(f"\033[1;32m{left}   • Members: {len(team.members)}\033[0m")
+        if team.description:
+            print(f"\033[1;32m{left}   • Description: {team.description}\033[0m")
+        if not is_last:
+            print("\033[1;32m│ │\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+    return 0
+
+
+def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
+    """Create a team from CLI flags."""
+    from local_operator.teams import TeamEditFields, parse_members
+
+    try:
+        members = parse_members(getattr(args, "members", None))
+        team = team_registry.create_team(
+            TeamEditFields(
+                name=args.name,
+                description=getattr(args, "description", "") or "",
+                manager=getattr(args, "manager", None) or "manager",
+                members=members,
+            )
+        )
+    except ValueError as exc:
+        print(f"\n\033[1;31mError: {exc}\033[0m")
+        return -1
+    print("\n\033[1;32m╭─ Created New Team ───────────────────────────\033[0m")
+    print(f"\033[1;32m│ Name: {team.name}\033[0m")
+    print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
+    print(f"\033[1;32m│ Members: {len(team.members)}\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+    return 0
+
+
+def teams_show_command(name: str, team_registry: Any) -> int:
+    """Print a team's roster and briefs."""
+    team = team_registry.get_team_by_name(name)
+    if team is None:
+        print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
+        return -1
+    print(f"\n\033[1;32m╭─ Team {team.name} ───────────────────────────\033[0m")
+    print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
+    if team.description:
+        print(f"\033[1;32m│ Description: {team.description}\033[0m")
+    print("\033[1;32m│ Roster:\033[0m")
+    for line in team.roster_lines():
+        print(f"\033[1;32m│   {line}\033[0m")
+    if team.instructions.strip():
+        print("\033[1;32m│ Collaboration:\033[0m")
+        for line in team.instructions.strip().splitlines():
+            print(f"\033[1;32m│   {line}\033[0m")
+    if team.project.strip():
+        print("\033[1;32m│ Project:\033[0m")
+        for line in team.project.strip().splitlines():
+            print(f"\033[1;32m│   {line}\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+    return 0
+
+
+def teams_delete_command(name: str, team_registry: Any) -> int:
+    """Delete a team by name."""
+    team = team_registry.get_team_by_name(name)
+    if team is None:
+        print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
+        return -1
+    team_registry.delete_team(team.id)
+    print(f"\n\033[1;32mSuccessfully deleted team: {name}\033[0m")
     return 0
 
 
@@ -1690,6 +1809,20 @@ def main() -> int:
                     return -1
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
+        elif args.subcommand == "teams":
+            from local_operator.teams import TeamRegistry
+
+            team_registry = TeamRegistry(base_dir)
+            if args.teams_command == "list":
+                return teams_list_command(team_registry)
+            elif args.teams_command == "create":
+                return teams_create_command(args, team_registry)
+            elif args.teams_command == "show":
+                return teams_show_command(args.name, team_registry)
+            elif args.teams_command == "delete":
+                return teams_delete_command(args.name, team_registry)
+            else:
+                parser.error(f"Invalid teams command: {args.teams_command}")
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)

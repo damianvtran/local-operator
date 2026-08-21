@@ -270,6 +270,7 @@ def build_system_blocks(
     user_instructions: str = "",
     repo_guidance: str = "",
     credentials: Sequence[str] | None = None,
+    team_brief: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -342,6 +343,12 @@ def build_system_blocks(
             f"{tail}\n\n<goal>\nThe user's standing objective for this "
             f"session:\n{goal}\n</goal>"
         )
+    if team_brief.strip():
+        # A /team launch stamps the group's collaboration and project briefs
+        # here rather than in the cached head: attaching a team mid-session
+        # must not invalidate the persona prefix, and a team is a grouping
+        # for THIS conversation, not a machine-wide preference.
+        tail = f"{tail}\n\n<team>\n{team_brief.strip()}\n</team>"
     names = [name for name in (credentials or ()) if name]
     if names:
         # Names only. The values live in process memory and are injected into

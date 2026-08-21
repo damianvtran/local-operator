@@ -157,7 +157,29 @@ async def test_create_refuses_to_clobber_an_existing_role(context) -> None:
 
 @pytest.mark.asyncio
 async def test_update_refuses_an_unknown_role(context) -> None:
-    assert "no registered role" in await call(context, op="update", name="ghost", instructions="x")
+    assert "no registered profile" in await call(
+        context, op="update", name="ghost", instructions="x"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_specialist_is_not_a_role(context, registry) -> None:
+    """A User Dashboard Agent is a reusable specialist, not a delegation role."""
+    body = await call(
+        context,
+        op="create",
+        name="user-dashboard",
+        kind="specialist",
+        description="Knows user-dashboard release practices",
+        instructions="Follow the user-dashboard SDLC. Never skip the design review.",
+    )
+    assert "created specialist" in body
+    agent = registry.get_agent_by_name("user-dashboard")
+    assert agent is not None
+    assert "role" not in (agent.tags or [])
+    assert resolve_profile("user-dashboard", registry=registry) is None
+    prompt = registry.get_agent_system_prompt(agent.id)
+    assert "user-dashboard SDLC" in prompt
 
 
 @pytest.mark.asyncio

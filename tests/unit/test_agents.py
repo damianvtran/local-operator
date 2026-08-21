@@ -1669,6 +1669,104 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     assert imported_agent.categories == agent.categories
 
 
+def test_export_strips_conversation_history(temp_agents_dir: Path):
+    """A published archive is the instruction set, never the operator's history."""
+    registry = AgentRegistry(temp_agents_dir)
+    agent = registry.create_agent(
+        AgentEditFields(
+            name="PrivateHistory",
+            security_prompt="prompt",
+            hosting="host",
+            model="model",
+            description="desc",
+            last_message="secret last message",
+            tags=[],
+            categories=[],
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    registry.set_agent_system_prompt(agent.id, "You review Python.")
+    registry.save_agent_state(
+        agent.id,
+        AgentState(
+            version="",
+            conversation=[
+                ConversationRecord(role=ConversationRole.USER, content="do not publish me")
+            ],
+            execution_history=[],
+            learnings=["private learning"],
+            current_plan="secret plan",
+            instruction_details="secret details",
+            agent_system_prompt="You review Python.",
+        ),
+    )
+    zip_path, _ = registry.export_agent(agent.id)
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        names = set(archive.namelist())
+    assert "agent.yml" in names
+    assert "system_prompt.md" in names
+    assert "conversation.jsonl" not in names
+    assert "execution_history.jsonl" not in names
+    assert "learnings.jsonl" not in names
+    assert "schedules.jsonl" not in names
+    assert "context.pkl" not in names
+    assert "current_plan.txt" not in names
+    assert "instruction_details.txt" not in names
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        dumped = yaml.safe_load(archive.read("agent.yml"))
+    assert dumped["last_message"] == ""
+
+
+def test_import_strips_history_from_an_older_archive(temp_agents_dir: Path):
+    """A hub zip from before the strip still must not land private history."""
+    registry = AgentRegistry(temp_agents_dir)
+    zip_path = temp_agents_dir / "leaky.zip"
+    agent_data = {
+        "id": "leaky-agent",
+        "name": "Leaky",
+        "created_date": datetime.now(timezone.utc).isoformat(),
+        "version": "0.1.0",
+        "security_prompt": "",
+        "hosting": "",
+        "model": "",
+        "description": "desc",
+        "last_message": "",
+        "last_message_datetime": datetime.now(timezone.utc).isoformat(),
+        "current_working_directory": ".",
+        "tags": [],
+        "categories": [],
+    }
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("agent.yml", yaml.dump(agent_data))
+        zip_file.writestr("system_prompt.md", "You are a specialist.")
+        zip_file.writestr("conversation.jsonl", '{"content": "private"}\n')
+        zip_file.writestr("learnings.jsonl", '{"learning": "secret"}\n')
+        zip_file.writestr("context.pkl", b"not-a-real-pickle")
+    imported = registry.import_agent(zip_path)
+    imported_dir = registry.agents_dir / imported.id
+    assert (imported_dir / "system_prompt.md").read_text() == "You are a specialist."
+    assert (
+        not (imported_dir / "conversation.jsonl").exists()
+        or (imported_dir / "conversation.jsonl").stat().st_size == 0
+    )
+    assert (
+        not (imported_dir / "learnings.jsonl").exists()
+        or (imported_dir / "learnings.jsonl").stat().st_size == 0
+    )
+    assert not (imported_dir / "context.pkl").exists()
+    state = registry.load_agent_state(imported.id)
+    assert state.conversation == []
+    assert state.learnings == []
+
+
 def test_import_agent_rejects_zip_with_path_traversal(temp_agents_dir: Path):
     """Import should reject archives containing unsafe traversal paths."""
     registry = AgentRegistry(temp_agents_dir)

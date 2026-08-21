@@ -155,6 +155,23 @@ SCOUT_PREAMBLE = (
 )
 
 
+def _specialist_instructions(agent: str, parent_session: "Session") -> str:
+    """A non-role agent's own system_prompt.md, or ''."""
+    if not agent or agent in {"task", "scout"}:
+        return ""
+    registry = getattr(parent_session, "agent_registry", None)
+    if registry is None or not hasattr(registry, "get_agent_by_name"):
+        return ""
+    try:
+        row = registry.get_agent_by_name(agent)
+        if row is None:
+            return ""
+        return (registry.get_agent_system_prompt(row.id) or "").strip()
+    except Exception:  # noqa: BLE001 — guidance is enrichment
+        logger.warning("could not read specialist instructions for %r", agent)
+        return ""
+
+
 def _resolve_role(agent: str, parent_session: "Session") -> "AgentProfile | None":
     """The profile for ``agent``, or None for a plain full child.
 
@@ -262,7 +279,25 @@ def _make_runner(
     elif agent == "scout":
         effective_prompt = SCOUT_PREAMBLE + prompt
     else:
-        effective_prompt = prompt
+        # A specialist on a team roster is not a role, so resolve_profile
+        # returns None. Still stamp its own system_prompt.md as the reusable
+        # BASE before the team brief, or a User Dashboard Agent would launch
+        # as a blank child.
+        specialist_prompt = _specialist_instructions(agent, parent_session)
+        if specialist_prompt:
+            effective_prompt = specialist_prompt + "\n\n" + prompt
+        else:
+            effective_prompt = prompt
+    # A parent running as a team manager stamps the GROUP brief onto every
+    # child so members inherit collaboration and project context without the
+    # manager restating it in the task prompt. The role preamble above is the
+    # reusable base; this is the layer that must not live on the agent.
+    team = getattr(parent_session, "active_team", None)
+    if team is not None:
+        try:
+            effective_prompt = team.member_preamble(agent) + effective_prompt
+        except Exception:  # noqa: BLE001 — a bad brief must not lose the child
+            logger.warning("could not stamp team preamble for %r", agent, exc_info=True)
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -811,6 +846,7 @@ async def _build_child_session(
         # learned about a bad one), and role resolution for its OWN launches
         # needs the same registry the parent used.
         agent_registry=getattr(parent_session, "agent_registry", None),
+        team_registry=getattr(parent_session, "team_registry", None),
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
@@ -900,6 +936,7 @@ async def _build_child_session(
         # delegates (a manager) or inspects a role sees the operator's profiles
         # rather than falling back to the packaged starters.
         agent_registry=getattr(parent_session, "agent_registry", None),
+        team_registry=getattr(parent_session, "team_registry", None),
         skill_resolver=resolve_internal_url,
         # How the transcript renders into LLM messages. Today every host uses
         # the default, so this changes nothing; it is plumbed because a host

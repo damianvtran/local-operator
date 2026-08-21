@@ -68,6 +68,7 @@ def _engine_context(**kwargs) -> ToolContext:
         # tool; the ops themselves are exercised in the agent-tool tests
         # against a real registry.
         agent_registry=object(),
+        team_registry=object(),
         has_ui=True,
         ask_user=_ask_user,
     )
