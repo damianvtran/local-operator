@@ -37,8 +37,10 @@ from rich.console import Console, RenderableType
 from rich.style import Style
 from rich.text import Text
 from textual import events
+from textual.binding import Binding
 from textual.containers import ScrollableContainer
 from textual.content import Content
+from textual.events import Key
 from textual.geometry import Size
 from textual.scrollbar import ScrollDown, ScrollTo, ScrollUp
 from textual.selection import Selection
@@ -460,6 +462,160 @@ class TranscriptBlock(Static):
         if not copied:
             return None
         return "\n".join(row.rstrip() for row in copied), "\n"
+
+
+class ExpandableActionBlock(TranscriptBlock):
+    """Shared interaction contract for expandable transcript action rows.
+
+    Tool calls and wake deliveries have different payloads and row builders,
+    but the user reaches both the same way: hover/focus reveals an action,
+    click or Enter/Space toggles it, arrows walk the ledger, and ordinary
+    typing returns to the composer. Keeping that behavior here prevents a wake
+    from merely *looking* like a tool trace while its keyboard or pointer UX
+    quietly drifts later.
+
+    Subclasses initialize ``_expanded``, ``_hovered`` and ``_focused``, provide
+    :meth:`can_expand` and ``_refresh_row``, and name their expanded CSS class.
+    The feedback hooks preserve ToolCard's useful ``no output`` response for
+    inert rows without burdening WakeBlock, whose message always expands.
+    """
+
+    SPACING_KIND = "tool"
+    LEDGER_ROW = True
+    SPACING_AIRY = True
+    EXPANDED_CLASS: ClassVar[str]
+
+    BINDINGS = [
+        Binding("enter", "activate", "Expand/collapse", show=False),
+        Binding("space", "activate", "Expand/collapse", show=False),
+        Binding("up", "focus_previous_action", "Previous action", show=False),
+        Binding("down", "focus_next_action", "Next action", show=False),
+    ]
+    _BOUND_KEYS = frozenset(
+        key.strip()
+        for binding in BINDINGS
+        for key in (binding.key if isinstance(binding, Binding) else binding[0]).split(",")
+    )
+    can_focus = True
+
+    def can_expand(self) -> bool:
+        """Whether opening the row reveals more than its one-line summary."""
+        raise NotImplementedError
+
+    def _refresh_row(self) -> None:
+        """Rebuild and apply this subclass's current summary/expansion."""
+        raise NotImplementedError
+
+    @property
+    def expanded(self) -> bool:
+        return self._expanded
+
+    def toggle_expanded(self) -> bool:
+        """Flip expansion when possible and refresh the adjacent block gap."""
+        if not self._expanded and not self.can_expand():
+            return self._expanded
+        self._expanded = not self._expanded
+        self.set_class(self._expanded, self.EXPANDED_CLASS)
+        self._after_toggle()
+        self._refresh_row()
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_after(self)
+        return self._expanded
+
+    def activate(self) -> bool:
+        """Run the row's one action; True means it expanded or collapsed."""
+        if not self.can_expand():
+            self._on_inert_activation()
+            return False
+        self.toggle_expanded()
+        return True
+
+    def _after_toggle(self) -> None:
+        """Subclass hook for state retired by a successful toggle."""
+
+    def _on_inert_activation(self) -> None:
+        """Subclass hook for visible feedback when nothing can expand."""
+
+    def _has_activation_feedback(self) -> bool:
+        return False
+
+    def _clear_activation_feedback(self) -> None:
+        """Subclass hook for transient activation feedback on blur."""
+
+    def action_activate(self) -> None:
+        self.activate()
+
+    def action_focus_next_action(self) -> None:
+        self._move_focus(1)
+
+    def action_focus_previous_action(self) -> None:
+        self._move_focus(-1)
+
+    def _move_focus(self, delta: int) -> None:
+        """Hand focus to a neighbouring action, else the screen tab order."""
+        parent = self.parent
+        if isinstance(parent, TranscriptView) and parent.focus_neighbour(self, delta):
+            return
+        if delta > 0:
+            self.screen.focus_next()
+        else:
+            self.screen.focus_previous()
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self.activate():
+            event.stop()
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Forward printable non-binding keys to the app's one composer."""
+        if event.key in self._BOUND_KEYS or not event.is_printable:
+            return
+        composer = self._composer()
+        if composer is None:
+            return
+        composer.focus()
+        composer.post_message(Key(event.key, event.character))
+        event.stop()
+        event.prevent_default()
+
+    def _composer(self):  # type: ignore[no-untyped-def]
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            return self.app.query_one(Editor)
+        except Exception:
+            return None
+
+    def on_enter(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._set_hovered(True)
+
+    def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._set_hovered(False)
+
+    def on_focus(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._set_focused(True)
+
+    def on_blur(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._set_focused(False)
+
+    def _set_hovered(self, hovered: bool) -> None:
+        """Repaint only when pointer state changes visible affordance text."""
+        if hovered == self._hovered or not self.can_expand():
+            self._hovered = hovered
+            return
+        self._hovered = hovered
+        if not self._focused:
+            self._refresh_row()
+
+    def _set_focused(self, focused: bool) -> None:
+        if focused == self._focused:
+            return
+        had_feedback = self._has_activation_feedback()
+        self._focused = focused
+        if not focused:
+            self._clear_activation_feedback()
+        if self.can_expand() or had_feedback:
+            self._refresh_row()
 
 
 class UserBlock(TranscriptBlock):
@@ -942,19 +1098,35 @@ class NoticeBlock(TranscriptBlock):
         return line
 
 
-class WakeBlock(TranscriptBlock):
-    """A scheduled-wake delivery receipt: one spine line, expandable to the
-    wake's message.
+class WakeBlock(ExpandableActionBlock):
+    """A scheduled-wake delivery receipt, drawn as a tool-ledger card.
 
     A wake fires with no user keystroke, so before this block the transcript
     showed the agent simply starting to work — the cause (which wake, saying
-    what) existed only in the model's context. This is the tool-call-shaped
-    receipt that closes that gap: a collapsed line naming the schedule, with
-    the full delivered prompt one activate away (Enter / click), the same
-    affordance the tool ledger uses.
+    what) existed only in the model's context. The receipt that closes that
+    gap has to be findable the same way a tool row is: a filled one-line
+    card, a blank row of air above and below, and an expand affordance that
+    lights on hover/focus rather than a dim trailing word that reads as
+    caption. The collapsed line names the schedule; the expansion is the
+    delivered prompt (Enter / click / Space), the same contract the tool
+    ledger uses.
+
+    It is a ledger row on purpose. Sharing :attr:`SPACING_KIND` with
+    :class:`~local_operator.tui.widgets.tool_card.ToolCard` plus
+    :attr:`SPACING_AIRY` is what puts a blank row above and below it even
+    when it sits between notices — the previous notice-kind line stacked
+    flush with the quota warnings around it and disappeared into them.
+    ``LEDGER_ROW`` keeps the name column aligned with neighbouring tool
+    cards so a wake in a run of actions is still a column, not a second
+    layout.
     """
 
-    SPACING_KIND = "notice"
+    EXPANDED_CLASS = "wake-expanded"
+
+    #: The name column always says ``wake``: the icon already marks a clock,
+    #: and a second label ("catch-up") would be a second spine for one kind
+    #: of row. Catch-up vs live is the SUMMARY, not the name.
+    tool_name = "wake"
 
     def __init__(self, text: str, *, catchup: bool = False) -> None:
         super().__init__()
@@ -962,78 +1134,174 @@ class WakeBlock(TranscriptBlock):
         self._text = text
         self._catchup = catchup
         self._expanded = False
-        self.set_content(self._build())
+        self._hovered = False
+        self._focused = False
+        #: Set by :meth:`_build_row` so the expansion and the summary cannot
+        #: disagree about which prompt this delivery carried.
+        self._message = ""
+        self._row_count = 1
+        self._applied_rows = -1
+        self._built_width = -1
+        self._refresh_row()
         self.finalize()
 
-    # -- expand affordance (the tool ledger's contract, minimal) --------------
-    def can_expand(self) -> bool:  # always: the collapsed line is a summary
+    def can_expand(self) -> bool:
+        """Always: the collapsed line is a summary of a prompt behind it."""
         return True
 
-    @property
-    def expanded(self) -> bool:
-        return self._expanded
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-fit the row at the new width (same guard as the tool card)."""
+        size = getattr(event, "size", None)
+        if size is not None and size.width == self._built_width:
+            return
+        self._refresh_row()
 
-    def toggle_expanded(self) -> bool:
-        self._expanded = not self._expanded
+    def copy_gutter(self, index: int) -> int:
+        """The icon field on the summary row; the expansion's indent below it."""
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+
+        return 2 if index == 0 else OUTPUT_INDENT
+
+    def refresh_row(self) -> None:
+        """Repaint at the current width — the ledger's shared column moved."""
+        self._refresh_row()
+
+    def _refresh_row(self) -> None:
+        """Rebuild the card at its OWN width (D3), matching :class:`ToolCard`.
+
+        Finalization is bypassed deliberately: a resize, a hover, or an expand
+        must be able to re-fit a settled card, and the content it produces is
+        a pure function of the card's state, never new history.
+        """
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+
+        container = getattr(self, "container_size", None)
+        width = self.size.width or (container.width if container else 0)
+        detached = False
+        if width <= 0:
+            try:
+                width = self.app.console.width
+            except Exception:
+                width = FALLBACK_WIDTH
+                detached = True
+        content = self._build_content(width)
+        self._row_count = max(1, len(content.plain.splitlines()))
+        if detached:
+            return
+        self._built_width = width
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
         was_finalized = self._finalized
         self._finalized = False
         try:
-            self.set_content(self._build())
+            self.set_content(content, layout=moved)
         finally:
             self._finalized = was_finalized
-        parent = self.parent
-        if isinstance(parent, TranscriptView):
-            parent.refresh_gap_around(self)
-        return self._expanded
-
-    def activate(self) -> bool:
-        return self.toggle_expanded()
-
-    def on_click(self, event: object) -> None:  # type: ignore[no-untyped-def]
-        self.toggle_expanded()
-
-    def copy_gutter(self, index: int) -> int:
-        return NoticeBlock.GLYPH_COLS
 
     def _build(self) -> RenderableType:
+        """Off-app / test entry: the card at its laid-out width, else 80."""
+        return self._build_content(self.size.width or 80)
+
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells.
+
+        Read from the transcript rather than fixed here, because the column is
+        a spine: a wake sitting between tool rows has to agree with them or
+        the ledger stops being a column.
+        """
+        from local_operator.tui.widgets.tool_card import NAME_COL, NAME_GROWTH_MIN_ROW
+
+        parent = self.parent
+        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_ROW:
+            return parent.tool_name_col
+        return NAME_COL
+
+    def _build_row(self, width: int) -> Text:
+        """The single summary row — the ONE-LINE guarantee lives here."""
+        from local_operator.tui.glyphs import display_name, tool_icon
+        from local_operator.tui.widgets.tool_card import (
+            _SUMMARY_FLOOR,
+            COLLAPSE_HINT,
+            EXPAND_HINT,
+            truncate_cells,
+        )
+
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        # Imported here, not at module scope: ``tool_card`` imports from this
-        # module, so a top-level import closes the cycle.
-        from local_operator.tui.widgets.tool_card import truncate_cells
+        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
 
-        indent = " " * SPINE_INDENT
-        hanging = " " * (SPINE_INDENT + 2)
-        width = max((self.size.width or 80) - 2, 12)
-        body = max(width - cell_len(hanging), 8)
+        icon = tool_icon(self.tool_name)
+        label = display_name(self.tool_name)
+        name_budget = width - 4  # icon, its space, name's trailing space, 1 cell of summary
+        identity, message = self._summary()
+        self._message = message
+        if name_budget < 2:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(icon + " ", style=dim)
+            return row
 
-        first, rest, message = self._summary()
-        line = Text(no_wrap=True, overflow="ellipsis")
-        line.append(indent, style=dim)
-        # The ◆ marks a delivery, not a notice tier: this block is clickable,
-        # and distinguishing it from a static receipt is what tells the user
-        # there is more behind it.
-        line.append("◆ ", style=muted)
-        line.append(truncate_cells(first, body), style=muted)
-        if self._expanded:
-            # The expansion is the MESSAGE, not the verbatim text re-dumped:
-            # the headline row already carries the envelope, so repeating it
-            # (cancel how-to included) reads as a second, louder wake. Just
-            # the delivered prompt, indented under the headline.
-            lines = [line]
-            for row in wrap_cells(message, body):
-                lines.append(Text(hanging + row, style=dim, no_wrap=True, overflow="ellipsis"))
-            return Text("\n").join(lines)
-        if rest:
-            line.append(f"  {rest}", style=dim)
-        return line
+        name_col = min(self._name_col(width), name_budget)
+        name = truncate_cells(label, name_col)
+        name = name + " " * max(0, name_col - cell_len(name))
+        prefix_cells = 2 + name_col + 1
 
-    def _summary(self) -> tuple[str, str, str]:
-        """(headline, trailing meta, message body) for the block.
+        slot = ""
+        remaining = max(0, width - prefix_cells)
+        if self._hovered or self._focused:
+            offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+            if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
+                slot = offer
+        slot_cells = cell_len(slot) + 1 if slot else 0
+        budget = max(0, remaining - slot_cells)
+        summary = truncate_cells(identity, budget)
 
-        The delivered text is ``<envelope>\n\n<message>``; the headline is the
-        envelope with the noisy cancel-instruction stripped, the meta names
-        what the expansion holds, and the body is the verbatim prompt.
+        row = Text(no_wrap=True, overflow="ellipsis")
+        row.append(icon + " ", style=dim)
+        row.append(name + " ", style=muted)
+        row.append(summary, style=dim)
+        if slot:
+            used = cell_len(row.plain)
+            pad = max(1, width - used - cell_len(slot))
+            row.append(" " * pad, style=dim)
+            row.append(slot, style=dim)
+        return row
+
+    def _build_content(self, width: int) -> Text:
+        """The card: the one-row summary, plus the delivered prompt expanded."""
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, truncate_cells
+
+        row = self._build_row(width)
+        if not self._expanded:
+            return row
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        # The expansion is the MESSAGE, not the verbatim text re-dumped: the
+        # headline row already carries the envelope, so repeating it (cancel
+        # how-to included) reads as a second, louder wake. Just the delivered
+        # prompt, indented under the headline. Wrapped, not truncated-per-line:
+        # a wake's body is a paragraph the user wrote, not a command's stdout.
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        message = getattr(self, "_message", "") or self._summary()[1]
+        # Split on the author's line breaks FIRST: a catch-up is several
+        # "- id (due …): …" lines, and wrapping the whole blob as one
+        # paragraph glued the ids together. wrap_cells then folds each
+        # line; truncate_cells is a guard against a future wrap that
+        # overshoots, not the everyday path.
+        for paragraph in message.splitlines() or [""]:
+            for wrapped in wrap_cells(paragraph, line_width) or [""]:
+                row.append("\n" + indent, style=dim)
+                row.append(truncate_cells(wrapped, line_width), style=dim)
+        return row
+
+    def _summary(self) -> tuple[str, str]:
+        """(identity, message body) for the card.
+
+        The delivered text is ``<envelope>\\n\\n<message>``. The identity is
+        the envelope with the noisy cancel-instruction and the ``(alarm)``
+        prefix stripped — the card's fill and the wake icon already say this
+        is a delivery, so repeating the model's envelope on the summary is
+        the dim single-line the user could not find. The body is the
+        verbatim prompt, shown only once the row is opened.
         """
         head, _, message = self._text.partition("\n\n")
         head = " ".join(head.split())  # collapse any envelope whitespace
@@ -1055,11 +1323,27 @@ class WakeBlock(TranscriptBlock):
                     ids.append(stripped[2:].split(" ", 1)[0].split("(", 1)[0].strip())
             count = len(ids)
             label = f"{count} missed wake{'s' if count != 1 else ''}"
-            headline = f"Wake catch-up — {label}"
+            headline = f"catch-up — {label}"
             if ids:
                 headline += f" ({', '.join(ids)})"
-            return headline, "details", message
-        return head, "message", message
+            return headline, message
+        if head.startswith("(alarm) "):
+            head = head[len("(alarm) ") :]
+        # The name column already says ``wake``; repeating "Scheduled wake"
+        # in the summary is the same caption-not-card problem at the next
+        # column along.
+        prefix = "Scheduled wake "
+        if head.startswith(prefix):
+            head = head[len(prefix) :]
+        return head, message
+
+    def settled_rows(self) -> int:
+        """Rows settled now: one collapsed, the whole card when expanded."""
+        return self._row_count if self._finalized else 0
+
+    def spans_multiple_rows(self) -> bool:
+        """Exact: the card already tracks its own height, collapsed or not."""
+        return self._row_count > 1
 
 
 class RichBlock(TranscriptBlock):

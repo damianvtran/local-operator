@@ -156,7 +156,7 @@ TranscriptView {
 /* Blocks: zero outer margin, zero padding — no declarations here by design
  * (the minimalism defense asserts their absence; anything uniform here would
  * be the "blank row between everything" regression). */
-TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard {
+TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard, WakeBlock {
     width: 1fr;
     height: auto;
 }
@@ -232,21 +232,23 @@ Screen > .screen--selection {
  * even after the resize rebuilds the row to fit — a ledger of one-line
  * traces silently doubles in height. Pinning makes the worst case a clipped
  * cell for one frame, which is the right failure. */
-ToolCard {
+ToolCard, WakeBlock {
     height: 1;
     background: $lo-surface;
     /* The hand pointer, not just the hover tint: the whole row is the click
-     * target for expand/collapse (see ToolCard.on_click), so the cursor is
-     * the affordance that says so BEFORE the click. Textual walks this rule
-     * on every mouse event and emits OSC 22, which ghostty implements and a
-     * terminal that does not simply ignores. */
+     * target for expand/collapse (see ToolCard.on_click / WakeBlock.on_click),
+     * so the cursor is the affordance that says so BEFORE the click. Textual
+     * walks this rule on every mouse event and emits OSC 22, which ghostty
+     * implements and a terminal that does not simply ignores. */
     pointer: pointer;
 }
 
 /* Expanded is the ONE case that is content-sized: the summary row plus one
- * row per line of revealed tool output (each already truncated to width, so
- * nothing reflows). The class beats the type selector above. */
-ToolCard.tool-expanded {
+ * row per line of revealed output (each already truncated to width, so
+ * nothing reflows). The class beats the type selector above. WakeBlock uses
+ * its own class name because it is a different widget; the height contract
+ * is the same. */
+ToolCard.tool-expanded, WakeBlock.wake-expanded {
     height: auto;
 }
 
@@ -264,7 +266,7 @@ ToolCard.tool-error {
 /* Mouse affordance: the whole row is the click target for expand/collapse,
  * so the whole row lights on hover. Last rule wins over the state tints —
  * pointing at a row should always look the same. */
-ToolCard:hover {
+ToolCard:hover, WakeBlock:hover {
     background: $lo-overlay;
 }
 
@@ -281,7 +283,7 @@ ToolCard:hover {
  * Last rule in the block, so it wins over the state tints AND over :hover:
  * where the keyboard is, is the more load-bearing fact. Still no border —
  * elevation is a background step here as everywhere. */
-ToolCard:focus {
+ToolCard:focus, WakeBlock:focus {
     background: $lo-tint-select;
 }
 
