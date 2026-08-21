@@ -48,6 +48,7 @@ from local_operator.agent_profiles import (
     NameTakenError,
     install_seed,
     is_role,
+    is_specialist,
     list_seeds,
     load_seed,
     profile_from_agent,
@@ -78,28 +79,32 @@ class AgentParams(BaseModel):
         description=(
             "search: find a role by meaning; list/show: what exists and what it "
             "says; install: add a packaged starter; create/update: author or fix "
-            "a role."
+            "a role or a specialist profile."
         )
     )
-    name: str | None = Field(default=None, description="Role name (all ops but search).")
+    name: str | None = Field(
+        default=None, description="Role or specialist name (all ops but search)."
+    )
     query: str | None = Field(default=None, description="search: the task, in a sentence.")
     description: str | None = Field(
         default=None,
         description=(
-            "create/update: when to use this role. Semantic routing matches this, "
-            "so write the trigger condition, not a job title."
+            "create/update: when to use this profile. Semantic routing matches "
+            "this, so write the trigger condition, not a job title."
         ),
     )
     instructions: str | None = Field(
         default=None,
         description=(
-            "create/update: standing guidance prepended to every run of the role. "
-            "Imperative and short — it is billed on each of that role's turns."
+            "create/update: standing guidance prepended to every run of the "
+            "profile. Imperative and short — it is billed on each of that "
+            "profile's turns. This is the BASE behaviour; a team layers "
+            "collaboration and project briefs on top without rewriting it."
         ),
     )
     tools: list[str] | None = Field(
         default=None,
-        description="create/update: restrict the role to these tools. Omit for all.",
+        description="create/update: restrict the profile to these tools. Omit for all.",
     )
     effort: Literal["lo", "med", "hi", ""] | None = Field(
         default=None,
@@ -108,8 +113,18 @@ class AgentParams(BaseModel):
     delegate: bool | None = Field(
         default=None,
         description=(
-            "create/update: may this role launch its own subagents? Default no — "
-            "only coordinating roles should."
+            "create/update: may this profile launch its own subagents? Default "
+            "no — only coordinating roles should."
+        ),
+    )
+    kind: Literal["role", "specialist"] | None = Field(
+        default=None,
+        description=(
+            "create: 'role' (default) is a reusable delegation target tagged "
+            "for task(agent=...). 'specialist' is a durable named agent with "
+            "its own instruction set — a User Dashboard Agent, a support "
+            "triager — that can sit on a team roster without being a role. "
+            "Ignored on update: a profile cannot change kind."
         ),
     )
 
@@ -218,6 +233,15 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     installed = _registered_profiles(registry) if registry is not None else []
     installed_names = {profile.name.lower() for profile in installed}
     lines = [_profile_line(profile, installed=True) for profile in installed]
+    specialists: list[Any] = []
+    if registry is not None:
+        try:
+            specialists = sorted(
+                (agent for agent in registry.list_agents() if is_specialist(agent)),
+                key=lambda agent: str(agent.name).lower(),
+            )
+        except Exception:  # noqa: BLE001 — listing is optional enrichment
+            specialists = []
     starters = [
         profile
         for profile in (load_seed(name) for name in list_seeds())
@@ -226,6 +250,14 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     body = ""
     if lines:
         body += "registered roles:\n" + "\n".join(lines)
+    if specialists:
+        if body:
+            body += "\n\n"
+        specialist_lines = []
+        for agent in specialists:
+            summary = (agent.description or "").strip() or "(no description)"
+            specialist_lines.append(f"- {agent.name} [specialist]: {summary}")
+        body += "registered specialists:\n" + "\n".join(specialist_lines)
     if starters:
         if body:
             body += "\n\n"
@@ -241,9 +273,30 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
 async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
     from local_operator.agent_profiles import resolve_profile
 
-    profile = resolve_profile(name, registry=_registry(context))
+    registry = _registry(context)
+    profile = resolve_profile(name, registry=registry)
+    if profile is None and registry is not None:
+        try:
+            specialist = registry.get_agent_by_name(name)
+        except Exception:  # noqa: BLE001
+            specialist = None
+        if specialist is not None and is_specialist(specialist):
+            instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
+            body = (
+                f"{specialist.name} — registered specialist\n"
+                f"when to use: {specialist.description or '(unstated)'}\n"
+                "tools: full inventory\n\n"
+                f"instructions:\n{instructions}\n\n"
+                f"launch with --agent {specialist.name}, or add it to a team roster."
+            )
+            text, spill = spill_truncate(body, "agent", context)
+            return _text(tool_call_id, "agent", text, details=spill or None)
     if profile is None:
-        return _error(tool_call_id, "agent", f"no role named {name!r} (try op='list')")
+        return _error(
+            tool_call_id,
+            "agent",
+            f"no role or specialist named {name!r} (try op='list')",
+        )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
     header = [
         f"{profile.name} — {origin}",
@@ -474,34 +527,58 @@ async def _op_write(
     except Exception:  # noqa: BLE001
         existing = None
 
-    # A name occupied by a NON-role is refused on both paths rather than being
-    # converted into one: an ordinary chat agent silently acquiring a role's
-    # tags and guidance is a surprising way to lose an agent, and on the update
-    # path it would be the same fail-open hijack the role tag exists to stop.
-    if existing is not None and not is_role(existing):
-        return _error(
-            tool_call_id,
-            "agent",
-            _name_taken_message(name),
-        )
-    if creating and existing is not None:
-        return _error(
-            tool_call_id,
-            "agent",
-            f"role {name!r} already exists; use op='update' to change it.",
-        )
-    if not creating and existing is None:
-        return _error(tool_call_id, "agent", f"no registered role named {name!r} to update.")
+    # Kind is chosen at CREATE and then frozen. An update that names the other
+    # kind is refused rather than converting the row: an ordinary specialist
+    # silently acquiring a role's tags (or a role losing them) is a surprising
+    # way to lose an agent, which is the fail-open hijack the role tag exists
+    # to stop.
+    if creating:
+        kind = params.kind or "role"
+        if existing is not None:
+            if kind == "role" and not is_role(existing):
+                return _error(tool_call_id, "agent", _name_taken_message(name))
+            return _error(
+                tool_call_id,
+                "agent",
+                f"{'role' if is_role(existing) else 'agent'} {name!r} already "
+                "exists; use op='update' to change it.",
+            )
+    else:
+        if existing is None:
+            return _error(
+                tool_call_id,
+                "agent",
+                f"no registered profile named {name!r} to update.",
+            )
+        if is_role(existing):
+            kind = "role"
+            if params.kind == "specialist":
+                return _error(
+                    tool_call_id,
+                    "agent",
+                    f"{name!r} is a role; do not pass kind='specialist' to update it.",
+                )
+        elif is_specialist(existing):
+            kind = "specialist"
+            if params.kind == "role":
+                return _error(tool_call_id, "agent", _name_taken_message(name))
+        else:
+            # An ordinary conversational agent is neither a role nor a
+            # specialist we authored. Converting it is the fail-open hijack
+            # the role tag exists to stop.
+            return _error(tool_call_id, "agent", _name_taken_message(name))
 
     instructions = (params.instructions or "").strip()
     if creating and not instructions:
-        return _error(tool_call_id, "agent", "create needs 'instructions' — the role's guidance.")
+        return _error(
+            tool_call_id, "agent", "create needs 'instructions' — the profile's guidance."
+        )
     if len(instructions) > MAX_INSTRUCTIONS_CHARS:
         return _error(
             tool_call_id,
             "agent",
             f"instructions exceed {MAX_INSTRUCTIONS_CHARS} chars; they ride in front of every "
-            "run of this role, so they must stay short.",
+            "run of this profile, so they must stay short.",
         )
 
     # An UPDATE merges onto the stored profile; only a CREATE starts from
@@ -546,10 +623,11 @@ async def _op_write(
         # hand-editing the tags.
         may_delegate=may_delegate,
     )
-    tags = list(seed_tags(profile))
+    tags = list(seed_tags(profile)) if kind == "role" else []
+    categories = ["role"] if kind == "role" else ["specialist"]
 
     # Every field is spelled out (``AgentEditFields`` is validated in strict
-    # mode, and every other caller in the tree does the same): a role inherits
+    # mode, and every other caller in the tree does the same): a profile inherits
     # the session's model and sampling settings rather than pinning any.
     def _fields(**overrides: Any) -> AgentEditFields:
         base: dict[str, Any] = dict(
@@ -576,23 +654,35 @@ async def _op_write(
 
     if existing is None:
         agent = registry.create_agent(
-            _fields(name=name, description=profile.description, tags=tags, categories=["role"])
+            _fields(
+                name=name,
+                description=profile.description,
+                tags=tags,
+                categories=categories,
+            )
         )
     else:
         agent = existing
         # An update carries only what changed: passing a None description here
         # would blank the routing text a previous create had set.
-        overrides: dict[str, Any] = {"tags": tags}
+        overrides: dict[str, Any] = {"tags": tags, "categories": categories}
         if profile.description:
             overrides["description"] = profile.description
         registry.update_agent(agent.id, _fields(**overrides))
     if instructions:
         registry.set_agent_system_prompt(agent.id, instructions)
     verb = "created" if existing is None else "updated"
+    if kind == "role":
+        how = f"launch with task(agent={name!r})"
+    else:
+        how = (
+            f"launch with --agent {name}, or put it on a team roster; "
+            "its instructions are the reusable base, not a team brief"
+        )
     return _text(
         tool_call_id,
         "agent",
-        f"{verb} role {name!r}; launch with task(agent={name!r}).",
+        f"{verb} {kind} {name!r}; {how}.",
     )
 
 
@@ -651,9 +741,11 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         name="agent",
         label="Agent roles",
         description=(
-            "Reusable role profiles for delegation (reviewer, coder, architect, "
-            "manager, designer, scout). Find, install, or author one; launch it "
-            "with task(agent='<name>')."
+            "Reusable agent profiles: delegation roles (reviewer, coder, "
+            "architect, manager, designer, scout) and specialists with their "
+            "own instruction sets. Find, install, or author one; launch a role "
+            "with task(agent='<name>'). A specialist is the reusable base a "
+            "team layers collaboration and project briefs on top of."
         ),
         parameters=AgentParams.model_json_schema(),
         # Writes land in the user's own configuration directory, never in the

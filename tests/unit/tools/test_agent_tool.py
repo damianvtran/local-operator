@@ -82,6 +82,26 @@ async def test_list_separates_registered_roles_from_starters(context, registry) 
 
 
 @pytest.mark.asyncio
+async def test_list_and_show_include_specialists_with_instructions(context) -> None:
+    await call(
+        context,
+        op="create",
+        kind="specialist",
+        name="dashboard-release",
+        description="Release the user dashboard safely",
+        instructions="Follow the dashboard SDLC and release checklist.",
+    )
+
+    listing = await call(context, op="list")
+    shown = await call(context, op="show", name="dashboard-release")
+
+    assert "registered specialists" in listing
+    assert "dashboard-release" in listing
+    assert "Follow the dashboard SDLC" in shown
+    assert "launch with --agent dashboard-release" in shown
+
+
+@pytest.mark.asyncio
 async def test_list_ignores_agents_that_are_not_roles(context, registry) -> None:
     """A registry also holds ordinary conversational agents; listing those as
     delegation targets would be noise at best and a privacy leak at worst."""
@@ -157,7 +177,29 @@ async def test_create_refuses_to_clobber_an_existing_role(context) -> None:
 
 @pytest.mark.asyncio
 async def test_update_refuses_an_unknown_role(context) -> None:
-    assert "no registered role" in await call(context, op="update", name="ghost", instructions="x")
+    assert "no registered profile" in await call(
+        context, op="update", name="ghost", instructions="x"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_specialist_is_not_a_role(context, registry) -> None:
+    """A User Dashboard Agent is a reusable specialist, not a delegation role."""
+    body = await call(
+        context,
+        op="create",
+        name="user-dashboard",
+        kind="specialist",
+        description="Knows user-dashboard release practices",
+        instructions="Follow the user-dashboard SDLC. Never skip the design review.",
+    )
+    assert "created specialist" in body
+    agent = registry.get_agent_by_name("user-dashboard")
+    assert agent is not None
+    assert "role" not in (agent.tags or [])
+    assert resolve_profile("user-dashboard", registry=registry) is None
+    prompt = registry.get_agent_system_prompt(agent.id)
+    assert "user-dashboard SDLC" in prompt
 
 
 @pytest.mark.asyncio

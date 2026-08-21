@@ -265,16 +265,16 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: is why it is resumption, the single question a returning user arrives with.
 TIPS: tuple[str, ...] = (
     "/resume picks up a recent session where you left off",
+    "/team <name> <message> sends work to the manager",
+    "Ask to create an agent with its own instruction set",
+    "Ask for a team of roles: manager, coder, reviewer",
     "/model <provider>/<id> switches this session only",
-    "/model default saves this for new sessions",
     "/usage shows how much provider quota is left",
     "/approvals <ask|auto> sets whether tools ask first",
     "Type as the agent works — it is sent at the next step",
     "esc stops the agent without ending the session",
     "Ask for parallel work and the agent fans out subagents",
-    "Compaction runs itself when the context window fills",
     "/mcp lists the MCP servers found in your mcp.json",
-    "/skills lists the skills loaded for this session",
     "/goal sets the objective that /loop iterates toward",
 )
 

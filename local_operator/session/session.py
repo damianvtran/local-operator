@@ -802,6 +802,10 @@ class Session:
         #: ``None`` means no registry: the ``agent`` tool is not advertised and
         #: delegation falls back to the packaged starter profiles.
         agent_registry: Any | None = None,
+        #: The user's persistent team registry, when the host keeps one. Behind
+        #: the ``team`` tool and behind ``/team``. ``None`` means the ``team``
+        #: tool is not advertised.
+        team_registry: Any | None = None,
         conversation_name: ConversationName | None = None,
         system_blocks_provider: Callable[[], list[str]] | Callable[[], Awaitable[list[str]]],
     ) -> None:
@@ -831,6 +835,12 @@ class Session:
         self._job_id = job_id
         self._subagent_comms = subagent_comms
         self.agent_registry = agent_registry
+        self.team_registry = team_registry
+        #: The team this session is running as manager of, when ``/team``
+        #: launched it. Held here so every ``task`` child inherits the group's
+        #: collaboration and project briefs without the manager restating them.
+        #: ``None`` on an ordinary session.
+        self.active_team: Any | None = None
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -1510,6 +1520,60 @@ class Session:
         next turn and only invalidates that tail — never the cached prefix.
         """
         return self._goal_state.set(text)
+
+    def attach_team(self, team: Any) -> None:
+        """Bind this session as the manager of ``team``.
+
+        The team's collaboration and project briefs ride the volatile tail
+        (see ``build_system_blocks``) so they apply from the next turn
+        without rebuilding the session or invalidating the cached persona
+        prefix. Children spawned after this inherit the same team via
+        :attr:`active_team`.
+        """
+        self.active_team = team
+        if team is None:
+            self._goal_state.team_brief = ""
+            return
+        preamble = getattr(team, "manager_preamble", lambda: "")()
+        # The manager's own profile instructions (the reusable BASE) sit in
+        # front of the team brief so a custom manager keeps its voice when
+        # this session was not launched with --agent. A packaged starter
+        # resolved by name is enough; a missing profile costs nothing.
+        manager_name = getattr(team, "manager", "") or ""
+        if manager_name and self.agent_registry is not None:
+            try:
+                from local_operator.agent_profiles import resolve_profile
+
+                profile = resolve_profile(manager_name, registry=self.agent_registry)
+            except Exception:  # noqa: BLE001
+                profile = None
+            if profile is not None and profile.preamble:
+                preamble = profile.preamble + (preamble or "")
+            elif profile is None:
+                # ``resolve_profile`` intentionally resolves only delegation
+                # roles. A team manager may instead be a reusable specialist;
+                # load its base prompt directly, but only when the explicit
+                # specialist marker is present so private chat agents are not
+                # pulled into team context by a coincidental name.
+                try:
+                    from local_operator.agent_profiles import is_specialist
+
+                    specialist = self.agent_registry.get_agent_by_name(manager_name)
+                    specialist_prompt = (
+                        self.agent_registry.get_agent_system_prompt(specialist.id)
+                        if specialist is not None and is_specialist(specialist)
+                        else ""
+                    )
+                except Exception:  # noqa: BLE001
+                    specialist_prompt = ""
+                if specialist_prompt.strip():
+                    preamble = (
+                        "<manager-profile>\n"
+                        + specialist_prompt.strip()
+                        + "\n</manager-profile>\n\n"
+                        + (preamble or "")
+                    )
+        self._goal_state.team_brief = preamble or ""
 
     @property
     def variables(self) -> Any:
@@ -2565,6 +2629,7 @@ class Session:
             variables=self._variables,
             job_id=self._job_id,
             agent_registry=self.agent_registry,
+            team_registry=self.team_registry,
             delegated_tools={
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },

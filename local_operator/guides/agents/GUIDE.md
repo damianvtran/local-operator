@@ -59,14 +59,20 @@ Roles resolve from the operator's registry first, then from packaged starters (`
 
 A role's tool allowlist is a capability boundary, not advice. A `reviewer` has no `edit`/`write` — it reads and runs tests but cannot alter what it reviews, which is what stops a reviewer from silently reviewing its own patch. Roles that do not coordinate also lose `task`/`wait`/`jobs`.
 
-Use the `agent` tool to work with roles:
+Use the `agent` tool to work with roles and specialists:
 
 - `search` — which role fits a task, by meaning. Use it when you are about to delegate something specialized and are not sure a role exists.
 - `list` / `show` — what exists, and what a role actually says.
 - `install` — pull a packaged starter into the registry on first need.
-- `create` / `update` — author a role, or FIX one whose guidance produced a bad run. Write `description` as the trigger condition ("reviewing a merge request"), not as a job title, because that text is what `search` matches.
+- `create` / `update` — author a role (`kind='role'`, the default) or a specialist (`kind='specialist'`), or FIX one whose guidance produced a bad run. Write `description` as the trigger condition ("reviewing a merge request"), not as a job title, because that text is what `search` matches. `instructions` are the reusable BASE behaviour; a team layers collaboration and project briefs on top without rewriting them.
+
+When a user asks for a named specialist — "create a User Dashboard Agent that knows our release practices" — that is `kind='specialist'` with a real instruction set, not a one-off prompt. Put it on a team roster later rather than baking the team into the agent.
 
 When a delegated run goes wrong in a way the role should have prevented, update the role rather than only patching this one prompt. That is the mechanism by which review guidance improves instead of being re-derived every time.
+
+## Teams
+
+A team is a named roster of these agents under one manager, plus collaboration and project briefs that do not belong on any one agent. Read `guide://teams` before creating or modifying a team, and before answering a question about how teams work.
 
 ## Awaiting delegated work
 

@@ -264,6 +264,7 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # only its PRESENCE is read here, since this test is about the
             # ORDER of a fully-capable inventory.
             agent_registry=object(),
+            team_registry=object(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)
@@ -376,6 +377,19 @@ def test_credentials_ride_the_volatile_tail_as_names_only() -> None:
     # Idle sessions pay nothing: no names means no block.
     idle = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
     assert "<session-credentials>" not in idle[3]
+
+
+def test_team_brief_rides_the_volatile_tail() -> None:
+    """A /team attach must not invalidate the cached persona prefix."""
+    blocks = build_system_blocks(
+        TOOLS, SKILLS, ENV, DATE, team_brief="[team: release]\nYou coordinate."
+    )
+    assert "<team>" in blocks[3]
+    assert "[team: release]" in blocks[3]
+    for block in blocks[:3]:
+        assert "team: release" not in block
+    idle = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+    assert "<team>" not in idle[3]
     # Same names keep the head byte-stable.
     again = build_system_blocks(
         TOOLS, "other skills", "other env", "2027-01-01", credentials=["GITHUB_TOKEN", "DEPLOY_KEY"]

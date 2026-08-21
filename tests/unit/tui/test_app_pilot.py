@@ -120,6 +120,10 @@ class FakeSession:
         # relies on, and a fake that reimplements it as a plain assignment
         # would let a regression in that rule pass every pilot test.
         self._name_state = ConversationName()
+        #: Optional team registry for ``/team``. Tests that exercise teams
+        #: assign a real ``TeamRegistry``; everyone else pays nothing.
+        self.team_registry: Any | None = None
+        self.attached_teams: list[Any] = []
 
     @property
     def session_id(self) -> str:
@@ -161,6 +165,9 @@ class FakeSession:
     def set_goal(self, text: str) -> str:
         self._goal = (text or "").strip()
         return self._goal
+
+    def attach_team(self, team: Any) -> None:
+        self.attached_teams.append(team)
 
     @property
     def variables(self) -> Any:

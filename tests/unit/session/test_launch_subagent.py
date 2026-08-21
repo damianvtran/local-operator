@@ -120,6 +120,140 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     await parent.dispose()
 
 
+def _agent_fields(**overrides):
+    from typing import Any
+
+    from local_operator.agents import AgentEditFields
+
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
+def test_subagent_only_loads_explicit_specialist_instructions(tmp_path):
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.subagent import _specialist_instructions
+
+    registry = AgentRegistry(tmp_path / "config")
+    private = registry.create_agent(
+        _agent_fields(name="private-chat", description="Personal notes")
+    )
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="dashboard-release",
+            description="Release the dashboard",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(private.id, "PRIVATE USER CONTEXT")
+    registry.set_agent_system_prompt(specialist.id, "Follow the release checklist.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    assert _specialist_instructions("private-chat", parent) == ""
+    assert _specialist_instructions("dashboard-release", parent) == "Follow the release checklist."
+
+
+def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.teams import Team, TeamMember
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    manager = registry.create_agent(
+        AgentEditFields(
+            name="dashboard-release",
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            description="Release the dashboard",
+            tags=None,
+            categories=["specialist"],
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    registry.set_agent_system_prompt(manager.id, "Follow the dashboard release checklist.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    parent.attach_team(
+        Team(
+            id="t1",
+            name="feature-release",
+            created_date=datetime.now(timezone.utc),
+            manager="dashboard-release",
+            members=[TeamMember(role="coder")],
+            instructions="Review before merge.",
+        )
+    )
+
+    brief = parent._goal_state.team_brief
+    assert "Follow the dashboard release checklist." in brief
+    assert "Review before merge." in brief
+
+
+@pytest.mark.asyncio
+async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monkeypatch):
+    """A manager session's children inherit collaboration and project context
+    without the manager restating them in the task prompt."""
+    from datetime import datetime, timezone
+
+    from local_operator.teams import Team, TeamMember
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream)
+    parent.attach_team(
+        Team(
+            id="t1",
+            name="feature-release",
+            created_date=datetime.now(timezone.utc),
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions="Review before merge.",
+            project="user-dashboard",
+        )
+    )
+    events: list[AgentEvent] = []
+    parent.subscribe(events.append)
+    parent._launch_subagent(label="code", prompt="implement the button", agent="coder")
+    await wait_for(lambda: any(e.type == "subagent_end" for e in events))
+    child_prompt = stream.requests[0].messages[0].text
+    assert "[team: feature-release]" in child_prompt
+    assert "You are coder on this team" in child_prompt
+    assert "Review before merge." in child_prompt
+    assert "user-dashboard" in child_prompt
+    assert "implement the button" in child_prompt
+    await parent.dispose()
+
+
 @pytest.mark.asyncio
 async def test_launch_subagent_is_wired_as_subagent_launcher(tmp_path, monkeypatch):
     """The ToolContext built for a turn carries _launch_subagent as the
