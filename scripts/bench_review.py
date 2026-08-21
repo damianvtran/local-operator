@@ -45,8 +45,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -81,7 +82,7 @@ class Product:
     unit_price_cents: int
     stock: int
 ''',
-    "inventory/pricing.py": '''"""Pricing math. All money is integer cents; callers never see floats."""
+    "inventory/pricing.py": '''"""Pricing math. Money is integer cents; callers never see floats."""
 
 from inventory.models import Product
 
@@ -186,14 +187,16 @@ PLANTED: list[tuple[str, str, str, str]] = [
         "MAJOR",
         # pct=10 means 10%; the diff divides by 10000 and prices at 0.1%.
         r"10000|percent|pct\b|discount|divisor",
-        r"wrong|incorrect|instead of|should (be|have been)|100\s?[x\u00d7]|factor of 100|two orders of magnitude|0\.1\s?%|not 900|bug|broken|off by",
+        r"wrong|incorrect|instead of|should (be|have been)|100\s?[x\u00d7]|"
+        r"factor of 100|two orders of magnitude|0\.1\s?%|not 900|bug|broken|off by",
     ),
     (
         "negative-discount-inflates-total",
         "MAJOR",
         # No validation on pct: pct=-50 CHARGES 150%.
         r"negative|validat|pct|discount",
-        r"missing|no validation|unvalidated|(without|lacks?).{0,20}validat|inflat|nonsense|silent|wrong|accepts any|not (validated|checked|clamped)",
+        r"missing|no validation|unvalidated|(without|lacks?).{0,20}validat|"
+        r"inflat|nonsense|silent|wrong|accepts any|not (validated|checked|clamped)",
     ),
     (
         "rounding-float-cents",
@@ -221,7 +224,7 @@ PLANTED: list[tuple[str, str, str, str]] = [
 
 
 DIFF_FILES_CONTENT: dict[str, str] = {
-    "inventory/pricing.py": '''"""Pricing math. All money is integer cents; callers never see floats."""
+    "inventory/pricing.py": '''"""Pricing math. Money is integer cents; callers never see floats."""
 
 from inventory.models import Product
 
@@ -282,7 +285,7 @@ def test_discounted_total_takes_ten_percent():
 ''',
 }
 
-REVIEW_PROMPT = """Review the changes on this branch. The base is the `main` branch; the work is on the current HEAD.
+REVIEW_PROMPT = """Review the changes on this branch. Base is `main`; work is current HEAD.
 
 Use `git diff main..HEAD` to see the change. The review is the diff; the tree is context.
 
@@ -309,7 +312,7 @@ def iter_events(text: str):
             yield event
 
 
-def prompt_side_tokens(usage: dict) -> int:
+def prompt_side_tokens(usage: dict[str, Any]) -> int:
     context = usage.get("context_tokens")
     if context:
         return int(context)
@@ -434,7 +437,8 @@ class Score:
 #: "no BLOCKERs" must not void a real finding elsewhere in the same review,
 #: so only defect-clearing verbs/phrases count, not severity-level negations.
 _ATTACK_WORDS = re.compile(
-    r"\b(attacks?|disputes?|refutes?|debunks?|no (bug|issue|defect|problem)|not a (bug|issue|defect|problem)|"
+    r"\b(attacks?|disputes?|refutes?|debunks?|"
+    r"no (bug|issue|defect|problem)|not a (bug|issue|defect|problem)|"
     r"correct(ly)? (handles|manages|applies|computes|validates)|preserved correctly|fine as-is)\b",
     re.IGNORECASE,
 )
@@ -470,7 +474,8 @@ def score_review(text: str) -> Score:
         # The heading must not itself be a negation ("## No BLOCKERs") — the
         # [^\n]* window between marker and newline would otherwise swallow it.
         raised = re.search(
-            r"(?ms)^\s*#{1,4}\s*(?!.*\bno\b)(?!.*\bnone\b)[^\n]*BLOCKER[^\n]*\n.{0,400}(?:" + guard_topic + ")",
+            r"(?ms)^\s*#{1,4}\s*(?!.*\bno\b)(?!.*\bnone\b)[^\n]*BLOCKER"
+            r"[^\n]*\n.{0,400}(?:" + guard_topic + ")",
             text,
             re.IGNORECASE,
         )
@@ -588,8 +593,6 @@ def run_arm(
         # selector with a different effort — that is a real route). Pointing
         # the run at its own config dir keeps the pin out of the operator's
         # real config; the auth store is symlinked in so credentials resolve.
-        import yaml
-
         run_config = workdir / "lop-config"
         run_config.mkdir(exist_ok=True)
         real_config = Path.home() / ".local-operator"
@@ -597,20 +600,16 @@ def run_arm(
             target = real_config / name
             if target.exists() and not (run_config / name).exists():
                 (run_config / name).symlink_to(target)
+        # Hand-written YAML: the document is tiny and static, and importing
+        # PyYAML here made pyright warn about missing stubs in CI.
         (run_config / "config.yml").write_text(
-            yaml.safe_dump(
-                {
-                    "values": {
-                        "retry": {
-                            "fallbackChains": {
-                                f"{hosting}/{model}": [
-                                    {"provider": hosting, "model": model, "effort": effort}
-                                ]
-                            }
-                        }
-                    }
-                }
-            ),
+            "values:\n"
+            "  retry:\n"
+            "    fallbackChains:\n"
+            f"      {hosting}/{model}:\n"
+            f"      - effort: {effort}\n"
+            f"        model: {model}\n"
+            f"        provider: {hosting}\n",
             encoding="utf-8",
         )
         env = {**os.environ, "LOCAL_OPERATOR_CONFIG_DIR": str(run_config)}
