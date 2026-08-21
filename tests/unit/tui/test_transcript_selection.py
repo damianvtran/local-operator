@@ -63,6 +63,7 @@ from rich.text import Text
 from textual import events
 from textual.content import Content
 from textual.geometry import Offset
+from textual.document._document import Selection as DocumentSelection
 from textual.selection import Selection
 from textual.visual import RichVisual
 
@@ -1130,7 +1131,7 @@ async def test_ctrl_c_with_a_live_range_copies_it() -> None:
         await pilot.pause()
         editor = await _composer(app, pilot, "summarise the ingest path please")
         app._clipboard = ""
-        editor.selection = Selection((0, 0), (0, 20))
+        editor.selection = DocumentSelection((0, 0), (0, 20))
         await pilot.pause()
 
         await pilot.press("ctrl+c")
@@ -1479,7 +1480,7 @@ async def test_the_read_only_composer_still_copies_what_it_shows() -> None:
         # Read-only or not, the gesture is the explicit one: a range, then
         # Ctrl+C. The text is the app's, which is exactly why someone would
         # lift it out — and why it never sits on the clipboard unasked.
-        editor.selection = Selection((0, 0), (0, 7))
+        editor.selection = DocumentSelection((0, 0), (0, 7))
         await pilot.pause()
         await pilot.press("ctrl+c")
         await pilot.pause()
@@ -2039,7 +2040,7 @@ async def test_a_new_selection_after_a_copy_does_not_rearm_the_interrupt() -> No
         # actually protects is that an unrelated selection cannot resurrect
         # a leftover deferral that would abort or quit; the press copies the
         # range on screen, nothing else.
-        editor.selection = Selection((0, 10), (0, 20))
+        editor.selection = DocumentSelection((0, 10), (0, 20))
         await pilot.pause()
         assert (
             editor.selected_text == "the ingest"
