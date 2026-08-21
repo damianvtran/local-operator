@@ -437,7 +437,7 @@ export function Composer({
 								? "session ended"
 								: projection.streaming
 									? "steer this turn…"
-									: "Message…"
+									: "message…"
 						}
 						disabled={disabled}
 						rows={1}

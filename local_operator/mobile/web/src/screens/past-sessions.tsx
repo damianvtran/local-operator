@@ -87,7 +87,7 @@ export function PastSessionsScreen() {
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-muted"
+					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 			</div>
 
@@ -121,9 +121,15 @@ export function PastSessionsScreen() {
 									) : null}
 								</span>
 								<span className="block truncate font-mono text-mono-sm text-ink-dim">
-									{s.id} · {formatRelative(s.mtime)}
+									{s.id}
 								</span>
 							</div>
+							{/* The timestamp gets its OWN shrink-0 slot: appended to the
+							   truncating id it was always the part clipped away, and
+							   "which session was this" is exactly what it answers. */}
+							<span className="shrink-0 text-meta text-ink-dim">
+								{formatRelative(s.mtime)}
+							</span>
 							<button
 								type="button"
 								onClick={() => void resume(s.id)}
