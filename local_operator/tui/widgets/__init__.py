@@ -17,6 +17,7 @@ from local_operator.tui.widgets.editor import (
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
+    ShellModeChanged,
 )
 from local_operator.tui.widgets.status_line import StatusLine
 from local_operator.tui.widgets.toast import Toast
@@ -35,6 +36,7 @@ __all__ = [
     "EditorQuit",
     "EditorSubmitted",
     "InterruptRequested",
+    "ShellModeChanged",
     "NoticeBlock",
     "StatusLine",
     "Toast",
