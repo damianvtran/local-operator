@@ -1607,6 +1607,38 @@ class SessionStreamFn:
         self._route_state.primary_retry_at_ms = int(time.time() * 1000) + 60_000
         self._primary_selector = primary_selector
 
+    def withdraw_fallback(self) -> None:
+        """The user explicitly re-selected a model; drop the pinned fallback route.
+
+        The inverse of :meth:`restore_fallback`. A fallback pin rescues the
+        SELECTED model by routing around it; when the user deliberately picks a
+        model again — including re-picking the very model a fallback displaced
+        them from — the pin's premise is withdrawn and the next request must go
+        to the primary.
+
+        Needed because the ordinary clear is selector-driven: ``preflight_usage``
+        resets the route only when it sees a DIFFERENT selector than the memoized
+        primary. A same-model re-selection never changes the selector, so that
+        lazy clear never fires and the session stays glued to the fallback until
+        the user switches away and back — the reported stuck-fallback symptom.
+
+        Silent on purpose — :meth:`FailoverRouteState.clear`, not
+        ``clear_settled``. The owning Session has already moved its own display
+        state and emitted the ``ModelChangeEvent`` for this withdrawal; firing a
+        settle edge here would re-persist and re-announce what the session just
+        recorded. Hosts without a route capability simply never call this.
+
+        Must stay SYNCHRONOUS for the same reason :meth:`on_model_changed` does:
+        ``Session.set_model`` is sync and discards a returned awaitable.
+        """
+        self._route_state.clear()
+        # The selector memo still matches the re-selected model, so preflight
+        # would otherwise trust the quota reading that pinned the fallback for
+        # the rest of the TTL. Reset the clock so the explicit re-selection gets
+        # a fresh probe at the next boundary instead of inheriting the stale
+        # verdict.
+        self._usage_checked_at = 0.0
+
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
         self._message_boundary_pending = True

@@ -108,12 +108,18 @@ class SessionProtocol(Protocol):
         """``provider/model`` of the spec actually serving requests."""
         ...
 
-    def set_model(self, model: ModelSpec) -> None:
+    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
         """Swap the model spec; in force from the very next provider call.
 
         The TUI's ``/model <provider>/<id>`` path calls this after building a
         new spec, so no session teardown is required. Also changes compaction
         thresholds for the new context window.
+
+        ``explicit`` marks a deliberate model CHOICE (``/model``, the phone's
+        model switch) rather than an internal knob adjustment (``/effort``,
+        sampling overrides). While a provider fallback is pinned, an explicit
+        choice withdraws the pin even when it re-selects the model the fallback
+        displaced — the user reclaiming their model ends the rescue route.
 
         Not "from the next turn": an implementation is expected to reach the
         RUNNING turn too. A turn is a chain of provider calls with tool batches

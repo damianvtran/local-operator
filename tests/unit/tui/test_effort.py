@@ -46,7 +46,7 @@ class EffortSession(FakeSession):
     def model(self) -> Any:
         return self._spec
 
-    def set_model(self, model: Any) -> None:
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
         self._spec = model
 
 

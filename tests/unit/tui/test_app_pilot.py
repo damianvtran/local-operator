@@ -165,7 +165,7 @@ class FakeSession:
     def effective_model_label(self) -> str:
         return self.model_label
 
-    def set_model(self, model: Any) -> None:
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
         pass
 
     @property
@@ -1970,7 +1970,7 @@ async def test_model_switch_calls_session_set_model() -> None:
     session = FakeSession()
     set_models: list[Any] = []
 
-    def set_model(spec):
+    def set_model(spec, *, explicit=False):
         set_models.append(spec)
 
     session.set_model = set_model  # type: ignore[attr-defined]
@@ -3625,7 +3625,7 @@ class _SwitchableSession(FakeSession):
     def model_label(self) -> str:
         return self._label
 
-    def set_model(self, model) -> None:
+    def set_model(self, model, *, explicit: bool = False) -> None:
         self._label = f"{model.provider}/{model.model_id}"
 
 

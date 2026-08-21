@@ -116,7 +116,7 @@ class FakeSession:
     def effective_model_label(self) -> str:
         return self.model_label
 
-    def set_model(self, model: Any) -> None:
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
         pass
 
     @property

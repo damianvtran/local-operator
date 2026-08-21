@@ -238,7 +238,10 @@ class OwnedSessionHandle(SessionHandle):
         from local_operator.model.configure import build_model_spec
 
         spec = await asyncio.to_thread(build_model_spec, provider, model_id)
-        self._session.set_model(spec)
+        # ``explicit``: the phone's model switch is a deliberate choice, so a
+        # pinned fallback route is withdrawn even when it re-selects the model
+        # the fallback displaced — see ``Session.set_model``.
+        self._session.set_model(spec, explicit=True)
         self._refresh_state()
         return f"model: {self._projection.model_label}"
 

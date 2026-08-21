@@ -7,6 +7,7 @@ hits the same endpoints as before through a descriptor table.
 """
 
 import json
+import time
 import zlib
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1194,6 +1195,53 @@ async def test_transport_fallback_cooldown_skips_quota_probe(tmp_path) -> None:
             await stream.preflight_usage(model)
         fetch.assert_not_called()
         assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_fallback_clears_the_route_and_reopens_the_quota_probe(
+    tmp_path,
+) -> None:
+    """An explicit re-selection ends the rescue route, whatever the cooldown says.
+
+    The selector-driven clear in ``preflight_usage`` never fires for a
+    same-model re-selection, so the session tells the stream fn directly. Two
+    things must move: the pinned route (including its cooldown — the user's
+    choice outranks the backoff that pinned the fallback), and the quota memo,
+    so the next boundary re-probes the primary instead of trusting the reading
+    that caused the pin. Silent: the owning session already announced this
+    withdrawal, so no settle edge fires here.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True}},
+        session_id="session-a",
+    )
+    stream._primary_selector = "anthropic/claude-opus-5"
+    await stream._route_state.activate(
+        FallbackTarget("openai/gpt-5.3-codex"),
+        "provider failure",
+        cooldown_ms=3_600_000,  # an hour of cooldown must not survive the withdrawal
+    )
+    settles: list[Any] = []
+    # Installed AFTER the pin: ``activate`` settles the pin itself, and the
+    # assertion below is that the WITHDRAWAL adds nothing to this list.
+    stream._route_state.on_settle = lambda target, reason: settles.append((target, reason))
+    # A fresh quota reading just pinned the fallback; the withdrawal must not
+    # inherit it.
+    stream._usage_checked_selector = "anthropic/claude-opus-5"
+    stream._usage_checked_at = time.monotonic()
+
+    try:
+        stream.withdraw_fallback()
+        assert stream._route_state.active is None
+        assert stream._route_state.primary_retry_due()  # cooldown gone with the pin
+        assert stream._usage_checked_at == 0.0  # memo reset: next boundary re-probes
+        assert settles == []  # silent — the session owns this announcement
     finally:
         await stream.close()
         store.close()
