@@ -2004,12 +2004,12 @@ class OperatorApp(App[None]):
                     # command's own card; the shape record_shell writes has
                     # exactly one, so consuming here is exact in practice and
                     # conservative in theory.
-                    open_settled = bool(
+                    user_run = bool(
                         bang_pending
                         and tool_calls[0] is call
                         and getattr(call, "name", "") == "bash"
                     )
-                    self._replay_tool_call(call, results, open_on_settle=open_settled)
+                    self._replay_tool_call(call, results, user_run=user_run)
                     appended = True
                 stop = getattr(message, "stop_reason", None)
                 if stop == "refusal":
@@ -2048,7 +2048,7 @@ class OperatorApp(App[None]):
             transcript.follow_tail()
 
     def _replay_tool_call(
-        self, call: Any, results: dict[str, Any], *, open_on_settle: bool = False
+        self, call: Any, results: dict[str, Any], *, user_run: bool = False
     ) -> None:
         """Mount one settled tool row for a call from a previous session.
 
@@ -2061,9 +2061,8 @@ class OperatorApp(App[None]):
             getattr(call, "id", "") or "",
             getattr(call, "name", "") or "",
             getattr(call, "arguments", None) or {},
+            user_run=user_run,
         )
-        if open_on_settle:
-            card.open_on_settle()
         self._append_block(card)
         result = results.get(getattr(call, "id", "") or "")
         if result is None:
@@ -5506,11 +5505,9 @@ class OperatorApp(App[None]):
         from local_operator.tools.builtin import execute_bash
 
         call_id = f"shell-{time.monotonic_ns()}"
-        card = ToolCard(call_id, "bash", {"command": command})
-        # The user ran this command TO SEE its output; a collapsed receipt
-        # hides exactly that behind a click nobody asked for. The card opens
-        # at its first settle (and stays a normal collapsible row after).
-        card.open_on_settle()
+        # user_run: the row says WHO ran it (`you:` chip) and opens at settle,
+        # because the user ran the command to read its output.
+        card = ToolCard(call_id, "bash", {"command": command}, user_run=True)
         self._append_block(UserBlock(f"! {command}"))
         self._append_block(card)
         signal = AbortSignal()

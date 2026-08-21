@@ -180,6 +180,16 @@ def test_blocks_isolate_volatile_content() -> None:
     # never invalidate the conversation prefix after it.
     blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
     assert len(blocks) == 4
+
+
+def test_the_system_prompt_names_user_run_bang_receipts() -> None:
+    """The model must be able to tell a command the USER ran (bang-mode) from
+    one it issued itself: a `! <command>` user message + bash call + result is
+    user-produced context, never the model's own earlier action."""
+    blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+    head = blocks[0]
+    assert "bang-mode" in head
+    assert "the USER ran directly" in head
     instructions, inventory, env_block, skills = blocks
 
     # block 0: stable instructions only
