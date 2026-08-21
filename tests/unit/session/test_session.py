@@ -40,6 +40,7 @@ from local_operator.harness.types import (
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import (
     IMAGE_DROPPED_NOTICE,
+    IMAGE_OMITTED_TEXT_ONLY_NOTICE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     Session,
     _paired_prefix,
@@ -48,6 +49,12 @@ from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
+TEXT_ONLY_MODEL = ModelSpec(
+    provider="test",
+    model_id="Text Only Test",
+    context_window=100_000,
+    supports_images=False,
+)
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:
@@ -1532,6 +1539,283 @@ async def test_an_ordinary_failure_leaves_images_alone(tmp_path):
     await session.prompt("go")
     assert not session._images_rejected
     assert _image_blocks(stream.requests[0]) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_switching_to_a_text_only_model_omits_images_from_context(tmp_path):
+    """The reported failure: a session with screenshots in its history was
+    switched onto a model that cannot receive images, and every turn died with
+    the provider's no-image-endpoint refusal until the session was abandoned.
+
+    The render now omits the blocks for a model whose spec says
+    ``supports_images=False`` — proactively, not after a wasted 4xx — and the
+    switch announces WHY the model no longer sees the images. And because the
+    omission reads the CURRENT spec, switching back to a vision model restores
+    the images on the very next request: the transcript was never touched.
+    """
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")] for _ in range(2)]
+    )
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[TextContent(text="look at this"), ImageContent(data="Zm9v")],
+            )
+        ]
+    )
+
+    session.set_model(TEXT_ONLY_MODEL)
+
+    await session.prompt("what was in the image?")
+    # The announcement rides the first render that strips the blocks, so it
+    # lands right after the turn that triggered it.
+    await wait_for(lambda: any(isinstance(event, NoticeEvent) for event in events))
+    request = stream.requests[-1]
+    assert _image_blocks(request) == 0, "the text-only model was sent the image"
+    sent = [
+        block.text
+        for message in request.messages
+        for block in message.content
+        if isinstance(block, TextContent)
+    ]
+    assert IMAGE_OMITTED_TEXT_ONLY_NOTICE in sent, "the model was left with a silent hole"
+    assert not session._images_rejected, "a capability switch must not trip the sticky degrade"
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert any(
+        "Text Only Test" in event.text and "does not accept images" in event.text
+        for event in notices
+    ), "the switch did not explain the omission"
+
+    # Switching back to a vision model restores the images: the omission was
+    # never written into the transcript.
+    session.set_model(MODEL)
+    await session.prompt("and now?")
+    assert _image_blocks(stream.requests[-1]) == 1, "the restore did not put the image back"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_text_only_omission_notice_fires_exactly_once(tmp_path):
+    """The announcement is latched: the render runs on every provider call, so
+    an unlatched notice would repaint the same warning on every turn until the
+    user learns to ignore it. One explanation per session is the contract."""
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")] for _ in range(2)]
+    )
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.seed_history(
+        [Message(role="user", content=[TextContent(text="look"), ImageContent(data="Zm9v")])]
+    )
+
+    session.set_model(TEXT_ONLY_MODEL)
+    await session.prompt("one")
+    await session.prompt("two")
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert len(notices) == 1, f"the omission was announced {len(notices)} times"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_new_attachment_on_a_text_only_model_is_announced(tmp_path):
+    """A screenshot pasted AFTER the switch must not vanish silently: the
+    first render that carries it posts the omission notice, so the transcript
+    answers "where did my image go" right under the prompt that cites it
+    (design review round 1, D2)."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    session.set_model(TEXT_ONLY_MODEL)
+    # No images yet: the latch stays unset, so the switch itself is quiet.
+    assert session._text_only_omission_announced is False
+    assert [event for event in events if isinstance(event, NoticeEvent)] == []
+
+    await session.prompt("look at this", [ImageContent(data="Zm9v")])
+    assert _image_blocks(stream.requests[-1]) == 0
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert len(notices) == 1 and "does not accept images" in notices[0].text
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_switching_to_a_text_only_model_without_images_stays_quiet(tmp_path):
+    """The notice answers "where did my screenshots go"; a text-only
+    conversation has nothing to omit, so the switch must not apologise for
+    images nobody sent — that would be noise on every drop to a cheaper model.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    session.set_model(TEXT_ONLY_MODEL)
+    # No images in the history: the latch stays unset and nothing is posted.
+    # Asserting the latch directly is deterministic where sleeping and counting
+    # notices only proves a negative (agent review round 1, NIT 1).
+    assert session._text_only_omission_announced is False
+    assert [event for event in events if isinstance(event, NoticeEvent)] == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_model_from_the_start_never_receives_images(tmp_path):
+    """A session BOOTED on a text-only model with a replayed vision history
+    (a resume of a session that ran on a vision model) omits the blocks from
+    its very first request — no switch and no refusal needed — and the
+    announcement still lands: the render-latch notice covers the boot path
+    the switch-only notice left silent (design review round 1, D1)."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    transcript = Transcript(tmp_path / "sess")
+    session = Session(
+        model=TEXT_ONLY_MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.seed_history(
+        [Message(role="user", content=[TextContent(text="hi"), ImageContent(data="Zm9v")])]
+    )
+    await session.prompt("go")
+    assert _image_blocks(stream.requests[0]) == 0
+    await wait_for(lambda: any(isinstance(event, NoticeEvent) for event in events))
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_on_a_text_only_model_keeps_images_in_the_live_context(
+    tmp_path, monkeypatch
+):
+    """A compaction committed while on a text-only model must NOT bake the
+    omission into the live context (agent review round 1, MAJOR 1).
+
+    The summary request is stripped (the text-only model cannot take images),
+    but the KEPT window is rebuilt from the unstripped render, so switching
+    back to a vision model afterwards still restores the screenshots for the
+    kept messages — the non-sticky contract holds across a compaction."""
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = 0.80
+        threshold_tokens: int = Field(default=600_000)
+        auto_continue: bool = False
+        mid_turn_enabled: bool = False
+
+    compacted = {"done": False}
+    summary_requests: list[list[Message]] = []
+
+    def estimate_messages_tokens(messages):
+        return 5_000 if compacted["done"] else 90_000
+
+    def messages_tokens_upper_bound(messages):
+        return 5_500 if compacted["done"] else 95_000
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(
+        fake_api,
+        "prune_tool_outputs",
+        lambda messages, now_ts, last, **kw: (list(messages), False),
+    )
+    setattr(fake_api, "estimate_messages_tokens", estimate_messages_tokens)
+    setattr(fake_api, "messages_tokens_upper_bound", messages_tokens_upper_bound)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    # Cut after the FIRST entry: it is summarized away (and its image must
+    # NOT reach the summary request), while the second image-bearing message
+    # lands in the KEPT window — exactly the blocks the strip would have
+    # baked out of the live context.
+    setattr(fake_api, "find_cut_point", lambda messages, keep: 1)
+    setattr(
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: min(int(window * 0.8), 600_000),
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
+    setattr(
+        fake_api,
+        "should_compact",
+        lambda ctx_tokens, window, settings: ctx_tokens
+        > fake_api.resolve_threshold_tokens(window, settings),
+    )
+
+    async def summarize(messages, complete_fn):
+        compacted["done"] = True
+        summary_requests.append(list(messages))
+        return "SUMMARY"
+
+    setattr(fake_api, "summarize_messages", summarize)
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    setattr(fake_pkg, "api", fake_api)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    monkeypatch.setitem(
+        sys.modules,
+        "local_operator.compaction.thresholds",
+        types.ModuleType("local_operator.compaction.thresholds"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "local_operator.compaction.snapcompact",
+        types.ModuleType("local_operator.compaction.snapcompact"),
+    )
+
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")] for _ in range(2)]
+    )
+    session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[TextContent(text="first shot"), ImageContent(data="Zm9v")],
+            ),
+            Message(
+                role="user",
+                content=[TextContent(text="second shot"), ImageContent(data="Zm9v")],
+            ),
+        ]
+    )
+    session.set_model(TEXT_ONLY_MODEL)
+
+    await session.prompt("go")
+    # The pass ran and its summary request carried no image blocks.
+    assert compacted["done"]
+    assert summary_requests
+    assert not any(
+        isinstance(block, ImageContent)
+        for message in summary_requests[0]
+        for block in message.content
+    ), "the summary request was sent images the model cannot take"
+
+    # The kept window in the LIVE context still holds the image block...
+    kept_images = [
+        block
+        for message in session._context.messages
+        if isinstance(message, Message)
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+    assert kept_images, "the compaction baked the omission into the live context"
+    # ...so switching back to a vision model restores it on the wire.
+    session.set_model(MODEL)
+    await session.prompt("again")
+    assert _image_blocks(stream.requests[-1]) == 1
     await session.dispose()
 
 
