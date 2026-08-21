@@ -2605,7 +2605,11 @@ class Session:
         Precedence: an explicit ``effort`` on the launch beats the role's own
         default, which beats the session model. That order is what lets a role
         say "this job is usually cheap" while a caller who knows this instance
-        is hard can still pay for the better model.
+        is hard can still pay for the better model. No role hardcodes a tier
+        here: the packaged seeds deliberately pin none, so a delegated child
+        inherits the session's model unless the OPERATOR chose a tier — a
+        shipped default that silently downgraded review quality could not be
+        traced to anything the operator decided.
         """
         wanted = effort
         if wanted is None and agent and agent != "task":
@@ -2617,8 +2621,6 @@ class Session:
                 profile = None
             if profile is not None:
                 wanted = profile.effort
-        if wanted is None and agent == "scout":
-            wanted = "lo"
         if wanted is None:
             return None
         try:

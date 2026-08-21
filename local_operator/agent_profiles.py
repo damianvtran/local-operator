@@ -112,7 +112,10 @@ class AgentProfile:
     filters the child's inventory to exactly those names. ``effort`` is the
     default model tier for the role and is always overridable per launch,
     because the right model for a role depends on the operator's provider mix
-    rather than on anything this file can know.
+    rather than on anything this file can know. The packaged seeds pin NO
+    tier: a child inherits the session's model unless the operator (or the
+    launch) picks one, so a review round never silently lands on a weaker
+    model than the session it is checking.
     """
 
     name: str
