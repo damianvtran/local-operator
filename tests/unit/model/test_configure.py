@@ -569,10 +569,13 @@ async def test_preflight_fallback_selection_skips_benched_targets(tmp_path) -> N
     try:
         # The stream driver benched zai after it exhausted its provider.
         stream._route_state.mark_target_failed(FallbackTarget("zai/glm-5.3"), cooldown_ms=300_000)
-        with patch(
-            "local_operator.providers.usage.fetch_usage",
-            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
-        ):
+
+        async def usage_for_access(_client, provider, **_kwargs):
+            # Anthropic is the exhausted primary; fallbacks must look usable
+            # so the quota-aware skip does not hide the bench preference.
+            return _anthropic_usage(100.0 if provider == "anthropic" else 20.0)
+
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
             await stream.preflight_usage(model)
 
         # Preflight pinned the SECOND fallback, not the benched head.
@@ -612,7 +615,9 @@ async def test_preflight_fallback_uses_a_benched_target_when_nothing_else_remain
         stream._route_state.mark_target_failed(FallbackTarget("zai/glm-5.3"), cooldown_ms=300_000)
         with patch(
             "local_operator.providers.usage.fetch_usage",
-            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+            side_effect=lambda _client, provider, **_kwargs: _anthropic_usage(
+                100.0 if provider == "anthropic" else 20.0
+            ),
         ):
             await stream.preflight_usage(model)
 
@@ -768,7 +773,13 @@ async def test_reserve_account_is_not_blocked_when_falling_back_cross_provider(t
     A lone reserve account with a cross-provider fallback used to be blocked
     until its window reset before the session moved to the fallback. The block
     is cross-process, so it also stranded every OTHER session — including ones
-    whose fallback chains could not rescue them."""
+    whose fallback chains could not rescue them.
+
+    Crossing the reserve threshold is also no longer a reason to LEAVE the
+    provider: the last account still holding spendable quota stays in
+    service until it is genuinely at 0%. The fallback is configured so the
+    old hop-at-10% behaviour would have pinned openai; staying on anthropic
+    is the contract this test now pins."""
     store = AuthStore(tmp_path / "auth.db")
     account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
     store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
@@ -793,10 +804,369 @@ async def test_reserve_account_is_not_blocked_when_falling_back_cross_provider(t
             await stream.preflight_usage(model)
 
         assert not store.is_blocked(account.id, "anthropic")
-        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+        assert stream._route_state.active is None
         # Another session (or process) with no fallback still reaches the account.
         access = await store.get_oauth_access("anthropic", "some-other-session")
         assert access is not None and access.credential_id == account.id
+    finally:
+        await stream.close()
+        store.close()
+
+
+def _anthropic_fable_usage(fable_used: float, five_hour_used: float = 0.0) -> UsageReport:
+    """The shape of a Fable request: the scoped weekly is the binding window.
+
+    Shared 5h/7d still apply (they always do), but a Fable model is also gated
+    by ``7 day (Fable)``. That is ``scope="model"`` when the Fable window is
+    the tightest — the path that used to hop providers without rotating
+    siblings."""
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used=five_hour_used, limit=100.0, unit="percent"),
+                window="5h",
+                shared=True,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:7d:fable",
+                label="7 day (Fable)",
+                amount=UsageAmount(used=fable_used, limit=100.0, unit="percent"),
+                window="7d",
+                shared=False,
+                tier="fable",
+                resets_at_ms=10**15,
+            ),
+        ],
+    )
+
+
+def _kimi_usage(used_percent: float) -> UsageReport:
+    return UsageReport(
+        provider="kimi",
+        limits=[
+            UsageLimit(
+                id="kimi:total",
+                label="Total quota",
+                amount=UsageAmount(used=used_percent, limit=100.0, unit="percent"),
+                shared=True,
+                resets_at_ms=10**15,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_path) -> None:
+    """A spent Fable weekly is per account, not per provider.
+
+    The reported cascade: primary on ``claude-fable-5``, first Anthropic
+    login's Fable window at 100% while siblings still had Fable headroom
+    (and every login still had 5h/7d), yet preflight hopped to Kimi because
+    ``scope="model"`` skipped sibling rotation. The first account is taken
+    out of rotation; the sibling with remaining Fable quota serves; no
+    provider failover fires."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    store.upsert_credential("kimi", _oauth("oauth-kimi", "kimi-a"))
+    session = _session_hashing_to_first_row(2)
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["kimi/k3"]},
+            }
+        },
+        session_id=session,
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+
+    async def usage_for_access(_client, provider, *, access_token=None, **_kwargs):
+        if provider == "kimi":
+            return _kimi_usage(90.0)
+        return _anthropic_fable_usage(100.0 if access_token == "oauth-a" else 16.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert store.is_blocked(first.id, "anthropic")
+        assert not store.is_blocked(second.id, "anthropic")
+        selected = await store.get_oauth_access("anthropic", session)
+        assert selected is not None and selected.credential_id == second.id
+        assert stream._route_state.active is None
+        assert any("trying another anthropic account" in notice for notice in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_last_account_in_reserve_stays_on_the_provider(tmp_path) -> None:
+    """Reserve is a preference between siblings, not a hop to the next provider.
+
+    One Anthropic account at 5% remaining, chain next is Kimi at 10% remaining
+    then a maxed Qwen then Grok. The old policy pinned Kimi the moment the
+    last Anthropic account crossed the 10% threshold, then pinned past Kimi
+    for the same reason. Spendable quota on the current provider must be
+    emptied before the cascade moves."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("kimi", _oauth("oauth-kimi", "kimi-a"))
+    store.upsert_credential("xai", _oauth("oauth-xai", "xai-a"))
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {
+                    "default": ["kimi/k3", "alibaba-token-plan/qwen3.8-max", "xai/grok-4.6"]
+                },
+            }
+        },
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+
+    async def usage_for_access(_client, provider, *, access_token=None, **_kwargs):
+        if provider == "kimi":
+            return _kimi_usage(90.0)
+        if provider == "xai":
+            return _kimi_usage(0.0)
+        return _anthropic_fable_usage(95.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert not store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active is None
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == account.id
+        assert any("continuing until anthropic quota is exhausted" in n for n in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_skips_a_depleted_fallback_provider(tmp_path) -> None:
+    """A maxed fallback is not a place to land.
+
+    Anthropic genuinely exhausted, Kimi at 10% remaining, Qwen at 100%. The
+    cascade must pin Kimi (spendable reserve) rather than Qwen (already
+    empty) or hopping past Kimi because 10% looks like a reason to leave."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("kimi", _oauth("oauth-kimi", "kimi-a"))
+    store.upsert_credential("xai", _oauth("oauth-xai", "xai-a"))
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["kimi/k3", "xai/grok-4.6"]},
+            }
+        },
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def usage_for_access(_client, provider, **_kwargs):
+        if provider == "anthropic":
+            return _anthropic_usage(100.0)
+        if provider == "kimi":
+            return _kimi_usage(90.0)
+        return _kimi_usage(100.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert stream._route_state.active == FallbackTarget("kimi/k3")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_skips_a_fully_spent_fallback_to_the_next_usable(tmp_path) -> None:
+    """When the chain's head fallback is at 0%, land on the next that isn't."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("kimi", _oauth("oauth-kimi", "kimi-a"))
+    store.upsert_credential("xai", _oauth("oauth-xai", "xai-a"))
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["kimi/k3", "xai/grok-4.6"]},
+            }
+        },
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def usage_for_access(_client, provider, **_kwargs):
+        if provider == "anthropic":
+            return _anthropic_usage(100.0)
+        if provider == "kimi":
+            return _kimi_usage(100.0)
+        return _kimi_usage(20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert stream._route_state.active == FallbackTarget("xai/grok-4.6")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_fallback_quota_is_unknown_when_an_oauth_account_is_omitted(tmp_path) -> None:
+    """One unread OAuth sibling prevents a provider-wide depleted verdict.
+
+    ``list_oauth_accesses`` omits refresh failures. If the one access it does
+    return is at 0%, the missing row is still UNKNOWN — not proof that every
+    account is depleted (agent review F1)."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(store, {"retry": {"usageAwareFallback": True}})
+
+    access = await store.get_oauth_access("anthropic", "session-a")
+    assert access is not None
+    survivor = first if access.credential_id == first.id else second
+
+    try:
+        with (
+            patch.object(store, "list_oauth_accesses", return_value=[access]),
+            patch(
+                "local_operator.providers.usage.fetch_usage",
+                side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+            ),
+        ):
+            verdict = await stream._provider_quota_availability(
+                "anthropic", "claude-opus-5", reserve_percent=10, cache={}
+            )
+
+        assert survivor.id in {first.id, second.id}
+        assert verdict == "unknown"
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_reserve_only_pool_settles_back_from_a_pinned_fallback(tmp_path) -> None:
+    """After every sibling is checked, reserve quota wins over the old pin.
+
+    Both Anthropic accounts have 5% Fable quota. The previous fallback must
+    clear after the second probe; attempted accounts are not counted as fresh
+    siblings that send the walk around once more (agent review F2)."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id=_session_hashing_to_first_row(2),
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+    stream._primary_selector = "anthropic/claude-fable-5"
+    await stream._route_state.activate(FallbackTarget("kimi/k3"), "previous failure", cooldown_ms=0)
+    # Permit the boundary probe of the primary while retaining the active pin.
+    stream._route_state.primary_retry_at_ms = 0
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_fable_usage(95.0),
+        ):
+            await stream.preflight_usage(model)
+
+        assert stream._route_state.active is None
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_depleted_oauth_does_not_hide_healthy_api_key(tmp_path) -> None:
+    """Availability follows the credential tier routing will actually use.
+
+    A blocked OAuth row is still enumerated for usage and reports 0%, but the
+    wire cascade falls through to the API key. Its healthy report prevents the
+    provider from being skipped (agent review F4)."""
+    store = AuthStore(tmp_path / "auth.db")
+    oauth = store.upsert_credential("kimi", _oauth("oauth-kimi", "kimi-a"))
+    store.block_credential(oauth.id, "kimi", block_ms=60_000)
+    api = store.upsert_credential("kimi", {"key": "sk-kimi", "source": "login"})
+    stream = create_stream_fn(store, {"retry": {"usageAwareFallback": True}})
+
+    selected = await store.get_oauth_access("kimi", "session-a", read_only=True)
+    assert selected is not None and selected.credential_id == api.id
+
+    async def usage_for_access(_client, provider, *, access_token=None, api_key=None, **_kwargs):
+        assert provider == "kimi"
+        return _kimi_usage(100.0 if access_token else 20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            verdict = await stream._provider_quota_availability(
+                "kimi", "k3", reserve_percent=10, cache={}
+            )
+
+        assert verdict == "usable"
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_depleted_selected_api_key_does_not_hide_an_unprobed_sibling(tmp_path) -> None:
+    """One empty key is not proof every key on the provider is empty.
+
+    The credential store exposes only the selected secret. When another API
+    key row exists, a depleted selected key therefore fails open so the stream
+    rotation can reach the sibling instead of skipping the provider (review
+    F5)."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("kimi", {"key": "sk-empty", "source": "login"})
+    second = store.upsert_credential("kimi", {"key": "sk-funded", "source": "login"})
+    session = _session_hashing_to_first_row(2)
+    stream = create_stream_fn(store, {"retry": {"usageAwareFallback": True}}, session_id=session)
+
+    selected = await store.get_oauth_access("kimi", session, read_only=True)
+    assert selected is not None and selected.credential_id == first.id
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _kimi_usage(100.0),
+        ):
+            verdict = await stream._provider_quota_availability(
+                "kimi", "k3", reserve_percent=10, cache={}
+            )
+
+        assert second.id != selected.credential_id
+        assert verdict == "unknown"
     finally:
         await stream.close()
         store.close()
