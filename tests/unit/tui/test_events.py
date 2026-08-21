@@ -414,6 +414,38 @@ def test_dispose_stops_flush_timer() -> None:
     assert app.timers[0].stopped
 
 
+def test_agent_end_sums_provider_reported_dollars_across_messages() -> None:
+    """A tool-using turn is many billed calls; the provider-reported dollar on
+    EACH message must be summed into the turn's aggregate, not overwritten by the
+    last one (the same rule the token buckets already follow)."""
+    from local_operator.harness.types import Usage
+
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    first = Message.assistant("")
+    first.usage = Usage(input_tokens=10, output_tokens=0, usd_cost=0.001)
+    second = Message.assistant("")
+    second.usage = Usage(input_tokens=20, output_tokens=0, usd_cost=0.002)
+    session.emit(AgentEndEvent(messages=[first, second]))
+    ended = [m for m in app.posted if isinstance(m, TurnEnded)]
+    assert ended and ended[-1].usage.usd_cost == pytest.approx(0.003)
+
+
+def test_agent_end_reported_dollar_is_none_when_no_message_carried_one() -> None:
+    """A turn whose calls carried only token counts must keep ``usd_cost`` as
+    ``None`` ("provider did not report"), so the app falls back to the estimate."""
+    from local_operator.harness.types import Usage
+
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    message = Message.assistant("")
+    message.usage = Usage(input_tokens=10, output_tokens=0)
+    session.emit(AgentEndEvent(messages=[message]))
+    ended = [m for m in app.posted if isinstance(m, TurnEnded)]
+    assert ended and ended[-1].usage.usd_cost is None
+    assert ended[-1].usage.input_tokens == 10
+
+
 def test_notice_forwarded() -> None:
     controller, session, app = _controller()
     session.emit(NoticeEvent(text="heads up", kind="warning"))

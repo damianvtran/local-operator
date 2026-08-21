@@ -476,3 +476,45 @@ def test_cost_for_usage_reads_a_serialized_usage_mapping() -> None:
     """A child's usage arrives rehydrated from a serialized event, as a dict."""
     usage = {"input_tokens": 1_000_000, "output_tokens": 0}
     assert cost_for_usage("anthropic", _priced(), usage) == pytest.approx(10.0)
+
+
+def test_cost_for_usage_prefers_a_provider_reported_dollar() -> None:
+    """OpenRouter's ``usage.cost`` is the provider's own bill: it must be
+    returned verbatim, never re-derived from tokens — a reconstruction cannot
+    reproduce the per-route price, reasoning split, or override that produced it."""
+    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, usd_cost=0.0075)
+    # Note the token-shaped usage would price to ~110.0 here; the reported
+    # figure must WIN, so the assertion is the figure, not the estimate.
+    assert cost_for_usage("openrouter", _priced(), usage) == pytest.approx(0.0075)
+
+
+def test_cost_for_usage_reported_dollar_wins_even_against_big_table_price() -> None:
+    """The preference is by presence, not by magnitude: even when the table
+    would price the token counts far higher, the provider's printed number is the
+    fact and the table is the estimate."""
+    usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000, "usd_cost": 0.0075}
+    assert cost_for_usage("openrouter", _priced(), usage) == pytest.approx(0.0075)
+
+
+def test_cost_for_usage_falls_back_to_estimate_without_a_reported_dollar() -> None:
+    """``usd_cost`` absent means the estimate is still the answer."""
+    usage = Usage(input_tokens=1_000_000, output_tokens=0)
+    assert cost_for_usage("openrouter", _priced(), usage) == pytest.approx(10.0)
+
+
+def test_cost_for_usage_treats_a_malformed_reported_dollar_as_absent() -> None:
+    """A non-numeric or negative reported amount is provider noise, not money:
+    it must degrade to the estimate, not raise or bill a credit."""
+    assert cost_for_usage(
+        "openrouter", _priced(), Usage(input_tokens=1_000_000, usd_cost=-5)
+    ) == pytest.approx(10.0)
+    assert cost_for_usage(
+        "openrouter", _priced(), {"input_tokens": 1_000_000, "usd_cost": "x"}
+    ) == pytest.approx(10.0)
+
+
+def test_cost_for_usage_reported_zero_is_a_fact_not_an_absence() -> None:
+    """A real ``0.0`` from the provider means "billed as free", which is not the
+    same as "not reported" — it must return 0.0, not fall through to the estimate."""
+    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, usd_cost=0.0)
+    assert cost_for_usage("openrouter", _priced(), usage) == 0.0
