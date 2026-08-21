@@ -831,6 +831,30 @@ class Editor(TextArea):
             self._history.pop()
         self._history_index = None
 
+    def forget_prompt(self, text: str) -> None:
+        """Remove the newest history entry equal to ``text``, wherever it sits.
+
+        The recall seam: an Esc-recalled steer is UNSENT — it goes back to the
+        composer as a draft — so Up-arrow must not offer it as a past prompt
+        while the composer already holds it as the present one. Unlike
+        :meth:`forget_last_prompt` the entry need not be the newest: the user
+        can submit something else between the steer and the recall, and the
+        recalled line then sits mid-history. One entry per call: the same text
+        sent twice is two sends, and recalling one of them retracts one.
+
+        Navigation is reset rather than re-aimed: a parked index would shift
+        under the removal, and a recall replaces the buffer anyway, so the
+        draft navigation was stashing is already gone.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return
+        for index in reversed(range(len(self._history))):
+            if self._history[index] == stripped:
+                del self._history[index]
+                break
+        self._history_index = None
+
     def remember_draft(self) -> bool:
         """Push the CURRENT buffer into prompt history without submitting it.
 

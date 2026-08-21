@@ -2054,6 +2054,57 @@ class Session:
         IS the correction."""
         self._steering_queue.put_nowait(Message.user(text, images))
 
+    def queued_steering(self) -> list[AgentMessage]:
+        """A FIFO snapshot of the steering queue, without draining it.
+
+        The read half of the recall seam: a host deciding what is still
+        recallable (`SessionProtocol.recall_steering`) must be able to SEE
+        the queue, and the queue itself is engine-internal. Identity of the
+        entries is preserved, which is what hosts match on.
+        """
+        return list(self._steering_queue._queue)
+
+    def steer_message(self, message: Message) -> None:
+        """Queue a caller-built steering message, sharing the caller's object.
+
+        The identity-preserving twin of :meth:`steer`: a host that keeps its
+        own reference to the queued message (the TUI pairs it with the
+        transcript blocks it painted for it) can later ask for THAT message
+        back via :meth:`recall_steering`. ``steer`` builds the Message here,
+        so no reference the host could match on ever leaves this method.
+        """
+        self._steering_queue.put_nowait(message)
+
+    def recall_steering(self, message: AgentMessage) -> bool:
+        """Remove ONE specific message from the steering queue, if present.
+
+        The TUI's Esc uses this to unsend a queued mid-turn steer: the
+        message goes back to the composer and the loop's next boundary finds
+        it gone. Matched by identity — the host hands back the very object
+        :meth:`steer_message` queued — so an equal-but-distinct message (the
+        same text steered twice) is not what a recall removes, and everything
+        else in the queue keeps its place: older steers, newer steers, and
+        wake deliveries, which ride this queue but were never the caller's
+        object. Returns False when the message is not queued — already
+        drained at a boundary, or never queued — and changes nothing.
+
+        The rebuild goes through the public get/put API rather than the
+        queue's private deque: ``asyncio.Queue`` is the contract this queue
+        has with the loop, and reaching inside it would couple the session
+        to an implementation detail.
+        """
+        remaining: list[AgentMessage] = []
+        found = False
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            if item is message and not found:
+                found = True
+                continue
+            remaining.append(item)
+        for item in remaining:
+            self._steering_queue.put_nowait(item)
+        return found
+
     def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
         """Install the host's tool-approval gate (see SessionProtocol).
 

@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import ImageContent, NoticeEvent, TextContent
+from local_operator.harness.types import AgentMessage, ImageContent, NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
@@ -121,6 +121,7 @@ class FakeSession:
         )
         self.preflight_calls = 0
         self.preflight_notice: str | None = None
+        self._steering_queue: list[Any] = []
         #: Whether a turn is running. Settable because the `/model` receipt now
         #: reads it: a switch made mid-turn says when it starts applying, and a
         #: hard-coded False could never exercise that branch.
@@ -206,6 +207,22 @@ class FakeSession:
 
     def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
+
+    # The recall seam, mirroring `Session.steer_message`/`recall_steering`:
+    # the TUI's Esc lifts a queued steer back into the composer, and tests
+    # for it drive these exactly as the real session's queue would.
+    def queued_steering(self) -> list[Any]:
+        return list(self._steering_queue)
+
+    def steer_message(self, message: Any) -> None:
+        self._steering_queue.append(message)
+
+    def recall_steering(self, message: AgentMessage) -> bool:
+        for index, held in enumerate(self._steering_queue):
+            if held is message:
+                del self._steering_queue[index]
+                return True
+        return False
 
     def set_approval_handler(self, handler: object | None) -> None:
         # The TUI installs its own approval gate on boot (the stdin gate
