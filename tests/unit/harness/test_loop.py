@@ -2180,3 +2180,26 @@ async def test_text_only_length_truncation_is_not_retried():
 
     assert len(stream.requests) == 1
     assert not [e for e in events if isinstance(e, NoticeEvent)]
+
+
+@pytest.mark.asyncio
+async def test_empty_length_retry_clamps_the_resolved_model_too():
+    """Review F1: the production session supplies ``get_model`` (its resolver
+    ignores the loop's ``config.model`` mutation), so the retreat must clamp
+    the RESOLVED spec or the retry goes back out at the same silent rung."""
+    host_model = _laddered_model()  # always returns "high"
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta="answered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    config = make_config(stream, model=host_model, get_model=lambda: host_model)
+    events = [e async for e in loop.run([Message.user("go")], context, config, None)]
+
+    assert len(stream.requests) == 2
+    assert stream.requests[0].model.reasoning_effort == "high"
+    assert stream.requests[1].model.reasoning_effort == "medium"
+    assert isinstance(events[-1], AgentEndEvent)

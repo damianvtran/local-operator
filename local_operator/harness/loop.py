@@ -528,15 +528,22 @@ class AgentLoop:
                             # spent): the turn is about to end with NOTHING on
                             # screen — minutes of "thinking" and then silence,
                             # the exact failure shape reported from session
-                            # f3c058d1. A notice is the minimum honest frame:
-                            # the user learns the budget went to reasoning,
-                            # not that the app froze.
+                            # f3c058d1. A notice is the minimum honest frame,
+                            # and it names WHICH limit ended the retreat
+                            # (review N1) so the user knows whether another
+                            # manual retry could still step down.
+                            cause = (
+                                f"{empty_truncation_retries} lower-effort "
+                                f"{'retries' if empty_truncation_retries != 1 else 'retry'} spent"
+                                if empty_truncation_retries >= MAX_EMPTY_TRUNCATION_RETRIES
+                                else "no lower effort setting to retry at"
+                            )
                             yield NoticeEvent(
                                 text=(
                                     "the model spent its whole output budget "
-                                    "thinking and produced no visible output — "
-                                    "retry, or switch to a model with a larger "
-                                    "output budget"
+                                    f"thinking and produced no visible output "
+                                    f"({cause}) — retry, or switch to a model "
+                                    "with a larger output budget"
                                 ),
                                 kind="warning",
                             )
@@ -713,11 +720,30 @@ class AgentLoop:
         converted = config.convert_to_llm(shaped)
         if inspect.isawaitable(converted):
             converted = await converted
+        # Resolved after `transform_context`/`convert_to_llm`, which can
+        # await: the spec is read as late as possible so a switch made
+        # while this call was being prepared still catches it.
+        model = self._current_model(config)
+        if effort_ceiling is not None:
+            # An empty-truncation retreat is in force. The host's resolver
+            # returns ITS model (the session's `get_model` ignores the
+            # loop's `config.model` mutation entirely), so the clamp has to
+            # land on the RESOLVED spec or the retry goes back out at the
+            # exact rung that just produced silence (review F1). Applied
+            # here rather than in the resolver because the ceiling is the
+            # loop's own state, and `effort_ceiling` on the request only
+            # covers hosts that re-impose an effort override downstream.
+            ladder = model.reasoning_efforts
+            current = model.reasoning_effort
+            if (
+                current is not None
+                and effort_ceiling in ladder
+                and current in ladder
+                and ladder.index(current) > ladder.index(effort_ceiling)
+            ):
+                model = model.model_copy(update={"reasoning_effort": effort_ceiling})
         request = ChatRequest(
-            # Resolved after `transform_context`/`convert_to_llm`, which can
-            # await: the spec is read as late as possible so a switch made
-            # while this call was being prepared still catches it.
-            model=self._current_model(config),
+            model=model,
             system_blocks=list(context.system_blocks),
             messages=list(converted),
             tools=list(context.tools),

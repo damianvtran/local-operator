@@ -2151,8 +2151,13 @@ class SessionStreamFn:
                             return
                         # Recovered but depleted for this model: the shared
                         # policy re-blocks and activates the fallback, naming
-                        # the quota in its notice.
-                        await self._apply_account_health(
+                        # the quota in its notice. Its True return means a
+                        # sibling took over (with several blocked rows the
+                        # walk unblocks them one at a time), and discarding
+                        # that signal ended preflight with a depleted row
+                        # unblocked and no fallback pinned (review F2) — so
+                        # re-enter the walk exactly like the other callers.
+                        if await self._apply_account_health(
                             model,
                             recovered[3],
                             storage,
@@ -2161,7 +2166,8 @@ class SessionStreamFn:
                             recovered[2],
                             retry,
                             attempted_ids,
-                        )
+                        ):
+                            continue
                         return
                 if siblings:
                     if health.state == "depleted":
@@ -2314,6 +2320,17 @@ class SessionStreamFn:
             # accounts blocked at 8%/4% while the live one read 0%). Probe
             # the blocked rows before the hop; ``None`` means every account
             # was re-checked and genuinely cannot serve.
+            #
+            # The account under verdict is blocked FIRST: its depletion is a
+            # definite reading, and a walk that settles on a recovered
+            # sibling returns before the tail of this method — which is
+            # where the block used to be written — leaving a spent account
+            # in the unblocked pool (review F2's second half).
+            self._auth_store.block_credential(
+                access.credential_id,
+                storage,
+                block_ms=max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
+            )
             blocked_rows = [
                 candidate
                 for candidate in self._auth_store.list_credentials(storage)
@@ -2436,18 +2453,23 @@ class SessionStreamFn:
         rows: list[Any],
         retry: Any,
     ) -> tuple[Any, float | None, bool, Any] | None:
-        """Re-check every blocked account before a provider failover.
+        """Re-check blocked accounts before a provider failover.
 
-        ``get_oauth_access`` returns None the moment all credentials are
-        blocked, but a block is a stale verdict the moment a window resets —
-        and preflight takes accounts out of rotation on nothing more than
-        crossing a reserve threshold, so a pool that still has spendable quota
-        can look exactly like a dead one. Each blocked account is probed in
-        turn: its block is lifted, its usage re-fetched, and the first account
-        with a definite answer (healthy, or low in a way that still routes)
-        wins. Unknown/unreachable reports re-impose a short block and move on.
-        ``None`` means every account is genuinely out — only then is a
-        provider fallback honest.
+        A block is a stale verdict the moment a window resets — and preflight
+        takes accounts out of rotation on nothing more than crossing a reserve
+        threshold, so a pool that still has spendable quota can look exactly
+        like a dead one. Each blocked row is probed with its OWN refreshed
+        token (asking the cascade would resolve to whichever credential
+        outranks the row, and with a healthy unblocked sibling in the pool
+        every probe answered for that sibling — re-blocking rows that held
+        the only spendable quota). Refresh failures and unknown/unreachable
+        reports leave the row's existing block standing and move on. The
+        first definite verdict wins: the row's block is lifted, the session
+        is pinned to it, and the (health, shared, tier, access) tuple goes
+        back to the caller's shared policy — which is what re-blocks a row
+        whose re-probe says depleted. ``None`` means every blocked account
+        was re-checked and none gave a verdict — only then is a provider
+        fallback honest.
         """
         from local_operator.providers.auth_store import OAuthAccess
         from local_operator.providers.registry import get_provider_definition

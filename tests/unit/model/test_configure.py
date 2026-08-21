@@ -1958,3 +1958,54 @@ async def test_preflight_falls_back_when_blocked_siblings_are_genuinely_depleted
     finally:
         await stream.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_walks_past_a_depleted_blocked_row_to_one_with_quota(
+    tmp_path,
+) -> None:
+    """Review F2: with several blocked rows, a first re-probe that says
+    depleted must not end the walk — the row is re-blocked by the shared
+    policy and the NEXT blocked row (holding quota) is probed and serves."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-live", "account-live"))
+    blocked_a = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    blocked_b = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    for row in (blocked_a, blocked_b):
+        store.block_credential(row.id, "anthropic", block_ms=3_600_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    reports = {
+        "oauth-live": _fable_report(0.0, 58.0, 100.0),  # selected: Fable spent
+        "oauth-a": _fable_report(0.0, 100.0, 100.0),  # blocked, truly out
+        "oauth-b": _fable_report(0.0, 96.0, 6.0),  # blocked, 6% Fable left
+    }
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        assert access_token is not None
+        return reports[access_token]
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        # No provider hop: the second blocked row held quota and serves.
+        assert stream._route_state.active is None
+        assert store.is_blocked(blocked_a.id, "anthropic")
+        assert not store.is_blocked(blocked_b.id, "anthropic")
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == blocked_b.id
+    finally:
+        await stream.close()
+        store.close()
