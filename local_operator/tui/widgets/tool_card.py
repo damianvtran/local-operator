@@ -1754,7 +1754,7 @@ class ToolCard(ExpandableActionBlock):
         # `begin_running` now clears the field, and this makes the invariant
         # checkable from the render side too, so the next way to leave it set
         # cannot reopen the same hole.
-        # A user-run receipt leads with a two-cell attribution chip. It sits
+        # A user-run receipt leads with a five-cell attribution chip. It sits
         # INSIDE the summary budget so the truncation ladder keeps it ahead of
         # the command — scrolling back to find your own `! git status` works
         # exactly when the row is narrow enough to hide everything else.
@@ -1808,10 +1808,15 @@ class ToolCard(ExpandableActionBlock):
         row.append(name, style=name_style)
         row.append(" ", style=dim)
         if row_chip:
-            # `dim`, the quietest ink: the attribution is chrome, and the
-            # command after it is the fact. It survives every shed rung
-            # because the budget above already paid for it.
-            row.append(row_chip, style=dim)
+            # Chrome quieter than the fact while live (the summary is
+            # `muted` there); one step BRIGHTER than the fact once settled,
+            # when the summary drops to `dim` — the attribution is the thing
+            # a reader scrolling back is hunting for, and a chip that faded
+            # to the same ink as the command stopped separating the two
+            # (design round 1, D1). It survives every shed rung because the
+            # budget above already paid for it.
+            chip_style = muted if not running else dim
+            row.append(row_chip, style=chip_style)
         row.append(summary, style=summary_style)
 
         # ONE right-aligned tail: the slot and the status share a single pad,
