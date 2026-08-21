@@ -1,7 +1,7 @@
 """Teams: a named roster of reusable agents under one manager.
 
 WHY THIS EXISTS
-===============
+---------------
 
 Roles and specialist agents are reusable building blocks — a ``coder`` or a
 "User Dashboard Agent" should be writable once and usable in many groupings.
@@ -25,7 +25,7 @@ A manager session also gets a roster so it can ``task(agent=...)`` the right
 people without the operator restating the org chart every turn.
 
 STORAGE
-=======
+-------
 
 ``<config_dir>/teams/<id>/``:
 

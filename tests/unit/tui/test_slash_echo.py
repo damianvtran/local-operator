@@ -235,13 +235,17 @@ async def test_bare_team_lists_without_a_user_row() -> None:
     )
     session.team_registry = registry
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(120, 40)) as pilot:
+    async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/team")
         rows = _user_rows(app)
-        notices = _notice_texts(app)
+        painted = _painted(app)
     assert rows == [], rows
-    assert any("feature-release" in body for body in notices), notices
+    assert "feature-release" in painted, painted
+    assert "Led by manager · 2 roles" in painted, painted
+    assert "Ship a change" in painted, painted
+    assert "Send: /team <name> <message>" in painted, painted
+    assert "manager=" not in painted, painted
 
 
 @pytest.mark.asyncio

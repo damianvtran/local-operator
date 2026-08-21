@@ -1439,6 +1439,11 @@ class AgentRegistry:
                 # Create a new agent with the imported data
                 agent_id = agent_data["id"]
                 agent_data["current_working_directory"] = "~/local-operator-home"
+                # Older profile bundles duplicated the final conversation turn
+                # into agent.yml. History files are ignored below, but leaving
+                # this field intact would still import private conversation
+                # content through a metadata side channel.
+                agent_data["last_message"] = ""
 
                 # Remove hosting and model from the agent data to use
                 # the default values from user config

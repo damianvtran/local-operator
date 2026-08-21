@@ -265,9 +265,9 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: is why it is resumption, the single question a returning user arrives with.
 TIPS: tuple[str, ...] = (
     "/resume picks up a recent session where you left off",
-    "/team <name> sends a request to that team's manager",
+    "/team <name> <message> sends work to the manager",
     "Ask to create an agent with its own instruction set",
-    "Ask for a team of roles — manager, coder, reviewer",
+    "Ask for a team of roles: manager, coder, reviewer",
     "/model <provider>/<id> switches this session only",
     "/usage shows how much provider quota is left",
     "/approvals <ask|auto> sets whether tools ask first",

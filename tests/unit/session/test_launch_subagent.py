@@ -120,6 +120,40 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     await parent.dispose()
 
 
+def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.teams import Team, TeamMember
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    manager = registry.create_agent(
+        AgentEditFields(
+            name="dashboard-release",
+            description="Release the dashboard",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(manager.id, "Follow the dashboard release checklist.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    parent.attach_team(
+        Team(
+            id="t1",
+            name="feature-release",
+            created_date=datetime.now(timezone.utc),
+            manager="dashboard-release",
+            members=[TeamMember(role="coder")],
+            instructions="Review before merge.",
+        )
+    )
+
+    brief = parent._goal_state.team_brief
+    assert "Follow the dashboard release checklist." in brief
+    assert "Review before merge." in brief
+
+
 @pytest.mark.asyncio
 async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monkeypatch):
     """A manager session's children inherit collaboration and project context

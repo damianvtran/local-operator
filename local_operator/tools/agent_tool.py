@@ -48,6 +48,7 @@ from local_operator.agent_profiles import (
     NameTakenError,
     install_seed,
     is_role,
+    is_specialist,
     list_seeds,
     load_seed,
     profile_from_agent,
@@ -232,6 +233,15 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     installed = _registered_profiles(registry) if registry is not None else []
     installed_names = {profile.name.lower() for profile in installed}
     lines = [_profile_line(profile, installed=True) for profile in installed]
+    specialists: list[Any] = []
+    if registry is not None:
+        try:
+            specialists = sorted(
+                (agent for agent in registry.list_agents() if is_specialist(agent)),
+                key=lambda agent: str(agent.name).lower(),
+            )
+        except Exception:  # noqa: BLE001 — listing is optional enrichment
+            specialists = []
     starters = [
         profile
         for profile in (load_seed(name) for name in list_seeds())
@@ -240,6 +250,14 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     body = ""
     if lines:
         body += "registered roles:\n" + "\n".join(lines)
+    if specialists:
+        if body:
+            body += "\n\n"
+        specialist_lines = []
+        for agent in specialists:
+            summary = (agent.description or "").strip() or "(no description)"
+            specialist_lines.append(f"- {agent.name} [specialist]: {summary}")
+        body += "registered specialists:\n" + "\n".join(specialist_lines)
     if starters:
         if body:
             body += "\n\n"
@@ -255,9 +273,30 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
 async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
     from local_operator.agent_profiles import resolve_profile
 
-    profile = resolve_profile(name, registry=_registry(context))
+    registry = _registry(context)
+    profile = resolve_profile(name, registry=registry)
+    if profile is None and registry is not None:
+        try:
+            specialist = registry.get_agent_by_name(name)
+        except Exception:  # noqa: BLE001
+            specialist = None
+        if specialist is not None and is_specialist(specialist):
+            instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
+            body = (
+                f"{specialist.name} — registered specialist\n"
+                f"when to use: {specialist.description or '(unstated)'}\n"
+                "tools: full inventory\n\n"
+                f"instructions:\n{instructions}\n\n"
+                f"launch with --agent {specialist.name}, or add it to a team roster."
+            )
+            text, spill = spill_truncate(body, "agent", context)
+            return _text(tool_call_id, "agent", text, details=spill or None)
     if profile is None:
-        return _error(tool_call_id, "agent", f"no role named {name!r} (try op='list')")
+        return _error(
+            tool_call_id,
+            "agent",
+            f"no role or specialist named {name!r} (try op='list')",
+        )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
     header = [
         f"{profile.name} — {origin}",
@@ -519,7 +558,7 @@ async def _op_write(
                     "agent",
                     f"{name!r} is a role; do not pass kind='specialist' to update it.",
                 )
-        elif any(str(c).strip().lower() == "specialist" for c in (existing.categories or [])):
+        elif is_specialist(existing):
             kind = "specialist"
             if params.kind == "role":
                 return _error(tool_call_id, "agent", _name_taken_message(name))

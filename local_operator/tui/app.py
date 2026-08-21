@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
+from rich.padding import Padding
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
@@ -2586,10 +2587,39 @@ class OperatorApp(App[None]):
                 ArgumentChoice(
                     team.name,
                     description,
-                    detail=f"{slots} roles · {manager}",
+                    detail=f"{slots} roles · led by {manager}",
                 )
             )
         return choices
+
+    def _team_list_block(self, teams: list[Any]) -> RichBlock:
+        """A structured roster list for bare ``/team``.
+
+        Each team gets its own name row, facts row, and optional description
+        row. Keeping fields on separate rows prevents a narrow terminal from
+        wrapping ``roles`` or the description into a position that reads as a
+        child of the next item — the flat debug-style line this replaces did
+        exactly that at both 100 and 60 columns.
+        """
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("teams", style=heading)]
+        for team in teams:
+            slots = len(team.members) + 1
+            rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
+            role_word = "role" if slots == 1 else "roles"
+            rows.append(
+                Padding(
+                    Text(f"Led by {team.manager} · {slots} {role_word}", style=body),
+                    (0, 0, 0, 4),
+                )
+            )
+            summary = (team.description or "").strip()
+            if summary:
+                rows.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
+        rows.append(Text())
+        rows.append(Text("Send: /team <name> <message>", style=body))
+        return RichBlock(Group(*rows))
 
     def _cmd_team(self, arg: str, notice: NoticeFn) -> None:
         """``/team`` — list; ``/team <name> <request>`` — talk to the manager.
@@ -2606,7 +2636,7 @@ class OperatorApp(App[None]):
         registry = self._team_registry()
         if registry is None or not hasattr(registry, "list_teams"):
             self._system_notice(
-                "teams are unavailable in this session — create one with the team tool",
+                "teams are unavailable in this session. Ask the agent to create one.",
                 "warning",
             )
             return
@@ -2617,19 +2647,9 @@ class OperatorApp(App[None]):
                 self._system_notice(f"could not list teams: {exc}", "warning")
                 return
             if not teams:
-                notice(
-                    "no teams yet — ask the agent to create one, or "
-                    "`lop teams create <name> --member coder`"
-                )
+                notice("no teams yet. Ask the agent to create one.")
                 return
-            lines = ["teams:"]
-            for team in teams:
-                slots = len(team.members) + 1
-                summary = (team.description or "").strip()
-                extra = f" — {summary}" if summary else ""
-                lines.append(f"  {team.name}  manager={team.manager}  {slots} roles{extra}")
-            lines.append("send a request with /team <name> <message>")
-            notice("\n".join(lines))
+            self._append_block(self._team_list_block(teams))
             return
         name, _, request = arg.partition(" ")
         name = name.strip()
@@ -2641,7 +2661,7 @@ class OperatorApp(App[None]):
             return
         if team is None:
             self._system_notice(
-                f"no team named {name!r} — /team to list them, or ask the agent to create one",
+                f"no team named {name!r}. Run /team to list teams, or ask the agent to create one.",
                 "warning",
             )
             return
@@ -2654,8 +2674,8 @@ class OperatorApp(App[None]):
                 return
         if not request:
             notice(
-                f"team {team.name} attached (manager {team.manager}). "
-                f"/team {team.name} <message> to send a request."
+                f"team {team.name} is ready. {team.manager} leads it. "
+                f"Send a request with /team {team.name} <message>."
             )
             return
         # `_submit_prompt` writes the user row (the request is what the
@@ -2663,7 +2683,7 @@ class OperatorApp(App[None]):
         # not echoed: the request text is the transcript subject, and a
         # second row restating `/team name …` would be the duplication
         # the echo policy exists to prevent.
-        notice(f"sending to {team.name}'s manager ({team.manager})")
+        notice(f"sending to {team.name}. {team.manager} is coordinating.")
         self._submit_prompt(request)
 
     # -- MCP status ---------------------------------------------------------

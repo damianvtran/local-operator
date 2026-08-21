@@ -82,6 +82,26 @@ async def test_list_separates_registered_roles_from_starters(context, registry) 
 
 
 @pytest.mark.asyncio
+async def test_list_and_show_include_specialists_with_instructions(context) -> None:
+    await call(
+        context,
+        op="create",
+        kind="specialist",
+        name="dashboard-release",
+        description="Release the user dashboard safely",
+        instructions="Follow the dashboard SDLC and release checklist.",
+    )
+
+    listing = await call(context, op="list")
+    shown = await call(context, op="show", name="dashboard-release")
+
+    assert "registered specialists" in listing
+    assert "dashboard-release" in listing
+    assert "Follow the dashboard SDLC" in shown
+    assert "launch with --agent dashboard-release" in shown
+
+
+@pytest.mark.asyncio
 async def test_list_ignores_agents_that_are_not_roles(context, registry) -> None:
     """A registry also holds ordinary conversational agents; listing those as
     delegation targets would be noise at best and a privacy leak at worst."""

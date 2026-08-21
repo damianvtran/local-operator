@@ -52,7 +52,7 @@ async def test_create_show_update_delete(context) -> None:
     )
     assert "created team 'feature-release'" in created
     shown = await call(context, op="show", name="feature-release")
-    assert "manager manager" in shown
+    assert "Led by manager" in shown
     assert "coder" in shown
     assert "Review before merge." in shown
     assert "user-dashboard" in shown

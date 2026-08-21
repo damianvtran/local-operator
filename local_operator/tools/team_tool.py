@@ -102,7 +102,8 @@ def _registry(context: ToolContext | None) -> TeamRegistry | None:
 def _row(team: Any) -> str:
     slots = len(team.members) + 1
     summary = (team.description or "").strip() or "(no description)"
-    row = f"- {team.name} [{slots} roles, manager={team.manager}]: {summary}"
+    role_word = "role" if slots == 1 else "roles"
+    row = f"- {team.name} [{slots} {role_word}, led by {team.manager}]: {summary}"
     return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
 
 
@@ -132,7 +133,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     if team is None:
         return _error(tool_call_id, "team", f"no team named {name!r} (try op='list')")
     header = [
-        f"{team.name} — manager {team.manager}",
+        f"{team.name}. Led by {team.manager}",
         f"description: {team.description or '(unstated)'}",
         "roster:",
         *team.roster_lines(),
@@ -216,8 +217,8 @@ async def _op_write(
     return _text(
         tool_call_id,
         "team",
-        f"{verb} team {team.name!r} (manager {team.manager}, "
-        f"{len(team.members)} member slot(s)); launch with /team {team.name} <request>.",
+        f"{verb} team {team.name!r}. {team.manager} leads it; "
+        f"{len(team.members)} member slot(s). Launch with /team {team.name} <request>.",
     )
 
 

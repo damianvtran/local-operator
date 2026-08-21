@@ -1549,6 +1549,30 @@ class Session:
                 profile = None
             if profile is not None and profile.preamble:
                 preamble = profile.preamble + (preamble or "")
+            elif profile is None:
+                # ``resolve_profile`` intentionally resolves only delegation
+                # roles. A team manager may instead be a reusable specialist;
+                # load its base prompt directly, but only when the explicit
+                # specialist marker is present so private chat agents are not
+                # pulled into team context by a coincidental name.
+                try:
+                    from local_operator.agent_profiles import is_specialist
+
+                    specialist = self.agent_registry.get_agent_by_name(manager_name)
+                    specialist_prompt = (
+                        self.agent_registry.get_agent_system_prompt(specialist.id)
+                        if specialist is not None and is_specialist(specialist)
+                        else ""
+                    )
+                except Exception:  # noqa: BLE001
+                    specialist_prompt = ""
+                if specialist_prompt.strip():
+                    preamble = (
+                        "<manager-profile>\n"
+                        + specialist_prompt.strip()
+                        + "\n</manager-profile>\n\n"
+                        + (preamble or "")
+                    )
         self._goal_state.team_brief = preamble or ""
 
     @property
