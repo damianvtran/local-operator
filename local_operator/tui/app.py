@@ -5502,14 +5502,19 @@ class OperatorApp(App[None]):
             # execute_bash reports a nonzero exit as a SUCCESSFUL tool result
             # (the model is expected to read the code and recover), but the
             # bang path's reader is a HUMAN whose collapsed card said `✓` on a
-            # command that failed (design round 1, D1). The header line is the
-            # tool's stable contract — `exit code: N` opens every result — so
-            # deriving the mark from it cannot disagree with the body.
-            head = _first_line(res.text)
-            if not head.startswith("exit code: "):
-                return False
-            code = head[len("exit code: ") :].split(" ", 1)[0]
-            return code.isdigit() and code != "0"
+            # command that failed (design round 1, D1). The header lines are
+            # the tool's stable contract — `exit code: N` opens every result,
+            # or `TIMEOUT after Ns` ahead of it when the deadline killed the
+            # process — so deriving the mark from them cannot disagree with
+            # the body. Scan the first lines, not just the first: the timeout
+            # notice is PREPENDED (round 3 minor).
+            for head in res.text.splitlines()[:3]:
+                if head.startswith("TIMEOUT after "):
+                    return True
+                if head.startswith("exit code: "):
+                    code = head[len("exit code: ") :].split(" ", 1)[0]
+                    return code.lstrip("-").isdigit() and code != "0"
+            return False
 
         async def run_shell() -> None:
             try:
