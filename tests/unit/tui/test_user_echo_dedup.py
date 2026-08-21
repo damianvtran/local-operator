@@ -110,6 +110,31 @@ async def test_a_steered_message_is_not_painted_again_by_its_own_delivery() -> N
 
 
 @pytest.mark.asyncio
+async def test_two_steers_drained_together_neither_repaints() -> None:
+    """Two messages queued against one boundary are announced FIFO — A then B
+    — while the NEWEST user row on screen is B. A de-dup that only compares
+    against the newest user row mismatches on A's event and repaints it; the
+    registry matches each event to its own entry regardless of what was
+    painted after it."""
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "first steer")
+        await _submit(pilot, app, "second steer")
+        assert session.steers == ["first steer", "second steer"]
+
+        app.post_message(SteeringDelivered(2))
+        await pilot.pause()
+        app.post_message(UserMessageStart("first steer", 0))
+        app.post_message(UserMessageStart("second steer", 0))
+        await pilot.pause()
+
+        assert len(_user_blocks(app, "first steer")) == 1
+        assert len(_user_blocks(app, "second steer")) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_message_from_another_front_end_still_paints() -> None:
     """No pending echo means the message is NEW here — the phone direction."""
     session = FakeSession()
