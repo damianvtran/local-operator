@@ -27,6 +27,7 @@ Nothing here raises. A price is never worth a broken frame.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 __all__ = ["turn_cost", "job_cost"]
@@ -51,6 +52,19 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
     if usage is None or not model_label:
         return None
     try:
+        # A provider-reported dollar amount is authoritative without a table:
+        # OpenRouter (and any aggregator that precomputes billing) returns the
+        # exact charge it printed, per-routed-provider pricing and reasoning
+        # splits included. It must win even when the model has no published price
+        # row, because the provider's bill is the fact the table is an estimate of.
+        reported = (
+            usage.get("usd_cost")
+            if isinstance(usage, Mapping)
+            else getattr(usage, "usd_cost", None)
+        )
+        if reported is not None:
+            return float(reported)
+
         from local_operator.model.configure import cost_for_usage, resolve_model_info
 
         provider, _, model_id = model_label.partition("/")

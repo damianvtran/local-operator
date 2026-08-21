@@ -222,6 +222,15 @@ class Usage(BaseModel):
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     context_tokens: int | None = None  # provider-reported full context size if given
+    # Provider-reported dollar cost for this one request, when the provider
+    # precomputes billing (OpenRouter's ``usage.cost``). This is the ground truth
+    # a caller must prefer over any token×rate reconstruction: the provider has
+    # already applied per-route pricing, reasoning-token splits, cache discounts
+    # and time/value overrides that a single flat table price cannot express.
+    # ``None`` means "not reported" and is distinct from a real ``0.0`` (a call
+    # the provider billed as free) — the same three-way split the TUI's
+    # ``None``-vs-``$0.0000`` contract already draws.
+    usd_cost: float | None = None
 
     @property
     def total_tokens(self) -> int:

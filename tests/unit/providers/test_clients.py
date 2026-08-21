@@ -308,6 +308,86 @@ async def test_openai_compat_error_finish_reason_without_error_object() -> None:
     assert end.error == "provider reported a mid-stream failure (finish_reason 'error')"
 
 
+async def test_openai_compat_captures_provider_reported_cost() -> None:
+    """OpenRouter's ``usage.cost`` is the provider's own bill and must reach
+    ``Usage.usd_cost`` intact, so the TUI can prefer it over a token×rate
+    reconstruction."""
+    body = _sse(
+        [
+            {"id": "chatcmpl-1", "choices": [{"delta": {"content": "boop"}, "index": 0}]},
+            {
+                "id": "chatcmpl-1",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 16,
+                    "cost": 7.5e-6,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
+            },
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    request = ChatRequest(
+        model=_spec(provider="openrouter", model_id="deepseek/deepseek-v4-flash-0731"),
+        messages=[Message.user("hi")],
+    )
+    events = await _collect(client.stream(request, "sk-test"))
+
+    usage_events = [e for e in events if isinstance(e, StreamUsageEvent)]
+    assert usage_events and usage_events[0].usage.usd_cost == pytest.approx(7.5e-6)
+
+
+async def test_openai_compat_cost_is_none_when_provider_omits_it() -> None:
+    """Providers that do not precompute billing leave ``usd_cost`` as ``None``,
+    never a fabricated 0.0 — the distinction the whole estimate fallback depends on."""
+    body = _sse(
+        [
+            {"id": "chatcmpl-1", "choices": [{"delta": {"content": "boop"}, "index": 0}]},
+            {
+                "id": "chatcmpl-1",
+                "choices": [],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+            },
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    request = ChatRequest(model=_spec(), messages=[Message.user("hi")])
+    events = await _collect(client.stream(request, "sk-test"))
+
+    usage_events = [e for e in events if isinstance(e, StreamUsageEvent)]
+    assert usage_events and usage_events[0].usage.usd_cost is None
+
+
+def test_usd_cost_coerces_and_rejects_malformed() -> None:
+    """The cost field is a JSON number but must not abort a stream when a
+    provider spells it differently; absent/negative/non-numeric all yield None."""
+    from local_operator.providers.clients import _usd_cost
+
+    assert _usd_cost({"cost": 7.5e-6}) == pytest.approx(7.5e-6)
+    assert _usd_cost({"cost": "0.1"}) == pytest.approx(0.1)
+    assert _usd_cost({"cost": 0.0}) == 0.0  # a real zero: billed as free
+    assert _usd_cost({}) is None
+    assert _usd_cost({"cost": None}) is None
+    assert _usd_cost({"cost": -1}) is None
+    assert _usd_cost({"cost": "not-a-number"}) is None
+    assert _usd_cost(None) is None
+
+
 async def test_openai_compat_tool_history_roundtrip() -> None:
     """Assistant tool_calls and tool results serialize for replay.
 
