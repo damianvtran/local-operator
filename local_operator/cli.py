@@ -977,7 +977,7 @@ def teams_list_command(team_registry: Any) -> int:
         left = "│  " if is_last else "│ │"
         print(f"\033[1;32m│ {branch} {team.name}\033[0m")
         print(f"\033[1;32m{left}   • Manager: {team.manager}\033[0m")
-        print(f"\033[1;32m{left}   • Members: {len(team.members)}\033[0m")
+        print(f"\033[1;32m{left}   • Members: {team.member_count()}\033[0m")
         if team.description:
             print(f"\033[1;32m{left}   • Description: {team.description}\033[0m")
         if not is_last:
@@ -1006,7 +1006,7 @@ def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
     print("\n\033[1;32m╭─ Created New Team ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Name: {team.name}\033[0m")
     print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
-    print(f"\033[1;32m│ Members: {len(team.members)}\033[0m")
+    print(f"\033[1;32m│ Members: {team.member_count()}\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
     return 0
 

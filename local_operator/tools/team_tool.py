@@ -288,6 +288,7 @@ class TeamDeleteParams(BaseModel):
     name: str = Field(description="Existing team name to delete permanently.")
 
 
+@_guard("team_delete")
 async def execute_team_delete(
     tool_call_id: str,
     args: dict[str, Any],

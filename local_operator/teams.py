@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -138,6 +139,16 @@ class Team(BaseModel):
             lines.append(f"- {member.role}{suffix}")
         return lines
 
+    def member_count(self) -> int:
+        """Total member copies on the roster (counts summed, manager excluded).
+
+        Distinct from ``len(members)``: a ``reviewer x2`` slot is two members
+        in one slot, and a summary that reports it as one understates the
+        team the user assembled.
+        """
+
+        return sum(member.count for member in self.members)
+
     def member_names(self) -> list[str]:
         """Role names on the roster, manager included, first occurrence winning."""
         names: list[str] = []
@@ -212,7 +223,10 @@ class TeamRegistry:
     def __init__(self, config_dir: Path, refresh_interval: float = 5.0) -> None:
         self.config_dir = Path(config_dir)
         self.teams_dir = self.config_dir / "teams"
-        self.teams_dir.mkdir(parents=True, exist_ok=True)
+        # No mkdir here: every interactive session constructs a registry, and
+        # an unused feature must not litter the config dir. ``save_team``
+        # creates the tree on first write, and ``_load`` treats a missing
+        # directory as "no teams".
         self._teams: dict[str, Team] = {}
         self._last_refresh_time = 0.0
         self._refresh_interval = refresh_interval
@@ -335,12 +349,14 @@ class TeamRegistry:
             self._load()
         if team_id not in self._teams:
             raise KeyError(f"Team with id {team_id} not found")
-        self._teams.pop(team_id)
+        # Remove the on-disk copy FIRST: if the rmtree fails (permissions, an
+        # open handle) the cache must still agree with disk, so the row stays
+        # and the error propagates. Popping before the rmtree left a deleted
+        # row in the cache only when the filesystem said no.
         team_dir = self.teams_dir / team_id
         if team_dir.exists():
-            import shutil
-
             shutil.rmtree(team_dir)
+        self._teams.pop(team_id)
 
 
 def parse_members(raw: Iterable[str] | None) -> list[TeamMember]:
