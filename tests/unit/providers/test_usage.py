@@ -121,6 +121,61 @@ def test_usage_health_shared_window_reaches_reserve() -> None:
     assert health.reset_after_ms == 10_000
 
 
+def test_usage_health_exact_zero_balance_is_depleted_without_a_total() -> None:
+    """An absolute zero is exhaustion even when percentage is unknowable.
+
+    Moonshot/Kimi's API-key endpoint reports only ``available_balance``. A
+    positive balance remains unknown because no denominator exists, but exact
+    zero must let fallback selection skip the empty provider (review F3)."""
+    zero = UsageReport(
+        provider="kimi",
+        limits=[
+            UsageLimit(
+                id="kimi:balance",
+                label="Balance (USD)",
+                amount=UsageAmount(remaining=0.0, unit="usd"),
+                window="lifetime",
+            )
+        ],
+    )
+    positive = UsageReport(
+        provider="kimi",
+        limits=[
+            UsageLimit(
+                id="kimi:balance",
+                label="Balance (USD)",
+                amount=UsageAmount(remaining=10.0, unit="usd"),
+                window="lifetime",
+            )
+        ],
+    )
+
+    mixed = UsageReport(
+        provider="deepseek",
+        limits=[
+            UsageLimit(
+                id="deepseek:balance:usd",
+                label="Balance (USD)",
+                amount=UsageAmount(remaining=0.0, unit="usd"),
+                window="lifetime",
+            ),
+            UsageLimit(
+                id="deepseek:balance:cny",
+                label="Balance (CNY)",
+                amount=UsageAmount(remaining=10.0, unit="unknown"),
+                window="lifetime",
+            ),
+        ],
+    )
+
+    health = usage_health(zero, "k3")
+    assert health.state == "depleted"
+    assert health.scope == "account"
+    assert health.remaining_fraction == 0.0
+    assert usage_health(positive, "k3").state == "unknown"
+    assert usage_health(mixed, "deepseek-chat").state == "unknown"
+
+
 def test_usage_health_depleted_reset_ignores_windows_merely_in_reserve() -> None:
     """The depleted horizon counts only fully-spent windows.
 
