@@ -48,8 +48,16 @@ def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None
     to be taller than one row.
     """
     text = TCSS.read_text()
-    tool_block = re.search(r"^ToolCard\s*\{([^}]*)\}", text, re.MULTILINE)
-    expanded = re.search(r"^ToolCard\.tool-expanded\s*\{([^}]*)\}", text, re.MULTILINE)
+    # ToolCard and WakeBlock share the pin: a wake receipt is a ledger row,
+    # and leaving it on `auto` would be the same first-measurement-sticks-at-
+    # two-rows failure the ToolCard pin exists to stop. Combined selectors
+    # so the two cannot drift.
+    tool_block = re.search(r"^ToolCard,\s*WakeBlock\s*\{([^}]*)\}", text, re.MULTILINE)
+    expanded = re.search(
+        r"^ToolCard\.tool-expanded,\s*WakeBlock\.wake-expanded\s*\{([^}]*)\}",
+        text,
+        re.MULTILINE,
+    )
     band_block = re.search(r"^#status-band\s*\{([^}]*)\}", text, re.MULTILINE)
     assert tool_block is not None and "height: 1;" in tool_block.group(1)
     assert expanded is not None and "height: auto;" in expanded.group(1)
@@ -68,7 +76,7 @@ def test_block_selectors_declare_no_margin_or_padding() -> None:
     text = TCSS.read_text()
     match = re.search(
         r"^TranscriptBlock,\s*UserBlock,\s*NoticeBlock,\s*RichBlock,\s*"
-        r"AssistantBlock,\s*ToolCard\s*\{([^}]*)\}",
+        r"AssistantBlock,\s*ToolCard,\s*WakeBlock\s*\{([^}]*)\}",
         text,
         re.MULTILINE,
     )
@@ -99,7 +107,7 @@ def test_gap_class_is_the_only_block_spacing_declaration() -> None:
     # And no ToolCard rule declares spacing of ANY kind, margin or padding:
     # the card's own 1-cell inner padding is drawn by the row builder, not by
     # the sheet, precisely so it cannot become a vertical row.
-    for block in re.findall(r"^ToolCard[^{]*\{([^}]*)\}", text, re.MULTILINE):
+    for block in re.findall(r"^(?:ToolCard|WakeBlock)[^{]*\{([^}]*)\}", text, re.MULTILINE):
         assert not re.search(r"\b(margin|padding)\s*:", block), block
 
 

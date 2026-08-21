@@ -24,6 +24,7 @@ from local_operator.tui.widgets.transcript import (
     TranscriptBlock,
     TranscriptView,
     UserBlock,
+    WakeBlock,
     WorkingBlock,
     needs_gap_above,
 )
@@ -136,11 +137,16 @@ def test_block_classes_declare_distinct_spacing_kinds() -> None:
     assert UserBlock.SPACING_LEAD is True
     assert WorkingBlock.SPACING_TRANSIENT is True
     assert ToolCard.SPACING_TRANSIENT is False
-    # The tool row is the ONLY airy block. Prose and notices are not: a
+    # Ledger rows are the ONLY airy blocks. Prose and notices are not: a
     # paragraph is already separated by its kind change, and a run of notices
-    # is deliberately dense. Airy spreading to a second class is how "one
+    # is deliberately dense. Airy spreading to a third class is how "one
     # blank row between actions" becomes "a blank row between everything".
+    # WakeBlock shares ToolCard's kind AND its airy flag so a wake sitting
+    # between notices still takes a blank row — the previous notice-kind
+    # line stacked flush with the quota warnings around it.
     assert ToolCard.SPACING_AIRY is True
+    assert WakeBlock.SPACING_AIRY is True
+    assert WakeBlock.SPACING_KIND == ToolCard.SPACING_KIND
     assert UserBlock.SPACING_AIRY is False
     assert NoticeBlock.SPACING_AIRY is False
     assert AssistantBlock.SPACING_AIRY is False
@@ -278,6 +284,27 @@ async def test_container_applies_the_gap_class_only_where_the_rule_says() -> Non
         assert prose.has_class(GAP_CLASS)  # different kind
         assert notice_a.has_class(GAP_CLASS)  # different kind again
         assert not notice_b.has_class(GAP_CLASS)  # a list of notices stays dense
+
+
+@pytest.mark.asyncio
+async def test_a_wake_between_notices_takes_air_like_a_tool_row() -> None:
+    """The field report: a wake stacked flush with the quota warnings around
+    it and disappeared into them. Sharing ToolCard's kind AND its airy flag
+    is what puts a blank row above and below even when both neighbours are
+    notices — a kind-change gap would only fire on one side.
+    """
+    app = _Harness()
+    async with app.run_test():
+        view = app.query_one(TranscriptView)
+        above = NoticeBlock("quota low", "warning")
+        wake = WakeBlock("(alarm) Scheduled wake w1 (1).\n\ncheck the build")
+        below = NoticeBlock("trying another account", "warning")
+        for block in (above, wake, below):
+            view.append_block(block)
+
+        assert not above.has_class(GAP_CLASS)  # nothing above it
+        assert wake.has_class(GAP_CLASS)  # airy: a blank row even after a notice
+        assert below.has_class(GAP_CLASS)  # kind change: notice after a tool row
 
 
 @pytest.mark.asyncio
