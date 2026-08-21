@@ -23,9 +23,12 @@ import argparse
 import asyncio
 import logging
 import secrets
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.harness.types import AgentEvent
+
+if TYPE_CHECKING:
+    from local_operator.harness.types import ImageContent
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle
 from local_operator.mobile.registrant import image_blocks as _image_blocks
@@ -197,7 +200,7 @@ class OwnedSessionHandle(SessionHandle):
         self._run_turn_task(text, image_blocks)
         return "prompt sent"
 
-    def _run_turn_task(self, text: str, image_blocks: list) -> None:
+    def _run_turn_task(self, text: str, image_blocks: list["ImageContent"]) -> None:
         """Run the turn as a background task and undo the premature echo if
         the prompt is rejected after all (a turn could have started in the
         gap between the guard above and the lock)."""
