@@ -545,13 +545,13 @@ READ_ONLY_PLACEHOLDER = "Read-only — press esc to reply"
 #: will do. Half the cells, so it also survives a narrow terminal.
 ASIDE_PLACEHOLDER = "Ask the aside…"
 
-#: What the composer says in bang-mode. Same shape as
-#: :data:`DEFAULT_PLACEHOLDER` — what typing here WILL DO, not how to leave.
-#: Esc and empty-buffer backspace already leave the mode, and naming them
-#: here would spend the invitation on an exit the user has not asked for
-#: yet. opencode's "Run a command…" is the sentence; the ellipsis matches
-#: the resting placeholder's cadence.
-SHELL_PLACEHOLDER = "Run a command…"
+#: What the composer says in bang-mode. The first clause is opencode's
+#: sentence — what typing here WILL DO — and the second names the way out,
+#: because entry is taught three ways (tip, placeholder, green chevron) while
+#: exit was taught by nothing on screen (design round 1, D2): the placeholder
+#: is the one surface guaranteed visible the moment the mode opens on an
+#: empty buffer, which is exactly when a first-timer looks for the door.
+SHELL_PLACEHOLDER = "Run a command… — esc to leave"
 
 
 class Editor(TextArea):

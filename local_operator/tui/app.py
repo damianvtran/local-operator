@@ -5498,6 +5498,19 @@ class OperatorApp(App[None]):
             except Exception:
                 logger.debug("could not persist bang-mode result", exc_info=True)
 
+        def _nonzero_exit(res: ToolResult) -> bool:
+            # execute_bash reports a nonzero exit as a SUCCESSFUL tool result
+            # (the model is expected to read the code and recover), but the
+            # bang path's reader is a HUMAN whose collapsed card said `✓` on a
+            # command that failed (design round 1, D1). The header line is the
+            # tool's stable contract — `exit code: N` opens every result — so
+            # deriving the mark from it cannot disagree with the body.
+            head = _first_line(res.text)
+            if not head.startswith("exit code: "):
+                return False
+            code = head[len("exit code: ") :].split(" ", 1)[0]
+            return code.isdigit() and code != "0"
+
         async def run_shell() -> None:
             try:
                 result = await execute_bash(
@@ -5519,6 +5532,11 @@ class OperatorApp(App[None]):
                     )
                 )
                 return
+            if _nonzero_exit(result):
+                # A nonzero exit is a FAILURE on this surface. Persist it as
+                # one so a resumed session restores the same ✗ the live card
+                # showed — the replay derives its state off `is_error`.
+                result = result.model_copy(update={"is_error": True})
             # Aborting paints the receipt immediately, but the worker remains
             # authoritative until the subprocess is reaped. Do not overwrite
             # that interrupted frame with execute_bash's abort result; DO still
