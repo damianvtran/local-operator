@@ -677,14 +677,27 @@ def config_create_command() -> int:
 
 def config_open_command() -> int:
     """Open the configuration file using the default system editor."""
+    from local_operator.cli_style import ERROR, paint
+
     config_path = config_dir() / "config.yml"
     if not config_path.exists():
         print(
-            "\n\033[1;31mError: Configuration file does not exist.  Create one with "
-            "`config create`.\033[0m"
+            paint(
+                "Error: Configuration file does not exist.  Create one with `config create`.",
+                ERROR,
+            ),
+            file=sys.stderr,
         )
         return 1
 
+    # Try the platform GUI opener first, then fall back to $VISUAL/$EDITOR. The
+    # GUI openers do not exist on a headless/SSH Linux box (there is no
+    # xdg-open without a desktop session), and there `config open` used to fail
+    # outright — yet that is exactly the environment where a terminal editor is
+    # the ONLY way in. Only spawn an interactive editor when stdout is a tty:
+    # an editor launched from a pipe or a non-interactive shell has no terminal
+    # to draw in and would hang or error.
+    gui_error: Exception | None = None
     try:
         if platform.system() == "Windows":
             subprocess.run(["start", str(config_path)], shell=True, check=True)
@@ -694,9 +707,31 @@ def config_open_command() -> int:
             subprocess.run(["xdg-open", str(config_path)], check=True)
         print(f"Opened configuration file at {config_path}")
         return 0
-    except Exception as e:
-        print(f"\n\033[1;31mError opening configuration file: {e}\033[0m")
-        return 1
+    except Exception as e:  # noqa: BLE001 — GUI opener absent or failed
+        gui_error = e
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if editor and sys.stdout.isatty():
+        try:
+            # ``shlex.split`` so a value like ``code --wait`` or ``emacs -nw``
+            # is honoured, not treated as one impossible executable name.
+            import shlex
+
+            subprocess.run([*shlex.split(editor), str(config_path)], check=True)
+            print(f"Opened configuration file at {config_path}")
+            return 0
+        except Exception as e:  # noqa: BLE001 — editor missing or exited non-zero
+            gui_error = e
+
+    print(
+        paint(f"Error opening configuration file: {gui_error}", ERROR),
+        file=sys.stderr,
+    )
+    print(
+        f"Set $VISUAL or $EDITOR, or edit the file directly at {config_path}.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def config_edit_command(args: argparse.Namespace) -> int:
@@ -1716,8 +1751,17 @@ def main() -> int:
         parser = build_cli_parser()
         args = parser.parse_args()
 
-        # Set up the subprocess environment early
-        setup_cross_platform_environment()
+        # Prime the login-shell PATH only on paths that actually spawn
+        # subprocess work: the interactive session, exec, serve and mobile all
+        # run shell commands whose PATH must match a login terminal's, but
+        # `config list`, `credential`, `login`, `agents` and the like never
+        # spawn a tool — yet every one of them used to pay a full login-shell
+        # round-trip (`$SHELL -l -c 'echo $PATH'`) on startup. The helper keeps
+        # a per-process cache, so a session that later needs it still primes at
+        # most once. ``None`` is the bare interactive launch.
+        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile"})
+        if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
+            setup_cross_platform_environment()
 
         # Resolve `--resume` HERE, before anything is started. Left to the
         # session factory it surfaces inside the TUI as "session failed to
