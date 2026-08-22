@@ -161,6 +161,35 @@ def rows(app: OperatorApp) -> list[str]:
     return [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
 
 
+async def _settled_rows(pilot: Any, app: OperatorApp, ceiling: int = 200) -> list[str]:
+    """The painted frame, read only once it has stopped reflowing.
+
+    Tests that assert on a row's REFLOWED GEOMETRY — which choices were shed at
+    a given width, whether anything bleeds past the terminal, whether a receipt
+    stays on one row — must not read a mid-reflow frame. A single ``pilot.pause()``
+    yields exactly one idle tick, and an approval row that is still collapsing to
+    fit a narrow width paints a truncated intermediate frame (a dangling ``…`` or
+    a half-shed clause) on that tick. Reading it makes a width-parametrized test
+    fail intermittently under load with a truncated row the settled frame never
+    shows — the failure mode that a fixed ``pause(0.2)`` used to paper over by
+    outlasting the reflow.
+
+    Waits for the CONDITION the geometry assertions depend on instead: the frame
+    is stable when two consecutive idle ticks paint the identical row set. The
+    ceiling is a deadlock guard, not a timing assumption, so a slow or contended
+    machine costs nothing and a genuinely stuck frame still fails rather than
+    hanging.
+    """
+    previous: list[str] = []
+    for _ in range(ceiling):
+        await pilot.pause()
+        current = rows(app)
+        if current == previous:
+            return current
+        previous = current
+    return previous
+
+
 async def _boot(pilot: Any, app: OperatorApp) -> None:
     """Wait for the session to be ADOPTED, rather than for a fixed duration.
 
@@ -811,8 +840,7 @@ async def test_the_prompt_never_hides_its_target_or_overflows(width: int) -> Non
         view.append_block(
             ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
         )
-        await pilot.pause()
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
 
         # Nothing bleeds past the terminal at any width.
         assert not [row for row in painted if cell_len(row) > width]
@@ -841,8 +869,7 @@ async def test_the_answered_receipt_stays_on_one_row(width: int) -> None:
         app.query_one(TranscriptView).append_block(block)
         await pilot.pause()
         block.resolve(True, answer="y")
-        await pilot.pause()
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
 
         # Found by the outcome GLYPH, not by the word: below ~32 columns the
         # receipt sheds `allowed` to keep the hazard clause, which is the same
@@ -872,8 +899,10 @@ async def test_the_hint_row_sheds_whole_choices(width: int) -> None:
     async with app.run_test(size=(width, 24)) as pilot:
         await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("bash", "run: make"))
-        await pilot.pause()
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        # Read the SETTLED frame: this asserts on the hint row's reflowed geometry
+        # (which choices were shed at this width), and a mid-reflow frame paints a
+        # truncated `…` the next assertion forbids. See _settled_rows.
+        painted = await _settled_rows(pilot, app)
         hint = next((row.strip() for row in painted if "deny" in row or "n/y" in row), "")
         assert hint, "the prompt must always advertise at least one answer"
         assert "…" not in hint
@@ -910,8 +939,7 @@ async def test_a_dangerous_ask_never_paints_like_a_safe_one(width: int) -> None:
         view = app.query_one(TranscriptView)
         view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /tmp/x/keys"))
         view.append_block(ApprovalBlock("write_file", "write: /tmp/x/keys"))
-        await pilot.pause()
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
         # Matched on the leading glyph, not the tool name: at the narrowest widths
         # the hazard IS the glyph (`!` for `?`), which is the behaviour under test
         # rather than a reason to miss the row.
@@ -945,8 +973,7 @@ async def test_a_narrow_prompt_keeps_the_end_of_the_path(detail: str, expected_t
     async with app.run_test(size=(52, 24)) as pilot:
         await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
-        await pilot.pause()
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
         ask = next(row for row in painted if "write_file" in row)
         assert expected_tail in ask, ask
 
