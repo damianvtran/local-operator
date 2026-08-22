@@ -79,6 +79,22 @@ ICON_MODEL = "◆"
 #: than a plain one with none.
 ICON_EFFORT = "▴"
 ICON_CWD = "⌂"
+#: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
+#: every other icon here — the value is the profile name beside it (`◉ auditor`),
+#: and the glyph never varies. Kept in **Geometric Shapes (U+25xx)** per the hard
+#: constraint above (checked ``cell_len`` == 1). Distinct from ``ICON_AGENTS``
+#: (``◍``, the subagent COUNTER in the right group): ``◉`` is a filled fisheye,
+#: ``◍`` a lined circle, and the two answer different questions — which persona
+#: is replying here versus how many children are running — so a shared glyph
+#: would conflate a session setting with a live count. They also live in
+#: opposite groups and rarely co-occur (the counter only appears with children
+#: running), so the confusion window is narrow even before the glyphs diverge.
+ICON_AGENT_PROFILE = "◉"
+#: Active ``/team`` roster this session manages (U2). Same category-marker role;
+#: ``◫`` (U+25EB, a compartmented square) reads as a roster of slots and stays in
+#: U+25xx. Lighter than the filled/hatched ``▦``/``▣`` squares it shares the
+#: block with, so it does not read as one of the right group's figure icons.
+ICON_TEAM = "◫"
 ICON_AGENTS = "◍"
 #: Background jobs. Kept inside **Geometric Shapes (U+25xx)** like every other
 #: segment icon above, and that block is a hard constraint rather than a
@@ -153,6 +169,16 @@ ICON_APPROVALS = "!"
 #: widest floor that still survives 100 columns with everything else on screen.
 NAME_CELLS = 40
 NAME_CELLS_FLOOR = 18
+
+#: Cap on the displayed active-agent / active-team NAME (U2). A BOUNDED rung,
+#: unlike ``cwd``: profile and team names are curated identifiers, not paths, so
+#: 20 cells shows every packaged and typical operator name whole
+#: (``dashboard-sme`` is 13, ``feature-release`` 15) while capping a pathological
+#: one rather than letting it push the model label off the left group. Truncated
+#: on a word boundary via ``truncate_cells`` like every other bounded segment.
+#: One cap for both because the two segments are siblings and a shorter name
+#: simply inks less — the cap bounds, it does not reserve.
+AGENT_PROFILE_CELLS = 20
 
 #: Separators point INWARD: the left group's chevrons aim right and the right
 #: group's aim left, so both runs converge on the centre gap and frame it. A
@@ -246,6 +272,31 @@ _DROP_LADDER: tuple[str, ...] = (
     # A static session setting the user chose — it does not change while they
     # watch, so it goes before either live number.
     "effort",
+    # The active /team roster and /agent profile (U2). Both are STATIC session
+    # settings the user chose — like `effort`, they do not change while the user
+    # watches — so they belong in this static-settings band ahead of the live
+    # numbers, never spending width a compaction reading or a cost could use.
+    #
+    # Two rungs, not one: a session may carry a team, a profile, both, or
+    # neither (each segment is empty and drops for free when its setting is
+    # unset), and splitting them lets a tight band keep the more specific one.
+    # They shed AFTER `effort` — later here means kept longer — because both
+    # NAME an identity the user just deliberately attached (`◉ auditor`,
+    # `◫ lopdev`), which is higher-information than the `high`/`low` level word
+    # `effort` carries; when the band is tight enough to drop one static
+    # setting, the level is the one to lose first.
+    #
+    # `team` sheds before `agent`: the roster is the broader coordination
+    # context (and re-derivable from the /team attach notice and the transcript)
+    # while the agent profile is the direct "which persona is replying here", so
+    # the profile is the last static setting to go. Both are BOUNDED rungs
+    # (:data:`AGENT_PROFILE_CELLS` caps the displayed name), so neither can
+    # become the unbounded tail `cwd` is barred from — see
+    # :data:`_UNBOUNDED_RUNGS`. When nothing is attached these rungs are inert
+    # and the ladder behaves exactly as it did before U2, which is why an
+    # unattached session's fit is unchanged.
+    "team",
+    "agent",
     # The name's own drop, and the one rung that is not simply a step down. By
     # here the segment has already given back every cell between its cap and its
     # floor, and the three drops above were made to keep that floor on screen; if
@@ -839,6 +890,13 @@ class StatusLine:
         # session exists) must not have to invent one.
         self._model_name: str = ""
         self._effort: str = ""
+        # The active /agent profile name and /team roster name governing this
+        # session (U2), "" when unattached — the band's two static-identity
+        # segments. Held as plain strings the app pushes through `update`, the
+        # same shape as `effort`: the band never reaches into the session, so
+        # the source of truth stays `Session.active_agent`/`active_team_name`.
+        self._agent_profile: str = ""
+        self._team: str = ""
         self._cwd: str = ""
         self._context_tokens: int = 0
         # Provenance of the reading above: True while it is the host's LOCAL
@@ -997,6 +1055,8 @@ class StatusLine:
         model_label: str | None = None,
         model_name: str | None = None,
         effort: str | None = None,
+        agent_profile: str | None = None,
+        team: str | None = None,
         cwd: str | None = None,
         context_tokens: int | None = None,
         context_is_estimate: bool | None = None,
@@ -1017,6 +1077,14 @@ class StatusLine:
             self._model_name = model_name
         if effort is not None:
             self._effort = effort
+        # "" is a MEANINGFUL value here (detach), so these follow the same
+        # None-means-leave-alone contract as every other segment: the app passes
+        # "" to clear the segment on /agent clear or team detach, and None to
+        # leave it untouched on an unrelated update.
+        if agent_profile is not None:
+            self._agent_profile = agent_profile
+        if team is not None:
+            self._team = team
         if cwd is not None:
             self._cwd = cwd
         if context_tokens is not None:
@@ -1414,7 +1482,7 @@ class StatusLine:
         seam: Style,
         accent: Style,
     ) -> Text:
-        """model › effort › cwd › mcp (+ the working indicator).
+        """model › effort › team › agent › cwd › mcp (+ the working indicator).
 
         Each segment is ``icon value``, the icon a step dimmer than its value so
         it frames the number rather than competing with it. Separators point
@@ -1449,6 +1517,32 @@ class StatusLine:
         if effort and "effort" not in dropped:
             parts.append(
                 (ICON_EFFORT, effort, Style(color=theme_mod.semantic_color("label")), None)
+            )
+        # Active /team roster, then /agent profile (U2). Both are the SESSION's
+        # own settings, never a subagent's: the overlay describes a CHILD's
+        # readings (model, effort, context) but the roster and profile are the
+        # parent's coordination context, which the page is a window onto — so
+        # they are read straight off the session fields with no `_shown_*`
+        # indirection, unlike effort above. `signal` (cool blue) matches the
+        # neighbouring cwd, grouping the static "where/who am I" identity fields
+        # apart from the violet `label` effort word; the icon frames it dim.
+        if self._team and "team" not in dropped:
+            parts.append(
+                (
+                    ICON_TEAM,
+                    truncate_cells(self._team, AGENT_PROFILE_CELLS),
+                    Style(color=theme_mod.semantic_color("signal")),
+                    None,
+                )
+            )
+        if self._agent_profile and "agent" not in dropped:
+            parts.append(
+                (
+                    ICON_AGENT_PROFILE,
+                    truncate_cells(self._agent_profile, AGENT_PROFILE_CELLS),
+                    Style(color=theme_mod.semantic_color("signal")),
+                    None,
+                )
             )
         if self._cwd and "cwd" not in dropped:
             rendered = format_cwd(self._cwd, short="cwd" in short)

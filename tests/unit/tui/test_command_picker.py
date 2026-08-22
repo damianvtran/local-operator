@@ -825,6 +825,57 @@ def test_detail_is_right_aligned_and_survives_the_description_collapse() -> None
     assert narrow.rstrip().endswith("logged in")
 
 
+def test_an_empty_detail_row_reclaims_the_reserved_column_for_its_description() -> None:
+    """D2: a row whose OWN detail is empty pays nothing for the detail column.
+
+    The column is reserved from the widest detail in the SET so the states scan
+    down one edge (the /login, /theme, /mcp behaviour the other tests pin). But
+    a row that puts nothing at that edge — most /theme rows, /mcp subcommands,
+    /agent specialists — was still charged the column's width, clipping its
+    description to make room for a column it never fills. Now it reclaims that
+    slack while detail-bearing rows keep the shared edge.
+    """
+    choices = [
+        ArgumentChoice(
+            "dark",
+            "A description long enough to be clipped by the reserved detail column",
+            (),
+            "current",
+        ),
+        ArgumentChoice(
+            "monokai",
+            "A description long enough to be clipped by the reserved detail column",
+            (),
+            "",
+        ),
+    ]
+    picker = _argument_picker(choices)
+    rows = [row.plain for row in picker.render_rows(60)]
+    # The detail-bearing row still ends at the shared column edge.
+    assert rows[0].rstrip().endswith("current")
+
+    # The empty-detail row inks more of its (identical) description than the
+    # detail-bearing row does, because it reclaimed the reserved column.
+    def desc_len(row: str, name: str) -> int:
+        body = row.split(name, 1)[1]
+        # Strip the trailing state word so only the description ink is compared.
+        return len(body.replace("current", "").rstrip())
+
+    assert desc_len(rows[1], "monokai") > desc_len(rows[0], "dark")
+
+
+def test_the_empty_detail_reclaim_does_not_move_the_scannable_state_edge() -> None:
+    """D2 must not regress the shared-edge scan the state column exists for.
+
+    Every row that HAS a detail still starts it at one x — the reclaim only
+    frees rows that place nothing there, so a /login-style list where every row
+    carries a state is untouched.
+    """
+    rows = [row.plain for row in _argument_picker(list(PROVIDER_CHOICES)).render_rows(80)]
+    starts = _column_starts(rows, ("logged in", "env key", "needs login"))
+    assert len(starts) == 1, f"states start at different columns: {sorted(starts)}"
+
+
 def test_a_row_too_narrow_for_both_keeps_the_name() -> None:
     """Below the point where the id itself would be squeezed, the detail goes.
 
