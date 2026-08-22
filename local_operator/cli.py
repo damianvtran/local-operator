@@ -604,8 +604,52 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def credential_update_command(args: argparse.Namespace) -> int:
+    """Prompt for and store one credential. Exit 0/1/130.
+
+    The prompt used to let three ordinary interruptions escape as tracebacks:
+    Ctrl-C raised a bare ``KeyboardInterrupt`` all the way out, and an empty
+    value / closed stdin raised a ``ValueError`` whose message carried nested
+    ANSI escapes that the generic red-banner handler in ``main`` then wrapped in
+    a stack-trace panel. None of the three is a program fault \u2014 they are the
+    user cancelling or mis-entering \u2014 so each gets one plain line and a clean
+    exit code: 130 for a cancel (the shell convention for SIGINT), 1 otherwise.
+    """
+    from local_operator.ansi import strip_control_sequences
+    from local_operator.cli_style import ERROR, WARNING, paint
+    from local_operator.providers.registry import PROVIDER_REGISTRY, env_key_name
+
+    # Warn when the key is not one the registry knows, with the closest match \u2014
+    # a typo'd ``OPENAI_API_KY`` otherwise stores silently and the provider
+    # never sees it. Arbitrary keys stay allowed (custom providers are
+    # legitimate); this is advice, not a gate.
+    known_keys = {name for p in PROVIDER_REGISTRY if (name := env_key_name(p.id))}
+    if args.key not in known_keys:
+        import difflib
+
+        close = difflib.get_close_matches(args.key, sorted(known_keys), n=1)
+        hint = f" Did you mean {close[0]}?" if close else ""
+        print(
+            paint(
+                f"Warning: '{args.key}' is not a known provider key.{hint} " "Storing it anyway.",
+                WARNING,
+            ),
+            file=sys.stderr,
+        )
+
     credential_manager = CredentialManager(config_dir())
-    credential_manager.prompt_for_credential(args.key, reason="update requested")
+    try:
+        credential_manager.prompt_for_credential(args.key, reason="update requested")
+    except KeyboardInterrupt:
+        # 130 is the shell's SIGINT convention; the message is one quiet line,
+        # not the red stack-trace panel the generic handler would have drawn.
+        print("\nCancelled.", file=sys.stderr)
+        return 130
+    except (ValueError, EOFError) as exc:
+        # Empty input or a closed stdin. Strip any control sequences from the
+        # message before printing \u2014 the presenter owns the colour, and a nested
+        # escape from deeper in the stack would otherwise repaint the line.
+        print(paint(strip_control_sequences(str(exc)), ERROR), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -654,7 +698,34 @@ def config_open_command() -> int:
 
 def config_edit_command(args: argparse.Namespace) -> int:
     """Edit a configuration value."""
+    from local_operator.cli_style import ERROR, paint
+
     config_manager = ConfigManager(config_dir())
+
+    # Validate the key against the shipped defaults BEFORE writing. The old
+    # ``except KeyError`` was dead code \u2014 ``update_config`` calls
+    # ``Config.set_value`` which is a plain ``dict.__setitem__`` and never
+    # raises for an unknown key \u2014 so a typo like ``config edit hostng radient``
+    # printed "Successfully updated hostng" and wrote a junk key the app never
+    # reads. difflib names the closest real key so the fix is one glance away.
+    from local_operator.config import DEFAULT_CONFIG
+
+    valid_keys = set(DEFAULT_CONFIG.values.keys())
+    if args.key not in valid_keys:
+        import difflib
+
+        close = difflib.get_close_matches(args.key, sorted(valid_keys), n=1)
+        hint = f" Did you mean '{close[0]}'?" if close else ""
+        print(
+            paint(f"Error: unknown configuration key: '{args.key}'.{hint}", ERROR),
+            file=sys.stderr,
+        )
+        print(
+            "Run `local-operator config list` to see the available keys.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         # Parse the value to the appropriate type
         value = args.value
@@ -684,12 +755,12 @@ def config_edit_command(args: argparse.Namespace) -> int:
 
         print(f"Successfully updated {args.key} to {value}")
         return 0
-    except KeyError:
-        print(f"\n\033[1;31mError: Invalid configuration key: {args.key}\033[0m")
-        return -1
     except Exception as e:
-        print(f"\n\033[1;31mError updating configuration: {e}\033[0m")
-        return -1
+        # 1, not -1: a shell sees -1 as 255, which collides with the
+        # xargs/ssh "command not found" sentinel and contradicts the
+        # documented 0/non-zero exec contract (item A13).
+        print(paint(f"Error updating configuration: {e}", ERROR), file=sys.stderr)
+        return 1
 
 
 def config_list_command() -> int:

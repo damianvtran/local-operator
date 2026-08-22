@@ -253,6 +253,36 @@ class ConfigManager:
         self.config_file = self.config_dir / CONFIG_FILE_NAME
         self.config = self._load_config()
 
+    def _handle_bad_config(self, detail: str) -> None:
+        """Report an unreadable config.yml and move it aside to config.yml.bad.
+
+        Backing the file up rather than deleting it keeps the user's edits
+        recoverable, and renaming it (rather than leaving it) is what stops the
+        very next launch from failing identically: a broken file that stays in
+        place turns one bad edit into a permanent lockout. Best-effort \u2014 if the
+        rename cannot happen (read-only dir), the load still degrades to
+        defaults, which is the whole point of catching this.
+        """
+        from local_operator.cli_style import ERROR, WARNING, paint
+
+        print(paint(f"Error: {detail}", ERROR), file=sys.stderr)
+        backup = self.config_file.with_suffix(self.config_file.suffix + ".bad")
+        try:
+            self.config_file.replace(backup)
+            print(
+                paint(
+                    f"Moved the invalid file to {backup} and starting with defaults. "
+                    "Run `local-operator config create` to write a fresh one.",
+                    WARNING,
+                ),
+                file=sys.stderr,
+            )
+        except OSError:
+            print(
+                paint("Starting with default configuration.", WARNING),
+                file=sys.stderr,
+            )
+
     def _load_config(self) -> Config:
         """Load configuration from file or create with defaults if none exists.
 
@@ -264,7 +294,27 @@ class ConfigManager:
             return _fresh_default_config()
 
         with open(self.config_file, "r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or deepcopy(vars(DEFAULT_CONFIG))
+            # A hand-edited config.yml with a YAML syntax error, or one whose
+            # top level parses to something other than a mapping (a bare list or
+            # scalar), used to raise a raw traceback straight out of startup \u2014
+            # the CLI died before it could say which file was wrong. Catch both:
+            # name the path and the parse error on one line, move the bad file
+            # aside to config.yml.bad so the next launch starts clean instead of
+            # failing identically forever, and point at `config create`. stderr
+            # because ConfigManager is built on the `exec --json` path, whose
+            # stdout is the event stream.
+            try:
+                loaded = yaml.safe_load(f)
+            except yaml.YAMLError as exc:
+                self._handle_bad_config(f"could not parse {self.config_file}: {exc}")
+                return _fresh_default_config()
+            if loaded is not None and not isinstance(loaded, dict):
+                self._handle_bad_config(
+                    f"{self.config_file} is not a valid configuration mapping "
+                    f"(top level is {type(loaded).__name__})"
+                )
+                return _fresh_default_config()
+            config_dict = loaded or deepcopy(vars(DEFAULT_CONFIG))
 
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
