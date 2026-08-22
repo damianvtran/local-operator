@@ -374,9 +374,11 @@ your sessions from your phone. See
 plane for every `lop` session on it. A single supervised **session daemon**
 owns the web surface, and every interactive TUI session registers with it
 automatically over an authenticated loopback socket. From your phone you can
-watch transcripts stream, steer a running turn, answer approval and ask
-prompts, switch model and effort, run slash commands, drill into subagents,
-and start brand-new sessions.
+watch transcripts stream, steer a running turn, switch model and effort, run
+slash commands, drill into subagents, and start brand-new sessions. Sessions
+you start from the phone also answer their own approval and ask prompts there;
+for a terminal session those prompts are still answered at the terminal (the
+phone shows that it is waiting).
 
 <p align="center">
   <img src="./static/mobile-session-view.png" alt="The Local Operator mobile relay open on a phone: a live session transcript with streamed assistant text, one-line tool cards with state glyphs and durations, a tasks counter, and the mobile composer with steer, stop, and send controls" width="360">
