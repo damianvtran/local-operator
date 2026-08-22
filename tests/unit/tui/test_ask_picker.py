@@ -1364,20 +1364,27 @@ async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> N
         card = app._ask_screen
         assert card is not None
 
+        # The fixed pauses in THIS test are deliberate and must not be converted
+        # to idle-waits. It probes a wall-clock ordering race: a key parked in the
+        # composer must not commit once the card has advanced past the question it
+        # was aimed at. The `pause(0.1)` after the click lets focus/routing settle
+        # so the press is held rather than dropped; `action_accept()` must run
+        # while the key is still parked (before the ~180 ms ANSWER_KEY_HOLD_S timer
+        # fires); and the trailing pump outlasts that window so any wrong commit
+        # would already have happened. An idle-wait cannot express "before a real
+        # timer fires" and made this test commit the stale key under CPU
+        # contention — the exact bug it exists to catch.
         await pilot.click(Editor)
-        await _until(pilot, lambda: isinstance(app.screen.focused, Editor))
+        await pilot.pause(0.1)
         await pilot.press("2")  # aimed at question 1: "Canary"
         assert app._held_answer_key is not None, "the key was not held"
 
         # The card advances to question 2 while the key is still parked.
         card.focus()
-        await pilot.pause()
+        await pilot.pause(0.02)
         card.action_accept()
-        # Pump the event loop so the stale key's hold window elapses and any
-        # (wrongly) parked answer would have committed by now — the assertion
-        # is that it did NOT. Idle-waits let that work run without a fixed bet
-        # on how long it takes; the key clears once the card has advanced.
-        await _until(pilot, lambda: app._held_answer_key is None)
+        for _ in range(20):
+            await pilot.pause(0.03)
 
         # The stale key answered nothing: question 2 is still being asked.
         assert not asked.done(), "a parked key answered a question it was not aimed at"
