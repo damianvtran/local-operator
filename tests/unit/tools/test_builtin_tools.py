@@ -1364,11 +1364,13 @@ async def test_todo_view_groups_by_phase_with_progress(tools, context) -> None:
 
     view = await _call(tools, "todo", {"op": "view"}, context)
 
+    # Header spelling mirrors the dock panel's ``PhaseName · done/total`` exactly
+    # (U5) — one grammar across both surfaces.
     assert view.text.splitlines() == [
-        "Foundation (1/2)",
+        "Foundation · 1/2",
         "- [x] scaffold",
         "- [ ] wire config",
-        "Verification (0/1)",
+        "Verification · 0/1",
         "- [ ] run gate",
     ]
 

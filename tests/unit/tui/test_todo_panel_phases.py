@@ -171,8 +171,11 @@ async def test_multi_phase_renders_headers_indent_and_marks() -> None:
         await pilot.pause()
         panel = app.query_one(TodoPanel)
         lines = str(panel._body.content).split("\n")
-        # Root progression line, then a header per phase with per-phase done/total.
-        assert lines[0] == "Todos · 1/2"
+        # Root progression line reads as a STAGE POINTER, not a completion
+        # fraction (D1/U1): ``stage 1/2`` cannot be misread as "1 of 2 done"
+        # against the ``0/N`` phase headers below it. The stage total is the
+        # absolute phase count (2), not the collapsed view's phase count.
+        assert lines[0] == "Todos · stage 1/2"
         assert "Foundation · 1/2" in lines
         assert "Auth · 0/1" in lines
         # Items are indented one two-space gutter beneath their phase header.
@@ -377,4 +380,112 @@ async def test_headers_count_toward_budget_and_composer_survives_a_short_termina
         assert app.screen.virtual_size == app.screen.size
         # The composer is still on screen below the band.
         assert app.query_one("#input-shell").region.y >= body.region.y
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_short_terminal_keeps_at_least_one_item_visible() -> None:
+    """On a terminal so short the budget is 2 rows (root + 1), the panel must
+    still paint an ITEM, not a bare root + phase header (U2).
+
+    The walking viewport puts a phase HEADER at ``body[0]``, so a naive
+    ``body[:cap]`` kept the header and painted zero todos — the panel read as
+    empty though items existed, strictly worse than the flat list it replaces
+    (which keeps the item at the same height). ``_fit_body`` trades the header
+    for the first item so a real todo is always visible."""
+    from local_operator.tools import builtin
+
+    for height in (12, 14):
+        session = FakeSession()
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(100, height)) as pilot:
+            await pilot.pause()
+            builtin.TODO_STORE["sess"] = [
+                {
+                    "name": f"Phase {p}",
+                    "items": [_item(f"task {p}.{n}", "pending") for n in range(2)],
+                }
+                for p in range(3)
+            ]
+            app._refresh_band()
+            await pilot.pause()
+            panel = app.query_one(TodoPanel)
+            painted = str(panel._body.content).split("\n")
+            # At least one indented item row is on screen — the panel never reads
+            # as empty while todos exist.
+            assert any(
+                ln.startswith("  - [") for ln in painted
+            ), f"h={height}: no item row painted, panel reads empty: {painted}"
+            # Budget still respected: composer stays below the band and no
+            # silent scrollbar appears. (``virtual_size == size`` is NOT asserted
+            # at h=12: the whole app's chrome exceeds ten content rows there for
+            # the FLAT list too, so it is a pre-existing app-height condition, not
+            # a phased-panel regression — the invariant the panel owns is "no
+            # scrollbar", which holds.)
+            assert len(painted) <= panel._body_rows()
+            assert app.screen.show_vertical_scrollbar is False
+            builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_root_stage_total_is_absolute_not_the_collapsed_view() -> None:
+    """The root ``stage N/M`` denominator counts ALL phases, not the visible
+    ones (code-review NIT under D1). An auto-hidden settled phase must not make
+    a three-phase plan read ``stage 2/2`` — the stage total is a fact about the
+    plan, not about what currently fits on screen."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = [
+            {"name": "Foundation", "items": [_item("a", "done"), _item("b", "done")]},
+            {"name": "Auth", "items": [_item("c", "pending"), _item("d", "pending")]},
+            {"name": "Verification", "items": [_item("e", "pending")]},
+        ]
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        # Age Foundation past the hide delay so it auto-hides from the view.
+        panel._settled_since["Foundation"] = (
+            panel._settled_since["Foundation"] - TODO_PHASE_HIDE_DELAY_S - 1
+        )
+        panel._shown = None
+        app._refresh_band()
+        await pilot.pause()
+        lines = str(panel._body.content).split("\n")
+        # Foundation is hidden, but the stage total is still 3, not 2.
+        assert "Foundation" not in str(panel._body.content)
+        assert lines[0] == "Todos · stage 2/3"
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_lone_named_phase_shows_its_header_matching_the_receipt() -> None:
+    """A single EXPLICITLY-named phase renders WITH its header in the dock,
+    matching the ``view`` receipt (U5). Only the implicit ``\"Todos\"`` phase is
+    headerless — the panel and receipt gate on the same predicate now."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = [
+            {"name": "Foundation", "items": [_item("a", "pending"), _item("b", "done")]},
+        ]
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        body = str(panel._body.content)
+        # The chosen name survives in the dock, spelled the same as the receipt.
+        assert "Foundation · 1/2" in body
+        # The implicit flat store still routes headerless (back-compat).
+        builtin.TODO_STORE["sess"] = [_item("x", "done"), _item("y", "pending")]
+        app._refresh_band()
+        await pilot.pause()
+        flat = str(panel._body.content).split("\n")
+        assert flat[0] == "Todos · 1/2 resolved"
+        assert flat[1] == "- [x] x"
         builtin.TODO_STORE.clear()
