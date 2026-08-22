@@ -255,6 +255,10 @@ def test_prompt_ascii_banner_when_stdout_cannot_encode(temp_config, monkeypatch,
     out = capsys.readouterr().out
     assert "─" not in out and "╭" not in out
     assert "+" in out  # ASCII border corner
+    # The success glyph also falls back — a stdout that cannot encode the box
+    # cannot encode ✓ either, and crashing after the key is saved is the worst
+    # place to fail.
+    assert "✓" not in out and "[ok]" in out
 
 
 class _TtyStub:

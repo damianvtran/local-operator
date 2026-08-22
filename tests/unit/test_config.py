@@ -332,3 +332,16 @@ def test_config_manager_non_mapping_top_level_backs_up(temp_config_dir, capsys):
     assert (temp_config_dir / "config.yml.bad").exists()
     err = capsys.readouterr().err
     assert "not a valid configuration mapping" in err
+
+
+def test_config_dir_created_0700(tmp_path):
+    """A config dir the manager CREATES is 0700 (item 17) — never chmod an
+    existing one."""
+    import os
+
+    if os.name != "posix":
+        pytest.skip("permission test is Unix-only")
+    fresh = tmp_path / "made"
+    manager = ConfigManager(fresh)
+    manager._write_config(vars(manager.config))
+    assert fresh.stat().st_mode & 0o077 == 0

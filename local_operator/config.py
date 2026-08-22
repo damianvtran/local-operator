@@ -290,7 +290,12 @@ class ConfigManager:
             Config: The configuration object
         """
         if not self.config_file.exists():
-            self.config_dir.mkdir(parents=True, exist_ok=True)
+            # 0700 at CREATION only (item 17): config.yml and the transcripts and
+            # credentials beside it are the same sensitivity class as the log dir
+            # (paths.ensure_log_dir), and the default 0755 exposed the directory
+            # to every other account on a shared host. Never chmod an existing
+            # dir on upgrade — a user may have widened it on purpose.
+            self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             return _fresh_default_config()
 
         with open(self.config_file, "r", encoding="utf-8") as f:
@@ -351,7 +356,8 @@ class ConfigManager:
             config (Dict[str, Any]): Configuration dictionary to write
         """
         if not self.config_file.exists():
-            self.config_dir.mkdir(parents=True, exist_ok=True)
+            # 0700 at creation for the same reason as _load_config above (item 17).
+            self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.config_file.touch()
 
         # Ensure version and metadata are included

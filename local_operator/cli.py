@@ -1468,7 +1468,14 @@ async def _run_headless_repl(
     # own output IS console output; lifting the level keeps its prints while
     # dropping the library chatter. WARNING and above still surface — a genuine
     # problem the user needs to see is not INFO.
+    #
+    # The noisy HTTP-client loggers are raised EXPLICITLY, not just via the root:
+    # configure_cli_logging pins each of them to INFO by name, and a child logger
+    # with its own level ignores the root's — so raising only the root left
+    # httpx's per-request line leaking. Same list configure_cli_logging quietens.
     logging.getLogger().setLevel(logging.WARNING)
+    for _noisy in ("requests", "urllib3", "httpx", "httpcore"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     console = Console(stderr=True, highlight=False)
     session = await create_session(

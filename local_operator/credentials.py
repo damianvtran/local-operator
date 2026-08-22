@@ -281,6 +281,10 @@ class CredentialManager:
         # Save the new API key to config file
         self.set_credential(key, credential, write=True)
 
-        print(paint("\n✓ Credential successfully saved!", SUCCESS))
+        # ASCII fallback for the check glyph too: a stdout that cannot encode the
+        # box drawing cannot encode ✓ either, and crashing on the SUCCESS line
+        # after the key is already saved is the worst place to fail (item 14).
+        tick = "✓" if can_encode("✓") else "[ok]"
+        print(paint(f"\n{tick} Credential successfully saved!", SUCCESS))
 
         return SecretStr(credential)
