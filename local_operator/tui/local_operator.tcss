@@ -1275,6 +1275,75 @@ Screen.subagent #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page org-chart view ──────────────────────────────────────────── *
+ *
+ * A sibling MODE of the subagent view (see that block): opened by
+ * `/team chart`, it takes the transcript's region and leaves the dock greyed,
+ * so the page reads as the same app looking somewhere else. Four rows: title,
+ * rule, the chart canvas (`1fr`), the hint.
+ *
+ * The one deliberate difference from the subagent body is `overflow: auto` on
+ * BOTH axes. An org chart is WIDE — wider than the viewport for any real org —
+ * so horizontal scroll is legitimate here, unlike the main screen (where a
+ * horizontal scrollbar is always a bug) and unlike the subagent body (vertical
+ * only). The canvas Static is pinned to the painted grid size, so the
+ * container's virtual size equals the canvas and Textual scrolls the
+ * difference; the chart is never re-laid-out on scroll. */
+.org-chart-view {
+    height: 1fr;
+    padding: 1 1 1 1;
+}
+
+.org-chart-view-title {
+    height: 1;
+}
+
+.org-chart-view-rule {
+    height: 1;
+}
+
+/* Both-axes scroll around the canvas. One row of air under the rule, the same
+ * reason the subagent body carries it: without it the rule sits on the first
+ * box row and a faint full-width line resting on a box reads as chrome that is
+ * not there. */
+.org-chart-view-body {
+    height: 1fr;
+    padding: 1 0 0 0;
+    overflow: auto;
+}
+
+/* The canvas is sized in Python to the painted grid (width AND height), which
+ * is what makes the body's virtual size equal the canvas and the scrollbars
+ * appear exactly when the org overflows. `auto` here would collapse it to the
+ * content the Static was handed with no room to scroll. */
+.org-chart-view-canvas {
+    width: auto;
+    height: auto;
+}
+
+/* One quiet row above the hint, same as the subagent footer: without it the
+ * hints sit flush on the last canvas row and read as part of the chart. */
+.org-chart-view-hints {
+    height: 2;
+    width: 1fr;
+    padding: 1 0 0 0;
+}
+
+/* The dock in org-chart mode: PRESENT and RECEDED, never removed — the exact
+ * treatment `Screen.subagent` gives it, and for the same reason (what recedes
+ * is what is inert; the band stays live because it still carries the parent's
+ * state). `text-opacity`, not `color`, because these paint rich `Text` whose
+ * ink is already chosen. */
+Screen.org-chart #prompt-chevron,
+Screen.org-chart #todo-panel {
+    text-opacity: 45%;
+}
+
+Screen.org-chart #input-dock #prompt-chevron {
+    color: $lo-dim;
+}
+
+
 /* ── /resume session picker ────────────────────────────────────────────── *
  *
  * A floating read surface (overlay ramp, borderless, content-sized, Esc to

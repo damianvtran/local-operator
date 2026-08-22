@@ -1083,6 +1083,14 @@ class Editor(TextArea):
         name, sep, tail = list_argument.partition(" ")
         if not name or not sep or tail.strip():
             return None
+        # `/team chart ` is NOT a completed name — `chart` is the reserved
+        # subcommand, and the space leads into the second-slot team list that
+        # feeds the chart, not into a switch/send choice. The attach-or-send
+        # semantics this hint names do not apply, so it must not show. (A team
+        # literally named `chart` is talked to with `/team =chart …`, whose
+        # leading `=` makes the first token not equal `chart`.)
+        if self._argument_command in ("team", "teams") and name.lower() == "chart":
+            return None
         return self.NAME_SWITCH_HINT
 
     def set_name_choices(self, names: frozenset[str]) -> None:
@@ -2663,13 +2671,16 @@ class Editor(TextArea):
                 # against team names.
                 self._name_choices = frozenset()
                 self.post_message(ArgumentQueryOpened(command or ""))
-            elif command == "mcp":
-                # `/mcp` is two-level: verbs in the first argument slot,
-                # servers in the second. ArgumentQueryOpened fires on the
-                # command WORD, so without this the verb rows would stay up
-                # after `login` was completed and the server slot would have
-                # nothing to offer. Tracked rather than refreshed per
-                # keystroke: the row set only changes when the verb does.
+            elif command in ("mcp", "team", "teams"):
+                # `/mcp` and `/team` are two-level: `/mcp` reserves verbs in the
+                # first argument slot and offers servers in the second; `/team`
+                # reserves the `chart` subcommand in the first slot and, once
+                # `chart ` is present, re-offers TEAM NAMES in the second (the
+                # [name] the chart wants). ArgumentQueryOpened fires on the
+                # command WORD, so without this the first-slot rows would stay
+                # up after the subcommand was completed and the second slot
+                # would have nothing to offer. Tracked rather than refreshed per
+                # keystroke: the row set only changes when the first token does.
                 subcommand = list_argument.partition(" ")[0].lower() if list_argument else ""
                 if subcommand != self._argument_subcommand:
                     self._argument_subcommand = subcommand

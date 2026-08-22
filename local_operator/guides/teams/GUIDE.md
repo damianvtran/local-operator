@@ -39,9 +39,31 @@ Then:
 
 Example: "create a Feature Release Team with a manager, coder, designer, architect, and security reviewer" → install those starters (author a `security-reviewer` role if none exists), agree collaboration ("architect designs, coder implements, reviewer and designer sign off, manager reports"), create the team, and stop. Do not start the work until they send `/team Feature-Release …`.
 
+## Nested teams (orgs)
+
+A member slot can reference ANOTHER team instead of an agent, turning a flat roster into an **org** — a team of teams. Prefix the member token with `team:`:
+
+- `team:pod` — nest the team named `pod` as a sub-org.
+- `team:pod:2` — two independent copies of the `pod` sub-org.
+
+A bare token (no prefix) stays an agent, so the existing `coder` / `reviewer:2` grammar is untouched. A nested team carries its own collaboration and project briefs; the slot only points at it by name, so the same `pod` team can be nested under two different orgs without copying its briefs into each parent. Nesting is bounded (a reference deeper than the org-depth limit, or a cycle where A nests B nests A, is truncated rather than followed).
+
+`team show <name>` badges a nested slot `(team)` so an org is distinguishable from a flat roster.
+
+> The chart renders the **declared** org — the structure the roster describes. The runtime that lets a manager delegate INTO a nested team's manager is a separate capability; a team-boundary node is tagged `(declared)` so the chart never implies a wiring that is not live yet.
+
 ## Running a team
 
 `/team` lists teams. `/team <name> <request>` attaches the team to this session (the current agent becomes the manager of that roster) and sends the request as a real turn.
+
+`/team chart [name]` opens a scrollable, zoomable **org chart** of a team: the manager at the top, members beneath, nested teams expanded recursively. `chart` is a reserved first-argument subcommand under `/team` (the same shape `/mcp login|logout|reauth` uses):
+
+- `/team chart <name>` charts that team.
+- `/team chart` (bare) charts the team currently attached to this session, or explains how to name one.
+- `/team chart chart` charts a team literally named `chart` (the second token is the `[name]`).
+- `/team =chart <request>` TALKS to a team named `chart` — a leading `=` on the first token means "literal team name, never a subcommand" (`=` cannot appear in a real team name, so it never collides).
+
+Inside the chart: `+`/`-` change zoom tier (outline → standard → detailed), `f` fits the chart to the viewport width, `e` expands/collapses the whole canvas, arrows/PageUp/PageDown/Home/End scroll, and `Esc` leaves.
 
 As the manager:
 
@@ -68,6 +90,8 @@ Use the `agent` tool to author or install the members first. A team that names a
 ```bash
 local-operator teams list
 local-operator teams create feature-release --manager manager --member coder --member reviewer:2
+# an org: a member that is itself a team
+local-operator teams create eng-org --manager director --member team:feature-release --member team:platform-pod:2
 local-operator teams show feature-release
 local-operator teams delete --name feature-release
 ```
