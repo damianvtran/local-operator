@@ -369,10 +369,29 @@ CHILD_QUIET_ENV: dict[str, str] = {
 #: How long teardown waits for the stderr pump after the child has exited. The
 #: pipe is normally at EOF already and this returns instantly; the bound only
 #: bites when a surviving descendant still holds the write end, and there is
-#: nothing more of the SERVER's own output to wait for in that case. Short
-#: because ``disconnect_all`` tears connections down one at a time, so this is
-#: paid per server on quit.
+#: nothing more of the SERVER's own output to wait for in that case. Kept
+#: short even though ``disconnect_all`` now closes connections concurrently:
+#: any single stdio server still pays it inline on ``/mcp reconnect`` and
+#: ``disconnect_server``, where nothing overlaps it.
 STDERR_DRAIN_GRACE_S = 0.25
+
+#: Grace a stdio server gets at each rung of teardown (stdin EOF, then
+#: SIGTERM, then SIGKILL) before escalation to the next rung. The wait is
+#: event-driven — ``process.wait()`` wakes the moment the child exits — so a
+#: prompt server pays nothing and only a stubborn one sits out a rung. The
+#: value preserves the budget of the 0.1 s polling loop it replaced (20 ticks
+#: per rung); what changed is the wake latency, not the patience.
+STDIO_EXIT_GRACE_S = 2.0
+
+#: Bound on closing ONE connection's exit stack (see
+#: :meth:`McpManager._teardown_connection`). Bounded at all because a remote
+#: transport's close is network I/O — the streamable-HTTP transport DELETEs
+#: its session on an HTTP client whose connect timeout alone is 30 s — and a
+#: dead network must not be able to hold quit hostage for that long. Five
+#: seconds matches the session's other dispose bounds (turn abort, browser
+#: close, title flush): comfortably above any healthy close, and a pause a
+#: person will sit through once rather than a hang they will kill -9.
+CONNECTION_TEARDOWN_TIMEOUT_S = 5.0
 
 #: Stderr lines retained per stdio server for the failure report. A Python
 #: traceback plus the banner that preceded it fits inside this; a chatty server
@@ -618,27 +637,44 @@ async def _stdio_transport(
             stderr_drained.set()
 
     async def _stop() -> None:
-        """Close stdin, give the server a grace window, then kill the tree."""
-        stdin = process.stdin
-        if stdin is not None:
-            with suppress(Exception):
-                await stdin.aclose()
-        exited = False
-        for _ in range(20):
-            if process.returncode is not None:
-                exited = True
-                break
-            await asyncio.sleep(0.1)
-        if not exited:
+        """Close stdin, give the server a grace window, then kill the tree.
+
+        EVENT-DRIVEN: each rung awaits ``process.wait()`` under a deadline
+        rather than polling ``returncode`` on a 0.1 s tick. The polling loop
+        this replaced charged up to a full tick of pure latency per rung on
+        every quit — a child that exited 1 ms after a poll still cost 99 ms —
+        and teardown is exactly the path where that latency is user-visible
+        (the terminal is already released; the user is watching the prompt).
+
+        CANCELLATION-SAFE on purpose: ``_teardown_connection`` bounds the
+        stack close, and the cancel it delivers on timeout lands on whichever
+        await is current in here. Absorbing that cancel without killing the
+        child would leak the process past the session — on Linux
+        ``start_new_session`` detaches it from our process group entirely (see
+        :func:`stdio_start_new_session`), so it would not even die with us.
+        Kill first, then let the cancellation propagate.
+        """
+        try:
+            stdin = process.stdin
+            if stdin is not None:
+                with suppress(Exception):
+                    await stdin.aclose()
+            with anyio.move_on_after(STDIO_EXIT_GRACE_S):
+                await process.wait()
+                return
             for stop_process in (process.terminate, process.kill):
                 with suppress(Exception):
                     stop_process()
-                for _ in range(20):
-                    if process.returncode is not None:
-                        break
-                    await asyncio.sleep(0.1)
-                if process.returncode is not None:
-                    break
+                with anyio.move_on_after(STDIO_EXIT_GRACE_S):
+                    await process.wait()
+                    return
+        except asyncio.CancelledError:
+            # The bounded teardown gave up on waiting; the child must not
+            # outlive the session that owns it. ``kill`` is synchronous (one
+            # signal), so this cannot itself block the cancellation.
+            with suppress(Exception):
+                process.kill()
+            raise
 
     try:
         async with anyio.create_task_group() as tg:
@@ -667,9 +703,10 @@ async def _stdio_transport(
                 # Let the stderr pump finish before the cancel below kills it.
                 # Without this wait a server that died DURING the handshake
                 # loses the last lines of its own stderr — exactly the ones
-                # saying why — because `_stop` returns up to one 0.1 s poll
-                # before the pump has drained them, and `_connect_server`
-                # quotes that tail into the error the user is shown.
+                # saying why: `_stop` observes the exit the moment it happens,
+                # which can be BEFORE the pump has consumed what is still
+                # sitting in the pipe, and `_connect_server` quotes that tail
+                # into the error the user is shown.
                 #
                 # Bounded because EOF is not guaranteed: the write end is held
                 # by every process that inherited it, so a server that spawned
@@ -1213,8 +1250,19 @@ class McpManager:
             # real McpConnectionError they can turn into a tool result (MCP-08).
             _settle_future_error(future, McpConnectionError("MCP manager disposed"))
         self._connect_futures.clear()
-        for name in list(self._connections):
-            await self._teardown_connection(name)
+        # CONCURRENTLY, not one at a time: teardown is per-connection I/O — a
+        # remote session-terminate round trip, a child process exit plus its
+        # stderr drain grace — and paying it serially made quit latency grow
+        # with the server count (measured 1.6 s across seven servers where the
+        # slowest single one needed 0.95 s). The teardowns share no state:
+        # each pops its own entry from ``_connections`` and closes its own
+        # stack, so the only thing serial order bought was the wait.
+        names = list(self._connections)
+        if names:
+            await asyncio.gather(
+                *(self._teardown_connection(name) for name in names),
+                return_exceptions=True,
+            )
         for watcher in list(self._watchers):
             watcher.cancel()
         for task in list(self._notify_tasks):
@@ -2129,14 +2177,26 @@ class McpManager:
         return conn
 
     async def _teardown_connection(self, name: str) -> None:
-        """Close one connection's stack without touching registries."""
+        """Close one connection's stack without touching registries.
+
+        BOUNDED (:data:`CONNECTION_TEARDOWN_TIMEOUT_S`): a remote transport's
+        close sends a session-terminate request over the network, and a dead
+        network or wedged server must not hold session dispose — the path the
+        user experiences as "quit hangs" — for the HTTP client's own 30 s
+        connect timeout. On timeout the close is CANCELLED: the stdio
+        transport responds by killing its child (see ``_stop``), and a
+        cancelled remote close simply drops the connection on the floor,
+        which is what a dead network leaves anyway. ``TimeoutError`` is an
+        ``Exception``, so the existing suppress covers it; a real
+        cancellation from above still propagates.
+        """
         conn = self._connections.pop(name, None)
         if conn is None:
             return
         conn.closed_event.set()
         if conn.stack is not None:
             with suppress(Exception):
-                await conn.stack.aclose()
+                await asyncio.wait_for(conn.stack.aclose(), CONNECTION_TEARDOWN_TIMEOUT_S)
 
     # --- notifications -------------------------------------------------------
 
