@@ -854,7 +854,7 @@ class _SessionPlan:
     """
 
     session_kwargs: dict[str, Any]
-    system_blocks_provider: Callable[[], Awaitable[list[str]]]
+    system_blocks_provider: Callable[..., Awaitable[list[str]]]
     knowledge_hooks: _KnowledgeHooks
     auth_store: AuthStore | None = None
 
@@ -868,7 +868,7 @@ def _make_system_blocks_provider(
     user_instructions: str = "",
     repo_guidance: str = "",
     variable_store: "VariableStore | None" = None,
-) -> Callable[[], Awaitable[list[str]]]:
+) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
     Session awaits the result (committed tolerance for awaitable providers),
@@ -892,7 +892,12 @@ def _make_system_blocks_provider(
     the next session, which is also what makes a session's prompt reproducible.
     """
 
-    async def provider() -> list[str]:
+    async def provider(model_label: str = "") -> list[str]:
+        # ``model_label`` is passed live by the Session each turn (its own
+        # ``model_label``), so a deliberate ``set_model`` or a failover fallback
+        # that changed the model is reflected in the env block on the next turn
+        # without rebuilding this closure. The benchmark/preflight caller passes
+        # the spec label directly; both keep the block byte-stable within a turn.
         from local_operator.prompts_api import build_system_blocks
 
         query = _latest_user_query(transcript)
@@ -925,6 +930,7 @@ def _make_system_blocks_provider(
             credentials=names,
             team_brief=team_brief,
             agent_brief=agent_brief,
+            model_label=model_label,
         )
 
     return provider
@@ -1539,9 +1545,13 @@ async def build_initial_blocks(
     """
     plan = await _prepare(args, config_manager, credential_manager, agent_registry, has_ui=False)
     # No session facade is built on this path, so the store's lifetime ends
-    # here: close it directly (CL-08) to release the SQLite lock.
+    # here: close it directly (CL-08) to release the SQLite lock. Pass the
+    # spec's label so the measured startup prompt includes the model line the
+    # real session will carry (the benchmark budget must not under-count it).
+    spec = plan.session_kwargs.get("model")
+    model_label = f"{spec.provider}/{spec.model_id}" if spec is not None else ""
     try:
-        return await plan.system_blocks_provider()
+        return await plan.system_blocks_provider(model_label)
     finally:
         if plan.auth_store is not None:
             try:

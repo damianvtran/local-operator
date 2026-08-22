@@ -272,6 +272,7 @@ def build_system_blocks(
     credentials: Sequence[str] | None = None,
     team_brief: str = "",
     agent_brief: str = "",
+    model_label: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -335,6 +336,18 @@ def build_system_blocks(
     env_block = f"Today is {date_str}."
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"
+    if model_label.strip():
+        # The running model, so the assistant knows which model it currently is
+        # rather than guessing (a subagent naming itself in a review byline, a
+        # model reasoning about its own context window or capabilities). This
+        # rides the byte-stable env HEAD block, not the volatile tail, because
+        # within one turn-loop the model does not change: a deliberate
+        # ``set_model`` or a failover fallback takes effect at the NEXT turn
+        # boundary, which re-renders this block from the session's live model,
+        # and the switch itself is separately announced as a
+        # ``session_model_switch`` message so the model notices the change
+        # rather than only seeing a different static line.
+        env_block = f"{env_block}\n\nModel: {model_label.strip()}"
 
     tail = skills_block or "<skills/>"
     if goal:

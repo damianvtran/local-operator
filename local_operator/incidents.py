@@ -27,6 +27,14 @@ from dataclasses import dataclass
 #: resumed replay see the same incident.
 SESSION_INCIDENT_MESSAGE_TYPE = "session_incident"
 
+#: Custom-message type journaled by the session when the running model changes
+#: (a deliberate ``set_model``, or a failover fallback to another model).
+#: Rendered to a user message the same way as an incident, so the model NOTICES
+#: it is now answering as a different model rather than only seeing a changed
+#: static "Model:" line in the system prompt. Persisted, so a resumed session
+#: replays the switch history too.
+SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
+
 #: Ordered (category, patterns) rules. First category whose pattern matches
 #: (case-insensitive) wins; order is specificity, not severity.
 _RULES: list[tuple[str, tuple[str, ...]]] = [
@@ -176,3 +184,44 @@ def classify_incident(raw: str, provider: str = "", model: str = "") -> Incident
 def format_incident_message(raw: str, provider: str = "", model: str = "") -> str:
     """One-call formatter for the rendered user-visible text."""
     return classify_incident(raw, provider, model).render()
+
+
+def format_model_switch_message(
+    new_label: str,
+    previous_label: str = "",
+    *,
+    reason: str = "",
+    transient: bool = False,
+) -> str:
+    """Render the model-switch text injected into the model's context.
+
+    ``new_label`` / ``previous_label`` are ``provider/model_id`` strings (the
+    same vocabulary the status band and the system-prompt ``Model:`` line use,
+    so two names for one object never read as two models). ``transient`` marks
+    a per-request failover fallback that may return to the primary at the next
+    boundary, as opposed to a deliberate switch that persists; ``reason``
+    carries the failover cause when there is one.
+
+    The message is phrased as present-tense state ("You are now running as X")
+    rather than a command, so the model treats it as context for the turns that
+    follow rather than an instruction to acknowledge.
+    """
+    if previous_label and previous_label != new_label:
+        head = f"[model switch] You are now running as {new_label} (was {previous_label})."
+    else:
+        head = f"[model switch] You are now running as {new_label}."
+    lines = [head]
+    if reason.strip():
+        lines.append(f"Reason: {reason.strip()[:200]}")
+    if transient:
+        lines.append(
+            "This is a temporary fallback for the current request; the session "
+            "may return to its primary model at a later turn. Capabilities and "
+            "context window may differ from the primary."
+        )
+    else:
+        lines.append(
+            "This applies from now on. Capabilities, context window, and tone "
+            "may differ from the previous model; act as the model you now are."
+        )
+    return "\n".join(lines)

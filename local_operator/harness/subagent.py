@@ -912,7 +912,13 @@ async def _build_child_session(
     if mcp is not None and not restricted:
         tools = tools + mcp.tools
 
-    def system_blocks_provider() -> list[str]:
+    def system_blocks_provider(model_label: str = "") -> list[str]:
+        # ``model_label`` is passed by the child Session each turn (its own
+        # ``model_label``), which for a subagent is the resolved effort-tier
+        # override or the parent's model. Surfacing it lets a delegated
+        # reviewer/designer name the model it actually ran on in its byline
+        # instead of guessing.
+        #
         # Standard block layout. The lazy-knowledge tail carries the MCP
         # catalogue and nothing else: re-running semantic skill selection per
         # one-shot child would add cost without giving the parent a new durable
@@ -941,6 +947,7 @@ async def _build_child_session(
             goal=parent_session.goal,
             user_instructions=user_instructions,
             credentials=names,
+            model_label=model_label,
         )
 
     child = Session(
