@@ -293,6 +293,11 @@ MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes
 #: Dropping it also stops the row being WRONG on the error path, where the turn
 #: was not stopped by anyone: it failed, and its own error notice says so.
 DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
+#: The one row a recall decline prints (design round 1, D1): a silent Esc over
+#: a half-typed draft reads as a dropped keystroke, so the decline names the
+#: obstacle and the recovery. Named because the SUCCESSFUL recall retires its
+#: own decline row (design round 2, D4) and must recognise it.
+RECALL_DECLINE_NOTICE = "queued steer kept — clear the composer, esc again to recall"
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -11150,9 +11155,9 @@ class OperatorApp(App[None]):
         # the obstacle. The recovery is one line, replaced on repeat like the
         # ladder's own rows.
         if editor.text.strip():
-            self._replace_stop_notice(
-                "queued steer kept — clear the composer, esc again to recall it", "note"
-            )
+            # 59 cells: inside the set's 61-column one-line budget (design
+            # round 2, D5).
+            self._replace_stop_notice(RECALL_DECLINE_NOTICE, "note")
             return
         text = message.text
         # The steer recorded itself in prompt history on submit; the recall
@@ -11182,6 +11187,15 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         for block in (notice, *image_blocks, user_block):
             transcript.remove_block(block)
+        # A decline row from an earlier press advertised exactly this recall
+        # ("clear the composer, esc again"); now that it has happened the row
+        # is an instruction for a state that no longer holds — the same
+        # stale-row class the queued-steer receipts exist to eliminate. Retire
+        # it with the steer's own rows (design round 2, D4).
+        stop_notice = self._stop_notice
+        if stop_notice is not None and stop_notice._text == RECALL_DECLINE_NOTICE:
+            transcript.remove_block(stop_notice)
+            self._stop_notice = None
         # The steer branch registered its text as a pending user echo so the
         # delivery's MessageStartEvent would not repaint it; the recall has
         # removed the painted row, so the entry must go with it — left in

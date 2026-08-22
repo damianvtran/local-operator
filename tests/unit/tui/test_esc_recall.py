@@ -268,6 +268,17 @@ async def test_recall_declines_over_a_half_typed_draft() -> None:
         # the recovery (design round 1, D1).
         assert any("esc again to recall" in text for text in _notice_texts(app))
 
+        # The advertised recovery: clear the buffer, Esc again — the steer is
+        # recalled, and the decline row that advertised the recall retires
+        # with the steer's own rows (design round 2, D4).
+        editor.text = ""
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.text == "queued steer"
+        assert session.queued_steering() == []
+        assert not any("esc again to recall" in text for text in _notice_texts(app))
+
 
 @pytest.mark.asyncio
 async def test_recall_does_not_steal_the_stop_escalation_ladder() -> None:
