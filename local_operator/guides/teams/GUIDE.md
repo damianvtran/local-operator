@@ -19,6 +19,8 @@ A member actually sees, outermost last:
 
 Never copy a team's collaboration or project brief into an agent's base instructions. That is how a reusable coder becomes "the user-dashboard coder" and cannot staff anything else.
 
+Roster members are the same roles/specialists `/agent` exposes: authoring an agent for a team also makes it individually invokable with `/agent <name> <message>`, so its name must follow the no-spaces rule either way.
+
 ## When the user asks to create a team
 
 Work with them. Do not invent a roster silently. Ask, using the `ask` tool when a choice is theirs:

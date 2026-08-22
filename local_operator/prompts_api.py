@@ -271,6 +271,7 @@ def build_system_blocks(
     repo_guidance: str = "",
     credentials: Sequence[str] | None = None,
     team_brief: str = "",
+    agent_brief: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -349,6 +350,12 @@ def build_system_blocks(
         # must not invalidate the persona prefix, and a team is a grouping
         # for THIS conversation, not a machine-wide preference.
         tail = f"{tail}\n\n<team>\n{team_brief.strip()}\n</team>"
+    if agent_brief.strip():
+        # `/agent <name>` rides the tail for the same cache reason as the team
+        # brief. AFTER `<team>` deliberately: an agent attached mid-session is
+        # the more recent, more specific instruction, and later placement is
+        # how the model reads precedence when the two briefs disagree.
+        tail = f"{tail}\n\n<agent>\n{agent_brief.strip()}\n</agent>"
     names = [name for name in (credentials or ()) if name]
     if names:
         # Names only. The values live in process memory and are injected into

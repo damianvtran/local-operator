@@ -871,6 +871,7 @@ def _make_system_blocks_provider(
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
         team_brief = goal_state.team_brief if goal_state is not None else ""
+        agent_brief = goal_state.agent_brief if goal_state is not None else ""
         names = (
             variable_store.credential_names()
             if variable_store is not None and hasattr(variable_store, "credential_names")
@@ -886,6 +887,7 @@ def _make_system_blocks_provider(
             repo_guidance=repo_guidance,
             credentials=names,
             team_brief=team_brief,
+            agent_brief=agent_brief,
         )
 
     return provider

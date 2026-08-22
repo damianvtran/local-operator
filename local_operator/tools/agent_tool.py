@@ -82,8 +82,16 @@ class AgentParams(BaseModel):
             "a role or a specialist profile."
         )
     )
+    # The no-spaces guidance is a modularity contract, not registry law: the
+    # registry itself accepts any string, but a role/specialist name is also a
+    # `/agent <name> <message>` argument parsed at the first whitespace, so a
+    # spaced name authors a profile the user cannot invoke from that surface.
     name: str | None = Field(
-        default=None, description="Role or specialist name (all ops but search)."
+        default=None,
+        description=(
+            "Role or specialist name (all ops but search). No spaces — the "
+            "name doubles as the /agent slash-command argument."
+        ),
     )
     query: str | None = Field(default=None, description="search: the task, in a sentence.")
     description: str | None = Field(

@@ -31,6 +31,12 @@ class GoalState:
     #: team cannot overwrite a standing ``/goal``, and clearing a goal cannot
     #: drop the roster the manager is coordinating.
     team_brief: str = ""
+    #: Agent-profile brief stamped by ``/agent``. Its OWN field rather than a
+    #: suffix of ``team_brief`` because the two are attached by different
+    #: commands with different lifetimes: a later ``/agent`` replaces only the
+    #: previous agent brief, and it must never eat the roster a running
+    #: ``/team`` manager is still coordinating (nor vice versa).
+    agent_brief: str = ""
 
     def set(self, text: str) -> str:
         """Store a trimmed, length-capped goal and return what was stored."""

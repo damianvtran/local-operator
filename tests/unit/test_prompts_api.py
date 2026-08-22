@@ -389,6 +389,26 @@ def test_credentials_ride_the_volatile_tail_as_names_only() -> None:
     assert "<session-credentials>" not in idle[3]
 
 
+def test_agent_brief_rides_the_volatile_tail() -> None:
+    """A /agent attach must not invalidate the cached persona prefix, and it
+    must land AFTER the team brief — the later, more specific instruction."""
+    blocks = build_system_blocks(
+        TOOLS,
+        SKILLS,
+        ENV,
+        DATE,
+        team_brief="[team: release]\nYou coordinate.",
+        agent_brief="[role: reviewer]\nYou review.",
+    )
+    assert "<agent>" in blocks[3]
+    assert "[role: reviewer]" in blocks[3]
+    assert blocks[3].index("<team>") < blocks[3].index("<agent>")
+    for block in blocks[:3]:
+        assert "role: reviewer" not in block
+    idle = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+    assert "<agent>" not in idle[3]
+
+
 def test_team_brief_rides_the_volatile_tail() -> None:
     """A /team attach must not invalidate the cached persona prefix."""
     blocks = build_system_blocks(

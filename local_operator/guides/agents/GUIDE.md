@@ -68,6 +68,10 @@ Use the `agent` tool to work with roles and specialists:
 
 When a user asks for a named specialist — "create a User Dashboard Agent that knows our release practices" — that is `kind='specialist'` with a real instruction set, not a one-off prompt. Put it on a team roster later rather than baking the team into the agent.
 
+### One profile, three surfaces
+
+A registered role or specialist is modular: the SAME profile is (a) launchable as a subagent via `task(agent=...)`, (b) directly usable in the current session via `/agent <name> <message>` (bare `/agent` lists roles and specialists; `/agent <name>` alone adopts the profile's instructions for this session), and (c) placeable on any team roster. Author once, and it must work on all three surfaces — so satisfy the strictest surface's naming rule: no spaces in the name (it becomes a slash-command argument parsed at the first whitespace, the same constraint the teams guide states for team names). Ordinary conversational agents are not exposed on any of these surfaces.
+
 When a delegated run goes wrong in a way the role should have prevented, update the role rather than only patching this one prompt. That is the mechanism by which review guidance improves instead of being re-derived every time.
 
 ## Teams
