@@ -1356,7 +1356,12 @@ AnalyticsScreen .analytics-panel {
     scrollbar-size-vertical: 1;
     scrollbar-gutter: stable;
     scrollbar-background: $lo-sunken;
-    scrollbar-color: $lo-edge;
+    /* `muted` idle (not `edge`) so this bar reads as the SAME chrome as the
+     * hand-painted `/usage` thumb, whose idle glyph is `muted` (design D1/D2):
+     * an `edge`-idle bar was near-invisible next to the bright `/usage` one, so
+     * the two overlays spoke two scrollbar languages and scroll was hard to
+     * discover here. Hover/active still step up so the grab target is obvious. */
+    scrollbar-color: $lo-muted;
     scrollbar-color-hover: $lo-muted;
     scrollbar-color-active: $lo-accent;
 }

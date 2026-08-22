@@ -528,7 +528,13 @@ class AnalyticsScreen(ModalScreen[None]):
         # header from the scrolling body, the same device ``/usage`` uses.
         fg = Style(color=theme_mod.semantic_color("fg"), bold=True)
         faint = Style(color=theme_mod.semantic_color("faint"))
-        title = Text()
+        # ``no_wrap`` + crop so the rule (and the title's suffix) CROP to the
+        # widget's real content box instead of wrapping. ``_card_width`` floors
+        # at 40, but the painted title box is narrower on a sub-46-col terminal
+        # (review MINOR): an unbounded ``─`` run would wrap to a second line and
+        # eat into the fixed ``height: 3``. Cropping keeps the rule one line at
+        # any width; the report rows already truncate per-row for the same reason.
+        title = Text(no_wrap=True, overflow="crop")
         title.append("Usage analytics", style=fg)
         title.append("   all sessions", style=faint)
         title.append("\n")
