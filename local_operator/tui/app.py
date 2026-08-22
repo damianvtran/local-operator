@@ -424,6 +424,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("context", "Show prompt, tool-schema and message token usage"),
+    # The screen it opens IS the receipt (same rule as `/usage`). The argument
+    # names WHICH analytics view; today only `usage` exists, so the list is an
+    # OFFER — a bare `/analytics` opens the usage view rather than doing
+    # nothing, which is what makes the single-view case feel like one command
+    # while leaving room for `/analytics cost`, `/analytics latency`, ... later.
+    SlashCommand(
+        "analytics",
+        "Aggregated token-consumption analytics across all sessions",
+        arguments=ArgumentMode.OPTIONAL,
+    ),
     # THE exception. `/goal <text>` is the one command whose argument reaches
     # the model: the goal rides the system prompt's volatile tail on every later
     # turn (`Session.set_goal`). Words the model is given are the transcript's
@@ -7355,6 +7365,8 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
+        elif command == "/analytics":
+            self._cmd_analytics(arg, notice)
         elif command == "/context":
             block = self._context_block()
             if block is not None:
@@ -8834,6 +8846,58 @@ class OperatorApp(App[None]):
 
         return time.time() * 1000
 
+    #: The analytics views ``/analytics`` can open. Today only ``usage``
+    #: exists; the mapping is here (not inlined in the dispatch) so adding a
+    #: view — ``cost``, ``latency`` — is one row, and so the argument-choice
+    #: list and the dispatch read the SAME source of truth about what exists.
+    _ANALYTICS_VIEWS: dict[str, str] = {
+        "usage": "Token consumption: cache rates, per-provider, per-component",
+    }
+
+    def _cmd_analytics(self, arg: str, notice: NoticeFn) -> None:
+        """``/analytics [view]`` — open an aggregated analytics screen.
+
+        The user asked for ``/analytics /usage``, so a leading slash on the
+        view name is accepted (and stripped) as well as the bare word. A bare
+        ``/analytics`` opens the default view rather than doing nothing: there
+        is exactly one view today, and making the user name it would be a gate
+        in front of a command that has one answer. An unknown view is rejected
+        through ``_system_notice`` — nothing ran, so the boot composition must
+        survive it, the same rule ``_cmd_usage`` and ``_cmd_model`` follow.
+        """
+        view = arg.strip().lstrip("/").lower() or "usage"
+        if view not in self._ANALYTICS_VIEWS:
+            known = ", ".join(f"/{name}" for name in self._ANALYTICS_VIEWS)
+            self._system_notice(f"unknown analytics view: {arg.strip()} — try {known}", "warning")
+            return
+        # The query is a GROUP BY over a bounded on-disk ledger — milliseconds —
+        # but it is still disk I/O, so it runs in a worker rather than on the
+        # paint path. The screen is pushed from the worker once the data is in
+        # hand, so the overlay never appears empty and then fills.
+        self.run_worker(
+            self._open_analytics_worker(view),
+            thread=False,
+            group="analytics",
+            exclusive=True,
+        )
+
+    async def _open_analytics_worker(self, view: str) -> None:
+        """Query the analytics ledger off the paint path, then push the screen."""
+        from local_operator.analytics import AnalyticsStore
+        from local_operator.tui.widgets.analytics_panel import AnalyticsScreen
+
+        try:
+            # The store read is blocking SQLite; keep it off the event loop.
+            aggregate = await asyncio.to_thread(lambda: AnalyticsStore().aggregate())
+        except Exception as error:  # noqa: BLE001 — a report must never crash the app
+            logger.debug("analytics: aggregate failed", exc_info=True)
+            self._system_notice(f"analytics unavailable: {error}", "warning")
+            return
+        # ``push_screen`` (not the awaiting variant): the screen dismisses
+        # itself on Esc and returns nothing to reconcile, exactly like the
+        # other read-only overlays.
+        self.push_screen(AnalyticsScreen(aggregate))
+
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""
         # ``_system_notice`` for every branch that REJECTS: a command that did
@@ -9507,6 +9571,10 @@ class OperatorApp(App[None]):
             picker.set_choices(self._approval_choices())
             picker.set_notice("")
             return
+        if message.command == "analytics":
+            picker.set_choices(self._analytics_choices())
+            picker.set_notice("")
+            return
         if message.command == "mcp":
             # Clear BEFORE the fill: the builder may set a notice of its own
             # (an unreadable credential store on the logout list), and a
@@ -9631,6 +9699,20 @@ class OperatorApp(App[None]):
                 )
             )
         return choices
+
+    def _analytics_choices(self) -> list[ArgumentChoice]:
+        """The views ``/analytics`` offers. One row per :attr:`_ANALYTICS_VIEWS`.
+
+        Built from the same mapping the dispatch reads, so the list can never
+        offer a view the handler does not know or hide one it does. There is a
+        single row today (``usage``); the list still exists so the space after
+        ``/analytics`` shows what the command can do rather than nothing, and so
+        a second view added to the mapping appears here for free.
+        """
+        return [
+            ArgumentChoice(name=name, description=description)
+            for name, description in self._ANALYTICS_VIEWS.items()
+        ]
 
     def _approval_choices(self) -> list[ArgumentChoice]:
         """The four rows ``/approvals`` offers: two modes × two scopes.
