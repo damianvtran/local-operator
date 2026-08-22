@@ -81,21 +81,19 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests with coverage
+        # pytest-cov (not `coverage run -m pytest`) because the suite now runs
+        # under xdist: coverage has to be collected inside each worker
+        # subprocess and merged, which pytest-cov does automatically and a
+        # top-level `coverage run` cannot. `-n auto` comes from addopts; the
+        # 80% floor is enforced by `fail_under` in [tool.coverage.report], so
+        # the step no longer parses the percentage out of the report by hand.
         run: |
-          coverage run -m pytest -v
-          COVERAGE_PERCENTAGE=$(coverage report | awk '/TOTAL/ {print $NF}' | tr -d '%')
-          echo "Coverage Percentage: $COVERAGE_PERCENTAGE"
-          if (( $(echo "$COVERAGE_PERCENTAGE >= 80" | bc -l) )); then
-            echo "Coverage check passed!"
-          else
-            echo "Coverage check failed. Minimum coverage is 80%"
-            exit 1
-          fi
-
-      - name: Generate coverage HTML report
-        run: coverage html
+          pytest --cov --cov-report=term-missing:skip-covered --cov-report=html
 
       - name: Upload coverage report
+        # `if: always()` so a coverage-threshold failure still uploads the HTML,
+        # which is exactly when you want to see which lines dropped.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report-${{ matrix.python-version }}
