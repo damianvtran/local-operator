@@ -310,7 +310,7 @@ def test_small_window_caps_verbatim_edges_to_its_share():
 
     The regression this locks down: the edges are the archive's un-trimmable
     floor (the frame-budget loop can only drop imaged pages), and at the
-    default ``HQ_EDGE_FRAMES * capacity`` they are ~35k tokens for an
+    default ``HQ_EDGE_FRAMES * capacity`` they are ~31.5k tokens for an
     Anthropic 1932px reader REGARDLESS of the window. On a small window that
     floor alone exceeds the whole ``0.5 * window`` archive budget, so a pass
     meant to get the context under the line commits it above the line instead.
