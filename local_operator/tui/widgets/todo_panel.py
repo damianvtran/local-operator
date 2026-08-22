@@ -579,6 +579,18 @@ class TodoPanel(Container):
         else:
             lines, affordance = self._build_phased(phases, hidden)
 
+        # EXPANDED item-visibility floor (U6). The affordance is pinned as its
+        # OWN row OUTSIDE the scroll region, so at the floored budget (h=12 both
+        # shapes, h=13 phased) it consumed the single row the first item would
+        # occupy: expand painted the header + ``ctrl+t to collapse`` and ZERO
+        # todo rows where collapsed showed one — the exact "expand shows nothing"
+        # defect the feature exists to kill, resurfacing at the extreme floor.
+        # Guarantee an item survives before the affordance claims its row,
+        # mirroring collapsed's ``_fit_body`` floor. Only touches the tightest
+        # budgets; every h>=14 keeps the affordance untouched.
+        if self._expanded and affordance is not None:
+            lines, affordance = self._guarantee_expanded_item(lines, affordance)
+
         # The clip happens HERE, against a width, because nothing in the layout
         # supplies one (see :meth:`_row_cells`). Applied uniformly to headers,
         # items and the affordance so no row can push the band past the screen.
@@ -911,6 +923,69 @@ class TodoPanel(Container):
             dropped = [kept[-1], *dropped]
             kept = kept[:-1]
         return kept, dropped
+
+    def _guarantee_expanded_item(
+        self, lines: list[Text], affordance: Text
+    ) -> tuple[list[Text], Text | None]:
+        """Ensure an ITEM row is on screen when expanded at the floored budget (U6).
+
+        The affordance is pinned as its OWN row OUTSIDE the scroll region, so the
+        scroll viewport gets ``budget - 1`` rows (:meth:`sync`). At the collapsed
+        floor (h=12 both shapes, h=13 phased) that one row went to the affordance
+        and the first item fell just below the fold: expand painted the header +
+        ``ctrl+t to collapse`` and ZERO todo rows where collapsed showed one — the
+        "expand shows nothing" defect returning at the extreme floor. Collapsed
+        never hits this because its marker is a body line, not a pinned widget, so
+        its scroll region is one row taller.
+
+        The fix mirrors collapsed's ``_fit_body`` floor — an item is worth more
+        than the redundant chrome — with two levers, cheapest first:
+
+        1. DROP THE AFFORDANCE row. Its hint is implied (the header names the
+           list, ``ctrl+t`` still collapses, the wheel/``ctrl+down`` still reach
+           the rest), so handing its row back to the scroll is a pure win when it
+           is what buries the item.
+        2. At the very floor, leading CHROME (the root line plus a phase header)
+           can still push the first item below a two-row viewport. Keep the root
+           line — the one non-negotiable total — and drop the chrome line(s)
+           between it and the first item until the item fits. The dropped phase
+           header's count is implied by the root ``stage`` line, and the whole
+           list is one ``ctrl+down`` away.
+
+        Only ever touches the tightest budgets: every h>=14 has room for an item
+        beneath the affordance, so the guard returns untouched and the affordance
+        stays. Returns ``(lines, affordance-or-None)``.
+        """
+        budget = self._body_rows()
+
+        def _first_item_idx(rows: list[Text]) -> int | None:
+            for i, row in enumerate(rows):
+                # Item rows carry the tool's ``- [`` mark; headers/root do not.
+                if "- [" in row.plain:
+                    return i
+            return None
+
+        first = _first_item_idx(lines)
+        if first is None:
+            return lines, affordance  # nothing to keep visible
+
+        # Viewport = rows the scroll shows before any scroll, matching sync's
+        # ``max_height = budget - affordance_rows``.
+        if first < max(1, budget - 1):
+            return lines, affordance  # item already visible with the affordance kept
+
+        # Lever 1: give the affordance's row back to the scroll.
+        if first < max(1, budget):
+            return lines, None
+
+        # Lever 2: trim leading chrome (never the root at index 0) until the
+        # first item fits the affordance-free viewport.
+        lines = list(lines)
+        viewport = max(1, budget)
+        while first >= viewport and first > 1:
+            del lines[first - 1]
+            first -= 1
+        return lines, None
 
     def _phase_header_row(self, name: str, done: int, total: int) -> Text:
         """A phase header ``PhaseName · done/total`` — muted name, dim progress,

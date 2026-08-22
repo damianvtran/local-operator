@@ -705,6 +705,19 @@ async def test_short_terminal_keeps_at_least_one_item_visible() -> None:
             # scrollbar", which holds.)
             assert len(painted) <= panel._body_rows()
             assert app.screen.show_vertical_scrollbar is False
+
+            # EXPANDED must ALSO keep an item on screen at the floor (U6): the
+            # pinned affordance row must not starve the last item. Assert an
+            # actual item row sits in the initial scroll viewport, not merely
+            # that some line was painted (a header-only panel would clear that).
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            scroll = app.screen.query_one("#todo-scroll")
+            exp_lines = str(panel._body.content).split("\n")
+            window = exp_lines[scroll.scroll_offset.y : scroll.scroll_offset.y + scroll.size.height]
+            assert any(
+                "- [" in ln for ln in window
+            ), f"h={height}: expanded viewport shows no item row: {window}"
             builtin.TODO_STORE.clear()
 
 
@@ -995,3 +1008,62 @@ async def test_collapsed_view_has_no_childless_phase_header() -> None:
         "Validation",
         "v0",
     ]
+
+
+@pytest.mark.asyncio
+async def test_expanded_shows_an_item_at_the_floor_flat_and_phased() -> None:
+    """U6: at the collapsed floor (h=12 both shapes, h=13 phased) ``ctrl+t`` must
+    still paint at least one real ITEM row in the initial scroll viewport, not
+    just the header + ``ctrl+t to collapse`` affordance.
+
+    The affordance is pinned OUTSIDE the scroll region, so at ``budget - 1`` rows
+    it stole the single row the first item would occupy — expand painted zero
+    todos where collapsed showed one, the "expand shows nothing" defect returning
+    at the extreme floor. This asserts an actual ``- [`` item row is WITHIN the
+    scroll viewport (top ``scroll.size.height`` body lines), not merely that the
+    painted line count cleared a bar the header alone would clear."""
+    from local_operator.tools import builtin
+
+    def _items_in_viewport(app: "OperatorApp", panel: TodoPanel) -> int:
+        scroll = app.screen.query_one("#todo-scroll")
+        lines = str(panel._body.content).split("\n")
+        top = scroll.scroll_offset.y
+        window = lines[top : top + scroll.size.height]
+        return sum(1 for ln in window if "- [" in ln)
+
+    flat_store = [_item(f"foundation task {n}", "pending") for n in range(15)]
+    phased_store = _big_multi_phase()
+    cases = [
+        ("flat", flat_store, 12),
+        ("flat", flat_store, 13),
+        ("phased", phased_store, 12),
+        ("phased", phased_store, 13),
+    ]
+    for shape, store, height in cases:
+        session = FakeSession()
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(100, height)) as pilot:
+            await pilot.pause()
+            builtin.TODO_STORE["sess"] = [dict(p) for p in store] if shape == "phased" else store
+            app._refresh_band()
+            await pilot.pause()
+            panel = app.query_one(TodoPanel)
+            collapsed_items = _items_in_viewport(app, panel)
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            expanded_items = _items_in_viewport(app, panel)
+            assert expanded_items >= 1, (
+                f"{shape} h={height}: expanded viewport shows no item row: "
+                f"{str(panel._body.content).split(chr(10))}"
+            )
+            # Never worse than collapsed at the same height (the U1 contract, held
+            # at the floor by the U6 guard).
+            assert expanded_items >= collapsed_items, (
+                f"{shape} h={height}: expanded {expanded_items} < collapsed " f"{collapsed_items}"
+            )
+            # The rest stays reachable — the guard trims chrome, never drops an
+            # item — so the overflow scrolls rather than being lost.
+            scroll = app.screen.query_one("#todo-scroll")
+            assert scroll.max_scroll_y > 0
+            assert app.query_one("#input-shell").region.height > 0
+            builtin.TODO_STORE.clear()
