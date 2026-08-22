@@ -1321,6 +1321,12 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # A reasoning-effort ceiling the harness set DELIBERATELY (an empty
+    # truncation retry stepped the effort down one rung). The session's
+    # frozen auto-effort override must not raise the request back above it:
+    # the override exists to hold a classification steady, not to undo a
+    # retreat the loop made because the higher rung produced nothing.
+    effort_ceiling: str | None = None
     # Stable request-prefix identity used by providers' server-side prompt
     # caches. Session hosts populate it once from their session id; keeping it
     # on the request lets retries and fallback clones preserve the same value.

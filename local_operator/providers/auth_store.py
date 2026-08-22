@@ -651,6 +651,26 @@ class AuthStore:
             self._conn.commit()
             return merged
 
+    async def ensure_oauth_fresh(self, credential_id: int) -> dict[str, Any] | None:
+        """Usable OAuth data for ONE specific credential, refreshed if stale.
+
+        The per-row half of the cascade's refresh step, exposed for callers
+        that must read a SPECIFIC account's state — quota recovery probes a
+        blocked row's own usage, and asking the cascade would resolve to
+        whichever sibling outranks the row instead. Returns ``None`` when the
+        row is gone, disabled, not an OAuth credential, or its refresh fails:
+        the caller keeps whatever verdict the row already carried. Raises
+        nothing; a probe is a read, not a routing decision."""
+        row = self.get_credential(credential_id)
+        if row is None or row.disabled_cause is not None:
+            return None
+        if row.credential_type != "oauth":
+            return None
+        try:
+            return await self._ensure_oauth_fresh(row)
+        except AuthStoreError:
+            return None
+
     # -- selection: stickiness + round-robin -------------------------------------
 
     def deprioritize_credential(self, provider: str, credential_id: int) -> None:
@@ -812,6 +832,21 @@ class AuthStore:
             self._sticky.pop((provider, session_id), None)
         else:
             self._sticky[(provider, session_id)] = credential_id
+
+    def pin_session_credential(
+        self, provider: str, session_id: str | None, credential_id: int
+    ) -> None:
+        """Point a session's sticky selection at ``credential_id``.
+
+        The public half of :meth:`_set_sticky`, for callers that have just
+        PROBED a specific account and must route the session to the account
+        the quota verdict was about. Quota-aware preflight re-checks blocked
+        siblings one by one; without pinning, the cascade's round-robin /
+        stickiness could hand the request to a different row than the one
+        whose usage was just read, and the session would keep failing on an
+        account the recovery walk had already judged. A no-op without a
+        session id, like the sticky write it wraps."""
+        self._set_sticky(provider, session_id, credential_id)
 
     def _usable_key_rows(
         self,

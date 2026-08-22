@@ -7,6 +7,7 @@ hits the same endpoints as before through a descriptor table.
 """
 
 import json
+import time
 import zlib
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1200,6 +1201,53 @@ async def test_transport_fallback_cooldown_skips_quota_probe(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_withdraw_fallback_clears_the_route_and_reopens_the_quota_probe(
+    tmp_path,
+) -> None:
+    """An explicit re-selection ends the rescue route, whatever the cooldown says.
+
+    The selector-driven clear in ``preflight_usage`` never fires for a
+    same-model re-selection, so the session tells the stream fn directly. Two
+    things must move: the pinned route (including its cooldown — the user's
+    choice outranks the backoff that pinned the fallback), and the quota memo,
+    so the next boundary re-probes the primary instead of trusting the reading
+    that caused the pin. Silent: the owning session already announced this
+    withdrawal, so no settle edge fires here.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True}},
+        session_id="session-a",
+    )
+    stream._primary_selector = "anthropic/claude-opus-5"
+    await stream._route_state.activate(
+        FallbackTarget("openai/gpt-5.3-codex"),
+        "provider failure",
+        cooldown_ms=3_600_000,  # an hour of cooldown must not survive the withdrawal
+    )
+    settles: list[Any] = []
+    # Installed AFTER the pin: ``activate`` settles the pin itself, and the
+    # assertion below is that the WITHDRAWAL adds nothing to this list.
+    stream._route_state.on_settle = lambda target, reason: settles.append((target, reason))
+    # A fresh quota reading just pinned the fallback; the withdrawal must not
+    # inherit it.
+    stream._usage_checked_selector = "anthropic/claude-opus-5"
+    stream._usage_checked_at = time.monotonic()
+
+    try:
+        stream.withdraw_fallback()
+        assert stream._route_state.active is None
+        assert stream._route_state.primary_retry_due()  # cooldown gone with the pin
+        assert stream._usage_checked_at == 0.0  # memo reset: next boundary re-probes
+        assert settles == []  # silent — the session owns this announcement
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_startup_preflight_recovers_a_blocked_account_that_still_has_quota(
     tmp_path,
 ) -> None:
@@ -1821,3 +1869,266 @@ class TestRouteSettleBridge:
         finally:
             await stream.close()
             store.close()
+
+
+# ---------------------------------------------------------------------------
+# Blocked-sibling recovery: the stale-block trap (session f3c058d1, 2026-08-21)
+# ---------------------------------------------------------------------------
+
+
+def _fable_report(five_hour_used: float, seven_day_used: float, fable_used: float) -> Any:
+    """The live incident shape: shared windows + a scoped Fable weekly."""
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used=five_hour_used, limit=100.0, unit="percent"),
+                window="5h",
+                shared=True,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:7d",
+                label="7 day",
+                amount=UsageAmount(used=seven_day_used, limit=100.0, unit="percent"),
+                window="7d",
+                shared=True,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:7d:fable",
+                label="7 day (Fable)",
+                amount=UsageAmount(used=fable_used, limit=100.0, unit="percent"),
+                window="7d",
+                shared=False,
+                tier="fable",
+                resets_at_ms=10**15,
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_preflight_recovers_a_blocked_sibling_holding_model_quota(tmp_path) -> None:
+    """The reported incident: the selected account is model-depleted (Fable at
+    0%) while two accounts sit under stale blocks holding 8%/4% Fable. The
+    unblocked pool has no sibling to rotate to, so preflight must probe the
+    blocked rows and settle on the recovered one instead of hopping providers.
+
+    The walk must attribute each verdict to the row it probed — a healthy
+    unblocked sibling in the pool must not swallow the probes."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-live", "account-live"))
+    blocked_a = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    blocked_b = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    for row in (blocked_a, blocked_b):
+        store.block_credential(row.id, "anthropic", block_ms=3_600_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+
+    reports = {
+        "oauth-live": _fable_report(0.0, 58.0, 100.0),  # Fable depleted
+        "oauth-a": _fable_report(0.0, 92.0, 16.0),  # 16% Fable left
+        "oauth-b": _fable_report(0.0, 96.0, 6.0),  # 6% Fable left
+    }
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        assert access_token is not None
+        return reports[access_token]
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        # No provider failover: a blocked account recovered with Fable quota.
+        assert stream._route_state.active is None
+        # The recovered account's block is lifted and the session is pinned to
+        # it; the other blocked row keeps its block (its verdict was never read).
+        assert not store.is_blocked(blocked_a.id, "anthropic")
+        assert store.is_blocked(blocked_b.id, "anthropic")
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == blocked_a.id
+        assert any("recovered" in notice for notice in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_falls_back_when_blocked_siblings_are_genuinely_depleted(
+    tmp_path,
+) -> None:
+    """The honest-failover half: when every blocked account re-probes as
+    depleted for the model, the provider fallback fires and the blocks stand."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-live", "account-live"))
+    blocked = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.block_credential(blocked.id, "anthropic", block_ms=3_600_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        if access_token == "oauth-live":
+            return _fable_report(0.0, 58.0, 100.0)
+        return _fable_report(0.0, 100.0, 100.0)  # blocked account truly out
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        assert stream._route_state.active is not None
+        assert stream._route_state.active.selector == "openai/gpt-5.3-codex"
+        assert store.is_blocked(blocked.id, "anthropic")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_walks_past_a_depleted_blocked_row_to_one_with_quota(
+    tmp_path,
+) -> None:
+    """Review F2: with several blocked rows, a first re-probe that says
+    depleted must not end the walk — the row is re-blocked by the shared
+    policy and the NEXT blocked row (holding quota) is probed and serves."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-live", "account-live"))
+    blocked_a = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    blocked_b = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    for row in (blocked_a, blocked_b):
+        store.block_credential(row.id, "anthropic", block_ms=3_600_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    reports = {
+        "oauth-live": _fable_report(0.0, 58.0, 100.0),  # selected: Fable spent
+        "oauth-a": _fable_report(0.0, 100.0, 100.0),  # blocked, truly out
+        "oauth-b": _fable_report(0.0, 96.0, 6.0),  # blocked, 6% Fable left
+    }
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        assert access_token is not None
+        return reports[access_token]
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        # No provider hop: the second blocked row held quota and serves.
+        assert stream._route_state.active is None
+        assert store.is_blocked(blocked_a.id, "anthropic")
+        assert not store.is_blocked(blocked_b.id, "anthropic")
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == blocked_b.id
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_depleted_blocked_rows_do_not_ping_pong_the_recovery_walk(
+    tmp_path,
+) -> None:
+    """Review F5: the walk terminates, and a healthy row enumerated AFTER two
+    depleted ones is still reached.
+
+    The recursion is the point. A depleted re-probe hands the verdict back to
+    ``_apply_account_health``, which re-blocks that row and walks the blocked
+    pool again — so without recording which rows this boundary has already
+    judged, the row cleared in one frame is blocked again by the next and
+    re-enumerated by the one after. Two depleted blocked accounts ping-pong
+    A→B→A until ``RecursionError`` kills the turn, and it kills it inside
+    ``preflight_usage``, which ``__call__`` awaits unguarded.
+
+    This is the live shape of the reported incident, not a constructed one:
+    four Anthropic logins, the selected account model-depleted, two blocked
+    accounts genuinely out, and one blocked account still holding quota that
+    the crash meant nobody ever probed.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-live", "account-live"))
+    spent_a = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    spent_b = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    healthy = store.upsert_credential("anthropic", _oauth("oauth-c", "account-c"))
+    for row in (spent_a, spent_b, healthy):
+        store.block_credential(row.id, "anthropic", block_ms=3_600_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    reports = {
+        "oauth-live": _fable_report(0.0, 58.0, 100.0),  # selected: Fable spent
+        "oauth-a": _fable_report(0.0, 100.0, 100.0),  # blocked, truly out
+        "oauth-b": _fable_report(47.0, 100.0, 34.0),  # blocked, truly out
+        "oauth-c": _fable_report(10.0, 30.0, 5.0),  # blocked, but HEALTHY
+    }
+    probed: list[str] = []
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        assert access_token is not None
+        probed.append(access_token)
+        return reports[access_token]
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        # Terminated, and on the right account: no provider hop while an
+        # Anthropic login still holds quota for this model.
+        assert stream._route_state.active is None
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == healthy.id
+        assert not store.is_blocked(healthy.id, "anthropic")
+        assert store.is_blocked(spent_a.id, "anthropic")
+        assert store.is_blocked(spent_b.id, "anthropic")
+
+        # Each account is probed at most once per boundary. A count, not a
+        # bare "it did not crash": unbounded re-probing would still terminate
+        # by luck of ordering while spending a network round trip per frame.
+        assert sorted(probed) == ["oauth-a", "oauth-b", "oauth-c", "oauth-live"]
+    finally:
+        await stream.close()
+        store.close()
