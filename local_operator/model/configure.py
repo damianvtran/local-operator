@@ -1985,7 +1985,38 @@ class SessionStreamFn:
             FallbackTarget(f"{model.provider}/{model.model_id}", model.reasoning_effort)
         )
 
-    async def preflight_usage(self, model: ModelSpec) -> None:
+    @staticmethod
+    def _write_quota_block(
+        auth_store: Any,
+        credential_id: int,
+        storage: str,
+        health: Any,
+        block_ms: int,
+    ) -> None:
+        """Record a quota verdict against a credential, scoped to what it binds.
+
+        A verdict whose ONLY binding windows are model-family caps (Anthropic's
+        ``7 day (Fable)`` at 100% beside a healthy shared 5-hour window) stops
+        ONE family on the account, not the account: the block is written under
+        ``model:<family>`` so requests for other families still resolve to the
+        row and spend the shared headroom. The moment a shared window binds
+        (``health.scope == "account"``) the account is out for every model and
+        the block is account-wide, as before. Writing family verdicts
+        account-wide is the defect that made an opus request report "all
+        credentials unusable" on a pool whose only spent window was Fable's.
+        """
+        if health.scope == "model" and health.binding_families:
+            for fam in health.binding_families:
+                auth_store.block_credential(
+                    credential_id,
+                    storage,
+                    block_scope=f"model:{fam}",
+                    block_ms=block_ms,
+                )
+        else:
+            auth_store.block_credential(credential_id, storage, block_ms=block_ms)
+
+    async def preflight_usage(self, model: ModelSpec, *, consume_boundary: bool = True) -> None:
         """Check reliable OAuth quota once per user-message boundary.
 
         Unknown/unreachable usage fails open. A low account is suppressed only
@@ -2014,7 +2045,12 @@ class SessionStreamFn:
         recheck_due = self._quota_recheck_for == selector
         if not self._message_boundary_pending and not recheck_due:
             return
-        self._message_boundary_pending = False
+        # The boundary token also gates effort CLASSIFICATION in ``__call__``;
+        # a switch-time probe (``consume_boundary=False``) must not spend it,
+        # or a mid-turn ``/model`` would silently skip the next request's
+        # effort grading.
+        if consume_boundary:
+            self._message_boundary_pending = False
         if recheck_due:
             self._quota_recheck_for = None
 
@@ -2022,13 +2058,31 @@ class SessionStreamFn:
         if (
             selector == self._usage_checked_selector
             and now - self._usage_checked_at < self.USAGE_CHECK_TTL_S
+            and not self._route_state.quota_pinned
         ):
+            # The memo dedupes the several requests ONE message makes; a
+            # quota-pinned route is re-probed at every boundary regardless,
+            # or a session could sit on a fallback for a whole memo window
+            # past the primary's recovery.
             return
         self._usage_checked_selector = selector
         self._usage_checked_at = now
 
         retry = RetrySettings.from_settings(self._settings)
-        if self._route_state.active is not None and not self._route_state.primary_retry_due():
+        # Credential blocks are scoped to the model family that spent them,
+        # so a spent family cap never takes the account out of rotation for
+        # models of another family; the reads below are model-scoped.
+        if (
+            self._route_state.active is not None
+            and not self._route_state.primary_retry_due()
+            and not self._route_state.quota_pinned
+        ):
+            # A quota pin is re-probed at every boundary: the usage endpoint
+            # answers definitively and cheaply, and its cooldown can be hours
+            # long (a 24h advertised reset), which would otherwise glue the
+            # session to a fallback past the primary's window reopening.
+            # Transport pins keep the cooldown — their recovery is not
+            # observable without re-paying the failure.
             return
         if not retry.usage_aware_fallback:
             if self._route_state.active is not None and await self._primary_has_auth(model):
@@ -2042,13 +2096,18 @@ class SessionStreamFn:
         attempted_ids: set[int] = set()
         while True:
             try:
-                access = await self._auth_store.get_oauth_access(model.provider, self._session_id)
+                access = await self._auth_store.get_oauth_access(
+                    model.provider, self._session_id, model_id=model.model_id
+                )
             except Exception:
                 return
             if access is None:
                 storage = self._storage_provider(model.provider)
                 rows = self._auth_store.list_credentials(storage)
-                if rows and all(self._auth_store.is_blocked(row.id, storage) for row in rows):
+                if rows and all(
+                    self._auth_store.is_blocked_for_model(row.id, storage, model.model_id)
+                    for row in rows
+                ):
                     # Every account is under a block, but "blocked" is only a
                     # verdict from an earlier probe — quota resets while the
                     # backoff is still on the clock, and a tier-scoped cap can
@@ -2081,6 +2140,7 @@ class SessionStreamFn:
                         await self._route_state.activate(
                             fallback,
                             f"{model.provider} credentials temporarily unavailable",
+                            quota=True,
                         )
                 return
             if access.kind != "oauth" or access.credential_id in attempted_ids:
@@ -2140,7 +2200,9 @@ class SessionStreamFn:
                     if candidate.id != access.credential_id
                     and candidate.id not in attempted_ids
                     and (row is None or candidate.credential_type == row.credential_type)
-                    and not self._auth_store.is_blocked(candidate.id, storage)
+                    and not self._auth_store.is_blocked_for_model(
+                        candidate.id, storage, model.model_id
+                    )
                 ]
                 if not siblings and health.state == "depleted":
                     # No UNBLOCKED sibling can take this model, but blocked
@@ -2160,7 +2222,9 @@ class SessionStreamFn:
                         if candidate.id != access.credential_id
                         and candidate.id not in attempted_ids
                         and (row is None or candidate.credential_type == row.credential_type)
-                        and self._auth_store.is_blocked(candidate.id, storage)
+                        and self._auth_store.is_blocked_for_model(
+                            candidate.id, storage, model.model_id
+                        )
                     ]
                     recovered = await self._recover_blocked_accounts(
                         model, storage, blocked_rows, retry, attempted_ids
@@ -2205,13 +2269,12 @@ class SessionStreamFn:
                         return
                 if siblings:
                     if health.state == "depleted":
-                        self._auth_store.block_credential(
+                        self._write_quota_block(
+                            self._auth_store,
                             access.credential_id,
                             storage,
-                            block_ms=max(
-                                60_000,
-                                health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS,
-                            ),
+                            health,
+                            max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
                         )
                     else:
                         self._auth_store.deprioritize_credential(
@@ -2246,6 +2309,7 @@ class SessionStreamFn:
                 await self._route_state.activate(
                     fallback,
                     f"{model.provider} {condition}{remaining} for {model.model_id}",
+                    quota=True,
                 )
                 return
 
@@ -2312,7 +2376,7 @@ class SessionStreamFn:
             if candidate.id != access.credential_id
             and candidate.id not in attempted_ids
             and (row is None or candidate.credential_type == row.credential_type)
-            and not self._auth_store.is_blocked(candidate.id, storage)
+            and not self._auth_store.is_blocked_for_model(candidate.id, storage, model.model_id)
         ]
         fallback = await self._first_available_fallback(
             model,
@@ -2336,6 +2400,7 @@ class SessionStreamFn:
                     await self._route_state.activate(
                         fallback,
                         f"{model.provider} {condition}{remaining}",
+                        quota=True,
                     )
                     return False
             await self._notice(
@@ -2360,10 +2425,12 @@ class SessionStreamFn:
             # sibling returns before the tail of this method — which is
             # where the block used to be written — leaving a spent account
             # in the unblocked pool (review F2's second half).
-            self._auth_store.block_credential(
+            self._write_quota_block(
+                self._auth_store,
                 access.credential_id,
                 storage,
-                block_ms=max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
+                health,
+                max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
             )
             blocked_rows = [
                 candidate
@@ -2371,7 +2438,7 @@ class SessionStreamFn:
                 if candidate.id != access.credential_id
                 and candidate.id not in attempted_ids
                 and (row is None or candidate.credential_type == row.credential_type)
-                and self._auth_store.is_blocked(candidate.id, storage)
+                and self._auth_store.is_blocked_for_model(candidate.id, storage, model.model_id)
             ]
             recovered = await self._recover_blocked_accounts(
                 model, storage, blocked_rows, retry, attempted_ids
@@ -2450,10 +2517,12 @@ class SessionStreamFn:
         if health.state == "depleted":
 
             def take_out_of_rotation(credential_id: int) -> None:
-                self._auth_store.block_credential(
+                self._write_quota_block(
+                    self._auth_store,
                     credential_id,
                     storage,
-                    block_ms=max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
+                    health,
+                    max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
                 )
 
         else:
@@ -2479,6 +2548,7 @@ class SessionStreamFn:
         await self._route_state.activate(
             fallback,
             f"{model.provider} {condition}{remaining}",
+            quota=True,
         )
         return False
 
@@ -2581,7 +2651,12 @@ class SessionStreamFn:
             # or block-again-and-fall-back). A depleted verdict is returned,
             # not swallowed — the policy decides its fate, and the caller's
             # fallback notice must name the quota, not the credential pool.
-            self._auth_store.clear_block(row.id, storage)
+            # A definite verdict supersedes exactly the blocks that could
+            # hide this model: the account-wide backoff and every scoped
+            # block whose family gates it. Blocks for OTHER families stay
+            # standing — a probe that proves opus serviceable says nothing
+            # about a fable weekly that is still spent.
+            self._auth_store.clear_blocks_for_model(row.id, storage, model.model_id)
             self._auth_store.pin_session_credential(model.provider, self._session_id, row.id)
             shared_remaining, tier_binding = shared_tier_saturation(
                 report,

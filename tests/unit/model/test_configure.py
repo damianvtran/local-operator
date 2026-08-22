@@ -899,10 +899,19 @@ async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_p
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
             await stream.preflight_usage(model)
 
-        assert store.is_blocked(first.id, "anthropic")
+        # The spent Fable weekly takes the first account out of rotation FOR
+        # FABLE — a family-scoped block, not an account-wide one: the shared
+        # 5h/7d windows still serve other families, so an opus resolve must
+        # still see the row (the defect this guards: "all credentials
+        # unusable" on a pool whose only spent window was Fable's).
+        assert store.is_blocked_for_model(first.id, "anthropic", "claude-fable-5")
+        assert not store.is_blocked(first.id, "anthropic")
+        assert not store.is_blocked_for_model(first.id, "anthropic", "claude-opus-4-8")
         assert not store.is_blocked(second.id, "anthropic")
         selected = await store.get_oauth_access("anthropic", session)
         assert selected is not None and selected.credential_id == second.id
+        opus = await store.get_oauth_access("anthropic", session, model_id="claude-opus-4-8")
+        assert opus is not None  # the family-blocked account still serves opus
         assert stream._route_state.active is None
         assert any("trying another anthropic account" in notice for notice in notices)
     finally:
@@ -2129,6 +2138,213 @@ async def test_two_depleted_blocked_rows_do_not_ping_pong_the_recovery_walk(
         # bare "it did not crash": unbounded re-probing would still terminate
         # by luck of ordering while spending a network round trip per frame.
         assert sorted(probed) == ["oauth-a", "oauth-b", "oauth-c", "oauth-live"]
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_family_scoped_blocks_leave_other_families_serving(tmp_path) -> None:
+    """A spent family cap blocks the family, never the account.
+
+    The reported state: four Anthropic accounts, one of them (gominerva)
+    holding shared headroom but a 100% Fable weekly. Preflight for
+    ``claude-fable-5`` must take that account out of Fable rotation while
+    leaving it resolvable for opus — the account-wide block the old code
+    wrote is what later made an opus session report "all credentials
+    unusable" on a pool whose only spent window was Fable's."""
+    store = AuthStore(tmp_path / "auth.db")
+    gominerva = store.upsert_credential("anthropic", _oauth("oauth-gominerva", "a1"))
+    radienthq = store.upsert_credential("anthropic", _oauth("oauth-radienthq", "a2"))
+    pergamon = store.upsert_credential("anthropic", _oauth("oauth-pergamon", "a3"))
+    gmail = store.upsert_credential("anthropic", _oauth("oauth-gmail", "a4"))
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["zai/glm-5.3"]},
+            }
+        },
+        session_id="session-a",
+    )
+    reports = {
+        "oauth-gominerva": _fable_report(2.0, 59.0, 100.0),  # fable spent, shared fine
+        "oauth-radienthq": _fable_report(0.0, 100.0, 34.0),  # shared 7d spent
+        "oauth-pergamon": _fable_report(0.0, 100.0, 100.0),  # everything spent
+        "oauth-gmail": _fable_report(100.0, 41.0, 79.0),  # shared 5h spent
+    }
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return reports[access_token] if access_token is not None else None
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            stream.begin_message()
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        # The fable verdict on gominerva is family-scoped; the shared-window
+        # verdicts on the other three are account-wide.
+        assert not store.is_blocked(gominerva.id, "anthropic")
+        assert store.is_blocked_for_model(gominerva.id, "anthropic", "claude-fable-5")
+        assert not store.is_blocked_for_model(gominerva.id, "anthropic", "claude-opus-4-8")
+        assert store.is_blocked(radienthq.id, "anthropic")
+        assert store.is_blocked(pergamon.id, "anthropic")
+        assert store.is_blocked(gmail.id, "anthropic")
+
+        # Switching to opus resolves gominerva directly — no recovery probe
+        # needed, no failover — because the family block never hid the row
+        # from an opus resolve.
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            opus_spec = ModelSpec(provider="anthropic", model_id="claude-opus-4-8")
+            stream.on_model_changed(opus_spec)
+            stream.begin_message()
+            await stream.preflight_usage(opus_spec)
+        selected = await store.get_oauth_access(
+            "anthropic", "session-a", model_id="claude-opus-4-8"
+        )
+        assert selected is not None and selected.credential_id == gominerva.id
+        assert stream._route_state.active is None
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_reactive_stream_recovers_stale_account_blocks(tmp_path) -> None:
+    """A request that skips preflight must not die on stale quota blocks.
+
+    The reported terminal error: "All 4 OAuth sign-in credentials ... not
+    usable right now" on an opus request, because every account carried a
+    block written by an earlier fable-scoped verdict. Isolated requests
+    (errands, subagents) never run the preflight that would have re-scoped
+    those blocks, so the stream driver probes the blocked rows itself: the
+    account whose shared windows still hold headroom is unblocked and serves."""
+    import httpx
+
+    store = AuthStore(tmp_path / "auth.db")
+    gominerva = store.upsert_credential("anthropic", _oauth("oauth-gominerva", "a1"))
+    store.upsert_credential("anthropic", _oauth("oauth-radienthq", "a2"))
+    store.upsert_credential("anthropic", _oauth("oauth-pergamon", "a3"))
+    gmail = store.upsert_credential("anthropic", _oauth("oauth-gmail", "a4"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"enabled": True, "usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    reports = {
+        "oauth-gominerva": _fable_report(2.0, 59.0, 100.0),
+        "oauth-radienthq": _fable_report(0.0, 100.0, 34.0),
+        "oauth-pergamon": _fable_report(0.0, 100.0, 100.0),
+        "oauth-gmail": _fable_report(100.0, 41.0, 79.0),
+    }
+    # Legacy state: every account under an ACCOUNT-WIDE block, as an older
+    # build wrote for the same fable verdicts.
+    for row in store.list_credentials("anthropic"):
+        store.block_credential(row.id, "anthropic", block_ms=60 * 60 * 1000)
+
+    anthropic_ok = (
+        'data: {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}\n\n'
+        'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}}\n\n'
+        'data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"},'
+        ' "usage": {"output_tokens": 1}}\n\n'
+        'data: {"type": "message_stop"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "anthropic" in str(request.url):
+            if "oauth-gominerva" in request.headers.get("authorization", ""):
+                return httpx.Response(
+                    200, text=anthropic_ok, headers={"content-type": "text/event-stream"}
+                )
+            return httpx.Response(
+                429,
+                json={"error": {"message": "This request would exceed your account's rate limit."}},
+            )
+        return httpx.Response(500, json={})
+
+    await stream._http.aclose()
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return reports[access_token] if access_token is not None else None
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            events = [
+                event
+                async for event in stream(
+                    ChatRequest(
+                        model=ModelSpec(provider="anthropic", model_id="claude-opus-4-8"),
+                        messages=[Message.user("hi")],
+                        isolated=True,
+                    ),
+                    None,
+                )
+            ]
+        assert events  # the turn completed on the recovered account
+        assert not store.is_blocked(gominerva.id, "anthropic")
+        # The genuinely spent accounts keep their blocks.
+        assert store.is_blocked(gmail.id, "anthropic")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_pinned_fallback_is_reprobed_at_the_next_boundary(tmp_path) -> None:
+    """A quota pin never outlives the primary's recovery.
+
+    The reported symptom: a session ran fine, tripped onto a fallback, then
+    stayed glued to it — the pin's cooldown (sized to an advertised quota
+    reset, hours long) suppressed the re-probe that would have shown the
+    primary serving again. Quota pins are re-probed at every message
+    boundary; a healthy primary withdraws the pin immediately."""
+    from local_operator.providers.failover import FallbackTarget
+
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["zai/glm-5.3"]},
+            }
+        },
+        session_id="session-a",
+    )
+    state = {"report": _fable_report(100.0, 41.0, 79.0)}  # 5h spent: depleted
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return state["report"]
+
+    try:
+        opus_spec = ModelSpec(provider="anthropic", model_id="claude-opus-4-8")
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            stream.begin_message()
+            await stream.preflight_usage(opus_spec)
+        assert stream._route_state.active is not None
+
+        # A long cooldown lands on the pin (a 24h advertised reset); the next
+        # boundary must STILL re-probe because the pin is quota evidence.
+        await stream._route_state.activate(
+            FallbackTarget("zai/glm-5.3", None),
+            "provider failure",
+            cooldown_ms=24 * 60 * 60 * 1000,
+            quota=True,
+        )
+        state["report"] = _fable_report(5.0, 41.0, 79.0)  # 5h window reset
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            stream.begin_message()
+            await stream.preflight_usage(opus_spec)
+        assert stream._route_state.active is None
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == account.id
     finally:
         await stream.close()
         store.close()

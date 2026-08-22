@@ -28,6 +28,7 @@ import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
@@ -1728,6 +1729,35 @@ class OperatorApp(App[None]):
             await cast(Callable[[], Awaitable[None]], usage_preflight)()
         except Exception:
             pass
+
+    def _probe_quota_after_switch(self, session: Any) -> None:
+        """Run the quota preflight for the model a ``/model`` just selected.
+
+        Without this the switch's quota verdict waited for the next message
+        boundary: a session whose DEFAULT model sat under a spent family cap
+        (``claude-fable-5`` with the Fable weekly at 100%) carried that
+        verdict across the switch until the first request on the new model
+        paid for it — and the reactive path could die on blocks the probe
+        would have scoped correctly. The probe consumes no message-boundary
+        token, so the next request still gets its effort classification and
+        its own preflight.
+        """
+        preflight = getattr(session, "preflight_usage", None)
+        if not callable(preflight):
+            return
+
+        probe = cast(
+            "Callable[..., Awaitable[None]]",
+            partial(preflight, consume_boundary=False),
+        )
+
+        async def _run() -> None:
+            try:
+                await probe()
+            except Exception:
+                pass  # a failed probe is the old deferred behaviour, not a crash
+
+        self.run_worker(_run(), exclusive=False)
 
     async def _boot_session(self) -> None:
         """Await the session factory; on failure surface + offer /reload."""
@@ -7561,6 +7591,7 @@ class OperatorApp(App[None]):
         # route is withdrawn even when the choice re-selects the model the
         # fallback displaced — see ``Session.set_model``.
         session.set_model(self._spec_with_chosen_effort(spec), explicit=True)
+        self._probe_quota_after_switch(session)
         # A text-only model renders the history WITHOUT its images (see
         # ``Session._render_history``), so the estimate painted for the vision
         # model overstates what the new one actually carries. Re-measure so
