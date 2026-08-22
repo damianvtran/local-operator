@@ -175,7 +175,9 @@ async def test_steering_mid_turn_does_not_end_the_turn_with_open_todos(tmp_path)
 
     # The steered requirement survived as a tracked item rather than a promise
     # in prose, and every item ended up resolved.
-    assert [item["text"] for item in builtin.TODO_STORE["e2e"]] == [
+    # The store is now phased; a flat init lives in one implicit "Todos" phase,
+    # so walk into its items rather than indexing the owner-list directly.
+    assert [item["text"] for phase in builtin.TODO_STORE["e2e"] for item in phase["items"]] == [
         "read repo",
         "write code",
         "add email column",
@@ -279,7 +281,7 @@ async def test_blocking_an_item_ends_the_turn_without_a_second_nudge(tmp_path) -
     assert len(stream.requests) == 4, "nudged once, then released after the block"
     assert reminders_in(stream, 3) == [], "a blocked list must not re-arm the guardrail"
     assert builtin.open_todos("e2e") == [], "blocked is not open work"
-    assert builtin.TODO_STORE["e2e"][0]["status"] == "blocked"
+    assert builtin.TODO_STORE["e2e"][0]["items"][0]["status"] == "blocked"
 
     await session.dispose()
 
