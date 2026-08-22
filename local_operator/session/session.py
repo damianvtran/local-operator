@@ -4115,9 +4115,38 @@ class Session:
             summary, preserve_data = await self._produce_summary(
                 compaction_api, to_summarize, plan.strategy
             )
+            # STRUCTURAL guarantee that a user turn is never paraphrased away.
+            # ``to_summarize`` is the RENDERED history, where a prior marker and
+            # every injected user-role delivery (wake/hub/incident/todo) already
+            # look like a plain user Message; the genuine prompts are the
+            # ``Message(role="user")`` entries in the LIVE context (injected
+            # content is a CustomMessage there), so their ids are the filter
+            # that keeps a previous summary from being carried forward verbatim.
+            # The summarizer still ran over ``to_summarize`` above — the summary
+            # may paraphrase the user, and that is fine BECAUSE the verbatim
+            # copy rides alongside it and is what the model reads.
+            genuine_user_ids = {
+                message.id
+                for message in self._context.messages
+                if isinstance(message, Message) and message.role == "user"
+            }
+            # Resolved off the module by NAME so a partial test double that does
+            # not expose it degrades to no preservation rather than crashing the
+            # pass — the same tolerance ``_offloaded`` grants its rulers. The
+            # real ``compaction.api`` always exports it, so production always
+            # gets the structural guarantee.
+            extract: Any = getattr(compaction_api, "extract_preserved_user_turns", None)
+            preserved_user_turns: list[dict[str, str]] = []
+            if callable(extract):
+                extracted: Any = extract(to_summarize, genuine_user_ids)
+                preserved_user_turns = list(extracted)
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
-                summary, first_kept_entry_id, plan.context_tokens, preserve_data=preserve_data
+                summary,
+                first_kept_entry_id,
+                plan.context_tokens,
+                preserve_data=preserve_data,
+                preserved_user_turns=preserved_user_turns,
             )
             marker_details: dict[str, Any] = {"summary": summary}
             if preserve_data is not None:
@@ -4127,12 +4156,34 @@ class Session:
                 attribution="system",
                 details=marker_details,
             )
+            # Rebuild the verbatim user turns as real user messages, reusing
+            # each turn's original id so the live context and a resumed
+            # ``build_llm_history`` (which re-injects the SAME payload) stay
+            # byte-for-byte identical — the equivalence other tests pin.
+            # ``compaction_preserved`` marks each as already-compacted
+            # carried-forward content, so a subsequent pass does not re-count
+            # it as fresh history (see ``cutpoint._is_preserved_user_turn``);
+            # it rides ``provider_payload``, which the wire builders never ship.
+            preserved_messages = []
+            for turn in preserved_user_turns:
+                message = _replayed_user_message([TextContent(text=turn["text"])], turn["id"])
+                message.provider_payload = {compaction_api.PRESERVED_USER_TURN_KEY: True}
+                preserved_messages.append(message)
             # The context becomes the RENDERED history, so a live todo reminder
             # does not survive this — by design, and the reason the plan renders
             # without them (see :meth:`_render_for_compaction`): a reminder
             # baked in here as a plain user message is past both of the guards
             # that expire it.
-            self._context.messages = [marker, *kept]
+            # ``[marker, *preserved_user_turns, *kept]``: the marker (rendered
+            # as a user message) sitting next to a preserved user turn is a
+            # legal adjacency. Two consecutive user-role messages are accepted
+            # by every provider wire format we target (they are not required to
+            # strictly alternate on the user side), and this exact shape was
+            # already reachable before this change — a marker immediately
+            # followed by a user turn in ``kept`` produced ``[marker, user,
+            # ...]`` already. The preserved turns carry no tool_call pairing, so
+            # none of the orphan invariants can be affected.
+            self._context.messages = [marker, *preserved_messages, *kept]
             history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )
