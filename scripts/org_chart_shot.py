@@ -178,15 +178,19 @@ async def main() -> None:
             if app._session is not None:
                 break
         if scenario.startswith("picker-"):
-            # Type into the real editor to open the argument list; the frame is
-            # the picker, not a chart.
-            editor = app.query_one(Editor)
-            editor.text = {
+            # Drive the argument list open through REAL key presses. Post-#250
+            # the picker's detection is caret-anchored, so setting editor.text
+            # directly no longer opens the list — only typing does (the same
+            # path the app takes and the tests use).
+            app.query_one(Editor).focus()
+            buffer = {
                 "picker-team": "/team ",
                 "picker-ch": "/team ch",
                 "picker-chart": "/team chart ",
             }[scenario]
-            editor.cursor_location = (0, len(editor.text))
+            for char in buffer:
+                key = "slash" if char == "/" else ("space" if char == " " else char)
+                await pilot.press(key)
             await pilot.pause()
             await pilot.pause()
         else:

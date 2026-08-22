@@ -2680,11 +2680,46 @@ class Editor(TextArea):
                 # command WORD, so without this the first-slot rows would stay
                 # up after the subcommand was completed and the second slot
                 # would have nothing to offer. Tracked rather than refreshed per
-                # keystroke: the row set only changes when the first token does.
-                subcommand = list_argument.partition(" ")[0].lower() if list_argument else ""
-                if subcommand != self._argument_subcommand:
-                    self._argument_subcommand = subcommand
-                    self.post_message(RefreshArgumentChoices(command))
+                # keystroke: the row set only changes when the sub-slot does.
+                first_tok, sep, _tail = (list_argument or "").partition(" ")
+                if command == "mcp":
+                    # `/mcp` is per-verb: every verb has a distinct server list,
+                    # so the tracking key is the verb token and any change posts
+                    # a refresh (verbs while it is bare, servers once a verb is
+                    # chosen — the builder reads the space itself).
+                    subcommand = first_tok.lower() if list_argument else ""
+                    if subcommand != self._argument_subcommand:
+                        self._argument_subcommand = subcommand
+                        self.post_message(RefreshArgumentChoices(command))
+                else:
+                    # `/team` has exactly ONE thing that changes its choice set:
+                    # crossing into or out of the `chart ` SECOND slot (first
+                    # token is the reserved `chart` word AND a space follows —
+                    # first-slot team names ⇄ second-slot chart targets). Track
+                    # that boolean, not the raw first token: a team-NAME first
+                    # token (`/team security `) is the talk path whose choice set
+                    # never changes, so it must NOT post a refresh. The refresh
+                    # handler clears the notice, which would wipe the switch/send
+                    # parked-caret hint the block below sets — the exact D5
+                    # regression #250 guards
+                    # (`test_completing_a_team_name_keeps_the_parked_hint`). And
+                    # tracking the boolean (not the token) is what makes the
+                    # second slot refill at all: `chart`→`chart ` leaves the
+                    # token unchanged but flips the boundary, so a token-keyed
+                    # tracker would never fire on the space that opens slot two.
+                    chart_second_slot = "chart" if (first_tok.lower() == "chart" and sep) else ""
+                    # Normalize the prior state: both ``None`` (never tracked)
+                    # and ``""`` (first slot) mean "not in the chart second
+                    # slot", so entering ``/team `` for the first time is NOT a
+                    # boundary crossing and must not post a refresh — otherwise
+                    # the very first sync would clear the switch/send notice
+                    # before it is set (D5). Only a real cross into or out of
+                    # ``chart `` fires.
+                    was_chart_slot = self._argument_subcommand == "chart"
+                    is_chart_slot = chart_second_slot == "chart"
+                    self._argument_subcommand = chart_second_slot
+                    if was_chart_slot != is_chart_slot:
+                        self.post_message(RefreshArgumentChoices(command))
             self._picker.sync_argument(list_argument)
             # U1/U2 discoverability hint. The moment a NAME+message name is
             # autofilled (or hand-typed) to `/<cmd> <name> ` with an empty tail,

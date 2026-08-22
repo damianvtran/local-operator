@@ -2901,22 +2901,27 @@ class OperatorApp(App[None]):
         return choices
 
     def _team_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
-        """Rows for the ``/team <…>`` list: the `chart` subcommand, then teams.
+        """Rows for the ``/team <…>`` list: team NAMES first, then `chart`.
 
-        Two-level, decided by the BUFFER like ``/mcp``'s builder: with nothing
-        typed yet the first argument slot offers the reserved `chart`
-        subcommand row FIRST (tagged so it reads as different in kind from a
-        team name — the same separation `/mcp` draws between verb rows and
-        server rows), then every team name (so a team literally named `chart`
-        still appears as its own row beneath the subcommand and is never
-        hidden). Once `chart ` is in the buffer the second slot re-offers TEAM
-        NAMES as `chart <name>` compound rows that FEED the chart — completing
-        one lands the ready-to-run `/team chart <name>`.
+        Two-level, decided by the BUFFER like ``/mcp``'s builder. In the first
+        argument slot the TEAM NAMES come first and the reserved `chart`
+        subcommand row is appended AFTER them. Order matters because it decides
+        the default completion: ``argument_suggestions`` returns rows in list
+        order for an empty query, so a bare ``/team `` + Tab completes the sole
+        (or first) TEAM, never the subcommand. That preserves #250's invariant
+        (Tab fills the sole team and parks the switch/send hint) AND improves
+        collision-safety: the common action on ``/team `` is TALKING to a team,
+        so Tab must never silently open a chart when the user meant to message.
+        The `chart` row is still fully discoverable — it is visible in the list
+        and the normal matcher ranks it to the top the moment the user types
+        ``c``/``ch``/``chart`` (a typed query is scored, not list-ordered).
 
-        The compound-name shape is the same crank `/mcp login <server>` uses:
-        the matcher compares against the WHOLE argument, so the server/team
-        rows must carry the leading verb or they would not match once it is
-        typed.
+        Once ``chart `` is in the buffer the second slot re-offers TEAM NAMES as
+        ``chart <name>`` compound rows that FEED the chart — completing one
+        lands the ready-to-run ``/team chart <name>``. The compound-name shape
+        is the same crank ``/mcp login <server>`` uses: the matcher compares
+        against the WHOLE argument, so the rows must carry the leading verb or
+        they would not match once it is typed.
         """
 
         from local_operator.tui.widgets.command_picker import slash_argument
@@ -2934,14 +2939,10 @@ class OperatorApp(App[None]):
                 )
                 for team in teams
             ]
-        # First slot: the subcommand row first, then team names.
-        rows: list[ArgumentChoice] = [
-            ArgumentChoice(
-                "chart",
-                "Show a team's org chart",
-                detail="subcommand",
-            )
-        ]
+        # First slot: TEAM NAMES first (so bare Tab completes a team, not the
+        # subcommand — #250's invariant + collision-safety), then the `chart`
+        # subcommand row last.
+        rows: list[ArgumentChoice] = []
         # U3 — a team whose name collides with the reserved `chart` word cannot
         # be talked to via its plain name from the picker: completing `chart`
         # routes to the SUBCOMMAND, not the team. So its row completes to the
@@ -2960,6 +2961,15 @@ class OperatorApp(App[None]):
                 )
             else:
                 rows.append(team)
+        # The subcommand row is offered AFTER the team names — discoverable and
+        # rank-able by query, but never the default Tab completion (see above).
+        rows.append(
+            ArgumentChoice(
+                "chart",
+                "Show a team's org chart",
+                detail="subcommand",
+            )
+        )
         return rows
 
     def _team_list_block(self, teams: list[Any]) -> RichBlock:

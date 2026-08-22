@@ -69,6 +69,21 @@ async def _boot(pilot, app: OperatorApp) -> None:
             return
 
 
+async def _type(pilot, text: str) -> None:
+    """Type ``text`` into the focused editor via real key presses.
+
+    Post-#250 the picker's argument detection is caret-anchored: it syncs during
+    ``load_text`` while the caret is still at the origin, so setting ``editor.text``
+    directly and then moving the caret no longer opens the argument list. Driving
+    the buffer through real key presses is the path the app actually takes and the
+    only one that opens the picker — the same approach ``test_slash_echo`` uses.
+    """
+    for char in text:
+        await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+    await pilot.pause()
+    await pilot.pause()
+
+
 # -- routing dispatch table -------------------------------------------------
 
 
@@ -212,7 +227,16 @@ async def test_chart_unknown_team_is_an_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_picker_first_slot_offers_chart_subcommand_then_teams() -> None:
+async def test_picker_first_slot_offers_teams_first_then_chart_subcommand() -> None:
+    """The `/team ` first slot lists TEAM NAMES first, then the `chart` row.
+
+    Team-first is the ordering #250's D5 regression pins: a bare `/team ` + Tab
+    must complete the sole/first TEAM (the common action is talking to a team),
+    never the subcommand — so the `chart` row is offered but is NOT the default
+    completion. It stays discoverable (present in the list, and the normal
+    matcher ranks it up the moment the user types `c`/`ch`/`chart`).
+    """
+
     session = FakeSession()
     session.team_registry = _registry(
         TeamEditFields(name="org", manager="director", members=[TeamMember(role="coder")]),
@@ -221,23 +245,51 @@ async def test_picker_first_slot_offers_chart_subcommand_then_teams() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
+        app.query_one(Editor).focus()
+        await _type(pilot, "/team ")
         editor = app.query_one(Editor)
-        editor.text = "/team "
-        editor.cursor_location = (0, len(editor.text))
-        await pilot.pause()
-        await pilot.pause()
         rows = [(c.name, c.detail) for c in editor.picker._choices]
-    # The subcommand row is FIRST and tagged.
-    assert rows[0] == ("chart", "subcommand")
-    # U3: a team literally named `chart` still appears as its own row, but it
-    # completes to the `=chart` ESCAPE (not the bare name, which would route to
-    # the subcommand) and its detail names the talk path — so the collision is
-    # resolvable from within the picker that creates it.
+    # Team rows come FIRST; the subcommand row is present but LAST (never the
+    # default Tab completion — see test_completing_a_team_name_keeps_the_parked_hint).
+    assert rows, "the team list must be populated"
+    assert rows[0][0] != "chart", f"a team must lead, not the subcommand: {rows}"
+    # The `chart` subcommand row is still offered — discoverable, ranked by query.
+    assert ("chart", "subcommand") in rows
+    assert rows[-1] == ("chart", "subcommand"), f"subcommand must rank last: {rows}"
+    # U3: a team literally named `chart` still appears, completing to the `=chart`
+    # ESCAPE (not the bare name, which would route to the subcommand); its detail
+    # names the talk path, so the collision is resolvable from the picker.
     assert ("=chart", "talk to team · 2 roles · led by m") in rows
     # A non-colliding team keeps its plain name.
     assert any(name == "org" for name, _ in rows)
     # The bare `chart` name is NOT offered as a team row (it would mis-route).
     assert ("chart", "2 roles · led by m") not in rows
+
+
+@pytest.mark.asyncio
+async def test_bare_tab_completes_a_team_not_the_chart_subcommand() -> None:
+    """A bare `/team ` + Tab fills the sole TEAM, not the `chart` subcommand.
+
+    The collision-safety guarantee behind team-first: Tab never silently opens a
+    chart when the user meant to message their team. Mirrors #250's
+    test_completing_a_team_name_keeps_the_parked_hint invariant for our ordering.
+    """
+
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(name="security", manager="manager", members=[TeamMember(role="coder")]),
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app.query_one(Editor).focus()
+        await _type(pilot, "/team ")
+        editor = app.query_one(Editor)
+        assert editor.picker.is_open(), "the team list must open"
+        await pilot.press("tab")
+        await pilot.pause()
+        text = editor.text
+    assert text == "/team security ", text
 
 
 @pytest.mark.asyncio
@@ -250,11 +302,9 @@ async def test_picker_second_slot_reoffers_teams_feeding_the_chart() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
+        app.query_one(Editor).focus()
+        await _type(pilot, "/team chart ")
         editor = app.query_one(Editor)
-        editor.text = "/team chart "
-        editor.cursor_location = (0, len(editor.text))
-        await pilot.pause()
-        await pilot.pause()
         names = [c.name for c in editor.picker._choices]
     # Second slot: `chart <name>` compound rows that complete to the chart.
     assert "chart org" in names
