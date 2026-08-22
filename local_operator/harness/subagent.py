@@ -211,6 +211,7 @@ def run_subagent(
     model_spec: ModelSpec | None = None,
     resume_dir: "Path | None" = None,
     agent: str = "task",
+    effort: str | None = None,
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -224,6 +225,13 @@ def run_subagent(
     it and the new run replays everything the old one said and did before
     reading ``prompt``. Used by ``hub op='resume'`` (see
     :mod:`local_operator.harness.comms`); ``None`` is a fresh child.
+
+    ``effort`` is recorded on the job for display only — the caller has already
+    resolved it into ``model_spec`` (``Session._resolve_subagent_model``), so
+    the runner never re-reads it. It rides here rather than being derived from
+    ``model_spec`` because a tier does not survive that resolution: two tiers
+    can point at the same model, and a child on the parent's own model still
+    ran at a chosen level the band should name.
     """
     queued = jobs_manager.at_capacity()
     job_id = jobs_manager.register(
@@ -248,6 +256,11 @@ def run_subagent(
         # case and is deliberately left until the runner, because an empty list
         # would claim the child had begun and produced nothing.
         job.prompt = prompt
+        # Same registration-time rule as ``prompt``: the role and effort tier
+        # identify the child before its runner exists, and a queued job that
+        # never starts still shows both in the page title and the status band.
+        job.agent_role = agent
+        job.effort = effort
     # Same reason: the parent must be able to address a child that is parked
     # behind the capacity gate (messages to it buffer until it starts), so the
     # comms record exists from the moment the id does.

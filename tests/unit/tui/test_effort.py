@@ -539,3 +539,35 @@ def test_closing_the_page_reveals_the_parents_level_again() -> None:
     status.set_subagent(SubagentBand(model_label="openai/gpt-4.1"))
     status.set_subagent(None)
     assert status.render_text(120).plain == before
+
+
+def test_a_child_on_another_model_shows_its_OWN_recorded_effort() -> None:
+    """The tier is recorded at the child's launch (``AsyncJob.effort``) and is
+    true of whatever model the child runs, so a different-model child now names
+    its own level instead of the blank it used to show. `hi` here is the
+    CHILD's tier, not the parent's `high`, so the overlay names the level the
+    child is actually running rather than dropping the segment for safety."""
+    from local_operator.tui.widgets.status_line import SubagentBand
+
+    status = _overlay_band()
+    status.set_subagent(SubagentBand(model_label="openai/gpt-4.1", effort="hi"))
+    child = status.render_text(120).plain
+    # The child's own tier, beside its own model — not the parent's `high`.
+    assert "hi" in child
+    assert "high" not in child
+    assert "claude" not in child.lower()
+
+
+def test_the_overlays_own_effort_wins_even_on_the_parents_model() -> None:
+    """When the overlay carries a tier it is authoritative — it was recorded at
+    launch — so it is used even for a child on the parent's model rather than
+    reading the parent's live level, which can drift as the operator cycles
+    ``/effort`` while the page is open."""
+    from local_operator.tui.widgets.status_line import SubagentBand
+
+    status = _overlay_band()  # parent is on `high`
+    status.set_subagent(SubagentBand(model_label="anthropic/claude-opus-5", effort="lo"))
+    shown = status.render_text(120).plain
+    assert "lo" in shown
+    # The parent's `high` must not leak through the overlay's own reading.
+    assert "high" not in shown

@@ -881,6 +881,93 @@ async def test_the_title_drops_whole_fields_rather_than_cutting_a_value() -> Non
 
 
 @pytest.mark.asyncio
+async def test_the_title_names_a_non_default_role_and_the_effort_tier() -> None:
+    """The header surfaces WHAT kind of child this is and at what level, not
+    only its label: a scout on the `hi` tier reads `Subagent · scout · <label>
+    … running · hi · <elapsed>`. Both come off the job, recorded at launch."""
+    job = _Job("sub-scout", "RetryBudgetScout", status="running")
+    job.agent_role = "scout"
+    job.effort = "hi"
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        wide = view._title_row(120, "⣾", tools=0).plain
+        assert "scout" in wide
+        assert "hi" in wide
+        # Role rides the breadcrumb (before the label); effort rides the status
+        # group (after the state word), which is where the band puts it too.
+        assert wide.index("scout") < wide.index("RetryBudgetScout")
+        assert wide.index("running") < wide.index(" hi")
+
+
+@pytest.mark.asyncio
+async def test_the_default_task_role_is_not_printed_as_noise() -> None:
+    """Every child is a task unless told otherwise, so the word says nothing a
+    reader did not already assume. A `task` role is suppressed; the effort tier
+    beside it is still shown, because the level is not a default."""
+    job = _Job("sub-1", "IngestAuditor", status="running")
+    job.agent_role = "task"
+    job.effort = "med"
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        wide = view._title_row(120, "⣾", tools=0).plain
+        assert "task" not in wide
+        assert "med" in wide
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, glyph, word",
+    [
+        # A SHORT state word (`running`, 7 cells) and a LONG one (`completed`,
+        # 9 cells). The long word is the regression guard for MINOR 1: the role
+        # chrome (`scout · `, 8 cells) is shorter than ` completed`, so an
+        # innermost keep-role offer let a wordless-but-role-kept row win over a
+        # worded-but-roleless one at ~30 cells — the invariant held for
+        # `running` and broke for `completed`, which the old single-status test
+        # could not see. The glyph mirrors what `status_glyph` yields so the row
+        # measures the way it paints.
+        ("running", "⣾", "running"),
+        ("completed", "✓", "completed"),
+    ],
+)
+async def test_the_role_yields_before_the_state_word_as_the_row_tightens(
+    status: str, glyph: str, word: str
+) -> None:
+    """Role is identity sugar the label already half-carries, so it is strictly
+    more disposable than the status fields: wherever the role is on the row the
+    state word is too (the role is never kept at the cost of the state, even
+    when the role chrome is shorter than the word), every field on the row is
+    whole, and the role is gone entirely once the row is narrow enough that only
+    the identity of the page survives."""
+    job = _Job("sub-scout", "RetryBudgetScout", status=status)
+    job.agent_role = "scout"
+    job.effort = "hi"
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        wide = view._title_row(120, glyph, tools=0).plain
+        assert "scout" in wide  # the role shows when there is room
+        for width in range(20, 121):
+            row = view._title_row(width, glyph, tools=0).plain
+            assert cell_len(row) <= width, (width, row)
+            # The role never survives a width where the state word had to go —
+            # not even where the role is the cheaper of the two to keep.
+            if "scout" in row:
+                assert word in row, (width, row)
+        # At the narrow end the row keeps only what identifies the page; the
+        # role has left with the rest of the qualifiers.
+        assert "scout" not in view._title_row(24, glyph, tools=0).plain
+
+
+@pytest.mark.asyncio
 async def test_the_scroll_caption_keeps_the_space_every_other_hint_has() -> None:
     """It is the one hint with no key in front of it, so without its own
     leading space the row read `↑↓scroll` while every other hint in the app —
