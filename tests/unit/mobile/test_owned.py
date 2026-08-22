@@ -26,6 +26,7 @@ class FakeSession:
         self.model = None
         self.conversation_name = ""
         self.is_streaming = False
+        self._handlers: list = []
         self._named: list[tuple[str, bool]] = []
         self._complete_calls: list[tuple[str, str]] = []
         # The naming call's reply must be wrapped in the <title> tag the
@@ -51,8 +52,20 @@ class FakeSession:
         self._ask_handler = handler
 
     # -- subscribe/selectors the handle reads at construction ------------------
-    def subscribe(self, handler):  # pragma: no cover - not exercised here
-        return lambda: None
+    def subscribe(self, handler):
+        # Capture the handler so a test can drive the fold with real events,
+        # the way the live session's event stream does.
+        self._handlers.append(handler)
+
+        def _unsub() -> None:
+            if handler in self._handlers:
+                self._handlers.remove(handler)
+
+        return _unsub
+
+    def emit(self, event) -> None:
+        for handler in list(getattr(self, "_handlers", [])):
+            handler(event)
 
     def history(self):  # pragma: no cover - not exercised here
         return []
@@ -148,3 +161,51 @@ async def test_naming_worker_stores_a_title_once() -> None:
     for _ in range(5):
         await asyncio.sleep(0)
     assert session._named == [("A Neat Title", False)]
+
+
+@pytest.mark.asyncio
+async def test_agent_end_clears_streaming_despite_stale_is_streaming() -> None:
+    """Regression: the phone stayed pinned to "in progress" after a turn ended.
+
+    The session emits ``AgentEndEvent`` while its ``is_streaming`` flag is
+    STILL True — the flag clears only in the turn's ``finally`` block, after
+    the event has been emitted and folded. The per-event ``_refresh_state``
+    used to re-read that stale True and overwrite the fold's correct
+    ``streaming=False``; because the end event is the turn's last event, no
+    later push ever corrected it and the session list shimmered forever.
+
+    This drives the real handler wiring (subscribe → emit) and asserts the
+    projection settles to ``streaming=False`` even though ``is_streaming`` is
+    left True, exactly as the live session leaves it at the emit point.
+    """
+    from local_operator.harness.types import AgentEndEvent, AgentStartEvent
+
+    handle, session = make_handle()
+    handle.subscribe(lambda: None)
+
+    # Turn starts: the session marks itself streaming and emits the start.
+    session.is_streaming = True
+    session.emit(AgentStartEvent(generation=1))
+    assert handle._fold.projection.streaming is True
+
+    # Turn ends: the session emits AgentEndEvent BEFORE clearing the flag,
+    # reproducing the real ordering (is_streaming still True at emit time).
+    session.emit(AgentEndEvent(aborted=False, generation=1))
+
+    assert handle._fold.projection.streaming is False, (
+        "projection stuck streaming=True after AgentEndEvent — the per-event "
+        "refresh clobbered the fold with the not-yet-cleared is_streaming flag"
+    )
+    assert handle._fold.projection.stop_reason == "completed"
+    assert handle._fold.projection.activity == ""
+
+
+@pytest.mark.asyncio
+async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> None:
+    """A phone that subscribes mid-turn never saw the AgentStartEvent, so the
+    fold alone would open on a stale ``streaming=False``. Attach seeds the live
+    flag once from the session so the working line paints immediately."""
+    handle, session = make_handle()
+    session.is_streaming = True
+    handle.subscribe(lambda: None)
+    assert handle._fold.projection.streaming is True

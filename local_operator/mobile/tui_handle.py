@@ -122,6 +122,12 @@ class TuiSessionHandle(SessionHandle):
             self._fold.fold_history(session.history())
         except Exception:  # noqa: BLE001
             logger.debug("mobile history fold failed", exc_info=True)
+        # Seed the live flag ONCE at attach: a phone that subscribes mid-turn
+        # never witnessed the AgentStartEvent, so the fold alone would start on
+        # a stale ``streaming=False``. After this the fold's own lifecycle
+        # events (start/end/turn-end) are the sole authority — see
+        # ``_reconcile_streaming`` for why per-event reads are poison.
+        self._reconcile_streaming()
         self._unsubscribe = unsubscribe
         return unsubscribe
 
@@ -214,6 +220,11 @@ class TuiSessionHandle(SessionHandle):
         )
         self._refresh_state()
         self._refresh_todos()
+        # A command may have started or stopped a turn (prompt, abort, /new,
+        # /resume). Command boundaries are safe to reconcile from the session
+        # flag: no terminal event is mid-flight here, unlike the per-event
+        # path. See ``_reconcile_streaming``.
+        self._reconcile_streaming()
 
     # -- pending-prompt mirroring ----------------------------------------------------
 
@@ -258,8 +269,35 @@ class TuiSessionHandle(SessionHandle):
             # the phone on "untitled" forever. Cheap attribute read; the fold
             # already bumps the epoch only when something actually changed.
             conversation_name=getattr(session, "conversation_name", "") or None,
-            streaming=bool(getattr(session, "is_streaming", False)),
+            # NOTE: ``streaming`` is deliberately NOT set here. This runs after
+            # EVERY folded event, and the session flips ``is_streaming`` to
+            # False only in the turn's ``finally`` block -- AFTER the
+            # ``AgentEndEvent`` has already been emitted and folded. Reading
+            # the still-True flag on that terminal event overwrote the fold's
+            # correct ``streaming=False`` with True, and because the end event
+            # is the last event of the turn, no later push ever corrected it:
+            # the phone stayed pinned to "in progress" forever. The fold's own
+            # lifecycle events are authoritative for ``streaming``;
+            # ``_reconcile_streaming`` covers attach and command boundaries.
         )
+
+    def _reconcile_streaming(self) -> None:
+        """Align ``streaming`` with the session's ``is_streaming`` flag at the
+        two moments the fold cannot be trusted on its own: initial attach (the
+        AgentStartEvent may predate the subscription) and command boundaries
+        (a prompt/abort/new/resume just changed turn state).
+
+        Crucially this is NOT called from the per-event handler. There the
+        terminal ``AgentEndEvent`` fires while ``is_streaming`` is still True
+        (the flag clears in the turn's ``finally``), so a reconcile there would
+        re-stick the projection to True with no later event to fix it -- the
+        exact bug this method's absence from the hot path prevents.
+        """
+        try:
+            session = self._session()
+        except RuntimeError:
+            return
+        self._fold.set_state(streaming=bool(getattr(session, "is_streaming", False)))
 
     def _refresh_todos(self) -> None:
         try:
