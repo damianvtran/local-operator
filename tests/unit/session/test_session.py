@@ -42,7 +42,9 @@ from local_operator.session.session import (
     IMAGE_DROPPED_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
     SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     Session,
+    _callable_accepts_one_positional,
     _paired_prefix,
 )
 from local_operator.session.transcript import Transcript
@@ -1033,6 +1035,146 @@ async def test_model_label_and_ids(tmp_path):
     assert session.session_id == "sess-42"
     assert session.agent_id == "Sub"
     assert session.model_label == "test/m"
+    await session.dispose()
+
+
+def test_callable_accepts_one_positional_classifies_arity() -> None:
+    # A one-arg provider is certain; a zero-arg one is certainly not.
+    assert _callable_accepts_one_positional(lambda label="": []) == (True, True)
+    assert _callable_accepts_one_positional(lambda: []) == (False, True)
+
+    # *args counts as accepting one positional.
+    assert _callable_accepts_one_positional(lambda *a: [])[0] is True
+
+    # A signature that cannot be read (str raises ValueError under
+    # inspect.signature) defaults to "assume it takes it", uncertain.
+    assert _callable_accepts_one_positional(str) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_live_model_label_reaches_a_label_aware_provider(tmp_path):
+    """A provider that accepts the label is handed the session's LIVE model, so
+    the env block names the running model and follows a mid-session switch."""
+    seen: list[str] = []
+
+    def provider(model_label: str = "") -> list[str]:
+        seen.append(model_label)
+        return [f"Model: {model_label}"]
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, system_blocks_provider=provider)
+    await session.prompt("hi")
+    assert seen[-1] == "test/m"
+    assert stream.requests[0].system_blocks == ["Model: test/m"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_zero_arg_provider_still_works_after_the_label_addition(tmp_path):
+    """A legacy zero-arg provider (some hosts, most tests) must keep working:
+    the label is additive, not a required parameter."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, system_blocks_provider=lambda: ["stable", "env"])
+    assert session._blocks_provider_takes_label is False
+    await session.prompt("hi")
+    assert stream.requests[0].system_blocks == ["stable", "env"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_set_model_journals_a_model_visible_switch(tmp_path):
+    """A deliberate switch appends a model-visible record so the NEXT turn knows
+    it is now a different model — not just the UI band."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    OTHER = ModelSpec(provider="zai", model_id="glm-5.3", context_window=100_000)
+    session.set_model(OTHER, explicit=True)
+    await wait_for(
+        lambda: any(
+            isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
+            for m in session._context.messages
+        )
+    )
+    switches = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    ]
+    assert len(switches) == 1
+    text = switches[-1].details["text"]
+    assert "You are now running as zai/glm-5.3" in text
+    assert "was test/m" in text
+
+    # It renders into the request the provider sees on the next turn.
+    await session.prompt("continue")
+    rendered = "\n".join(getattr(m, "text", "") for m in stream.requests[0].messages)
+    assert "[model switch]" in rendered and "zai/glm-5.3" in rendered
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_knob_only_change_does_not_journal_a_switch(tmp_path):
+    """Same provider/model_id with a different effort is not a model switch and
+    must not append a switch record (which would be one row per keystroke)."""
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream)
+    same_pair = MODEL.model_copy(update={"reasoning_effort": "hi"})
+    session.set_model(same_pair)
+    await asyncio.sleep(0.01)
+    switches = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    ]
+    assert switches == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_model_switch_record_deduplicates(tmp_path):
+    """The two edges that can fire for one change (set_model and a route event)
+    must not double-announce the same target."""
+    session = make_session(tmp_path, ScriptedStream([]))
+    await session.journal_model_switch("zai/glm-5.3", "test/m", transient=True)
+    await session.journal_model_switch("zai/glm-5.3", "test/m", transient=True)
+    switches = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    ]
+    assert len(switches) == 1
+    # A genuinely different target is not suppressed.
+    await session.journal_model_switch("kimi/k3", "zai/glm-5.3", transient=True)
+    switches = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    ]
+    assert len(switches) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failover_route_settled_journals_a_transient_switch(tmp_path):
+    """A failover fallback tells the model it is now on a fallback, marked
+    transient so it does not adopt the fallback as its identity."""
+    session = make_session(tmp_path, ScriptedStream([]))
+
+    class _Target:
+        selector = "zai/glm-5.3"
+        effort = None
+
+    await session._on_route_settled(_Target(), "test/m 429 — falling back")
+    switches = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    ]
+    assert len(switches) == 1
+    text = switches[-1].details["text"]
+    assert "You are now running as zai/glm-5.3" in text
+    assert "temporary fallback" in text
+    assert switches[-1].details["transient"] is True
     await session.dispose()
 
 

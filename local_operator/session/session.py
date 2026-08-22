@@ -112,7 +112,10 @@ from local_operator.harness.wake import (
     format_wake_delivery_text,
 )
 from local_operator.imaging import rebound_oversize_image
-from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
+from local_operator.incidents import (
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+)
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import (
@@ -331,6 +334,32 @@ def _archive_to_json(archive: Any) -> dict[str, Any]:
     return archive.model_dump(mode="json")
 
 
+def _callable_accepts_one_positional(func: Callable[..., Any]) -> tuple[bool, bool]:
+    """``(accepts_one_positional, certain)`` for ``func``.
+
+    Used to decide whether the system-blocks provider takes the live
+    ``model_label`` (the factory and subagent providers do; a legacy zero-arg
+    callable does not). When the signature can be read the answer is certain;
+    when it cannot (a builtin, a C callable, some mocks) the answer is ``True``
+    but ``certain`` is ``False``, so the caller tries the labelled call and may
+    fall back once. Distinguishing the two matters: a TypeError raised INSIDE a
+    provider whose signature was read as one-arg is a real bug that must surface,
+    not be swallowed by a zero-arg retry.
+    """
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True, False
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.POSITIONAL_ONLY,
+        ):
+            return True, True
+    return False, True
+
+
 def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     """Default transcript→LLM rendering.
 
@@ -364,11 +393,17 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # compaction cut landing on a rendered marker can still locate
             # ``first_kept_entry_id`` on replay.
             out.append(_render_compaction_marker(message, entry_id=message.id))
-        elif message.custom_type == SESSION_INCIDENT_MESSAGE_TYPE:
+        elif message.custom_type in (
+            SESSION_INCIDENT_MESSAGE_TYPE,
+            SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        ):
             # An incident rides the sender's preformatted text (the classifier
             # already wrote category + suggested action), exactly like a wake
             # delivery: it must reach the model as a user turn or the session
-            # stays blind to why its last run died.
+            # stays blind to why its last run died. A model-switch record uses
+            # the same path so the model becomes aware it is now answering as a
+            # different model (a deliberate switch or a failover fallback),
+            # rather than only seeing a changed static "Model:" system line.
             out.append(
                 Message(
                     role="user",
@@ -457,7 +492,9 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
 #: time as a message replays a superseded summary back into context beside the
 #: live one. A deny-list enumerating the ephemeral types cannot see a type that
 #: does not exist yet; this one excludes it by default.
-_PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
+_PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
+    {SESSION_INCIDENT_MESSAGE_TYPE, SESSION_MODEL_SWITCH_MESSAGE_TYPE}
+)
 
 
 def _paired_prefix(messages: Sequence[AgentMessage]) -> list[AgentMessage]:
@@ -937,7 +974,11 @@ class Session:
         #: tool is not advertised.
         team_registry: Any | None = None,
         conversation_name: ConversationName | None = None,
-        system_blocks_provider: Callable[[], list[str]] | Callable[[], Awaitable[list[str]]],
+        # Called each turn with the session's live ``model_label`` so the env
+        # block names the running model; accepts it positionally (``...``) and
+        # may return sync or async. A provider that ignores the argument is
+        # still valid — the label is additive.
+        system_blocks_provider: Callable[..., list[str]] | Callable[..., Awaitable[list[str]]],
     ) -> None:
         self._model = model
         self._stream_fn = stream_fn
@@ -1007,6 +1048,16 @@ class Session:
         #: this task instead — see :meth:`_spawn_selected_model_write`.
         self._selected_model_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
+        # Whether the block provider accepts the live ``model_label`` argument.
+        # Computed once here rather than per call: the factory and subagent
+        # providers do, a bare zero-arg callable (some hosts, most tests) does
+        # not, and the label is additive either way. A provider whose signature
+        # cannot be inspected (a C callable, a mock) is assumed to take it and
+        # falls back at the call site only if that assumption is wrong.
+        (
+            self._blocks_provider_takes_label,
+            self._blocks_provider_arity_certain,
+        ) = _callable_accepts_one_positional(system_blocks_provider)
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
         #: Set once a provider refuses a request because of an image block, and
         #: never cleared: from then on this session renders its history without
@@ -1150,6 +1201,10 @@ class Session:
         # Error text from the run just ended, journalled as a session incident
         # once persistence finishes (see _run_turn / journal_incident).
         self._pending_incident: str | None = None
+        # (new_label, transient) of the last model switch made model-visible, so
+        # the two edges that can both fire for one change (``set_model`` and a
+        # route-settled event) do not double-announce. See journal_model_switch.
+        self._last_model_switch_announced: tuple[str, bool] | None = None
         self._turn_task: asyncio.Task[None] | None = None  # in-flight turn (wake deliveries)
 
         # on_job_complete: settled model-owned jobs auto-deliver back into the
@@ -1620,6 +1675,34 @@ class Session:
     def model_label(self) -> str:
         return f"{self._model.provider}/{self._model.model_id}"
 
+    def _system_blocks(self) -> list[str] | Awaitable[list[str]]:
+        """Invoke the block provider with the live model label.
+
+        The provider gained an optional ``model_label`` argument so the env
+        block can name the running model (see ``build_system_blocks``). A
+        provider that predates the argument — a bare zero-arg callable a host or
+        a test supplies — is still valid: its arity is inspected once (not
+        probed by catching ``TypeError``, which would mask a genuine TypeError
+        raised INSIDE a one-arg provider and re-invoke it) and it is called with
+        no argument. The label is therefore strictly additive: no caller is
+        forced to grow a parameter it does not use.
+        """
+        if not self._blocks_provider_takes_label:
+            return self._system_blocks_provider()
+        if self._blocks_provider_arity_certain:
+            # Signature was readable and takes the label: any TypeError from here
+            # is a genuine bug inside the provider and must surface, not be
+            # swallowed by a zero-arg retry.
+            return self._system_blocks_provider(self.model_label)
+        try:
+            return self._system_blocks_provider(self.model_label)
+        except TypeError:
+            # Unreadable signature guessed one-arg and guessed wrong: this
+            # provider is genuinely zero-arg. Remember it and call the
+            # compatible way from now on.
+            self._blocks_provider_takes_label = False
+            return self._system_blocks_provider()
+
     @property
     def model(self) -> ModelSpec:
         """The spec every provider call is built from."""
@@ -1827,6 +1910,19 @@ class Session:
         notify = getattr(self._stream_fn, "on_model_changed", None)
         if callable(notify):
             notify(model)
+        # Make the deliberate switch visible to the MODEL, not just the host's
+        # band. A same-pair knob change never reaches here (it took an early
+        # return above), so this fires once per genuine switch. Background
+        # because ``set_model`` is sync and runs on the UI loop; the record
+        # lands before the next turn reads context.
+        self._spawn_background(
+            self.journal_model_switch(
+                f"{model.provider}/{model.model_id}",
+                f"{previous.provider}/{previous.model_id}",
+                reason="model switched",
+                transient=False,
+            )
+        )
 
     def _journal_effort_if_selection_in_force(self, previous: ModelSpec, model: ModelSpec) -> None:
         """Re-journal the selection when a knob change moves the effort on a
@@ -2799,7 +2895,7 @@ class Session:
           the ~0.15 ms the hop itself takes. This runs on the boot path a
           sibling commit cleared of exactly this kind of stall.
         """
-        blocks = self._system_blocks_provider()
+        blocks = self._system_blocks()
         if inspect.isawaitable(blocks):
             blocks = await blocks
         resolved = list(blocks)
@@ -2907,6 +3003,14 @@ class Session:
                     context_window=int(self._model.context_window),
                 )
             )
+            # Tell the model it is back on its primary. Not transient: the
+            # session has returned to its selected model for the foreseeable
+            # future, unlike the outbound fallback below.
+            await self.journal_model_switch(
+                f"{self._model.provider}/{self._model.model_id}",
+                reason=reason or "returned to primary model",
+                transient=False,
+            )
             return
         selector = str(target.selector)
         target_effort = getattr(target, "effort", None)
@@ -2928,6 +3032,16 @@ class Session:
                 is_fallback=True,
                 context_window=int(spec.context_window),
             )
+        )
+        # Tell the model it is now answering on a FALLBACK. Transient: the
+        # session may return to its primary at a later boundary (the target=None
+        # branch above), and the model should know the change may not persist so
+        # it does not, for example, record the fallback as its identity.
+        await self.journal_model_switch(
+            f"{spec.provider}/{spec.model_id}",
+            f"{self._model.provider}/{self._model.model_id}",
+            reason=reason,
+            transient=True,
         )
 
     def _spec_for_route(self, selector: str, effort: str | None) -> ModelSpec | None:
@@ -3076,7 +3190,7 @@ class Session:
                 ):
                     await self._emit(MessageStartEvent(message=message))
 
-            blocks = self._system_blocks_provider()
+            blocks = self._system_blocks()
             if inspect.isawaitable(blocks):
                 blocks = await blocks
             self._context.system_blocks = list(blocks)
@@ -3426,6 +3540,58 @@ class Session:
             self._context.messages.append(message)
         except OSError:
             logger.warning("could not journal session incident", exc_info=True)
+
+    async def journal_model_switch(
+        self,
+        new_label: str,
+        previous_label: str = "",
+        *,
+        reason: str = "",
+        transient: bool = False,
+    ) -> None:
+        """Make a model change visible to the MODEL, not just the UI.
+
+        A deliberate ``/model`` switch and a failover fallback both already
+        emit a ``ModelChangeEvent`` the front end repaints from, and the
+        selection is journalled as ``SELECTED_MODEL_CUSTOM_TYPE`` so a resume
+        restores it — but none of that reaches the model's own context. Without
+        this, a model that has just been switched onto (or a subagent whose run
+        failed over to a different model) keeps reasoning as though it were the
+        previous model: it can misreport which model it is, assume the wrong
+        context window, or name the wrong model in a byline. This appends a
+        ``session_model_switch`` message to the live context so the very next
+        turn sees the change, and persists it so a resumed session replays it.
+
+        Deduplicated against the last switch record so the two edges that can
+        both fire for one change (``set_model`` and a route-settled event) do
+        not double-announce: a repeat naming the same ``new_label`` with the
+        same ``transient`` flag is dropped.
+        """
+        from local_operator.incidents import format_model_switch_message
+
+        if self._disposed or not new_label:
+            return
+        if (new_label, transient) == self._last_model_switch_announced:
+            return
+        self._last_model_switch_announced = (new_label, transient)
+        text = format_model_switch_message(
+            new_label, previous_label, reason=reason, transient=transient
+        )
+        message = CustomMessage(
+            custom_type=SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "new_label": new_label,
+                "previous_label": previous_label,
+                "transient": transient,
+            },
+        )
+        try:
+            await self._transcript.append_message(message)
+            self._context.messages.append(message)
+        except OSError:
+            logger.warning("could not journal model switch", exc_info=True)
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
         """MCP manager hook (breaker trips): journal without blocking the
@@ -4440,7 +4606,7 @@ class Session:
         Safe to call mid-turn, and the pairing below is what makes that true —
         see :meth:`_wire_legal_snapshot`.
         """
-        blocks = self._system_blocks_provider()
+        blocks = self._system_blocks()
         if inspect.isawaitable(blocks):
             blocks = await blocks
         request = ChatRequest(

@@ -214,6 +214,38 @@ def test_the_system_prompt_names_user_run_bang_receipts() -> None:
     assert skills == SKILLS
 
 
+def test_model_label_rides_the_env_block_not_the_stable_head() -> None:
+    # The running-model line must be visible to the model, and it belongs in the
+    # env block (index 2) rather than the byte-stable head, because it can change
+    # mid-session (a /model switch, a failover fallback) and must not invalidate
+    # the cached conversation prefix.
+    blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE, model_label="anthropic/claude-opus-4-8")
+    instructions, inventory, env_block, _skills = blocks
+    assert "Model: anthropic/claude-opus-4-8" in env_block
+    # Not in the stable head/inventory — those must stay model-agnostic.
+    assert "claude-opus-4-8" not in instructions
+    assert "claude-opus-4-8" not in inventory
+
+
+def test_model_label_absent_by_default_and_when_blank() -> None:
+    # Sessions/hosts that pass no label (or a blank one) must not grow a dangling
+    # "Model:" line — the feature is additive.
+    for label in ("", "   "):
+        blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE, model_label=label)
+        assert "Model:" not in blocks[2]
+    assert "Model:" not in build_system_blocks(TOOLS, SKILLS, ENV, DATE)[2]
+
+
+def test_model_label_does_not_perturb_the_stable_prefix() -> None:
+    # Two different model labels must leave blocks 0 and 1 byte-identical, so a
+    # switch never busts the prompt-cache prefix.
+    a = build_system_blocks(TOOLS, SKILLS, ENV, DATE, model_label="anthropic/x")
+    b = build_system_blocks(TOOLS, SKILLS, ENV, DATE, model_label="zai/y")
+    assert a[:2] == b[:2]
+    # Arity is still fixed with the label present.
+    assert len(a) == 4
+
+
 def test_no_skills_keeps_fixed_arity_with_placeholder() -> None:
     # The block list is fixed-arity: an empty selection emits the constant
     # placeholder, never drops the block (breakpoint derivation counts
