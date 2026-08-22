@@ -551,10 +551,11 @@ implementation; any mistakes here are our own.
 
 All of the projects above are MIT-licensed, as is Local Operator itself. Under
 the MIT license you are free to draw inspiration from or reuse code from Local
-Operator in your own work. We ask only that credit be given where credit is due
-— an acknowledgement of the projects and people whose work you build on, in the
-same spirit as the credits above. It costs little and it keeps open source
-healthy.
+Operator in your own work. Verbatim reuse of the code requires retaining the
+copyright notice and license text, as the license states. Beyond that legal
+minimum, we simply appreciate credit where credit is due — an acknowledgement
+of the projects and people whose work you build on, in the same spirit as the
+credits above. It costs little and it keeps open source healthy.
 
 Core contributor: Damian Tran &lt;[damian@gominerva.com](mailto:damian@gominerva.com)&gt;.
 
