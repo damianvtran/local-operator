@@ -147,7 +147,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 				/>
 			) : null}
 
-			{projection.todos.length > 0 ? (
+			{projection.todos.some((p) => p.items.length > 0) ? (
 				<TodosPanel todos={projection.todos} />
 			) : null}
 			{projection.subagents.length > 0 ? (

@@ -185,6 +185,29 @@ class TodoItem:
         return asdict(self)
 
 
+#: The name the tool store gives a flat/implicit list — one phase called
+#: ``"Todos"`` (``builtin._IMPLICIT_PHASE``). Duplicated here rather than
+#: imported so the wire types stay free of a tools dependency; the coupling is
+#: that a projection with EXACTLY this one phase renders headerless, mirroring
+#: the TUI's flat-list back-compat rule. Keep in sync with the builtin.
+IMPLICIT_TODO_PHASE = "Todos"
+
+
+@dataclass
+class TodoPhase:
+    """One named group of todos — the TUI's phase model on the wire.
+
+    A single implicit ``"Todos"`` phase (``IMPLICIT_TODO_PHASE``) is how a
+    legacy flat list is carried, and the front-end drops the header for that
+    lone-phase case so it renders identically to the pre-phase flat list."""
+
+    name: str
+    items: list[TodoItem] = field(default_factory=list)
+
+    def to_json(self) -> dict[str, Any]:
+        return {"name": self.name, "items": [item.to_json() for item in self.items]}
+
+
 @dataclass
 class SubagentRow:
     """One row of the subagent roster — the TUI panel's shape."""
@@ -256,7 +279,9 @@ class SessionProjection:
     ended: bool = False  # process gone; history still resumable
     degraded: bool = False  # record fresh but socket unreachable
     transcript: list[TranscriptEntry] = field(default_factory=list)
-    todos: list[TodoItem] = field(default_factory=list)
+    #: Todos grouped into phases (``builtin`` stores them phased). A single
+    #: implicit ``"Todos"`` phase carries a flat list and renders headerless.
+    todos: list[TodoPhase] = field(default_factory=list)
     subagents: list[SubagentRow] = field(default_factory=list)
     #: The FRONT waiting request; the phone renders it as the pinned card.
     pending: PendingRequest | None = None
