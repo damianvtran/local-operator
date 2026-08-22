@@ -1693,6 +1693,20 @@ class Session:
         """
         return self._goal_state.agent_brief
 
+    @property
+    def active_agent(self) -> str:
+        """The DISPLAY NAME of the ``/agent`` profile in force ("" when none).
+
+        Distinct from :attr:`agent_brief`, which is the opaque instruction blob:
+        the band's active-profile segment (U2) needs to NAME the persona, and a
+        role that resolved but stamped nothing (A2) has an empty brief yet still
+        counts as attached, so the brief alone cannot answer "which profile".
+        Mirrors how ``agent_brief`` is surfaced — a read-only view onto the
+        volatile tail's holder — so the front end never reaches into
+        ``_goal_state`` for it.
+        """
+        return self._goal_state.agent_name
+
     def set_goal(self, text: str) -> str:
         """Set (or clear, with an empty string) the standing objective.
 
@@ -1701,6 +1715,21 @@ class Session:
         next turn and only invalidates that tail — never the cached prefix.
         """
         return self._goal_state.set(text)
+
+    @property
+    def active_team_name(self) -> str:
+        """The NAME of the team this session manages ("" when none).
+
+        The band's active-team segment (U2) names the roster in force. Read off
+        ``active_team.name`` rather than a separate field because the team object
+        is already the source of truth and can carry no other name; guarded so a
+        detach (``active_team is None``) or a nameless test double both resolve
+        to "" and the segment simply disappears.
+        """
+        team = self.active_team
+        if team is None:
+            return ""
+        return str(getattr(team, "name", "") or "")
 
     def attach_team(self, team: Any) -> None:
         """Bind this session as the manager of ``team``.
@@ -1856,6 +1885,10 @@ class Session:
         its notice rather than rejecting it here.
         """
         self._goal_state.agent_brief = body
+        # The NAME is stamped even when ``body`` is empty (the A2 hollow-profile
+        # case): the profile IS attached and the band must name it, so the
+        # segment tracks "which profile is in force", not "did it layer text".
+        self._goal_state.agent_name = display_name
         return display_name
 
     @property

@@ -104,6 +104,18 @@ def _painted(app: OperatorApp) -> str:
     return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
 
 
+def _band_text(app: OperatorApp) -> str:
+    """The status band's current rendered text (U2 segment assertions).
+
+    Rendered wide so the drop ladder keeps the static-identity segments — the
+    band sheds them at narrow widths by design, which the status_line suite
+    covers; here we only assert they are wired to the command.
+    """
+    status = app._status
+    assert status is not None
+    return status.render_text(200).plain
+
+
 async def _boot(pilot, app: OperatorApp) -> None:
     """Settle until the session exists.
 
@@ -270,10 +282,13 @@ async def test_team_request_attaches_and_sends() -> None:
         await _boot(pilot, app)
         await _submit(pilot, app, "/team feature-release ship the dashboard")
         rows = _user_rows(app)
+        band = _band_text(app)
     assert session.attached_teams, "the team must be attached before the turn"
     assert session.attached_teams[0].name == "feature-release"
     assert session.prompts == ["ship the dashboard"]
     assert rows == ["ship the dashboard"], rows
+    # U2: the band names the active roster after the attach.
+    assert "feature-release" in band, band
 
 
 def _agent_registry(tmp: str):
@@ -371,9 +386,12 @@ async def test_agent_name_alone_attaches_without_a_turn() -> None:
         await _submit(pilot, app, "/agent auditor")
         rows = _user_rows(app)
         notices = _notice_texts(app)
+        band = _band_text(app)
     assert session.attached_agents == ["auditor"]
     assert session.prompts == []
     assert rows == [], rows
+    # U2: the band names the active profile after the attach.
+    assert "auditor" in band, band
     # U3/U4: the notice states the profile now governs the session and points
     # at the detach verb, rather than the thinner "is active".
     assert any("auditor is ready and now governs" in n for n in notices), notices
@@ -428,15 +446,23 @@ async def test_agent_clear_detaches_the_active_profile() -> None:
         await _boot(pilot, app)
         await _submit(pilot, app, "/agent auditor")
         assert session.agent_brief, "profile should be attached first"
+        band_attached = _band_text(app)
         await _submit(pilot, app, "/agent clear")
         cleared_brief = session.agent_brief
         cleared_count = session.cleared_agents
+        band_cleared = _band_text(app)
         notices = _notice_texts(app)
+    # U2: the band named the profile while attached, and drops it on clear.
+    assert "auditor" in band_attached, band_attached
+    assert "auditor" not in band_cleared, band_cleared
     assert cleared_brief == "", "clear must blank the agent brief"
     assert cleared_count == 1, "clear must reach the session detach"
     # `clear` was the verb, not an attach — attached_agents stays as it was.
     assert session.attached_agents == ["auditor"]
     assert any("base instructions" in n for n in notices), notices
+    # D4: the noun is standardized on "agent" — the detach notice no longer says
+    # "agent profile". A drift back to "profile" here re-opens the finding.
+    assert not any("profile" in n for n in notices), notices
 
 
 @pytest.mark.asyncio

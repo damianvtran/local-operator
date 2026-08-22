@@ -37,6 +37,14 @@ class GoalState:
     #: previous agent brief, and it must never eat the roster a running
     #: ``/team`` manager is still coordinating (nor vice versa).
     agent_brief: str = ""
+    #: The DISPLAY NAME of the profile ``agent_brief`` was stamped from ("" when
+    #: none). Kept beside the brief rather than derived from it because the band
+    #: needs to NAME the active profile (U2), and the brief is an opaque
+    #: instruction blob with no reliable name inside it — a role preamble, a
+    #: wrapped specialist prompt, or empty for a resolved-but-hollow profile
+    #: (A2), which still counts as attached. The two move together: every stamp
+    #: sets both, and ``clear_agent_profile`` blanks both.
+    agent_name: str = ""
 
     def set(self, text: str) -> str:
         """Store a trimmed, length-capped goal and return what was stored."""

@@ -1675,6 +1675,14 @@ class OperatorApp(App[None]):
             model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
+            # The active /agent profile and /team roster segments (U2). Read
+            # defensively via getattr: an embedded-SDK or test double may not
+            # expose these accessors, and a missing one must leave the segment
+            # empty rather than raise on boot. A resumed session that carried an
+            # attached profile/team restores it here, so the band names it
+            # immediately instead of only after the next attach.
+            agent_profile=str(getattr(session, "active_agent", "") or ""),
+            team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
         )
@@ -2833,6 +2841,10 @@ class OperatorApp(App[None]):
             except Exception as exc:
                 self._system_notice(f"could not attach team {name!r}: {exc}", "warning")
                 return
+        # U2: the band names the roster now managed by this session. Synced from
+        # the session after the attach, so the segment matches what was actually
+        # stamped rather than the name the user typed.
+        self._sync_team_band()
         if not request:
             notice(
                 f"team {team.name} is ready. {team.manager} leads it. "
@@ -2945,6 +2957,30 @@ class OperatorApp(App[None]):
         out.append(Text("Detach: /agent clear", style=body))
         return RichBlock(Group(*out))
 
+    def _sync_agent_band(self) -> None:
+        """Repaint the band's active-agent segment from the session (U2).
+
+        The session is the source of truth (``active_agent`` is "" once
+        ``clear_agent_profile`` runs, the resolved name after an attach), so the
+        band is synced FROM it rather than handed a string by each call site —
+        the two cannot then drift, and a future attach path gets the segment for
+        free. No-op before the band or session exists (early boot).
+        """
+        if self._status is None or self._session is None:
+            return
+        self._status.update(agent_profile=str(getattr(self._session, "active_agent", "") or ""))
+
+    def _sync_team_band(self) -> None:
+        """Repaint the band's active-team segment from the session (U2).
+
+        Mirror of :meth:`_sync_agent_band` for the roster: read straight off
+        ``active_team_name`` so an attach (and, when one exists, a detach) both
+        flow through the same one-line sync.
+        """
+        if self._status is None or self._session is None:
+            return
+        self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
+
     def _cmd_agent(self, arg: str, notice: NoticeFn) -> None:
         """``/agent`` — list; ``/agent <name> [<message>]`` — adopt a profile.
 
@@ -2987,12 +3023,21 @@ class OperatorApp(App[None]):
             detach = getattr(session, "clear_agent_profile", None)
             if callable(detach):
                 detach()
-            notice("no agent profile active; this session uses its base instructions.")
+            # U2: the band's active-agent segment disappears on detach. Synced
+            # from the session (the source of truth `clear_agent_profile` just
+            # blanked), not by pushing "" directly, so the band and session can
+            # never disagree about what is attached.
+            self._sync_agent_band()
+            # D4: standardize the noun on "agent" — the listing header, attach
+            # notice, and this detach notice all say "agent", never "agent
+            # profile". Plain wording, no em dashes.
+            notice("no agent active; this session uses its base instructions.")
             return
         attach = getattr(session, "attach_agent_profile", None)
         if not callable(attach):
             self._system_notice(
-                "agent profiles are unavailable in this session.",
+                # D4: "agents", matching /team's "teams are unavailable".
+                "agents are unavailable in this session.",
                 "warning",
             )
             return
@@ -3008,6 +3053,11 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        # U2: the profile is now attached (including the A2 hollow case, which
+        # still governs which persona is named even though it layered no text),
+        # so the band names it from here. Synced before the notices below rather
+        # than after, so the segment is up by the time the receipt scrolls in.
+        self._sync_agent_band()
         # A2: the NAME resolved, but a role/specialist with empty instructions
         # layered no persona — a "is active" notice would overclaim. Tell the
         # user the profile carries no instructions so the missing effect is not
