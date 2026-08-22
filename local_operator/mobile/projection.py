@@ -353,8 +353,19 @@ class ProjectionFold:
                     )
                 )
         elif isinstance(event, TurnEndEvent):
-            p.streaming = False
-            self._streaming_ended = True
+            # NOT a streaming terminal. TurnEndEvent fires after EVERY model
+            # turn within a run (harness.loop yields it whenever the assistant
+            # produced tool calls and the run will continue — loop.py ~589), so
+            # a multi-batch turn emits several before the run ends. The session
+            # keeps ``is_streaming`` True across them and clears it only after
+            # AgentEndEvent, and the TUI's working line stays up the same way,
+            # so the phone must too. Flipping streaming False here (and, worse,
+            # latching ``_streaming_ended``) blanked the working line mid-run
+            # and pinned it off. This branch previously set streaming False and
+            # was harmless ONLY because the removed per-event is_streaming
+            # re-read overwrote it every time; with the fold now authoritative
+            # it must leave streaming alone. AgentEndEvent is the sole terminal.
+            pass
         elif isinstance(event, MessageStartEvent):
             if isinstance(event.message, Message) and event.message.role == "assistant":
                 entry = TranscriptEntry(
@@ -559,10 +570,20 @@ class ProjectionFold:
             self._activity_started_at = time.monotonic()
             self._set_activity("thinking")
             return
-        if isinstance(event, (AgentEndEvent, TurnEndEvent)):
+        if isinstance(event, AgentEndEvent):
+            # The one true terminal: the run is over, clear the working line.
             p.activity = ""
             p.activity_started_s = 0.0
             self._activity_started_at = None
+            return
+        if isinstance(event, TurnEndEvent):
+            # A per-model-turn boundary, NOT the end of the run (loop.py ~589
+            # yields it after every assistant turn that made tool calls). The
+            # run is now waiting on the next model call, exactly like the gap
+            # after a tool finishes — show "thinking", restart the clock for the
+            # wait. Clearing it here blanked the working line mid-run; only
+            # AgentEndEvent settles the turn.
+            self._set_activity("thinking", restart_clock=True)
             return
         if not p.streaming:
             return
