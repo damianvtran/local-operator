@@ -23,8 +23,6 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import asyncio
-import base64
-import io
 import logging
 import os
 import time
@@ -1138,7 +1136,9 @@ class OperatorApp(App[None]):
         #: inert — a recall can never match them — and are dropped with the
         #: notice they share. Cleared wherever the blocks are removed (session
         #: swap, `/clear`) for the same reason `_queued_steer_notices` is.
-        self._held_steer_blocks: list[tuple[Message, UserBlock, list[ImageBlock], NoticeBlock]] = []
+        self._held_steer_blocks: list[
+            tuple[Message, UserBlock, list[ImageBlock], NoticeBlock, dict[int, Attachment]]
+        ] = []
         #: Rows whose turn ended before any boundary drained them: they now read
         #: `still queued — sends with your next message`, and the message really
         #: is still in the engine's queue, so the NEXT turn's first drain is the
@@ -5809,7 +5809,15 @@ class OperatorApp(App[None]):
             # ride the same queue but never get an entry, so they simply never
             # match. Entries outlive delivery harmlessly — a delivered message
             # is no longer in the queue, so it can never be recalled.
-            self._held_steer_blocks.append((steer_message, user_block, image_blocks, queued))
+            # The attachments ride the entry for the same reason they ride
+            # the compaction hold: the transcript's ImageBlocks keep a
+            # DOWNSCALED copy of the pixels, so rebuilding the draft's images
+            # from them would resend a blur of the original screenshot. The
+            # map is only held while the steer is queued — the entry goes at
+            # delivery — so the bytes live no longer than the promise.
+            self._held_steer_blocks.append(
+                (steer_message, user_block, image_blocks, queued, dict(attachments or {}))
+            )
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
@@ -11118,7 +11126,7 @@ class OperatorApp(App[None]):
                 break
         else:
             return
-        message, user_block, image_blocks, notice = entry
+        message, user_block, image_blocks, notice, attachments = entry
         editor = self._editor()
         if self._aside_is_open():
             # The composer is the aside's while the card is up; Enter would
@@ -11138,7 +11146,6 @@ class OperatorApp(App[None]):
         if editor.text.strip():
             return
         text = message.text
-        attachments = self._attachments_for_recall(text, image_blocks)
         # The steer recorded itself in prompt history on submit; the recall
         # UNSENT it, so Up-arrow must not offer the line the composer already
         # holds as a past prompt.
@@ -11191,41 +11198,6 @@ class OperatorApp(App[None]):
         itself is engine-internal.
         """
         return any(item is message for item in session.queued_steering())
-
-    def _attachments_for_recall(
-        self, text: str, image_blocks: list[ImageBlock]
-    ) -> dict[int, Attachment]:
-        """Rebuild the index→image map for a recalled draft's markers.
-
-        The composer needs its attachments back as an index→Attachment map so
-        the markers in the recalled text resolve to the SAME images and a
-        resend sends the original bytes. The transcript's ImageBlocks kept
-        the decoded pixels and their original dimensions but not the base64
-        or the marker numbers, so the numbers come from the markers in the
-        recalled text (in citation order, the same walk `resolve_markers`
-        sends in) and the bytes are re-encoded from the block's retained
-        image — the same pixels the block was built from. A block whose
-        image did not decode yields no attachment: its marker stays prose,
-        exactly as `adopt_attachments` would treat an uncited number.
-        """
-        from local_operator.tui.widgets.editor import IMAGE_MARKER
-
-        attachments: dict[int, Attachment] = {}
-        for position, match in enumerate(IMAGE_MARKER.finditer(text)):
-            if position >= len(image_blocks):
-                break
-            block = image_blocks[position]
-            if block._pil is None:
-                continue
-            buffer = io.BytesIO()
-            block._pil.save(buffer, format="PNG")
-            image = ImageContent(
-                data=base64.b64encode(buffer.getvalue()).decode(), mime_type="image/png"
-            )
-            dimensions = f"{block._px_width}x{block._px_height}"
-            marker = f"[Image #{match.group(1)}, {dimensions}]"
-            attachments[int(match.group(1))] = Attachment(image, marker)
-        return attachments
 
     def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.

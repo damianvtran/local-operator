@@ -178,6 +178,48 @@ async def test_a_delivered_steer_is_not_recallable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_recalled_draft_keeps_its_original_screenshot(tmp_path: Path) -> None:
+    """The recall hands back the ORIGINAL bytes, not the transcript's blur.
+
+    The transcript's ImageBlocks keep a downscaled copy of the pixels; a
+    recall rebuilt from them would resend a blur of what the user pasted.
+    The held entry carries the submit-time attachment map instead, so the
+    recalled draft's markers resolve to the very bytes that were queued.
+    """
+    import base64
+
+    from PIL import Image
+    from textual import events
+
+    path = tmp_path / "shot.png"
+    Image.new("RGB", (64, 32), (30, 30, 40)).save(path)
+    original = base64.b64encode(path.read_bytes()).decode()
+
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        editor.insert("check this ")
+        app.post_message(events.Paste(str(path)))
+        await pilot.pause()
+        await pilot.pause()
+        assert "[Image #1" in editor.text
+        await pilot.press("enter")
+        await pilot.pause()
+        assert len(session.queued_steering()) == 1
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert "[Image #1" in editor.text
+        attachments = editor.attachments()
+        assert list(attachments) == [1]
+        assert attachments[1].image.data == original, "the original bytes ride the recall"
+        # And the resend resolves the marker to that image.
+        assert [image.data for image in editor.referenced_images()] == [original]
+
+
+@pytest.mark.asyncio
 async def test_recall_works_after_the_turn_has_ended() -> None:
     """The deferred state: the turn stopped, the steer is still queued.
 
