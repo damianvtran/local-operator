@@ -128,7 +128,43 @@ async def test_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 
     assert len(stream.requests) == 2  # one nudge, then the turn ends
     assert len(reminders(session._context.messages)) == 1
-    assert session._todo_reminder_fingerprint == (("decide the domain", "pending"),)
+    assert session._todo_reminder_fingerprint == (("Todos", "decide the domain", "pending"),)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
+    """THE §5.3 coupling guard. A PHASED no-progress list must be nudged exactly
+    once, the same as a flat one. If ``session.py:_stamped_todo_fingerprint`` is
+    NOT widened to 3-tuples in lockstep with ``builtin.todo_fingerprint``, the
+    stamped side compares empty, every reminder expires on every render, and the
+    latch nudges again on the second identical yield. That failure is SILENT in
+    the flat suite (whose stamps happen to survive) and in any 'does it nudge?'
+    test — only a phased 'does it STOP nudging?' assertion catches it."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"name": "Foundation", "items": [{"text": "decide the domain", "status": "pending"}]},
+        {"name": "Verification", "items": [{"text": "run the gate", "status": "pending"}]},
+    ]
+    stream = ScriptedStream(prose_turns(4))
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("go")
+
+    assert len(stream.requests) == 2, "one nudge, then the turn ends — not re-nudged every yield"
+    assert len(reminders(session._context.messages)) == 1
+    assert session._todo_reminder_fingerprint == (
+        ("Foundation", "decide the domain", "pending"),
+        ("Verification", "run the gate", "pending"),
+    )
+    # The reminder must actually REACH the model on the continuation request:
+    # that render passes through ``_expire_stale_todo_reminders`` →
+    # ``_stamped_todo_fingerprint``. If that normaliser is NOT widened to
+    # 3-tuples in lockstep (§5.3), the stamped side compares empty against the
+    # live 3-tuple, the reminder is judged stale on an UNCHANGED list, and it is
+    # stripped from this request — so the model never sees the nudge. Asserting
+    # the text is present on request 2 is what catches the silent coupling break.
+    sent = stream.requests[1].messages[-1].text
+    assert "decide the domain" in sent and "<system-reminder>" in sent
     await session.dispose()
 
 
@@ -309,10 +345,45 @@ async def test_unstamped_reminder_expires(tmp_path) -> None:
     session = make_session(tmp_path, stream)
 
     kept = session._live_todo_reminders(
-        [Message.user("go"), _reminder("stamped", (("ship it", "pending"),))]
+        [Message.user("go"), _reminder("stamped", (("Todos", "ship it", "pending"),))]
     )
     dropped = session._live_todo_reminders([Message.user("go"), _reminder("no stamp")])
 
     assert len(kept) == 2
     assert len(dropped) == 1
     await session.dispose()
+
+
+def test_phased_open_todos_flattens_pending_and_excludes_blocked() -> None:
+    """The guardrail's \"open\" is pending across ALL phases; blocked stays out so
+    a phased list can still stop honestly."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {
+            "name": "A",
+            "items": [
+                {"text": "one", "status": "pending"},
+                {"text": "settled", "status": "done"},
+            ],
+        },
+        {
+            "name": "B",
+            "items": [
+                {"text": "two", "status": "pending"},
+                {"text": "held", "status": "blocked", "reason": "waiting"},
+            ],
+        },
+    ]
+
+    assert [item["text"] for item in builtin.open_todos(SESSION_ID)] == ["one", "two"]
+
+
+def test_stamped_fingerprint_round_trips_a_three_tuple() -> None:
+    """A reminder's stamped fingerprint survives the JSON list round trip and
+    compares equal to the live 3-tuple, so an unchanged phased list keeps its
+    reminder instead of expiring it (the §5.3 failure mode)."""
+    from local_operator.session.session import _stamped_todo_fingerprint
+
+    # JSON turns the nested tuples into lists; the normaliser must still yield a
+    # 3-tuple that equals what todo_fingerprint emits.
+    details = {"fingerprint": [["Foundation", "decide", "pending"]]}
+    assert _stamped_todo_fingerprint(details) == (("Foundation", "decide", "pending"),)

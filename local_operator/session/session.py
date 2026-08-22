@@ -537,7 +537,7 @@ def _is_persistable_message(message: AgentMessage) -> bool:
     return True
 
 
-def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str], ...]:
     """The todo fingerprint a reminder was built from, normalized for compare.
 
     Read back through an explicit tuple/str coercion rather than trusted as
@@ -546,12 +546,21 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
     list and expire every reminder on sight. A reminder with no stamp (or a
     malformed one) compares equal to nothing and expires, which is the safe
     direction: a nudge that may be lying is worth less than one turn without it.
+
+    ARITY MUST MATCH ``builtin.todo_fingerprint`` (design §5.3): it now emits
+    3-tuples ``(phase_name, text, status)``, so this filter keeps ``len == 3``.
+    If this stayed at 2 while the source grew to 3, EVERY stamped item would be
+    dropped, the stamped side would compare empty against a non-empty current
+    fingerprint, and every reminder would expire on every render — the latch
+    errs safe (keeps nudging) so 'does it nudge' still passes while the
+    no-second-nudge suppression silently breaks. The phased no-second-nudge
+    guardrail test is what catches a regression here.
     """
     stamped = details.get("fingerprint") or ()
     return tuple(
-        (str(item[0]), str(item[1]))
+        (str(item[0]), str(item[1]), str(item[2]))
         for item in stamped
-        if isinstance(item, (list, tuple)) and len(item) == 2
+        if isinstance(item, (list, tuple)) and len(item) == 3
     )
 
 
@@ -1096,12 +1105,17 @@ class Session:
         # last guardrail nudge in THIS user turn, so a model that yields twice
         # with a byte-identical list is not nudged a second time. Reset per user
         # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
-        self._todo_reminder_fingerprint: tuple[tuple[str, str], ...] | None = None
+        # Both fingerprints are the phase-aware 3-tuple form
+        # ``(phase_name, text, status)`` that ``builtin.todo_fingerprint`` now
+        # emits (phased-todos change): the reminder latch and the persistence
+        # latch both compare against that source, so their annotations must match
+        # its arity or a comparison silently degrades.
+        self._todo_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
         # The todo fingerprint that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
-        self._persisted_todo_fingerprint: tuple[tuple[str, str], ...] | None = None
+        self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
 
         self._disposed = False
         # Session-scoped task group (HC-11): wake deliveries and aside
