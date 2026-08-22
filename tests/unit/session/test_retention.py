@@ -10,6 +10,7 @@ no transcript, no content — which is definitionally not a session.
 
 from __future__ import annotations
 
+import os
 import time
 
 from local_operator.session.retention import (
@@ -23,8 +24,6 @@ from local_operator.session.retention import (
 
 
 def _session(root, name: str, *, size: int = 1024, age_days: float = 0.0):
-    import os
-
     directory = root / name
     directory.mkdir(parents=True)
     (directory / "transcript.jsonl").write_text("x" * size)
@@ -41,8 +40,6 @@ def _hollow(root, name: str, *, age_seconds: float = EMPTY_DIR_GRACE_SECONDS + 6
     means now: a fresh empty directory is indistinguishable from a sibling
     process's session awaiting its first message, and must survive.
     """
-    import os
-
     directory = root / name
     directory.mkdir(parents=True)
     when = time.time() - age_seconds
@@ -285,8 +282,6 @@ def test_a_fresh_empty_directory_survives_a_sibling_sweep(tmp_path):
 def test_grace_window_boundary(tmp_path):
     """Inside the window survives; past it is reaped. ``now`` moves the
     clock so the boundary is tested without sleeping or utime races."""
-    import os
-
     sessions = tmp_path / "sessions"
     fresh = _hollow(sessions, "fresh", age_seconds=0.0)
     aged = _hollow(sessions, "aged", age_seconds=0.0)

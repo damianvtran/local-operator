@@ -370,11 +370,26 @@ class Transcript:
             # one mkdir restores; ``self._entries`` still holds every prior
             # entry, so the recreated file is rebuilt complete rather than
             # starting truncated.
-            try:
-                with self.path.open("a", encoding="utf-8") as handle:
-                    handle.write(entry.to_json() + "\n")
-                    handle.flush()
-            except FileNotFoundError:
+            #
+            # The FILE alone vanishing (directory intact) is the same wound
+            # with a quieter symptom: ``"a"`` mode recreates the file without
+            # raising, so the append succeeds and the transcript silently
+            # holds one row while memory holds the whole session — a resume
+            # would then replay a single message as if the rest never
+            # happened. Checked BEFORE the append because that path never
+            # raises; both cases rebuild from ``self._entries`` under the
+            # same lock.
+            rebuild = not self.path.exists()
+            if not rebuild:
+                try:
+                    with self.path.open("a", encoding="utf-8") as handle:
+                        handle.write(entry.to_json() + "\n")
+                        handle.flush()
+                except FileNotFoundError:
+                    # Directory removed between the exists() check and the
+                    # open — the race is real, so the window is too.
+                    rebuild = True
+            if rebuild:
                 self.directory.mkdir(parents=True, exist_ok=True)
                 with self.path.open("w", encoding="utf-8") as handle:
                     for row in self._entries:
