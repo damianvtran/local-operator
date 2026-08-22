@@ -571,6 +571,35 @@ class Editor(TextArea):
     #: rest: see :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
     DESTRUCTIVE_COMMANDS = ("logout",)
 
+    #: Commands whose ARGUMENT is a NAME optionally followed by a free-text
+    #: message (`/team <name> <request>`, `/agent <name> <message>`). Completing
+    #: the name adds a trailing SPACE and parks the caret after it so the user
+    #: can keep typing the message — it does NOT submit, unlike the enum-tail
+    #: argument commands (`/login`, `/effort`, the model list) where the
+    #: argument IS the whole command and Enter runs it. A blank Enter after that
+    #: space is the attach-only switch, and a typed message then Enter sends it:
+    #: both already emerge from the tokenizer closing the argument list on the
+    #: space and the app's dispatch collapsing a bare name to attach-only, so no
+    #: dispatch/registry change is needed — only completion inserts the space.
+    #:
+    #: A local class tuple mirroring ``MODEL_COMMANDS`` rather than a new
+    #: ``ArgumentMode`` member: the mode enum is a shared surface (the mobile
+    #: daemon projects it, ``set_commands``/``opens_a_list`` branch on it), and a
+    #: new member would force a re-audit of every ``arguments is/==`` site for a
+    #: two-command editor-local exception. Both spellings, because the alias is
+    #: itself a runnable command — same reason ``MODEL_COMMANDS`` lists
+    #: ``models``.
+    NAME_ARGUMENT_COMMANDS = ("team", "teams", "agent", "agents")
+
+    #: The discoverability hint shown the moment a NAME+message name is completed
+    #: with an empty tail (ux round 1, U1/U2). Names both outcomes of the parked
+    #: caret — a blank Enter switches, a typed message sends — so the divergence
+    #: from the enum-tail commands (Enter-on-a-row runs immediately) is visible
+    #: BEFORE the user commits, not inferred from a transcript notice afterwards.
+    #: Shown in the picker's own notice row and withdrawn as soon as a message
+    #: character is typed. See :meth:`_name_switch_hint`.
+    NAME_SWITCH_HINT = "Enter to switch · type a message to send"
+
     #: The attachment chip's two grounds, on top of everything ``TextArea``
     #: already declares. Component classes rather than hexes in Python so the
     #: colours sit in the stylesheet beside every other composer colour and
@@ -578,6 +607,14 @@ class Editor(TextArea):
     COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
         "text-area--image-marker",
         "text-area--image-marker-selected",
+        # Slash-command syntax highlighting (see :meth:`_paint_slash`). Component
+        # classes rather than Python hexes for the same reason the chip uses
+        # them: the colours live in the stylesheet beside every other composer
+        # colour and follow the theme's ``$lo-*`` variables through a theme
+        # switch for free.
+        "text-area--slash-command",  # recognized /command word
+        "text-area--slash-argument",  # recognized team/agent NAME
+        "text-area--slash-unknown",  # a leading /word that is NOT a command
     }
 
     def __init__(
@@ -608,6 +645,34 @@ class Editor(TextArea):
         # description advertises options the editor never offers.
         self._argument_commands: tuple[str, ...] = ()
         self._required_argument_commands: tuple[str, ...] = ()
+        # Every registered command word (primaries AND aliases), lower-cased,
+        # for the highlighter's "is this leading /word a real command?" oracle.
+        # Derived from the registry in :meth:`set_commands` — the render pass
+        # must not import the app (which owns ``slash_command_for``): editor.py
+        # is imported BY app.py, so the dependency only goes one way. The same
+        # name-in-``names`` membership ``slash_command_for`` uses is reproduced
+        # here so the highlight cannot claim a command the dispatch would reject.
+        self._command_names: frozenset[str] = frozenset()
+        # The team/agent NAMES the open argument list is offering, pushed by the
+        # app in ``on_argument_query_opened`` (see :meth:`set_name_choices`).
+        # A frozenset so the render pass tests membership in O(1): the render
+        # path must never walk the team/agent registries itself — that is I/O,
+        # and ``render_line`` runs on every keystroke-frame. Empty until the
+        # list has opened at least once; a name hand-typed in full before the
+        # list ever filled goes un-highlighted, an accepted affordance gap.
+        self._name_choices: frozenset[str] = frozenset()
+        # Per-render-pass memo for :meth:`_slash_runs` (CR1). ``render_line`` is
+        # called once per visible screen row and the runs are identical for every
+        # row of a frame; this caches the parse against a key of every input it
+        # reads, so the compute runs once and the other rows reuse it. ``None``
+        # until the first row of the first frame that asks.
+        # The key is a heterogeneous snapshot of every input _slash_runs reads
+        # (text, two frozensets, the argument-commands tuple, picker mode/flags),
+        # so it is typed ``tuple[object, ...]`` — it is only ever compared for
+        # equality, never indexed.
+        self._slash_runs_cache: (
+            tuple[tuple[object, ...], tuple[int, list[tuple[int, int, str]]] | None] | None
+        ) = None
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
@@ -745,7 +810,12 @@ class Editor(TextArea):
                     assert cursor_style is not None  # narrowed by `caret`
                     content = content.stylize(ContentStyle.from_rich_style(cursor_style), 0, 1)
                 return Strip(content.render_segments(self.visual_style), content.cell_length)
-        return self._paint_markers(super().render_line(y), y)
+        # Slash highlighting LAST so its own line-0/leading-`/` bail is the cheap
+        # rejection on the common prose path. The two passes never contend for
+        # the same cells: a marker opens with `[` and lives in the message tail,
+        # the command word and name open with `/` on line 0 — so order is
+        # immaterial for correctness (see :meth:`_paint_slash`).
+        return self._paint_slash(self._paint_markers(super().render_line(y), y), y)
 
     # -- public API ---------------------------------------------------------
     @property
@@ -905,6 +975,11 @@ class Editor(TextArea):
             if command.arguments is ArgumentMode.REQUIRED
             for name in command.names
         )
+        # Lower-cased so the highlighter's membership test matches the
+        # case-insensitive way ``slash_command_for`` resolves a typed word.
+        self._command_names = frozenset(
+            name.lower() for command in commands for name in command.names
+        )
 
     def opens_a_list(self, name: str) -> bool:
         """Whether completing the command word ``name`` opens a list INSTEAD of
@@ -919,6 +994,72 @@ class Editor(TextArea):
         """
         lowered = name.lower()
         return lowered in self.MODEL_COMMANDS or lowered in self._required_argument_commands
+
+    def _is_name_argument_command(self, name: str | None) -> bool:
+        """Whether ``name``'s argument is a NAME followed by a free-text message.
+
+        The one predicate behind both asks: completion routes team/agent rows to
+        :meth:`_complete_name_argument` (space, no submit), and the highlighter
+        only paints an argument NAME for these commands. ``name`` may be ``None``
+        because ``_apply_command`` reads ``_argument_command`` while a list is
+        open — defensive, mirroring :meth:`opens_a_list`'s lowercase test.
+        """
+        return (name or "").lower() in self.NAME_ARGUMENT_COMMANDS
+
+    def _name_switch_hint(self, list_argument: str) -> str | None:
+        """The U1/U2 hint, or ``None`` when it must not show.
+
+        Shows ONLY in the one state it answers: a NAME+message command whose
+        argument is a completed name followed by a single terminating space and
+        nothing else — i.e. exactly the parked-caret resting state
+        ``_complete_name_argument`` produces. ``list_argument`` is the picker's
+        current argument query (everything after ``/<cmd> ``), so:
+
+        * a bare ``/team `` (empty argument) is still choosing a NAME — the row
+          list is up and answers the question, no hint;
+        * ``/team frontend-guild `` (name + one trailing space) is the moment the
+          two outcomes appear — HINT;
+        * ``/team frontend-guild fix`` (a message is being typed) has a non-empty
+          tail past the space — the user has chosen "send", withdraw the hint.
+
+        Gated on the command being a NAME+message one so it never intrudes on the
+        enum-tail argument lists, and returned as text the caller feeds to the
+        picker notice channel (empty tail only, so it cannot cover a real row).
+        """
+        if not self._is_name_argument_command(self._argument_command):
+            return None
+        # A completed name reads as `<name> ` — one internal space that
+        # terminates the name and an empty tail. `rstrip(" ")` then a re-add of a
+        # single space would be fragile; instead require exactly: a non-empty
+        # first token, and everything after the FIRST space is blank.
+        name, sep, tail = list_argument.partition(" ")
+        if not name or not sep or tail.strip():
+            return None
+        return self.NAME_SWITCH_HINT
+
+    def set_name_choices(self, names: frozenset[str]) -> None:
+        """The team/agent names the OPEN argument list is offering, for the
+        highlighter.
+
+        Pushed by the app from ``on_argument_query_opened`` beside the
+        ``picker.set_choices`` call — the same "app fills the rows when the list
+        opens" contract, extended to hand the widget a cheap immutable snapshot
+        it can test membership against on the render path. The render pass must
+        never walk the registries itself (that is app-side I/O on every frame),
+        so name recognition rides this snapshot; it is cleared when the argument
+        command changes to a non-name one (see :meth:`_sync_picker`).
+
+        Refreshes the composer when the snapshot actually changes: the names
+        arrive one message-loop tick AFTER the keystroke that opened the list
+        (the app answers ``ArgumentQueryOpened``), by which point ``render_line``
+        has already painted — and cached — the line without them. Without the
+        refresh the name would only light up on the NEXT keystroke, a visible
+        lag. Gated on a real change so an unchanged re-push is not a repaint.
+        """
+        if names == self._name_choices:
+            return
+        self._name_choices = names
+        self.refresh()
 
     @property
     def shell_mode(self) -> bool:
@@ -1696,6 +1837,177 @@ class Editor(TextArea):
         """``strip`` with ``style`` laid ON TOP of each segment's own style."""
         return Strip(Segment.apply_style(strip, post_style=style), strip.cell_length)
 
+    def _slash_runs(self) -> tuple[int, list[tuple[int, int, str]]] | None:
+        """The document-column spans to highlight, and the line they sit on.
+
+        Returns ``(line_index, [(col_start, col_end, component_class), …])`` or
+        ``None`` when nothing on the buffer is a slash surface. The runs are the
+        leading ``/command`` token (always, when the line starts with ``/``) and,
+        for a NAME+message command whose typed name is a known team/agent, the
+        NAME token — never the free-text message tail, which is the whole point:
+        the user sees what is command versus what will be sent.
+
+        Memoized per render pass (CR1). ``render_line(y)`` calls this once per
+        VISIBLE screen row, and the runs are identical for every row of a frame —
+        they are a property of the buffer and picker state, not of ``y``. The
+        cache key captures every input the computation reads, so a keystroke that
+        changes any of them (buffer text, the name/command snapshots, the picker
+        state that gates the unknown treatment) recomputes on the next row that
+        asks, while the other rows of the same frame reuse the result. Composer
+        buffers are small, so this is a micro-optimisation, not a hot-path fix —
+        but it makes the "cheap on the hot path" claim exact and stops the
+        per-row line-list allocation on prose frames.
+        """
+        # Every value the compute reads, so a stale run can never survive an
+        # input change. ``_command_names``/``_name_choices`` are frozensets and
+        # ``_argument_commands`` a tuple — all hashable and cheap to compare.
+        key = (
+            self.text,
+            self._command_names,
+            self._name_choices,
+            self._argument_commands,
+            self._picker.mode,
+            self._picker.is_open(),
+            self._picker.is_pending(),
+        )
+        cached = self._slash_runs_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        runs = self._compute_slash_runs()
+        self._slash_runs_cache = (key, runs)
+        return runs
+
+    def _compute_slash_runs(self) -> tuple[int, list[tuple[int, int, str]]] | None:
+        """The uncached body of :meth:`_slash_runs` — see its docstring.
+
+        "Recognized" for the command word is membership in ``_command_names`` —
+        the same case-insensitive ``name in entry.names`` test the app's
+        ``slash_command_for`` uses, reproduced here because editor.py cannot
+        import the app it is imported by. An unrecognized word gets the muted
+        ``slash-unknown`` treatment so an inert ``/teem`` reads as text that WILL
+        be sent — EXCEPT while the command picker is still choosing (``/te``),
+        where the word is a prefix in progress, not yet a typo.
+        """
+        lines = self.text.split("\n")
+        first = next((i for i, line in enumerate(lines) if line.strip()), None)
+        if first is None:
+            return None
+        # Single content-line discipline, identical to ``slash_context`` — once a
+        # newline follows the command line the buffer is a message body, and a
+        # stray command highlight there would contradict "this is prose".
+        if len(lines) > first + 1:
+            return None
+        line = lines[first]
+        indent = len(line) - len(line.lstrip())
+        rest = line[indent:]
+        if not rest.startswith("/"):
+            return None
+        # The command token runs from the slash through the first whitespace.
+        word_end = next((i for i, ch in enumerate(rest) if i > 0 and ch.isspace()), len(rest))
+        cmd_start, cmd_end = indent, indent + word_end
+        word = rest[1:word_end].lower()
+        runs: list[tuple[int, int, str]] = []
+        if word in self._command_names:
+            runs.append((cmd_start, cmd_end, "text-area--slash-command"))
+        else:
+            # Suppress the "unknown" flash while the word is still being picked:
+            # a prefix under an open command list is in progress, not wrong. The
+            # recognized and name highlights are unaffected by this gate.
+            picking = self._picker.mode is PickerMode.COMMAND and (
+                self._picker.is_open() or self._picker.is_pending()
+            )
+            if not picking:
+                runs.append((cmd_start, cmd_end, "text-area--slash-unknown"))
+        # The NAME token, only for /team·/agent and only when the typed name is a
+        # known team/agent (an exact snapshot hit — a half-typed name stays prose
+        # rather than flickering). ``slash_argument`` hands back everything after
+        # the command word's first space, so the name is its first token. The
+        # single-content-line guard above has already excluded any newline in the
+        # buffer, so the name is a plain whitespace-delimited token (CR3: no
+        # second newline split is needed after that guard).
+        if self._is_name_argument_command(word):
+            argument = slash_argument(self.text, self._argument_commands)
+            if argument is not None:
+                lead = len(argument) - len(argument.lstrip())
+                name = argument[lead:].split(" ", 1)[0]
+                if name and name.lower() in self._name_choices:
+                    # The argument tail begins one cell past the command token
+                    # (the terminating space), then any extra spaces the user
+                    # typed before the name.
+                    name_start = cmd_end + 1 + lead
+                    runs.append((name_start, name_start + len(name), "text-area--slash-argument"))
+        return (first, runs) if runs else None
+
+    def _slash_cells(self, y: int) -> list[tuple[int, int, str]]:
+        """``(x_start, x_end, component_class)`` for slash cells on screen row ``y``.
+
+        Mirrors :meth:`_marker_cells`: SCREEN row, not document line, so a long
+        ``/team <name> <message>`` that soft-wraps maps its document columns to
+        the right screen x on whichever wrapped row carries them. The command
+        token is short and rarely wraps; the name token can, so the same
+        wrap-boundary math the marker pass uses is reused here.
+        """
+        runs = self._slash_runs()
+        if runs is None:
+            return []
+        line_index, spans = runs
+        wrapped = self.wrapped_document
+        absolute_y = self.scroll_offset.y + y
+        if absolute_y >= wrapped.height:
+            return []
+        row_line, section_start = wrapped.offset_to_location(Offset(0, absolute_y))
+        if row_line != line_index:
+            # Only the command line's screen rows can carry the tokens.
+            return []
+        line = self.document.get_line(line_index)
+        offsets = wrapped.get_offsets(line_index)
+        section_index = bisect_right(offsets, section_start)
+        wraps_on = section_index < len(offsets)
+        section_end = offsets[section_index] if wraps_on else len(line)
+        gutter = self.gutter_width
+        cells: list[tuple[int, int, str]] = []
+        for col_start, col_end, component in spans:
+            start = max(col_start, section_start)
+            end = min(col_end, section_end)
+            if start >= end:
+                continue  # this token lives entirely on another wrapped row
+            x_start = wrapped.location_to_offset((line_index, start)).x
+            if wraps_on and end >= section_end:
+                # ``end`` IS the wrap offset, which location_to_offset reads as
+                # column 0 of the NEXT row; the token runs to this row's text end.
+                x_end = cell_len(
+                    expand_tabs_inline(line[section_start:section_end], self.indent_width)
+                )
+            else:
+                x_end = wrapped.location_to_offset((line_index, end)).x
+            cells.append((x_start + gutter, x_end + gutter, component))
+        return cells
+
+    def _paint_slash(self, strip: Strip, y: int) -> Strip:
+        """Overlay the slash-command / name highlight on an already-rendered row.
+
+        Foreground-only component styles (see the tcss) laid on as ``post_style``
+        for the same reason as the chip: every segment ``TextArea`` returns
+        carries an explicit fg/bg, so a base style is discarded on arrival.
+        Foreground-only is deliberate — it composes with the cursor's inverse and
+        the selection ground without fighting them, so the pass need not exclude
+        the caret cell the way the opaque chip does.
+        """
+        cells = self._slash_cells(y)
+        if not cells:
+            return strip
+        width = strip.cell_length
+        edges = sorted({0, width} | {x for start, end, _ in cells for x in (start, end)})
+        styles = {component: self.get_component_rich_style(component) for _, _, component in cells}
+        pieces: list[Strip] = []
+        for left, piece in zip(edges, strip.divide(edges[1:])):
+            component = next((comp for start, end, comp in cells if start <= left < end), None)
+            if component is None:
+                pieces.append(piece)
+                continue
+            pieces.append(self._overlay(piece, styles[component]))
+        return Strip.join(pieces)
+
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         """Note a press that landed inside a marker; the release decides.
 
@@ -2173,6 +2485,10 @@ class Editor(TextArea):
         if list_argument is None:
             self._argument_command = None
             self._argument_subcommand = None
+            # No argument list is open, so the name snapshot is stale: drop it so
+            # a highlight can never outlive the list that filled it (e.g. the
+            # command word was deleted back to `/tea`).
+            self._name_choices = frozenset()
             self._picker.sync(self.text)
         else:
             command = self._command_word()
@@ -2184,6 +2500,11 @@ class Editor(TextArea):
                 # credential, so carrying them across would briefly offer a logout
                 # from an account the user never had.
                 self._picker.set_choices([])
+                # Clear the name snapshot too: the app re-pushes it for a
+                # NAME+message command in ``on_argument_query_opened``; leaving
+                # the previous command's names would highlight `/agent frontend`
+                # against team names.
+                self._name_choices = frozenset()
                 self.post_message(ArgumentQueryOpened(command or ""))
             elif command == "mcp":
                 # `/mcp` is two-level: verbs in the first argument slot,
@@ -2197,6 +2518,34 @@ class Editor(TextArea):
                     self._argument_subcommand = subcommand
                     self.post_message(RefreshArgumentChoices(command))
             self._picker.sync_argument(list_argument)
+            # U1/U2 discoverability hint. The moment a NAME+message name is
+            # autofilled (or hand-typed) to `/<cmd> <name> ` with an empty tail,
+            # the picker closes and NOTHING on screen says the two outcomes now
+            # available: a blank Enter SWITCHES (attach-only), a typed message
+            # SENDS. That divergence from the enum-tail commands (where Enter on a
+            # row runs immediately) is invisible, so a first-timer reads the park
+            # as a dropped keystroke. We reuse the picker's own notice row — the
+            # codebase's bounded, self-clearing "say it where the list was" idiom
+            # (see CommandPicker.set_notice) — rather than inventing a widget. It
+            # shows only in the name-complete-empty-tail state and is withdrawn
+            # the instant a message character is typed (the tail stops being
+            # empty) or the name is edited (the space is gone), so it never sits
+            # over a live message. Managed here because for these commands the
+            # notice channel is otherwise unused (the app sets it to "").
+            #
+            # GATED to NAME+message commands only (CR4, round 2). `set_notice`
+            # runs on EVERY keystroke of the argument, but the app owns the
+            # notice channel for the OTHER argument commands — `/logout` ("no
+            # stored credentials…"), `/effort` ("this model takes no effort
+            # setting"), `/mcp`'s builder notices — and sets them ONCE on the
+            # command-word change (`on_argument_query_opened`), never per
+            # keystroke. An unconditional write here called `set_notice("")` on
+            # each resync of those commands and erased a notice that is, for an
+            # empty-by-construction list, the entire content the user is reading.
+            # Only `/team`·`/agent` reach this write, and for those the app
+            # always sets the notice to "", so the hint owns the channel cleanly.
+            if self._is_name_argument_command(self._argument_command):
+                self._picker.set_notice(self._name_switch_hint(list_argument) or "")
         argument = slash_argument(self.text, self.MODEL_COMMANDS)
         if argument is None:
             if self._model_picker.is_open():
@@ -2337,6 +2686,13 @@ class Editor(TextArea):
         drops away on the same keystroke that chose from it.
         """
         if self._picker.mode is PickerMode.ARGUMENT:
+            # A clicked team/agent row fills the name and a space and waits for
+            # the message, exactly like Tab/Enter on the same row — a click on a
+            # NAME+message row is "chosen, now type the message", never "switch
+            # and discard whatever you were about to say".
+            if self._is_name_argument_command(self._argument_command):
+                self._complete_name_argument(name)
+                return
             if self._argument_is_destructive():
                 self._complete_argument(name)
                 return
@@ -2358,7 +2714,15 @@ class Editor(TextArea):
         fuzzy matcher guessed would make one mis-keystroke destructive. An
         ambiguous Enter completes instead — the buffer then holds the exact id,
         which is one match, so the second Enter runs it.
+
+        A NAME+message command (`/team`, `/agent`) short-circuits ALL of that:
+        Tab and Enter, ambiguous or not, fill the name and a space and never
+        submit — "one match" is not "run" for these, it is "ready for the
+        message". See :meth:`_complete_name_argument`.
         """
+        if self._is_name_argument_command(self._argument_command):
+            self._complete_name_argument(name)
+            return
         if key == "tab" or not unambiguous:
             self._complete_argument(name)
             return
@@ -2389,6 +2753,33 @@ class Editor(TextArea):
         """
         self._complete_argument(name)
         self._submit()
+
+    def _complete_name_argument(self, name: str) -> None:
+        """Fill a team/agent NAME and a trailing space, WITHOUT submitting.
+
+        The inverse of :meth:`_complete_argument`'s "no space so the matcher
+        keeps matching". Here the space is load-bearing in the other direction:
+        it terminates the name so the argument list closes (``slash_argument``
+        goes to an empty match set, verified), and it opens the free-text
+        message tail the user now types. Parking the caret after it is what lets
+        `/team frontend-guild ` become either an attach-only switch (a blank
+        Enter — the app's dispatch strips the bare name) or `/team frontend-guild
+        fix the bug` (a typed message then Enter) without either being a picker
+        gesture. Neither Tab nor Enter ever submits for these commands, because
+        for a NAME+message command "the name is chosen" is not "run it", it is
+        "ready for the message" — see :attr:`NAME_ARGUMENT_COMMANDS`.
+
+        Setting ``self.text`` funnels through ``load_text`` → ``_sync_picker``,
+        which re-derives the picker as an argument list with no matches, so the
+        list closes on the same keystroke that completed the name.
+        """
+        argument = slash_argument(self.text, self._argument_commands)
+        if argument is None:
+            return
+        # The argument is by construction the tail of the buffer, so trimming its
+        # length off the end leaves exactly `…/team ` to append the name+space.
+        self.text = f"{self.text[: len(self.text) - len(argument)]}{name} "
+        self.move_cursor(self._end_of_buffer())
 
     def _extend_to_common_prefix(self) -> None:
         """Grow the typed word to the matches' longest common prefix, no further.
