@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from local_operator.compaction.snapcompact import (
     DEFAULT_MAX_FRAMES,
+    EDGE_WINDOW_FRACTION,
     FRAME_DATA_BYTES_BUDGET,
     FRAME_TOKEN_ESTIMATE,
     HQ_EDGE_FRAMES,
@@ -286,6 +287,134 @@ def test_compact_max_frames_is_a_ceiling_an_explicit_ask_can_reach():
     messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(20)]
     archive = compact_to_archive(messages, "openai", "gpt-5.5", max_frames=MAX_FRAMES)
     assert DEFAULT_MAX_FRAMES < len(archive.frames) <= MAX_FRAMES
+
+
+def test_edges_default_to_frame_shape_without_a_window():
+    """No ``context_window`` → the verbatim edges keep their full default size.
+
+    This is the wide-window / unknown-window path: the edge cap only ever
+    SHRINKS the default, never grows it, so an archive built without a window
+    (or on a 1M-token model where the default already fits its share) is byte
+    for byte what it was before the cap existed. Guards against the cap
+    silently changing the common case.
+    """
+    shape = resolve_shape("anthropic", "claude-sonnet-4-5")
+    messages = _conversation_messages(200)
+    archive = compact_to_archive(messages, "anthropic", "claude-sonnet-4-5")
+    assert len(archive.text_head) == HQ_EDGE_FRAMES * shape.capacity
+    assert len(archive.text_tail) == HQ_EDGE_FRAMES * shape.capacity
+
+
+def test_small_window_caps_verbatim_edges_to_its_share():
+    """A tight window shrinks the verbatim edges to ``EDGE_WINDOW_FRACTION``.
+
+    The regression this locks down: the edges are the archive's un-trimmable
+    floor (the frame-budget loop can only drop imaged pages), and at the
+    default ``HQ_EDGE_FRAMES * capacity`` they are ~31.5k tokens for an
+    Anthropic 1932px reader REGARDLESS of the window. On a small window that
+    floor alone exceeds the whole ``0.5 * window`` archive budget, so a pass
+    meant to get the context under the line commits it above the line instead.
+    Capping the edges to a window share is what keeps them a minority of the
+    post-compaction context, and the trimmed oldest-edge text is not lost — it
+    flows into the imaged middle.
+    """
+    # 128k: the window's per-edge share works out ABOVE one page and below
+    # the shape default, so the cap binds without hitting the floor — the
+    # regime this test is about. (Below ~70k the per-edge share drops under
+    # one page and the floor takes over; that path is its own test.)
+    window = 128_000
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    default_edge = HQ_EDGE_FRAMES * shape.capacity
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(40)]
+    archive = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=window)
+    # Each edge is strictly smaller than the shape default. The per-edge
+    # budget is checked on text_tail, the clean edge: text_head carries the
+    # appended "[... N chars dropped]" truncation marker, which is a handful
+    # of chars ON TOP of the bounded slice, so only the tail is exactly the
+    # raw window-share slice.
+    assert len(archive.text_head) < default_edge
+    assert len(archive.text_tail) < default_edge
+    per_edge_char_budget = (int(window * EDGE_WINDOW_FRACTION) // 2) * 4
+    assert len(archive.text_tail) <= per_edge_char_budget
+    # And it really is the window share, not the floor: strictly more than one
+    # page, so this exercises the cap rather than the min() safety net.
+    assert len(archive.text_tail) > shape.capacity
+
+
+def test_small_window_archive_replay_fits_its_budget():
+    """The whole point: replay cost stays under the ``0.5 * window`` budget.
+
+    Before the edge cap, a 64k-token window produced a ~31.5k-token edge-only
+    replay against a 32k-token budget — the frame loop dropped every page and
+    the pass STILL overshot. With the edges bounded, the replayed archive
+    (text edges + imaged frames) fits. NB 64k is the FLOOR regime for the
+    1932px reader (per-edge share works out at one page); the cap-regime
+    budget fit is covered by ``test_cap_regime_archive_replay_fits_its_budget``.
+    """
+    window = 64_000
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(60)]
+    archive = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=window)
+    budget = max(frame_token_estimate_for("anthropic", "claude-opus-4-8"), int(window * 0.5))
+    assert estimate_archive_tokens(archive) <= budget
+
+
+def test_cap_regime_archive_replay_fits_its_budget():
+    """Budget fit in the CAP regime (edges trimmed below default, above floor).
+
+    At 128k the 1932px per-edge share is 38400 chars — strictly between the
+    one-page floor (21000) and the shape default (63000) — so this exercises
+    the window-proportional cap doing its job, not the floor override, and
+    proves the resulting archive still fits ``0.5 * window``. This is the
+    regime the fix actually changes; the 64k test above only reaches the floor.
+    """
+    window = 128_000
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    # The 128k per-edge char share sits strictly between floor and default.
+    assert shape.capacity < 38_400 < HQ_EDGE_FRAMES * shape.capacity
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(80)]
+    archive = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=window)
+    assert shape.capacity < len(archive.text_tail) < HQ_EDGE_FRAMES * shape.capacity
+    budget = max(frame_token_estimate_for("anthropic", "claude-opus-4-8"), int(window * 0.5))
+    assert estimate_archive_tokens(archive) <= budget
+
+
+def test_native_200k_window_trims_the_high_res_opus_edges():
+    """The 1932px reader's edges ARE trimmed at its native 200k window.
+
+    Documents the intended, easily-missed behaviour flagged in review: the
+    Opus-1932 default edge pair is 31.5k tokens = 15.75% of a 200k window,
+    just over the 15% share, so ``_edge_chars_for`` trims each edge from 63000
+    to 60000 chars. This is not a regression — the cap is designed to make the
+    edges follow the window — but "large windows unchanged" is only true ABOVE
+    the shape's threshold (~210k for this reader), so the flagship 200k path is
+    guarded here rather than assumed untouched.
+    """
+    window = 200_000
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    default_edge = HQ_EDGE_FRAMES * shape.capacity  # 63000
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(80)]
+    archive = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=window)
+    # Trimmed to the 15% share: (200000 * 0.15 // 2) * 4 = 60000, below default.
+    assert len(archive.text_tail) == 60_000
+    assert len(archive.text_tail) < default_edge
+    # A wider window ABOVE the ~210k threshold keeps the full default edge.
+    wide = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=400_000)
+    assert len(wide.text_tail) == default_edge
+
+
+def test_edge_cap_keeps_at_least_one_page_of_verbatim_text():
+    """A pathologically small window never collapses the edges to nothing.
+
+    Some verbatim anchor always beats none: even when the window share works
+    out below one page, the floor is ``shape.capacity`` chars per edge, and
+    the frame budget remains the mechanism that bounds total archive size.
+    """
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(40)]
+    archive = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=8_000)
+    assert len(archive.text_head) >= shape.capacity
+    assert len(archive.text_tail) >= shape.capacity
 
 
 def test_compact_frames_are_valid_pngs():
