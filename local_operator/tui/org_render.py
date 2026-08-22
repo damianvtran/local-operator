@@ -103,16 +103,26 @@ def _count_suffix(node: OrgNode) -> str:
 
 
 def _member_badge(node: OrgNode) -> str:
-    """The ``·N`` agent-member count shown on an outline-tier team box.
+    """The ``·N`` member-count badge shown on an outline-tier team box.
 
-    Counts the team's own AGENT members only (not the manager, which is
-    structural and always exactly one, and not nested sub-teams, which the
-    outline still draws as their own boxes). A manager-only org therefore
-    carries no badge rather than a misleading ``·1`` beside its visible
-    sub-team boxes.
+    Counts EVERY leaf member — resolved agents AND unresolved/cycle/depth
+    markers (minor-2) — but not the manager (structural, always one) and not
+    nested sub-teams (the outline draws those as their own boxes). Counting the
+    unresolved ones is the fix for the "gap is always visible" invariant the
+    ``org_chart`` docstring promises: a team whose only member is a missing
+    agent used to badge nothing and read as empty; now it reads ``·1 ?`` so the
+    presence — and the fact one is broken — survives the collapse to a box.
+
+    A trailing ``?`` flags that at least one counted member is a ghost
+    (unresolved/cycle/depth), so "someone is here but unresolved" is legible
+    without expanding. A manager-only org still carries no badge.
     """
-    agents = sum(c.count for c in node.children if c.kind in ("role", "specialist", "seed"))
-    return f" ·{agents}" if agents else ""
+    leaf_kinds = ("role", "specialist", "seed", "unresolved", "cycle", "depth")
+    members = sum(c.count for c in node.children if c.kind in leaf_kinds)
+    has_ghost = any(c.kind in ("unresolved", "cycle", "depth") for c in node.children)
+    if not members:
+        return ""
+    return f" ·{members} ?" if has_ghost else f" ·{members}"
 
 
 def _leaf_label(node: OrgNode, tier: Tier) -> str:
@@ -120,8 +130,15 @@ def _leaf_label(node: OrgNode, tier: Tier) -> str:
     if node.kind == "unresolved":
         return f"? {node.label}"
     if node.kind == "cycle":
+        # D6 — the detailed tier is where the "(already shown above)" hint earns
+        # its keep, so the marker carries its detail there; at coarser tiers the
+        # amber ↩ alone says "cycles back" without the extra width.
+        if tier == 2 and node.detail:
+            return f"↩ {node.label} · {node.detail}"
         return f"↩ {node.label}"
     if node.kind == "depth":
+        if tier == 2 and node.detail:
+            return f"⋯ {node.label} · {node.detail}"
         return f"⋯ {node.label}"
     label = node.label
     if node.kind == "manager":
@@ -153,7 +170,14 @@ def _build_boxes(node: OrgNode, tier: Tier, *, expand_all: bool, top: bool = Fal
         # Outline: the team is one box with a member-count badge; its agent
         # members are folded away, but nested teams stay as boxes so the org
         # shape is still legible.
-        label = node.label + _member_badge(node) + _count_suffix(node)
+        #
+        # D2 — a member badge (``·N``) and a copy badge (``×N``) abutting read
+        # as one garbled number (``·1 ×2``). Join them with a ` · ` seam so they
+        # read as two distinct facts ("·1 · ×2" = 1 member, 2 copies).
+        member = _member_badge(node).strip()  # "·1" / "·1 ?" / ""
+        copies = _count_suffix(node).strip()  # "×2" / ""
+        badges = " · ".join(part for part in (member, copies) if part)
+        label = f"{node.label} {badges}".rstrip() if badges else node.label
         box = _Box(node=node, text=label, style_key="team")
         for child in node.children:
             if child.kind == "team":
@@ -240,10 +264,12 @@ def render_org(
     min_left, max_right, max_depth = org_layout.bounds(placed)
 
     # Grid dimensions. One cell of margin each side so a box never touches the
-    # canvas edge (which reads as clipped). Height covers every level band plus
-    # the box row of the last level.
+    # canvas edge (which reads as clipped). Height covers every level band, the
+    # box row of the last level, AND one extra row beneath it for the
+    # deepest-level team boundary rules (D1): a team's rule sits one row under
+    # its children, which for the deepest teams falls past the last box row.
     width = int(round(max_right - min_left)) + 2
-    height = max_depth * LEVEL_H + 1
+    height = max_depth * LEVEL_H + 2
 
     # char grid + parallel style-key grid. Space/'' means "untouched".
     chars = [[" "] * width for _ in range(height)]
@@ -300,6 +326,40 @@ def render_org(
                 paint(c)
 
     paint(box_root)
+
+    # D1 — per-team boundary rules. The user's headline ask was "boundaries at
+    # each level": on a shared leaf row like
+    # ``[◆ mgr-a] [coder] [reviewer] [reviewer] [◆ mgr-b] [scout]`` nothing said
+    # the first four belong to pod-a and the last two to pod-b. A faint rule
+    # under each team's own children, spanning their x-extent, draws that
+    # grouping — two separate spans read as two teams at a glance.
+    #
+    # Painted as a SEPARATE final pass that fills only BLANK cells, so it never
+    # clobbers a box or a connector: under a row of leaf members (the case the
+    # rule exists for) the row below is empty and the rule is solid and
+    # continuous; where a child is itself a sub-team its drop connector already
+    # occupies the centre and the rule simply flows around it. The rule's own
+    # tier gate keeps outline (tier 0) uncluttered — grouping there is already
+    # one-box-per-team — so rules draw at standard and detailed only.
+    def paint_boundaries(box: _Box) -> None:
+        if box.node.kind == "team" and box.children:
+            child_row = _placed(box.children[0]).depth * LEVEL_H
+            rule_row = child_row + 1
+            lefts = [_placed(c).x - min_left + 1.0 - _placed(c).width / 2 for c in box.children]
+            rights = [_placed(c).x - min_left + 1.0 + _placed(c).width / 2 for c in box.children]
+            lo = int(round(min(lefts)))
+            hi = int(round(max(rights))) - 1
+            for col in range(lo, hi + 1):
+                if 0 <= rule_row < height and 0 <= col < width and chars[rule_row][col] == " ":
+                    # `rule` is its own style key so the theme can render it
+                    # fainter than a connector — it is grouping, not structure.
+                    chars[rule_row][col] = "─"
+                    styles[rule_row][col] = "rule"
+        for c in box.children:
+            paint_boundaries(c)
+
+    if tier != 0:
+        paint_boundaries(box_root)
 
     # Assemble the Text row by row, coalescing runs of one style key into one
     # span so the output is compact and the plain text is exactly the grid.

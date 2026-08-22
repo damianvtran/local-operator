@@ -1302,6 +1302,14 @@ Screen.subagent #input-dock #prompt-chevron {
     height: 1;
 }
 
+/* The `?`-toggled glyph legend (U5/U6). display:none until opened, so it
+ * reserves no row in the resting layout; when shown it takes one row between
+ * the rule and the body. */
+.org-chart-view-legend {
+    height: 1;
+    display: none;
+}
+
 /* Both-axes scroll around the canvas. One row of air under the rule, the same
  * reason the subagent body carries it: without it the rule sits on the first
  * box row and a faint full-width line resting on a box reads as chrome that is

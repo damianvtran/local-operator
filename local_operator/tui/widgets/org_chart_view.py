@@ -86,6 +86,10 @@ def _style_resolver() -> Callable[[str], Style]:
         "marker": Style(color=color("warning")),
         # Connectors recede behind the boxes they join.
         "connector": Style(color=color("dim")),
+        # Per-team boundary rules (D1) are GROUPING, not structure — painted
+        # fainter than a connector (dim + 55% opacity) so they demarcate a
+        # team's members at a glance without competing with the tree's spine.
+        "rule": Style(color=color("dim"), dim=True),
     }
 
     def resolve(key: str) -> Style:
@@ -113,12 +117,26 @@ class OrgChartView(Vertical):
         Binding("minus,underscore", "zoom_out", "Zoom out", show=False),
         Binding("f", "fit", "Fit to width", show=False),
         Binding("e,space,enter", "toggle_expand", "Expand/collapse all", show=False),
+        # `?` reveals a one-line glyph legend (U5) and the `(declared)` gloss
+        # (U6) — the vocabulary (◆ ↩ ? ⋯ ·N ×N) is otherwise learnable only
+        # from source. Toggled, not always-on, so it costs no row until asked.
+        Binding("question_mark,question", "toggle_legend", "Legend", show=False),
         Binding("up", "scroll_up", "Scroll up", show=False),
         Binding("down", "scroll_down", "Scroll down", show=False),
         Binding("left", "scroll_left", "Scroll left", show=False),
         Binding("right", "scroll_right", "Scroll right", show=False),
+        # Vertical paging on PageUp/Down; HORIZONTAL paging on shift+arrows,
+        # because the chart overflows the wide axis far more than the tall one
+        # (U4) and single-cell arrows alone made the right edge ~58 presses
+        # away. Shift+left/right move a viewport-width at a time.
         Binding("pageup", "page_up", "Page up", show=False),
         Binding("pagedown", "page_down", "Page down", show=False),
+        Binding("shift+left", "page_left", "Page left", show=False),
+        Binding("shift+right", "page_right", "Page right", show=False),
+        # Home/End jump to the CORNERS (top-left / bottom-right). End reaching
+        # the bottom-right is what gives a keyboard jump to the RIGHT edge —
+        # the axis that actually overflows — which a y-only End could never do
+        # on a chart whose max_scroll_y is 0 (U4).
         Binding("home", "scroll_home", "To start", show=False),
         Binding("end", "scroll_end", "To end", show=False),
         Binding("escape", "leave", "Back", show=False),
@@ -133,10 +151,21 @@ class OrgChartView(Vertical):
         #: Current zoom tier and whether the whole canvas is force-expanded.
         self._tier: Tier = 1
         self._expand_all = False
+        #: Whether the one-shot §5.5 auto-fit has run. The body has no real
+        #: width until it is laid out, so the fit that picks the opening tier
+        #: has to wait for the first ``on_resize``; this guards it to fire once,
+        #: so a user's later manual zoom is never overridden on a resize.
+        self._auto_fitted = False
+        #: Whether the glyph legend line (U5/U6) is showing. Off by default so
+        #: it costs no vertical row until a user presses ``?``.
+        self._legend_open = False
         #: Last render, kept for the geometry probes and rendered_rows().
         self._last: RenderResult | None = None
         self._title = Static(classes="org-chart-view-title")
         self._rule = Static(classes="org-chart-view-rule")
+        #: The `?`-toggled glyph legend (U5/U6). A Static that is display:none
+        #: until opened, so it reserves no row in the resting layout.
+        self._legend = Static(classes="org-chart-view-legend")
         # A Static inside a both-axes scroll container: the Static is sized to
         # the painted canvas, the container clips and scrolls it. Virtual size
         # equals the canvas size, so Textual's own scrollbars appear when the
@@ -145,9 +174,19 @@ class OrgChartView(Vertical):
         self._body = ScrollableContainer(self._canvas, classes="org-chart-view-body")
         # Footer hints, same vocabulary as the subagent view so the two modes
         # read consistently. Each is its own widget so it can be hovered/clicked.
+        # Scroll is the headline affordance on a chart that overflows both axes
+        # (U1) — advertised first so a keyboard user learns arrows/Page scroll
+        # and a mouse user is not left hunting the thin scrollbar. `↔↕` names
+        # BOTH axes because the chart is wide, so horizontal scroll is the
+        # travel that matters, not an afterthought.
+        # Clicking the scroll hint just focuses the canvas so the arrow keys
+        # land here; routed through a None-returning helper because ``focus()``
+        # returns ``self``, which the ``Callable[[], None]`` action type rejects.
+        self._scroll_hint = HintButton("↔↕", self._focus_canvas)
         self._zoom_hint = HintButton("+/-", self._cycle_zoom)
         self._fit_hint = HintButton("f", lambda: self.action_fit())
         self._expand_hint = HintButton("e", lambda: self.action_toggle_expand())
+        self._legend_hint = HintButton("?", lambda: self.action_toggle_legend())
         self._exit_hint = HintButton("esc", self._leave)
         self._state_hint = HintButton(READ_ONLY_NOTE)
         self._hints = Horizontal(classes="org-chart-view-hints")
@@ -162,11 +201,14 @@ class OrgChartView(Vertical):
     def compose(self):  # type: ignore[override]
         yield self._title
         yield self._rule
+        yield self._legend
         yield self._body
         with self._hints:
+            yield self._scroll_hint
             yield self._zoom_hint
             yield self._fit_hint
             yield self._expand_hint
+            yield self._legend_hint
             yield self._exit_hint
             yield self._state_hint
 
@@ -186,6 +228,16 @@ class OrgChartView(Vertical):
         # layout knows, so both are repainted on resize. The canvas itself is
         # width-independent (it scrolls), so only the chrome moves.
         self._paint_chrome()
+        # §5.5 auto-fit: on the FIRST layout (when the body finally has a real
+        # width — it is 0 until mounted, so this cannot run in on_mount), pick a
+        # tier that fits rather than always opening at standard. Runs once so a
+        # user who then zooms by hand is not overridden on the next resize. It
+        # uses the U2-aware ``action_fit``, so a small terminal lands on the
+        # coarsest tier that still shows members and only falls to outline when
+        # nothing else fits — never silently collapsing the roster to a box.
+        if not self._auto_fitted and self._root is not None and self._body.size.width > 0:
+            self._auto_fitted = True
+            self.action_fit()
 
     # -- data ---------------------------------------------------------------
     def show(self, root: OrgNode) -> None:
@@ -245,18 +297,111 @@ class OrgChartView(Vertical):
         width = max(self.size.width - 2, 1)
         self._rule_text = Text("─" * width, style=dim)
         self._rule.update(self._rule_text)
+        # Legend line (U5/U6): the glyph vocabulary + the `(declared)` gloss,
+        # shown only while toggled on. Painted here so a theme switch or resize
+        # repaints it in the current palette. It is display:none when closed, so
+        # the resting layout is unchanged.
+        self._legend.display = self._legend_open
+        if self._legend_open:
+            legend = Text(no_wrap=True, overflow="ellipsis")
+            legend.append("◆ manager", style=Style(color=theme_mod.semantic_color("accent")))
+            for glyph, meaning in (
+                ("? unresolved", "ghost"),
+                ("↩ cycle", "marker"),
+                ("⋯ depth-limit", "marker"),
+                ("·N members", None),
+                ("×N copies", None),
+            ):
+                legend.append("  ", style=dim)
+                style = (
+                    Style(color=theme_mod.semantic_color("warning")) if meaning == "marker" else dim
+                )
+                legend.append(glyph, style=style)
+            # (declared) gloss (U6): name what the tag means in-mode rather than
+            # relying on the guide.
+            legend.append(
+                "   (declared) = shown org, not yet an executable delegation",
+                style=dim,
+            )
+            self._legend.update(legend)
         self._paint_hints()
 
     def _paint_hints(self) -> None:
-        plan = [
-            (self._zoom_hint, " zoom", False),
-            (self._fit_hint, " fit", True),
-            (self._expand_hint, " expand", True),
-            (self._exit_hint, "back to conversation", True),
-            (self._state_hint, "", True),
+        """Lay out the footer hints, shedding WHOLE hints until the row fits.
+
+        D3 — the row used to render as one over-wide string that the terminal
+        clipped mid-word ("…back to conversatio") at 60 columns. Instead the
+        row sheds whole hints widest-first: the affordances a reader needs most
+        (scroll, zoom, esc) survive, and `esc` is never dropped because it is
+        the only way out. Each rung is measured before it is committed, so the
+        painted row is always one that fits.
+        """
+
+        # (visible hints with their labels, esc label) per rung, widest first.
+        # `esc` and `scroll` are the survivors; `read-only`, then the secondary
+        # controls, shed as the width tightens. Each rung is built from a list
+        # of the LEADING hints plus esc (always present, so a page always says
+        # how to leave) plus optionally the read-only note. Building each rung
+        # explicitly — rather than slicing one list — is what guarantees esc is
+        # never sliced off along with the tail (the bug a `full[:-2]` hid).
+        scroll = (self._scroll_hint, " scroll", False)
+        zoom = (self._zoom_hint, " zoom", True)
+        fit = (self._fit_hint, " fit", True)
+        expand = (self._expand_hint, " expand", True)
+        keys = (self._legend_hint, " keys", True)
+
+        def rung(
+            leads: list[tuple[HintButton, str, bool]],
+            esc_label: str,
+            *,
+            state: bool,
+        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
+            row = list(leads)
+            row.append((self._exit_hint, esc_label, bool(row)))
+            if state:
+                row.append((self._state_hint, "", True))
+            return (row, esc_label)
+
+        rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = [
+            rung([scroll, zoom, fit, expand, keys], "back to conversation", state=True),
+            rung([scroll, zoom, fit, expand, keys], "back to conversation", state=False),
+            rung([scroll, zoom, fit, expand, keys], "back", state=False),
+            rung([scroll, zoom, fit, expand], "back", state=False),  # drop keys
+            rung([scroll, zoom], "back", state=False),  # drop fit/expand
+            rung([scroll], "back", state=False),  # scroll + esc
+            rung([], "back", state=False),  # esc alone
         ]
+        width = max(self.size.width - 2, 1)
+        chosen = rungs[-1]
+        for plan, esc_label in rungs:
+            measured = self._measure_hints(plan, esc_label)
+            if measured <= width:
+                chosen = (plan, esc_label)
+                break
+        plan, esc_label = chosen
+        visible = {hint for hint, _label, _lead in plan}
         for hint, label, lead in plan:
-            hint.paint(label, lead=lead)
+            hint.paint(esc_label if hint is self._exit_hint else label, lead=lead)
+        # Hide the shed hints so the row is exactly what was measured.
+        for hint in (
+            self._scroll_hint,
+            self._zoom_hint,
+            self._fit_hint,
+            self._expand_hint,
+            self._legend_hint,
+            self._exit_hint,
+            self._state_hint,
+        ):
+            hint.display = hint in visible
+
+    def _measure_hints(self, plan: list[tuple[HintButton, str, bool]], esc_label: str) -> int:
+        """Cell width of a candidate hint row, measured before it is painted."""
+        from rich.cells import cell_len
+
+        row = Text()
+        for hint, label, lead in plan:
+            row.append(hint.preview(esc_label if hint is self._exit_hint else label, lead=lead))
+        return cell_len(row.plain)
 
     def rendered_rows(self) -> list[str]:
         """The page as plain strings — title, rule, canvas rows. Assertable."""
@@ -302,27 +447,49 @@ class OrgChartView(Vertical):
         self._expand_all = not self._expand_all
         self._repaint()
 
-    def action_fit(self) -> None:
-        """Pick the coarsest tier whose canvas fits the viewport width.
+    def _focus_canvas(self) -> None:
+        """Focus the view so the arrow/scroll keys land here (scroll-hint click)."""
+        self.focus()
 
-        Fit-to-WIDTH because the chart is wide and the horizontal axis is the
-        one that overflows first. Tries outline→detailed and keeps the first
-        that fits; if none fits (a huge org) it lands on outline and scroll
-        absorbs the rest.
+    def action_toggle_legend(self) -> None:
+        # Show/hide the glyph legend line (U5/U6). Only the chrome changes, so a
+        # repaint of the chrome is enough — the canvas is untouched.
+        self._legend_open = not self._legend_open
+        self._paint_chrome()
+
+    def action_fit(self) -> None:
+        """Fit to width WITHOUT hiding the roster — never auto-collapse to a box.
+
+        Fit-to-WIDTH because the chart overflows the wide axis first. The naive
+        "coarsest tier that fits" collapsed any wide flat team to outline, where
+        members fold into a ``·N`` badge — so pressing "fit" to SEE the org gave
+        strictly less than before the press (U2). The fix: ``f`` only ever
+        chooses among the MEMBER-SHOWING tiers (standard, detailed):
+
+        - Pick the coarsest of {standard, detailed} that fits (standard first —
+          less to read when both fit).
+        - If NEITHER fits (a genuinely wide org), land on STANDARD and let
+          horizontal scroll carry the rest. Standard still draws every member
+          box, so "fit" always leaves the roster visible; the reader scrolls to
+          the ones off-screen rather than watching them vanish.
+
+        Outline (tier 0) is never chosen by ``f`` — it is a deliberate ``-``
+        zoom the user asks for, where the ``·N ?`` badge summarises the roster
+        (member count + ghost flag) legibly. That split is what makes ``f``
+        honest: it may zoom out one step, but never past where the people are.
         """
 
         if self._root is None:
             return
         viewport = max(self._body.size.width, 1)
-        chosen: Tier = 0
-        for tier in (0, 1, 2):
+        chosen: Tier = 1  # standard + scroll is the floor: members always shown
+        for tier in (1, 2):
             result = render_org(
                 self._root, tier=tier, expand_all=self._expand_all, style_for=_style_resolver()
             )
             if result.width <= viewport:
                 chosen = tier  # type: ignore[assignment]
-            else:
-                break
+                break  # coarsest-first: standard wins when it fits
         self._set_tier(chosen)
 
     # -- scrolling (all CLAMP; no wrap on a canvas) -------------------------
@@ -344,10 +511,23 @@ class OrgChartView(Vertical):
     def action_page_down(self) -> None:
         self._body.scroll_page_down()
 
+    def action_page_left(self) -> None:
+        # Horizontal paging: the wide axis, reached in a few keystrokes (U4).
+        self._body.scroll_page_left()
+
+    def action_page_right(self) -> None:
+        self._body.scroll_page_right()
+
     def action_scroll_home(self) -> None:
+        # Jump to the top-LEFT corner (both axes), so a wide-scrolled reader
+        # returns to the root box in one key rather than paging back.
         self._body.scroll_home()
 
     def action_scroll_end(self) -> None:
+        # Jump to the bottom-RIGHT corner (both axes). On a chart with no
+        # vertical travel this is the only keyboard jump to the right edge —
+        # the axis that overflows (U4). ``scroll_end`` moves both x and y to
+        # their maxima, so it clamps to the far-right column.
         self._body.scroll_end()
 
     # -- leaving ------------------------------------------------------------

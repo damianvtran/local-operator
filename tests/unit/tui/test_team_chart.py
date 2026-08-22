@@ -121,6 +121,31 @@ async def test_chart_chart_charts_a_team_named_chart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chart_subcommand_is_case_insensitive() -> None:
+    """minor-1: `/team Chart <name>` routes to the chart, not the talk path.
+
+    The picker and the editor's hint suppression fold case, so a capitalised
+    `Chart` visually implies charting; the router must agree or it would attach
+    a team literally named `Chart` while the UI said otherwise.
+    """
+
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(name="org", manager="director", members=[TeamMember(role="coder")])
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/team Chart org")
+        await pilot.pause()
+        assert app._org_chart_view is not None
+        assert app._org_chart_view.team_name == "org"
+        # Routed to the chart, not the talk path.
+        assert session.prompts == []
+        assert session.attached_teams == []
+
+
+@pytest.mark.asyncio
 async def test_equals_escape_talks_to_a_team_named_chart() -> None:
     session = FakeSession()
     session.team_registry = _registry(
@@ -204,9 +229,15 @@ async def test_picker_first_slot_offers_chart_subcommand_then_teams() -> None:
         rows = [(c.name, c.detail) for c in editor.picker._choices]
     # The subcommand row is FIRST and tagged.
     assert rows[0] == ("chart", "subcommand")
-    # A team literally named `chart` still appears as its own row (not hidden).
-    assert ("chart", "2 roles · led by m") in rows
+    # U3: a team literally named `chart` still appears as its own row, but it
+    # completes to the `=chart` ESCAPE (not the bare name, which would route to
+    # the subcommand) and its detail names the talk path — so the collision is
+    # resolvable from within the picker that creates it.
+    assert ("=chart", "talk to team · 2 roles · led by m") in rows
+    # A non-colliding team keeps its plain name.
     assert any(name == "org" for name, _ in rows)
+    # The bare `chart` name is NOT offered as a team row (it would mis-route).
+    assert ("chart", "2 roles · led by m") not in rows
 
 
 @pytest.mark.asyncio
@@ -305,3 +336,99 @@ async def test_zoom_keys_change_the_tier() -> None:
         await pilot.press("minus")
         await pilot.pause()
         assert view._tier == 0  # clamps at outline
+
+
+@pytest.mark.asyncio
+async def test_footer_advertises_scroll() -> None:
+    """U1 — the scroll affordance is named in the footer, not left undiscoverable."""
+    session = FakeSession()
+    session.team_registry = _nested_registry()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._open_org_chart_view("org")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        hint_row = "".join(h.rendered() for h in view._hints.query(type(view._exit_hint)))
+    assert "scroll" in hint_row
+    assert "↔↕" in hint_row
+
+
+@pytest.mark.asyncio
+async def test_fit_never_collapses_a_flat_team_to_a_box() -> None:
+    """U2 — `f` on a wide flat team keeps members visible, never a bare box.
+
+    A 12-member team overflows 80×24. Pressing `f` must NOT land on outline
+    (which folds members to a `·N` badge); it stays on a member-showing tier and
+    lets horizontal scroll carry the overflow.
+    """
+
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(
+            name="wide",
+            manager="boss",
+            members=[TeamMember(role=f"m{i}") for i in range(12)],
+        )
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._open_org_chart_view("wide")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        await pilot.press("f")
+        await pilot.pause()
+        # Member tier, not outline: the roster is still drawn as boxes.
+        assert view._tier >= 1
+        # Every member box present (12 members + manager + team header).
+        assert view.last_result is not None
+        labels = " ".join(b.label for b in view.last_result.boxes)
+        assert "m11" in labels  # the last member is a real box, not a badge
+
+
+@pytest.mark.asyncio
+async def test_legend_toggles_with_question_mark() -> None:
+    """U5/U6 — `?` reveals the glyph legend + (declared) gloss in-mode."""
+    session = FakeSession()
+    session.team_registry = _nested_registry()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._open_org_chart_view("org")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        assert view._legend.display is False
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert view._legend.display is True
+        legend_text = view._legend.render()
+        plain = legend_text.plain if hasattr(legend_text, "plain") else str(legend_text)
+    assert "manager" in plain
+    assert "declared" in plain
+
+
+@pytest.mark.asyncio
+async def test_hints_shed_without_clipping_a_word_at_narrow_width() -> None:
+    """D3 — the hint row sheds whole hints rather than clipping mid-word."""
+    session = FakeSession()
+    session.team_registry = _nested_registry()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        app._open_org_chart_view("org")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        visible = [h for h in view._hints.query(type(view._exit_hint)) if h.display]
+        row = "".join(h.rendered() for h in visible)
+    # esc always survives; the row never ends mid-word like "conversatio".
+    assert "esc" in row
+    assert "conversatio" not in row or "conversation" in row

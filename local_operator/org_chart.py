@@ -103,7 +103,17 @@ def _agent_node(
     the resolved kind for the detailed zoom tier).
     """
 
-    kind = classify_name(name, registry=agents)
+    # minor-3 — belt-and-suspenders totality. ``classify_name`` ultimately
+    # calls ``resolve_profile`` → ``load_seed``, whose final ``read_text`` is
+    # guarded only for ``OSError``; a non-OSError there would propagate out of
+    # ``resolve_org``, which is called SYNCHRONOUSLY from ``_open_org_chart_view``
+    # and must never crash a UI surface. The resolver's "never raises" contract
+    # is now load-bearing, so a failed classification degrades to a resolved
+    # leaf tagged ``unresolved`` (a visible ghost) rather than an exception.
+    try:
+        kind = classify_name(name, registry=agents)
+    except Exception:  # noqa: BLE001 - a UI surface must never crash on classification
+        kind = "unresolved"
     if role_of_manager:
         # A manager keeps the "manager" node kind so the renderer marks it, but
         # records the resolved kind in detail so a missing manager still shows

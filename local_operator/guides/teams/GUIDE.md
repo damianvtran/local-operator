@@ -63,7 +63,7 @@ A bare token (no prefix) stays an agent, so the existing `coder` / `reviewer:2` 
 - `/team chart chart` charts a team literally named `chart` (the second token is the `[name]`).
 - `/team =chart <request>` TALKS to a team named `chart` — a leading `=` on the first token means "literal team name, never a subcommand" (`=` cannot appear in a real team name, so it never collides).
 
-Inside the chart: `+`/`-` change zoom tier (outline → standard → detailed), `f` fits the chart to the viewport width, `e` expands/collapses the whole canvas, arrows/PageUp/PageDown/Home/End scroll, and `Esc` leaves.
+Inside the chart: `+`/`-` change zoom tier (outline → standard → detailed), `f` fits to the viewport width (never collapsing past where the members are visible), `e` expands/collapses the whole canvas, `?` toggles a glyph legend (◆ manager, `?` unresolved, `↩` cycle, `⋯` depth-limit, `·N` members, `×N` copies, and what `(declared)` means). Arrows scroll a line; `shift+←/→` page horizontally and `PageUp/PageDown` vertically; `Home`/`End` jump to the top-left / bottom-right corner; `Esc` leaves. The chart is wide, so horizontal scroll (the `↔↕` footer hint) is the primary way to reach members off the right edge.
 
 As the manager:
 

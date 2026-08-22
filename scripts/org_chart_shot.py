@@ -117,6 +117,15 @@ def _seed(scenario: str) -> TeamRegistry:
                 ],
             )
         )
+    elif scenario == "wide":
+        # A 12-member flat team: overflows a normal terminal, the U1/U2 case.
+        reg.create_team(
+            TeamEditFields(
+                name="wide",
+                manager="boss",
+                members=[TeamMember(role=f"m{i}") for i in range(12)],
+            )
+        )
     else:
         # picker scenarios need a couple of teams incl. one named `chart`.
         reg.create_team(
@@ -143,6 +152,7 @@ _ROOT = {
     "cycle": "a",
     "deep": "t0",
     "missing-refs": "org",
+    "wide": "wide",
 }
 
 
@@ -155,6 +165,7 @@ async def main() -> None:
         size = (int(cols), int(rows))
     tier = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 1
     expand = len(sys.argv) > 5 and sys.argv[5] == "expand"
+    legend = len(sys.argv) > 5 and "legend" in sys.argv[5:]
 
     session = FakeSession()
     session.team_registry = _seed(scenario)
@@ -181,14 +192,16 @@ async def main() -> None:
         else:
             app._open_org_chart_view(_ROOT[scenario])
             await pilot.pause()
+            await pilot.pause()  # let the one-shot auto-fit settle first
             view = app._org_chart_view
             assert view is not None
-            for _ in range(tier - 1):
-                view.action_zoom_in()
-            if tier == 0:
-                view.action_zoom_out()
+            # Set the tier explicitly AFTER auto-fit so the capture is
+            # deterministic regardless of what auto-fit chose on open.
+            view._set_tier(tier)
             if expand:
                 view.action_toggle_expand()
+            if legend:
+                view.action_toggle_legend()
             await pilot.pause()
             await pilot.pause()
         app.save_screenshot(out)

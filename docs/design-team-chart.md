@@ -317,11 +317,18 @@ and the prototype confirms it on the org-within-org shape.
 - **Coordinates are floats during layout, rounded to ints at render** (second
   walk), so cumulative half-widths do not drift. `x` is a cell column, `y` is a
   level index.
-- **Level bands:** each level occupies `LEVEL_H` rows (prototype uses 4: one box
-  row, one connector row, spacing). A thin **boundary rule** per team (a faint
-  horizontal `───` under a team's manager, spanning its members' extent) draws
-  the "boundary at each level" the user asked for — cheap, since a team node
-  knows its children's min/max `x`.
+- **Level bands:** each level occupies `LEVEL_H` rows (box row, drop row, bus
+  row). A thin **boundary rule** per team (a faint horizontal `───` one row
+  UNDER the team's children, spanning their x-extent) draws the "boundary at
+  each level" the user asked for — cheap, since a team node knows its children's
+  min/max `x`. It is a separate final pass that fills only BLANK cells, so it
+  never clobbers a box or connector: under a row of leaf members (the case the
+  rule exists for) two sibling teams draw as two distinct spans with a gap
+  between, making the grouping legible at a glance; a sub-team's drop connector
+  simply interrupts the rule where it crosses. Rules draw at standard and
+  detailed only — outline is already one-box-per-team, so grouping there needs
+  no rule. Painted in a dedicated `rule` style key, fainter than a connector,
+  because it is grouping, not structure (D1).
 - **Connectors:** `│` drops from a parent's center; an elbow (`├─┬─┤`) row joins
   siblings. The prototype draws only the drop for brevity; the shipped renderer
   draws the full elbow bus per parent (one row, computed from children x-span).
@@ -341,7 +348,14 @@ only box widths and which rows are drawn change).
 |---|---|---|---|---|
 | **0 — Outline** | team name only, one box per TEAM (members collapsed to a count badge `[pod ·5]`) | collapsed to a box | badge `·N` | the "collapse deep levels to boxes" view; fits a big org on one screen |
 | **1 — Standard** (default) | one box per agent AND team boundary; manager marked | expanded one level, deeper teams collapsed to boxes | `×N` badge on one box | the everyday chart |
-| **2 — Detailed** | box shows name + kind (role/specialist/seed) + count; team boxes show `led by <mgr>` | fully expanded to `MAX_ORG_DEPTH` | N sibling copies drawn | audit / verify the whole org |
+| **2 — Detailed** | box shows name + kind (role/specialist/seed) + count; team boxes show `led by <mgr>` | fully expanded to `MAX_ORG_DEPTH` | AGENT copies drawn as N sibling boxes; TEAM copies stay one `×N`-badged box | audit / verify the whole org |
+
+> **Count expansion, agents vs teams (D4).** At the detailed tier a `count>1`
+> *agent* draws as N sibling boxes (`reviewer ×2` → two `[ reviewer (seed) ]`),
+> but a `count>1` *team* stays a single `×N`-badged box rather than duplicating
+> its whole subtree — duplicating an org N times would explode the canvas for no
+> extra information (the copies are identical). This asymmetry is deliberate;
+> the table above reflects the shipped behaviour.
 
 `collapse`/`expand` on a focused team node overrides the tier for that subtree
 (a per-node `expanded` set), so a user can drill one branch without exploding
@@ -399,9 +413,10 @@ Identified by CLASS not id (the `DuplicateIds`-on-fast-reopen lesson,
 |---|---|
 | `+` / `-` (and `=`) | zoom tier in / out |
 | `←↑↓→` | scroll the canvas (arrows scroll by a line; wrap disabled — this is a canvas, not a list, so movement CLAMPS per `AGENTS.md:221`) |
-| `PgUp/PgDn`, `Home/End` | page / jump scroll (clamp) |
-| `enter` / `space` on a focused team node | collapse/expand that subtree |
-| `f` | fit-to-width (auto-pick the coarsest tier that fits the viewport) |
+| `PgUp/PgDn` | page vertically (clamp); `shift+←/→` page horizontally — the wide axis overflows most, so it gets a jump too (U4) |
+| `Home/End` | jump to the top-left / bottom-right CORNER (both axes); `End` is the keyboard jump to the right edge on a chart with no vertical travel (U4) |
+| `enter` / `space` | expand/collapse the whole canvas (`e` is the primary key; v1 has no per-node focus) |
+| `f` | fit-to-width among the MEMBER-showing tiers (standard/detailed) — never auto-collapses to the outline box that would hide the roster (U2); falls back to standard + scroll when nothing fits |
 | `esc` | leave the mode (via `_close_org_chart_view`, mirrors `_close_subagent_view`) |
 
 Node focus/navigation across the grid is a stretch goal; v1 focuses the whole
@@ -428,10 +443,18 @@ controls. This keeps v1 small; per-node keyboard focus is listed as follow-up.
 
 ### 5.5 Degrading on a small terminal
 
-- Below a floor width/height, the chart cannot show tier 1; the widget auto-
-  selects tier 0 (outline) and, if even that overflows, relies on scroll. The
-  title always states the current tier so "why is this collapsed" is answered
-  on screen.
+- On the FIRST layout the widget auto-fits (the same logic as the `f` key): it
+  picks the coarsest MEMBER-showing tier that fits the viewport, so a small
+  terminal opens already zoomed to what fits rather than always at standard.
+  Crucially it does NOT auto-collapse to the outline box — that would hide the
+  roster (U2); when even standard overflows it opens at standard and relies on
+  scroll, and the title always states the current tier so "why is this zoomed"
+  is answered on screen. Outline (tier 0) remains a deliberate `-`/zoom choice,
+  where the `·N ?` badge summarises member count and flags any unresolved
+  member so the gap is never invisible (minor-2).
+- The footer hints SHED whole controls widest-first as the width tightens
+  (D3): `read-only`, then the secondary controls drop, but `scroll`, `zoom`,
+  and `esc` survive and the row never clips a word mid-character.
 - A team with a single agent and no nesting renders as a 2-node column that fits
   any terminal.
 - The mode keeps the dock, so the composer/band never disappear even at 80×24.

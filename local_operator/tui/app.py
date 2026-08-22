@@ -2942,7 +2942,24 @@ class OperatorApp(App[None]):
                 detail="subcommand",
             )
         ]
-        rows.extend(teams)
+        # U3 — a team whose name collides with the reserved `chart` word cannot
+        # be talked to via its plain name from the picker: completing `chart`
+        # routes to the SUBCOMMAND, not the team. So its row completes to the
+        # `=chart ` ESCAPE (the leading `=` forces the literal team name, past
+        # the subcommand check) and its detail names the escape, surfacing the
+        # way out at the one surface that creates the collision. Other teams are
+        # offered by their plain name unchanged.
+        for team in teams:
+            if team.name.casefold() == "chart":
+                rows.append(
+                    ArgumentChoice(
+                        f"={team.name}",
+                        team.description,
+                        detail=f"talk to team · {team.detail}",
+                    )
+                )
+            else:
+                rows.append(team)
         return rows
 
     def _team_list_block(self, teams: list[Any]) -> RichBlock:
@@ -3022,7 +3039,12 @@ class OperatorApp(App[None]):
         #      a real team name and cannot itself collide.
         first, _, rest = arg.partition(" ")
         first = first.strip()
-        if first == "chart":
+        # Case-fold the subcommand match (minor-1): the picker and the editor's
+        # hint suppression both fold case, so ``/team Chart do x`` visually
+        # implies charting — routing it to the talk path (attaching a team
+        # literally named ``Chart``) would contradict what the UI just showed.
+        # Consistent with ``get_team_by_name``'s own casefold.
+        if first.casefold() == "chart":
             self._cmd_team_chart(rest.strip(), registry, notice)
             return
         # Strip a single leading `=` escape before the name lookup, and skip the
@@ -7219,9 +7241,13 @@ class OperatorApp(App[None]):
         self.screen.mount(view, before=self.query_one("#input-dock"))
         self.screen.add_class(ORG_CHART_LAYOUT_CLASS)
         self._set_composer_read_only(True)
-        # Paint after mount so the widget's own on_mount focus/repaint runs; the
-        # resolved tree is handed in now so the first frame is the chart, not an
-        # empty canvas.
+        # nit-1 — deliberate ordering. ``mount`` posts ``on_mount`` (which calls
+        # ``_repaint``) but does not run it synchronously; this ``show(root)``
+        # runs FIRST and seeds ``_root`` so the first painted frame is the chart,
+        # not an empty canvas. The mount-time ``_repaint`` then re-runs with
+        # ``_root`` already set — a cheap, idempotent second paint, NOT a no-op
+        # that depends on ``_root`` still being ``None`` (it is not None by then).
+        # Order matters: seed the data before the deferred repaint lands.
         view.show(root)
 
     def _close_org_chart_view(self) -> bool:
