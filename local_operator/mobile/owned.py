@@ -219,6 +219,10 @@ class OwnedSessionHandle(SessionHandle):
             self._fold.fold_history(self._session.history())
         except Exception:  # noqa: BLE001 — history is a convenience, not a gate
             logger.debug("owned session history fold failed", exc_info=True)
+        # Seed the live flag ONCE at attach (a phone subscribing mid-turn never
+        # saw the AgentStartEvent). After this the fold's own lifecycle events
+        # own ``streaming`` — see ``_reconcile_streaming``.
+        self._reconcile_streaming()
         return unsubscribe
 
     async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
@@ -380,6 +384,9 @@ class OwnedSessionHandle(SessionHandle):
     async def refresh(self) -> None:
         self._refresh_state()
         self._refresh_todos()
+        # Command boundary: safe to reconcile from the session flag (no
+        # terminal event is mid-flight here, unlike the per-event path).
+        self._reconcile_streaming()
 
     # -- internals ----------------------------------------------------------------
 
@@ -401,8 +408,24 @@ class OwnedSessionHandle(SessionHandle):
             effort=_current_effort(self._session),
             effort_ladder=_ladder(self._session),
             conversation_name=getattr(self._session, "conversation_name", "") or None,
-            streaming=bool(getattr(self._session, "is_streaming", False)),
+            # NOTE: ``streaming`` is deliberately NOT set here. This runs after
+            # every folded event, and the session clears ``is_streaming`` only
+            # in the turn's ``finally`` -- AFTER the AgentEndEvent has been
+            # emitted and folded. Reading the still-True flag on that terminal
+            # event re-stuck the projection to True with no later event to fix
+            # it, pinning the phone to "in progress" forever. The fold's own
+            # lifecycle events are authoritative; ``_reconcile_streaming``
+            # covers attach and command boundaries.
         )
+
+    def _reconcile_streaming(self) -> None:
+        """Seed/align ``streaming`` from the session flag at attach and command
+        boundaries, delegating the safety rule to ``ProjectionFold`` (which
+        ignores the flag once it has folded a turn-terminal event -- see
+        ``ProjectionFold.reconcile_streaming``). NEVER called from the
+        per-event handler: the fold's lifecycle events own ``streaming``
+        there."""
+        self._fold.reconcile_streaming(bool(getattr(self._session, "is_streaming", False)))
 
     def _refresh_todos(self) -> None:
         try:
