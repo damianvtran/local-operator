@@ -224,8 +224,8 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     # ``dim`` not ``faint`` (D1): the word "estimated" is the whole reason this
     # section reads differently from TOTALS, so it must be legible, not the
     # lowest-contrast text on the panel. The distinction is ALSO carried at the
-    # data level — every percentage below is prefixed ``~`` and every value is
-    # tagged ``est.`` — so it survives when this heading has scrolled under the
+    # data level — the heading is marked ``≈`` and every percentage below is
+    # prefixed ``~`` — so it survives when this heading has scrolled under the
     # pinned header (the case the design round flagged in 02-by-session).
     heading.append("   ≈ estimated split of context tokens", style=dim)
     lines.append(heading)
