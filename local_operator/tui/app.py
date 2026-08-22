@@ -2770,9 +2770,13 @@ class OperatorApp(App[None]):
         child of the next item — the flat debug-style line this replaces did
         exactly that at both 100 and 60 columns.
         """
+        # D1: the section header outranks its entries, same treatment as
+        # ``_agent_list_block`` so the two listings stay consistent — bright
+        # bold `fg` for the header, muted `heading` for each team name.
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("teams", style=heading)]
+        rows: list[Any] = [Text("teams", style=section)]
         for team in teams:
             slots = len(team.members) + 1
             rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
@@ -2942,9 +2946,16 @@ class OperatorApp(App[None]):
         separate rows keep a narrow terminal from wrapping the facts or the
         description into a position that reads as a child of the next entry.
         """
+        # D1: the SECTION header must outrank its entries. Entry names take the
+        # muted body-ish `heading` weight; the section header takes bright `fg`
+        # AND bold, so it reads as a header rather than as one more (indented)
+        # entry name. Indentation alone did not separate them — header and names
+        # shared the one muted style, so only the two-cell indent told them
+        # apart, which a narrow frame or a quick scan loses.
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        out: list[Any] = [Text("agents", style=heading)]
+        out: list[Any] = [Text("agents", style=section)]
         for name, facts, summary in rows:
             out.append(Padding(Text(name, style=heading), (0, 0, 0, 2)))
             out.append(Padding(Text(facts, style=body), (0, 0, 0, 4)))

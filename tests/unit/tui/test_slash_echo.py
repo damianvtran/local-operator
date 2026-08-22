@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from rich.style import Style
 
 from local_operator.session.goal import MAX_GOAL_CHARS, GoalState
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp, slash_command_for
@@ -528,6 +529,77 @@ async def test_a_listing_names_what_it_lists() -> None:
     # `/login` bare lists the SAME set as `/provider`, so its caption is the
     # one carrying the whole distinction between two adjacent identical trees.
     assert "providers with interactive login" in painted, painted
+
+
+def _first_text_styles(block) -> list[tuple[str, Style]]:
+    """Flatten a listing block to (text, style) pairs, header first."""
+    from rich.console import Group
+    from rich.padding import Padding
+    from rich.text import Text
+
+    out: list[tuple[str, Style]] = []
+
+    def walk(node) -> None:
+        if isinstance(node, Group):
+            for child in node.renderables:
+                walk(child)
+        elif isinstance(node, Padding):
+            walk(node.renderable)
+        elif isinstance(node, Text):
+            # Only the styled entries matter; the blank spacer Text carries a
+            # bare "" style, which is not a Style object and is skipped.
+            style = node.style
+            if isinstance(style, Style):
+                out.append((node.plain, style))
+
+    walk(block.renderable)
+    return out
+
+
+def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
+    """D1: the section header must read as a header, not as one more entry.
+
+    Indentation alone did not separate them — header and entry names shared the
+    one muted style. The header now takes a brighter, bold weight while entries
+    keep the muted one, and both listings get the SAME treatment so they stay
+    consistent. Asserted on the rendered style, not the pixels, because "the
+    header is heavier than its entries" is exactly a style-attribute claim.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+
+    from local_operator.tui import theme as theme_mod
+
+    fg = theme_mod.semantic_color("fg")
+    muted = theme_mod.semantic_color("muted")
+
+    def _colour(style: Style) -> str:
+        colour = style.color
+        assert colour is not None, style
+        return colour.name
+
+    def _assert_header_outranks(block, header_text: str, entry_text: str) -> None:
+        pairs = _first_text_styles(block)
+        header_style = next(s for t, s in pairs if t == header_text)
+        entry_style = next(s for t, s in pairs if t == entry_text)
+        assert header_style.bold, f"{header_text!r} header must be bold"
+        assert _colour(header_style) == fg, header_style
+        assert not entry_style.bold, f"{entry_text!r} entry must not be bold"
+        assert _colour(entry_style) == muted, entry_style
+
+    _assert_header_outranks(
+        app._agent_list_block([("auditor", "role", "Audit changes")]), "agents", "auditor"
+    )
+
+    # /team gets the identical treatment (needs a real team object).
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    team = registry.create_team(
+        TeamEditFields(
+            name="feature-release", manager="manager", members=[TeamMember(role="coder")]
+        )
+    )
+    _assert_header_outranks(app._team_list_block([team]), "teams", "feature-release")
 
 
 @pytest.mark.asyncio
