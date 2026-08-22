@@ -1472,8 +1472,6 @@ async def create_session(
     hosting/model configuration is missing.
     """
 
-    from local_operator.session.session import Session
-
     # Create the agent's working-directory home HERE, lazily, rather than
     # unconditionally in main() before dispatch (where it hardcoded the path
     # and ignored the override). A session is a path that actually runs a task,
@@ -1482,6 +1480,7 @@ async def create_session(
     # because the workspace root could not be created (a read-only home), so a
     # creation error degrades to the process cwd the same way an unset cwd does.
     from local_operator.paths import ensure_agent_home_dir
+    from local_operator.session.session import Session
 
     try:
         ensure_agent_home_dir()
