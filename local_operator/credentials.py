@@ -99,7 +99,13 @@ class CredentialManager:
         directory.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=str(directory), prefix=".credentials-", suffix=".tmp")
         try:
-            os.fchmod(fd, _CREDENTIALS_MODE)
+            # os.fchmod is POSIX-only; on Windows it does not exist and calling
+            # it unconditionally raises AttributeError on every credential write
+            # (login and `credential update`). mkstemp already creates the temp
+            # at 0600 on POSIX, so the guard loses no hardening there, and
+            # Windows has no POSIX mode bits to set anyway.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, _CREDENTIALS_MODE)
             with os.fdopen(fd, "w") as f:
                 f.write(body)
             os.replace(tmp_path, self.config_file)
