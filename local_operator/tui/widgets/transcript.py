@@ -977,6 +977,13 @@ class NoticeBlock(TranscriptBlock):
         self.set_content(self._build())
         self.finalize()
 
+    def text(self) -> str:
+        """The notice as printed, for callers that must recognise their own
+        row (the Esc-recall retires its decline row by content). The parallel
+        of :meth:`UserBlock.text`: cross-module readers compare against this,
+        not against ``_text``."""
+        return self._text
+
     def restate(self, text: str, kind: NoticeKind) -> None:
         """Replace what this notice SAYS, after it was already finalized.
 

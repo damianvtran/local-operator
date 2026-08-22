@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -29,7 +29,6 @@ from textual.binding import Binding
 from textual.document._document import Selection
 
 from local_operator.harness.types import (
-    ImageContent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -89,8 +88,11 @@ class SteerableSession(FakeSession):
     def is_streaming(self) -> bool:
         return self.streaming
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        self.steers.append(text)
+    def steer_message(self, message: Any) -> None:
+        # Record the text the old `steer` override did and let the base fake
+        # hold the object, so the recall seam sees a real queue.
+        self.steers.append(message.text)
+        super().steer_message(message)
 
     def set_approval_handler(self, handler: object | None) -> None:
         self.approval_handler = handler

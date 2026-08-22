@@ -2089,6 +2089,78 @@ class Session:
         IS the correction."""
         self._steering_queue.put_nowait(Message.user(text, images))
 
+    def queued_steering(self) -> list[AgentMessage]:
+        """A FIFO snapshot of the steering queue, without draining it.
+
+        The read half of the recall seam: a host deciding what is still
+        recallable (`SessionProtocol.recall_steering`) must be able to SEE
+        the queue, and the queue itself is engine-internal. Identity of the
+        entries is preserved, which is what hosts match on.
+
+        ``asyncio.Queue`` has no public peek, so the snapshot is a drain and
+        a rebuild through the get/put API — the same shape
+        :meth:`recall_steering` uses, minus the removal. A drain CAN
+        interleave with this rebuild — ``_drain_steering`` awaits a disk
+        append between its ``get_nowait``s, and a key handler runs on the
+        same loop — and the interleaving is BENIGN: a message the drain
+        already holds simply fails the caller's identity check (it is no
+        longer in the queue, so it is not recallable), and the re-put items
+        join the same boundary's delivery. What this method promises is only
+        that it never loses or reorders an entry, which the get/put round
+        trip keeps.
+        """
+        snapshot: list[AgentMessage] = []
+        while not self._steering_queue.empty():
+            snapshot.append(self._steering_queue.get_nowait())
+        for message in snapshot:
+            self._steering_queue.put_nowait(message)
+        return snapshot
+
+    def steer_message(self, message: Message) -> None:
+        """Queue a caller-built steering message, sharing the caller's object.
+
+        The identity-preserving twin of :meth:`steer`: a host that keeps its
+        own reference to the queued message (the TUI pairs it with the
+        transcript blocks it painted for it) can later ask for THAT message
+        back via :meth:`recall_steering`. ``steer`` builds the Message here,
+        so no reference the host could match on ever leaves this method.
+        """
+        self._steering_queue.put_nowait(message)
+
+    def recall_steering(self, message: AgentMessage) -> bool:
+        """Remove ONE specific message from the steering queue, if present.
+
+        The TUI's Esc uses this to unsend a queued mid-turn steer: the
+        message goes back to the composer and the loop's next boundary finds
+        it gone. Matched by identity — the host hands back the very object
+        :meth:`steer_message` queued — so an equal-but-distinct message (the
+        same text steered twice) is not what a recall removes, and everything
+        else in the queue keeps its place: older steers, newer steers, and
+        wake deliveries, which ride this queue but were never the caller's
+        object. Returns False when the message is not queued — already
+        drained at a boundary, or never queued — and changes nothing.
+
+        The rebuild goes through the public get/put API rather than the
+        queue's private deque: ``asyncio.Queue`` is the contract this queue
+        has with the loop, and reaching inside it would couple the session
+        to an implementation detail. A concurrent ``_drain_steering`` can
+        interleave between the get and the put (it awaits a disk append per
+        message); the interleaving is benign for the same reasons
+        :meth:`queued_steering` documents — the drain takes what it finds,
+        the rebuild re-puts the rest, and nothing is lost either way.
+        """
+        remaining: list[AgentMessage] = []
+        found = False
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            if item is message and not found:
+                found = True
+                continue
+            remaining.append(item)
+        for item in remaining:
+            self._steering_queue.put_nowait(item)
+        return found
+
     def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
         """Install the host's tool-approval gate (see SessionProtocol).
 

@@ -89,6 +89,15 @@ class FakeSession:
     def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
+    def queued_steering(self) -> list[Any]:
+        return []
+
+    def steer_message(self, message: Any) -> None:
+        pass
+
+    def recall_steering(self, message: Any) -> bool:
+        return False
+
     def set_approval_handler(self, handler: Any | None) -> None:
         self.approval_handler = handler
 

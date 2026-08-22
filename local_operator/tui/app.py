@@ -293,6 +293,11 @@ MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes
 #: Dropping it also stops the row being WRONG on the error path, where the turn
 #: was not stopped by anyone: it failed, and its own error notice says so.
 DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
+#: The one row a recall decline prints (design round 1, D1): a silent Esc over
+#: a half-typed draft reads as a dropped keystroke, so the decline names the
+#: obstacle and the recovery. Named because the SUCCESSFUL recall retires its
+#: own decline row (design round 2, D4) and must recognise it.
+RECALL_DECLINE_NOTICE = "queued steer kept — clear the composer, esc again to recall"
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -1126,6 +1131,19 @@ class OperatorApp(App[None]):
         #: them together; cleared on a session swap, where the rows belong to a
         #: conversation that is no longer on screen.
         self._queued_steer_notices: list[NoticeBlock] = []
+        #: The transcript blocks behind every steer the app has queued, in
+        #: submit order, keyed by the VERY Message the engine's queue holds
+        #: (`steer_message` shares the object). Esc UNSENDS the newest steer
+        #: still queued (:meth:`_recall_queued_steers`): the message leaves
+        #: the queue for the composer and these blocks leave the transcript
+        #: with it, so nothing on screen keeps promising a send the user just
+        #: took back. Entries whose message already drained at a boundary are
+        #: inert — a recall can never match them — and are dropped with the
+        #: notice they share. Cleared wherever the blocks are removed (session
+        #: swap, `/clear`) for the same reason `_queued_steer_notices` is.
+        self._held_steer_blocks: list[
+            tuple[Message, UserBlock, list[ImageBlock], NoticeBlock, dict[int, Attachment]]
+        ] = []
         #: Rows whose turn ended before any boundary drained them: they now read
         #: `still queued — sends with your next message`, and the message really
         #: is still in the engine's queue, so the NEXT turn's first drain is the
@@ -2450,6 +2468,7 @@ class OperatorApp(App[None]):
         # identical prompt — a user who reopens with the same words would
         # watch the other front end paint it while this one stays silent.
         self._pending_user_echoes.clear()
+        self._held_steer_blocks.clear()
         # The per-call accrual belongs to a turn on the session being replaced.
         # Left standing, the NEXT session's first `agent_end` would subtract the
         # dead conversation's already-billed calls from its own turn total and
@@ -4183,6 +4202,22 @@ class OperatorApp(App[None]):
         # which is reporting work in progress rather than work Esc can reach.
         children = self._running_subagents(session)
 
+        # A queued steer the user takes back: Esc lifts the newest message
+        # still waiting in the engine's queue into the composer and removes
+        # its rows from the transcript, so "stop" also means "I want that
+        # back for a resend". After every surface Esc closes first (the
+        # aside, the subagent view, the ask picker) and after the escalation
+        # press above, and gated off the children presses — those two are
+        # the children's contract and must not be stolen by a recall. It
+        # sits BEFORE the nothing-to-stop return because a turn that has
+        # already ended (the deferred state) is exactly when a user reaches
+        # for the cancel key. No return afterwards: recalling is not
+        # stopping, and the press still means what Esc always means below
+        # (abort the turn, deny the prompt), so the resend the user is
+        # lining up goes now rather than queueing again.
+        if not children:
+            self._recall_queued_steers()
+
         if not (pending or streaming or children):
             # A bang-mode command is the one remaining thing Esc can stop
             # when no turn is running. Checked HERE rather than above the
@@ -5136,6 +5171,7 @@ class OperatorApp(App[None]):
         # delivery are removed by the same clear and go for the same reason.
         self._queued_steer_notices.clear()
         self._deferred_steer_notices.clear()
+        self._held_steer_blocks.clear()
         # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
         # session has not started talking and the splash the clear just restored
         # must survive it. Going through ``_append_block`` rather than straight to
@@ -5716,7 +5752,8 @@ class OperatorApp(App[None]):
         attachments: Mapping[int, Attachment] | None = None,
     ) -> None:
         images = images or []
-        self._append_block(UserBlock(text, len(images)))
+        user_block = UserBlock(text, len(images))
+        self._append_block(user_block)
         # The pictures themselves, under the prompt that cites them. The
         # receipt row above says the bytes went; these show WHICH bytes, which
         # is the difference between "1 image attached" and knowing you pasted
@@ -5724,7 +5761,7 @@ class OperatorApp(App[None]):
         # the user typed around); the images render in citation order, the
         # same order `resolve_markers` sent them in, labeled by the text's own
         # marker numbers.
-        self._append_image_blocks(images, marker_text=text)
+        image_blocks = self._append_image_blocks(images, marker_text=text)
         if self._session is None:
             self._append_block(NoticeBlock("session is still starting…", "warning"))
             return
@@ -5737,7 +5774,12 @@ class OperatorApp(App[None]):
         # mid-turn channel — the engine drains the queue at its next tool/message
         # boundary, which is exactly "send it after the current step finishes".
         if session.is_streaming:
-            session.steer(text, images)
+            # The VERY object the engine queues: Esc-recall matches the queue's
+            # contents by identity to know which transcript blocks the user
+            # took back (`_recall_queued_steers`), so the app and the queue
+            # must share one Message rather than each building their own.
+            steer_message = Message.user(text, images)
+            session.steer_message(steer_message)
             # "boundary" is engine vocabulary the UI never defines, and this is
             # the line answering "did my text just get thrown away?" — so it says
             # when it will be sent, in the tense it will be sent in, at the
@@ -5764,6 +5806,23 @@ class OperatorApp(App[None]):
             # The row is already on screen — registered here so that event is
             # recognised as our own echo rather than painted again.
             self._pending_user_echoes.append(text)
+            # Held with the notice so Esc can lift the whole steer — the queued
+            # row, the user row and its image blocks — back out of the
+            # transcript and into the composer (:meth:`_recall_queued_steers`).
+            # The message is the identity key: a recall finds it in the
+            # engine's queue and removes exactly these blocks with it. Wakes
+            # ride the same queue but never get an entry, so they simply never
+            # match. Entries outlive delivery harmlessly — a delivered message
+            # is no longer in the queue, so it can never be recalled.
+            # The attachments ride the entry for the same reason they ride
+            # the compaction hold: the transcript's ImageBlocks keep a
+            # DOWNSCALED copy of the pixels, so rebuilding the draft's images
+            # from them would resend a blur of the original screenshot. The
+            # map is only held while the steer is queued — the entry goes at
+            # delivery — so the bytes live no longer than the promise.
+            self._held_steer_blocks.append(
+                (steer_message, user_block, image_blocks, queued, dict(attachments or {}))
+            )
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
@@ -6836,7 +6895,7 @@ class OperatorApp(App[None]):
 
     def _append_image_blocks(
         self, images: list[ImageContent], *, marker_text: str | None = None
-    ) -> None:
+    ) -> list[ImageBlock]:
         """Mount one :class:`ImageBlock` per image, in order.
 
         The single entry point for putting pictures on the transcript — the
@@ -6864,6 +6923,7 @@ class OperatorApp(App[None]):
             from local_operator.tui.widgets.editor import IMAGE_MARKER
 
             indices = [int(match.group(1)) for match in IMAGE_MARKER.finditer(marker_text)]
+        mounted: list[ImageBlock] = []
         for index, image in enumerate(images):
             if len(images) <= 1:
                 label = ""
@@ -6877,6 +6937,8 @@ class OperatorApp(App[None]):
                 logger.debug("image block construction failed", exc_info=True)
                 continue
             self._append_block(block)
+            mounted.append(block)
+        return mounted
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
@@ -11030,6 +11092,134 @@ class OperatorApp(App[None]):
         duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
         toast.show(_splash_toast_headline(text), duration_ms=duration)
 
+    def _recall_queued_steers(self) -> None:
+        """Esc: lift the newest still-queued steer back into the composer.
+
+        The user's ask: a message sent mid-turn is queued, and Esc is the key
+        for "I want that back NOW" — cancel the send, edit or resend it
+        immediately, without retyping. The recall UNSENDS: the message leaves
+        the engine's queue (`recall_steering`) and its rows leave the
+        transcript, so nothing on screen keeps promising a send the user just
+        took back, and the composer holds the text ready for Enter.
+
+        Only the NEWEST entry still in the queue goes: an older queued steer
+        is one the user has already lived with for longer, and recalling the
+        whole queue would dump several messages into a composer the user
+        meant to arm with one resend. Entries whose message already drained
+        at a boundary are skipped — they were delivered, there is nothing to
+        take back — and dropped with the notice they share, which the
+        delivery receipt has settled by then.
+
+        Wakes ride the same queue but never appear in `_held_steer_blocks`,
+        so the identity match skips them by construction; a recall can never
+        lift the scheduler's text into the composer.
+
+        A recall that cannot finish — no session, a composer the app has put
+        read-only (the subagent view owns it), or a half-typed draft it would
+        have to displace — must not cost the user anything: `recall_steering`
+        is only called once the composer has accepted the text, so the queue
+        keeps the message and the rows keep promising, exactly as if Esc had
+        not happened. The message then rides the next boundary, which is the
+        behaviour the user had before they pressed Esc.
+        """
+        session = self._session
+        if session is None or not self._held_steer_blocks:
+            return
+        # The newest entry whose message is STILL queued. Delivered entries
+        # are skipped, not dropped here: `on_steering_delivered` removes them
+        # the moment their receipt lands, so by the time Esc runs the list's
+        # tail is either queued (recallable) or already gone. ONE snapshot per
+        # press: the membership scan below would otherwise drain-and-rebuild
+        # the queue once per held entry on the cancel key's hot path.
+        queued_now = session.queued_steering()
+        for entry in reversed(self._held_steer_blocks):
+            if any(item is entry[0] for item in queued_now):
+                break
+        else:
+            return
+        message, user_block, image_blocks, notice, attachments = entry
+        editor = self._editor()
+        if self._aside_is_open():
+            # The composer is the aside's while the card is up; Enter would
+            # send the recalled steer as an aside question. Esc closes the
+            # aside first (above), so the next press can recall.
+            return
+        if editor.read_only:
+            # The composer is refusing keys (the subagent view owns it); a
+            # recall would strand the text between the queue and a field that
+            # cannot show it. Leave everything as it is.
+            return
+        # A half-typed draft is NOT displaced: throwing away what the user
+        # is typing on the cancel key is the exact loss `action_stop`'s
+        # docstring forbids, and the recalled text is not lost either way —
+        # it stays queued and rides the next boundary. The recall simply
+        # declines, and the user can Esc again once the buffer is empty.
+        #
+        # But a silent decline is the one Esc failure that reads as a dropped
+        # keystroke (design round 1, D1): the user pressed the key they press
+        # to cancel, saw nothing move, and has no way to know the buffer is
+        # the obstacle. The recovery is one line, replaced on repeat like the
+        # ladder's own rows.
+        if editor.text.strip():
+            # 59 cells: inside the set's 61-column one-line budget (design
+            # round 2, D5).
+            self._replace_stop_notice(RECALL_DECLINE_NOTICE, "note")
+            return
+        text = message.text
+        # The steer recorded itself in prompt history on submit; the recall
+        # UNSENT it, so Up-arrow must not offer the line the composer already
+        # holds as a past prompt.
+        editor.forget_prompt(text)
+        editor.load_text(text)
+        # AFTER `load_text`: adoption re-keys onto the markers now in the
+        # buffer, so the text has to be there first (same order `_close_aside`
+        # restores a stashed draft in).
+        editor.adopt_attachments(attachments)
+        # The cursor lands at the END, not the start: the resend gesture is
+        # "edit, then Enter", and the end is where an edit appends. History
+        # navigation uses the same landing (`_navigate_history`).
+        editor.move_cursor(editor._end_of_buffer())
+        # Only now is the recall irreversible: the composer holds the text.
+        if not session.recall_steering(message):
+            # Defence, not a live race: this handler runs synchronously on the
+            # session's own loop, so nothing drains the queue between the
+            # snapshot above and here. Kept for a future host that runs the
+            # session off this loop; if it ever fires, the composer has the
+            # text and the queue delivered it too — the user sees both and can
+            # delete the draft, and putting the message back would double-send.
+            logger.debug("recall raced a steering delivery; composer keeps the text")
+        # `entry`, not the list's tail: the tail can be a delivered entry the
+        # receipt has not yet removed, and the recall must take exactly the
+        # one it loaded into the composer.
+        self._held_steer_blocks.remove(entry)
+        transcript = self._transcript_view()
+        for block in (notice, *image_blocks, user_block):
+            transcript.remove_block(block)
+        # A decline row from an earlier press advertised exactly this recall
+        # ("clear the composer, esc again"); now that it has happened the row
+        # is an instruction for a state that no longer holds — the same
+        # stale-row class the queued-steer receipts exist to eliminate. Retire
+        # it with the steer's own rows (design round 2, D4).
+        stop_notice = self._stop_notice
+        if stop_notice is not None and stop_notice.text() == RECALL_DECLINE_NOTICE:
+            transcript.remove_block(stop_notice)
+            self._stop_notice = None
+        # The steer branch registered its text as a pending user echo so the
+        # delivery's MessageStartEvent would not repaint it; the recall has
+        # removed the painted row, so the entry must go with it — left in
+        # place it would swallow the RESEND's echo and the resent message
+        # would never paint.
+        self._consume_user_echo(text)
+        for held in self._queued_steer_notices:
+            if held is notice:
+                self._queued_steer_notices.remove(held)
+                break
+        for held in self._deferred_steer_notices:
+            if held is notice:
+                self._deferred_steer_notices.remove(held)
+                break
+        editor.focus()
+
     def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.
 
@@ -11144,6 +11334,15 @@ class OperatorApp(App[None]):
                 block.restate(SENT_STEER_NOTICE, "success")
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be settled", exc_info=True)
+        # Delivered entries can never be recalled: drop their held blocks so
+        # the list only ever holds rows still in the engine's queue. Matched
+        # by the notice the entry shares — the receipt just settled it, and
+        # NoticeBlock equality is identity, so this cannot touch another
+        # steer's entry.
+        settled_set = set(settled)
+        self._held_steer_blocks = [
+            entry for entry in self._held_steer_blocks if entry[3] not in settled_set
+        ]
 
     def on_compaction_started(self, message: CompactionStarted) -> None:
         self._append_block(NoticeBlock("compacting context…", "info"))
