@@ -236,5 +236,14 @@ export type CommandOp =
 	| { op: "new_conversation" }
 	| { op: "resume_session"; session_id: string }
 	| { op: "approval_answer"; request_id: string; approved: boolean; remember: boolean }
-	| { op: "ask_answer"; request_id: string; value: string }
+	| {
+			op: "ask_answer";
+			request_id: string;
+			value: string;
+			/** The question the card was showing when the user answered. The
+			    daemon rejects the answer if the picker has advanced past it
+			    (U8), so a tap in flight during a terminal advance is never
+			    recorded against the wrong question. */
+			question_index: number;
+	  }
 	| { op: "snapshot" };

@@ -21,6 +21,12 @@ import type { PendingRequest } from "../types";
     connected"); a person staring at a phone needs the human version (U4/U7). */
 function humanizeError(message: string): string {
 	const m = message.toLowerCase();
+	if (m.includes("moved on")) {
+		/* The picker advanced (usually a terminal answer to this question)
+		   while the tap was in flight; the card is about to repaint to the
+		   current question (U8/U9) — distinct from "already answered". */
+		return "That question moved on — showing the current one.";
+	}
 	if (m.includes("already answered")) {
 		/* Stale tap: the question settled on another surface first (U4). */
 		return "Already answered — this question was settled on the terminal.";
@@ -85,12 +91,21 @@ export function PendingCard({
 				op: "ask_answer",
 				request_id: pending.request_id,
 				value,
+				/* The question this card is currently showing. The daemon
+				   rejects the answer if the picker advanced past it (U8). */
+				question_index: pending.question_index,
 			}),
 		);
 
 	/* A multi-question ask advances one question at a time (U1): show which
 	   question this is so the user knows the card is not the whole prompt. */
 	const multiQuestion = pending.question_total > 1;
+
+	/* When an answer is rejected as stale/moved-on, the card is either about to
+	   unmount (terminal settled it) or repaint to a new question. Until that
+	   repaint lands, its options must stop reading as tappable — otherwise the
+	   error line sits under buttons that still look live (D7). */
+	const inert = busy || error !== "";
 
 	return (
 		<div className="border-accent bg-accent-wash mx-2 flex flex-col gap-2 rounded-md border p-2.5">
@@ -158,11 +173,13 @@ export function PendingCard({
 						<button
 							key={opt.label}
 							type="button"
-							disabled={busy}
+							disabled={inert}
 							onClick={() => answerAsk(opt.label)}
 							/* Accent-tinted left edge + elevated fill so an option
 							   reads as a tap target, not a static label or a text
-							   field (D2). Disabled dims (D3/D4). */
+							   field (D2). Disabled dims (D3/D4) — including while an
+							   error is shown, so a stale option stops reading as
+							   live under the message (D7). */
 							className={cn(
 								"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 border-control border-l-accent bg-elevated px-3 py-2 text-left active:bg-accent-wash disabled:opacity-50",
 							)}
@@ -200,7 +217,7 @@ export function PendingCard({
 						/>
 						<button
 							type="button"
-							disabled={busy || !freeText.trim()}
+							disabled={inert || !freeText.trim()}
 							onClick={() => answerAsk(freeText.trim())}
 							className="flex min-h-11 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
 						>

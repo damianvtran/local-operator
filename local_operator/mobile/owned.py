@@ -393,7 +393,15 @@ class OwnedSessionHandle(SessionHandle):
         self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
-    async def ask_answer(self, request_id: str, value: str) -> str:
+    async def ask_answer(
+        self, request_id: str, value: str, question_index: int | None = None
+    ) -> str:
+        # ``question_index`` is accepted for protocol parity with the TUI handle
+        # (U8 guard). An owned session assigns a DISTINCT request_id per question
+        # (the gate loops one future per question), so the request_id is already
+        # the per-question identity: a stale tap targets an id whose future is
+        # gone and is rejected below. No separate index check is needed here.
+        del question_index
         # Resolve with the QUESTION id the harness asked under — never our
         # request id, which the harness never saw.
         question_id = self._pending_question_ids.get(request_id, request_id)

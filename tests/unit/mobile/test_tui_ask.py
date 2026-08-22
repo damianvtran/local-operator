@@ -377,3 +377,87 @@ async def test_multi_question_ask_advances_instead_of_truncating() -> None:
             assert handle._fold.projection.pending is None
         finally:
             control.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_advance_reprojects_and_stale_phone_tap_is_safe() -> None:
+    """U8: when the TERMINAL advances a multi-question ask, the phone must be
+    re-projected to the new question, and a phone tap carrying the OLD question
+    index must never be recorded against the question the terminal moved to.
+
+    Reproduces the corruption on the pre-fix code (a phone answer against the
+    stale question was silently keyed to the advanced question) and proves it is
+    now closed by BOTH halves: re-projection on terminal advance, and the
+    question-index guard on ask_answer.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        handle = await _wait_for_handle(app, pilot)
+        control = await _control_for(app, pilot)
+        try:
+            q1 = AskQuestion(
+                id="env",
+                question="Which environment?",
+                options=[
+                    AskOption(label="prod", description="the live one"),
+                    AskOption(label="staging", description="safe to break"),
+                ],
+            )
+            q2 = AskQuestion(
+                id="confirm",
+                question="Confirm the deploy?",
+                options=[AskOption(label="yes"), AskOption(label="no")],
+            )
+            asked = asyncio.create_task(app.request_user_choice([q1, q2]))
+            for _ in range(4):
+                await pilot.pause()
+
+            pending = handle._fold.projection.pending
+            assert pending is not None
+            assert pending.title == "Which environment?"
+            assert pending.question_index == 0
+            request_id = pending.request_id
+
+            # The TERMINAL answers Q1 by pressing Enter on the selected option
+            # (prod is index 0 and preselected). This advances the picker to Q2.
+            picker = app._ask_screen
+            assert picker is not None
+            await pilot.press("enter")
+            for _ in range(6):
+                await pilot.pause()
+            assert picker.question_index == 1, "terminal Enter did not advance the picker"
+
+            # Part 1 (re-project on terminal advance): the phone now shows Q2,
+            # not the stale Q1 — the desync U8 described is gone.
+            pending = handle._fold.projection.pending
+            assert pending is not None
+            assert pending.title == "Confirm the deploy?"
+            assert pending.question_index == 1
+            assert pending.request_id == request_id
+
+            # Part 2 (index guard): a phone tap that still carries the OLD index
+            # (0) — a tap in flight before the re-projection landed — must be
+            # REJECTED, never recorded against Q2. This is the exact corruption
+            # from the U8 repro: tapping 'staging' (a Q1 option) must not become
+            # the answer to 'Confirm the deploy?'.
+            reply = await control.send(
+                "ask_answer", request_id=request_id, value="staging", question_index=0
+            )
+            assert reply["op"] == "error"
+            assert "moved on" in str(reply["message"])
+            assert not asked.done(), "a stale-index tap must not settle the card"
+
+            # A correctly-indexed phone answer to the CURRENT question lands.
+            reply = await control.send(
+                "ask_answer", request_id=request_id, value="yes", question_index=1
+            )
+            assert reply["op"] == "ack"
+            for _ in range(4):
+                await pilot.pause()
+            answer = await asyncio.wait_for(asked, 2)
+            # Each value keyed to the RIGHT question: prod->env (terminal),
+            # yes->confirm (phone). 'staging' never entered the map.
+            assert answer == {"env": ["prod"], "confirm": ["yes"]}
+        finally:
+            control.close()

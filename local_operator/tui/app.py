@@ -5284,6 +5284,21 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 - a phone bridge must never break the ask
             logger.debug("mobile ask-settled notify failed", exc_info=True)
 
+    def _notify_mobile_ask_advanced(self, card: AskPickerScreen) -> None:
+        """Tell the mobile bridge an ask picker advanced to a new question.
+
+        Re-projects the current question so the phone follows a terminal-driven
+        advance (U8). Same lazy, swallow-all contract as the pending/settled
+        twins — the terminal ask proceeds regardless of the phone bridge.
+        """
+        handle = self._mobile_handle
+        if handle is None:
+            return
+        try:
+            handle.note_ask_advanced(card)
+        except Exception:  # noqa: BLE001 - a phone bridge must never break the ask
+            logger.debug("mobile ask-advanced notify failed", exc_info=True)
+
     def _settle_ask_picker(self) -> None:
         """Take down a live ``ask`` picker, answering with whatever was chosen.
 
@@ -5350,6 +5365,21 @@ class OperatorApp(App[None]):
         """
         message.stop()
         self._sync_prompt_host()
+
+    def on_ask_picker_screen_question_advanced(
+        self, message: AskPickerScreen.QuestionAdvanced
+    ) -> None:
+        """The ask card moved to a new question; re-project it to the phone.
+
+        Fires for a terminal Enter as well as a phone-routed answer, so the
+        phone always follows the terminal to Q2..Qn instead of being left on
+        the previous question — the cross-surface desync that let a phone tap
+        be recorded against the wrong question (U8). Guarded/best-effort like
+        the mount and settle notifications: a mobile-notify failure must never
+        break the terminal ask.
+        """
+        message.stop()
+        self._notify_mobile_ask_advanced(message.card)
 
     def _sync_prompt_host(self) -> None:
         """Hide the prompt host when what it holds cannot be drawn.

@@ -238,7 +238,9 @@ class TuiSessionHandle(SessionHandle):
         # keep the honest terminal-only stub rather than pretend otherwise.
         raise ValueError("this approval is on the terminal — answer it there")
 
-    async def ask_answer(self, request_id: str, value: str) -> str:
+    async def ask_answer(
+        self, request_id: str, value: str, question_index: int | None = None
+    ) -> str:
         """Answer the CURRENT question of a live TUI ask picker from the phone.
 
         Called on the registrant/daemon loop, so the whole resolve hops ONTO
@@ -258,6 +260,17 @@ class TuiSessionHandle(SessionHandle):
         the very future ``request_user_choice`` awaits, so the terminal screen
         also comes down and the tool call returns the full answer map.
 
+        ``question_index`` is the question the phone was DISPLAYING when the user
+        tapped. It is the U8 guard, mirroring the composer path's
+        ``_HeldAnswerKey.question_index``: a multi-question picker advances (and
+        the phone re-projects) between answers, so a tap already in flight when
+        a terminal advance lands must NOT be recorded against the question that
+        moved into its place. We refuse when it no longer matches the picker's
+        live index rather than misattribute the value; the phone then repaints
+        to the current question from the re-projection. ``None`` (an older
+        client) skips the check and answers the current question, the pre-guard
+        behaviour.
+
         Race message (U4): if the terminal (or a stop/teardown) already settled
         this card, report that it was "already answered on the terminal" — a
         human, reconciling message rather than the developer-worded "no longer
@@ -275,6 +288,15 @@ class TuiSessionHandle(SessionHandle):
             # actually made — refuse and let the phone show the real outcome.
             if getattr(card, "settled", False):
                 raise ValueError("that question was already answered on the terminal")
+            # U8 guard: the phone answered whatever question it was showing, but
+            # the terminal may have advanced the card since. Answering against a
+            # moved-on question would key the value to the WRONG question, so
+            # refuse and let the re-projection repaint the phone to the current
+            # one.
+            if question_index is not None:
+                live_index = int(getattr(card, "question_index", 0) or 0)
+                if live_index != question_index:
+                    raise ValueError("that question moved on — here is the current one")
             # answer_current takes the chosen text for the CURRENT question:
             # for options that is the tapped label, for free-text/secret the
             # typed value. An empty value means "nothing chosen" (settles with
@@ -283,7 +305,10 @@ class TuiSessionHandle(SessionHandle):
             if settled:
                 return "answered"
             # The picker advanced to the next question; project it so the phone
-            # follows the terminal to Q2..Qn instead of thinking it is done.
+            # follows to Q2..Qn instead of thinking it is done. (The picker also
+            # posts QuestionAdvanced, which re-projects too — this is the
+            # immediate, deterministic path; the message is belt-and-suspenders
+            # for terminal-driven advances.)
             self._project_ask_question(request_id, card)
             return "answered"
 
@@ -340,13 +365,30 @@ class TuiSessionHandle(SessionHandle):
         if self._on_projection is not None:
             self._on_projection()
 
+    def note_ask_advanced(self, card: Any) -> None:
+        """Re-project a picker that advanced to its next question, by ANY route.
+
+        Called on the Textual loop from ``OperatorApp`` when the picker posts
+        ``QuestionAdvanced`` — a terminal Enter as well as a phone-routed
+        answer. Re-projecting on the TERMINAL advance is what closes U8: without
+        it the phone kept showing the previous question after the terminal
+        moved on, and a tap there resolved against the question the terminal had
+        advanced to. Card-scoped and idempotent: a card the handle never
+        projected (or one already settled/popped) is a no-op.
+        """
+        request_id = self._request_id_for_card(card)
+        if request_id is None:
+            return
+        self._project_ask_question(request_id, card)
+
     def _project_ask_question(self, request_id: str, card: Any) -> None:
         """Re-project the picker's now-current question after it advanced.
 
         The push model is snapshot/repaint, so replacing the pending card with
-        the next question is all it takes for the phone to follow the terminal
-        from Q1 to Q2..Qn (U1). Same-id push (``set_pending`` semantics via
-        pop+push) so the card updates in place rather than stacking."""
+        the current question is all it takes for the phone to follow from Q1 to
+        Q2..Qn (U1/U8). Same-id push (``set_pending`` semantics via pop+push) so
+        the card updates in place rather than stacking, and a mid-ask reconnect
+        snapshots the CURRENT question because the fold now holds it."""
         self._fold.pop_pending(request_id)
         self._push_current_question(request_id, card)
         if self._on_projection is not None:

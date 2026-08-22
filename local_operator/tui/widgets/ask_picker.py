@@ -319,6 +319,22 @@ class AskPickerScreen(Container):
             super().__init__()
             self.card = card
 
+    class QuestionAdvanced(Message):
+        """The card moved to a NEW question within a multi-question ask.
+
+        Raised whenever ``_index`` advances, by ANY route — the terminal's
+        Enter (:meth:`action_accept`) and the phone's routed answer
+        (:meth:`answer_current`) both post it. The host relays it to the mobile
+        bridge so the phone re-projects the now-current question and follows the
+        terminal to Q2..Qn (UX round 2, U8): without it, a terminal advance left
+        the phone showing the previous question and a phone tap there was
+        recorded against the question the terminal had moved to.
+        """
+
+        def __init__(self, card: "AskPickerScreen") -> None:
+            super().__init__()
+            self.card = card
+
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("enter", "accept", "Answer", show=False),
@@ -640,6 +656,10 @@ class AskPickerScreen(Container):
         self._offset = 0
         self._hovered = None
         self._repaint()
+        # Tell the host the card moved to a new question so the phone follows
+        # the terminal to it (U8). Posted AFTER _index advances so the handler
+        # projects the now-current question, not the one just answered.
+        self._notify_advanced()
 
     def answer_current(self, values: list[str]) -> bool:
         """Answer the CURRENT question with ``values`` and advance, or settle.
@@ -684,7 +704,26 @@ class AskPickerScreen(Container):
         self._hovered = None
         self._rejected = False
         self._repaint()
+        # Same re-projection seam as the terminal Enter path: the phone that
+        # DIDN'T drive this advance (or reconnects mid-ask) must still be
+        # shown the current question (U8).
+        self._notify_advanced()
         return False
+
+    def _notify_advanced(self) -> None:
+        """Announce that the card advanced to a new question.
+
+        Posted from every ``_index`` advance so the host can re-project the
+        current question to the phone regardless of which surface drove the
+        move (U8). Guarded because a widget detached from the DOM (a card torn
+        down as it settled) has no message pump; the advance still happened for
+        the terminal, and a failed notify must never break it — the same
+        best-effort contract the app's mobile-notify helpers keep.
+        """
+        try:
+            self.post_message(self.QuestionAdvanced(self))
+        except Exception:  # noqa: BLE001 - a detached card cannot post; harmless
+            pass
 
     def _rejection(self) -> str:
         """What the footer says instead of the keys, or ``""`` to keep them.
