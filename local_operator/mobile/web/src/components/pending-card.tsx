@@ -15,9 +15,15 @@ import type { PendingRequest } from "../types";
 export function PendingCard({
 	pid,
 	pending,
+	count = 1,
 }: {
 	pid: number;
 	pending: PendingRequest;
+	/** Total requests waiting, including this one. A parallel tool batch can
+	    open several approvals at once; when >1 the card shows a "1 of N" badge
+	    so the user knows more follow, and answering this one reveals the next
+	    on the repaint. */
+	count?: number;
 }) {
 	const [remember, setRemember] = useState(false);
 	const [freeText, setFreeText] = useState("");
@@ -60,10 +66,17 @@ export function PendingCard({
 	return (
 		<div className="border-accent bg-accent-wash mx-2 flex flex-col gap-2 rounded-md border p-2.5">
 			<div className="flex flex-col gap-0.5">
-				<span className="text-meta text-accent">
-					{pending.kind === "approval"
-						? "approval needed"
-						: "question"}
+				<span className="flex items-center justify-between text-meta text-accent">
+					<span>
+						{pending.kind === "approval"
+							? "approval needed"
+							: "question"}
+					</span>
+					{count > 1 ? (
+						<span className="font-mono text-mono-sm text-ink-dim">
+							1 of {count}
+						</span>
+					) : null}
 				</span>
 				<span className="text-body font-medium">{pending.title}</span>
 				{pending.detail ? (

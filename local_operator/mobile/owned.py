@@ -58,15 +58,27 @@ class OwnedSessionHandle(SessionHandle):
         loop: asyncio.AbstractEventLoop,
         *,
         cwd: str,
+        auto_approve: bool = False,
     ) -> None:
         self._session = session
         self._loop = loop
+        # When the owner's saved default is full-auto (``tool_approval_mode:
+        # auto``), the phone must not park a card the TUI would never show —
+        # the gate is answered ``True`` inline instead. Stored so a future
+        # per-session toggle can flip it without reconstructing the handle.
+        self._auto_approve = auto_approve
         self._on_projection: Callable[[], None] | None = None
         self._projection = SessionProjection(
             session_id=session.session_id,
             pid=0,  # stamped by the registrant's record
             kind="daemon",
-            conversation_name=getattr(session, "conversation_name", "") or "mobile session",
+            # A restored session carries its stored name; a brand-new one has
+            # none yet and the naming errand (see prompt()) fills it after the
+            # first substantive turn. Left empty rather than a stand-in like
+            # "mobile session" so the phone's own fallback (the header shows
+            # "untitled", the list shows the cwd) is what the user sees until
+            # the real title lands, instead of a placeholder that never moves.
+            conversation_name=getattr(session, "conversation_name", "") or "",
             cwd=cwd,
             model_label=session.model_label,
             model_selector=_selector(session),
@@ -74,6 +86,13 @@ class OwnedSessionHandle(SessionHandle):
             effort_ladder=_ladder(session),
         )
         self._fold = ProjectionFold(self._projection)
+        # Conversation naming is a TUI-only errand today (OperatorApp owns the
+        # naming worker), so a phone-started session used to stay "mobile
+        # session" forever — the session list and the header both read the
+        # conversation name and had nothing better to show. This latch mirrors
+        # OperatorApp._name_requested: the first substantive prompt fires ONE
+        # background naming call, alongside the turn it decorates.
+        self._name_requested = False
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         # request_id -> the AskQuestion.id the harness is waiting on (the
@@ -85,10 +104,20 @@ class OwnedSessionHandle(SessionHandle):
 
     def _install_gates(self) -> None:
         async def approval_gate(tool_name: str, description: str) -> bool:
+            # Full-auto: the owner's saved default is to approve every tier,
+            # exactly as the TUI adopts ``tool_approval_mode: auto`` at boot
+            # (see OperatorApp._load_approvals_default). Answer inline so the
+            # turn never stalls on a card no front end would present.
+            if self._auto_approve:
+                return True
             request_id = secrets.token_hex(8)
             future: asyncio.Future[bool] = self._loop.create_future()
             self._pending_futures[request_id] = future
-            self._fold.set_pending(
+            # push_pending, not set_pending: a parallel tool batch can open two
+            # approvals concurrently, and each must get its own card. Clearing
+            # by request_id (pop_pending) is what keeps them independent — one
+            # answered card must not dismiss the sibling that is still waiting.
+            self._fold.push_pending(
                 PendingRequest(
                     request_id=request_id,
                     kind="approval",
@@ -103,7 +132,7 @@ class OwnedSessionHandle(SessionHandle):
                 return False
             finally:
                 self._pending_futures.pop(request_id, None)
-                self._fold.set_pending(None)
+                self._fold.pop_pending(request_id)
                 self._notify()
 
         async def ask_gate(questions: list[Any]) -> dict[str, list[str]] | None:
@@ -127,7 +156,7 @@ class OwnedSessionHandle(SessionHandle):
                     "mobile ask gate: %d questions, projecting the first only",
                     len(questions),
                 )
-            self._fold.set_pending(
+            self._fold.push_pending(
                 PendingRequest(
                     request_id=request_id,
                     kind="ask",
@@ -145,9 +174,15 @@ class OwnedSessionHandle(SessionHandle):
             finally:
                 self._pending_futures.pop(request_id, None)
                 self._pending_question_ids.pop(request_id, None)
-                self._fold.set_pending(None)
+                self._fold.pop_pending(request_id)
                 self._notify()
 
+        # Kept as attributes as well as registered on the session: the handle
+        # is the single owner of the gate behaviour, and holding the reference
+        # lets tests (and any future direct caller) exercise the exact closure
+        # the harness will await, rather than a re-implementation of it.
+        self._approval_gate = approval_gate
+        self._ask_gate = ask_gate
         self._session.set_approval_handler(approval_gate)
         self._session.set_ask_handler(ask_gate)
 
@@ -191,8 +226,58 @@ class OwnedSessionHandle(SessionHandle):
         # front so the common busy case answers immediately without a task.
         if self._session.is_streaming or getattr(self._session, "_compacting", False):
             return "not sent: session is busy — steer instead, or retry in a moment"
+        self._maybe_name_conversation(text)
         self._run_turn_task(text, image_blocks)
         return "prompt sent"
+
+    def _maybe_name_conversation(self, text: str) -> None:
+        """Name a still-unnamed conversation from its first real prompt.
+
+        The TUI's OperatorApp runs the full naming/re-titling machinery; the
+        phone only needs the FIRST-name half, because a mobile session opens
+        unnamed and the list/header have nothing to show until it is named.
+        Mirrors OperatorApp._maybe_name_conversation: skip low-signal openers
+        (a bare "hi" is usually followed by the real ask, and latching on it
+        would leave the session named after the greeting), fire at most once,
+        and run the call as a background task so the title arrives ALONGSIDE
+        the turn rather than after it.
+        """
+        from local_operator.session import naming
+
+        if self._name_requested or naming.is_low_signal(text):
+            return
+        if getattr(self._session, "conversation_name", ""):
+            # Already named (a restored session, or a prior prompt named it).
+            self._name_requested = True
+            return
+        self._name_requested = True
+        asyncio.ensure_future(self._name_conversation_worker(text))
+
+    async def _name_conversation_worker(self, text: str) -> None:
+        """Ask the model for a title once, cheaply, off the turn's lock.
+
+        ``session.complete_once`` is the same isolated, single-attempt, cheap
+        completion the TUI's naming worker uses — a 429 here is swallowed by
+        ``generate_title`` and cannot touch the turn. On success the title is
+        stored on the session (which persists it), then the projection is
+        refreshed and pushed so the phone's header and list update live.
+        """
+        from local_operator.session import naming
+
+        try:
+            title = await naming.generate_title(text, self._session.complete_once)
+        except Exception:  # noqa: BLE001 — naming is decoration; never fail a turn
+            logger.debug("mobile conversation naming failed", exc_info=True)
+            return
+        if not title or getattr(self._session, "conversation_name", ""):
+            # No title, or a user/restore named it while we were in flight:
+            # allow a later substantive prompt to retry only when still unnamed.
+            if not getattr(self._session, "conversation_name", ""):
+                self._name_requested = False
+            return
+        self._session.set_conversation_name(title, user_set=False)
+        self._refresh_state()
+        self._notify()
 
     def _run_turn_task(self, text: str, image_blocks: list["ImageContent"]) -> None:
         """Run the turn as a background task; a rejection surfaces as a notice,
@@ -368,6 +453,21 @@ async def spawn_owned_session(
     credential_manager = CredentialManager(config_dir=config_directory)
     agent_registry = AgentRegistry(config_dir=config_directory)
 
+    # The owner's saved tool-approval default. The TUI reads the SAME key at
+    # boot (OperatorApp._load_approvals_default) and adopts ``auto`` as
+    # "approve every tier"; a phone-started session must honour it too, or a
+    # device set to full-auto still pops an approval card the desktop would
+    # not. ``yolo`` stays False so the gate is INSTALLED (a per-session toggle
+    # can still switch to asking); the handle short-circuits it when auto.
+    try:
+        approval_mode = (
+            str(config_manager.get_config_value("tool_approval_mode", "ask")).strip().lower()
+        )
+    except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
+        logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
+        approval_mode = "ask"
+    auto_approve = approval_mode == "auto"
+
     args = argparse.Namespace(
         hosting=provider,
         model=model_id,
@@ -385,4 +485,4 @@ async def spawn_owned_session(
         has_ui=False,
         cwd=cwd,
     )
-    return OwnedSessionHandle(session, loop, cwd=cwd)
+    return OwnedSessionHandle(session, loop, cwd=cwd, auto_approve=auto_approve)

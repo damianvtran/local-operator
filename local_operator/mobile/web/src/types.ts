@@ -60,8 +60,20 @@ export interface TranscriptEntry {
 	elapsed_s: number;
 	error: string;
 	details: TranscriptEntryDetails;
+	/** Image attachments on a user turn, as lightweight references (never the
+	    bytes): each is `{index, mime_type}`. The pixels are fetched lazily from
+	    the image endpoint — see `imageUrl` in api.ts. */
+	images?: TranscriptImageRef[];
 	/** Assistant rows stream: `final` flips true on message_end. */
 	final: boolean;
+}
+
+/** A reference to one image block on a user turn. The bytes live in the
+    on-disk transcript and are served on demand, keyed by the entry id plus
+    this image-only index. */
+export interface TranscriptImageRef {
+	index: number;
+	mime_type: string;
 }
 
 export interface TodoItem {
@@ -125,6 +137,10 @@ export interface SessionProjection {
 	todos: TodoItem[];
 	subagents: SubagentRow[];
 	pending: PendingRequest | null;
+	/** How many requests are waiting in total (>= 1 while `pending` is set).
+	    A parallel tool batch can open several approvals at once; the card
+	    shows "1 of N" so the user knows more follow this one. */
+	pending_count: number;
 	/** input/output tokens. */
 	usage: Record<string, number>;
 	/** Projection epoch; drop stale repaints. */
@@ -173,6 +189,8 @@ export interface PastSession {
 export interface Directories {
 	home: string;
 	recent: string[];
+	/** The system temp dir, offered as a scratch start directory. */
+	tmp?: string;
 }
 
 /* ---- command ops (POST /api/sessions/{pid}/command) ---------------------- */

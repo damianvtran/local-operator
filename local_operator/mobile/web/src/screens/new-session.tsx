@@ -44,6 +44,30 @@ export function NewSessionScreen() {
 		);
 	}, [models, filter]);
 
+	/* The tagged quick-pick rows: home first, then the temp dir (a common
+	   scratch root the daemon now admits), then recent working directories.
+	   Deduped so a recent dir that IS home or tmp does not appear twice. Each
+	   row carries an explicit ``name`` because a bare basename is a poor label
+	   for some roots — the macOS temp dir resolves to
+	   ``/private/var/folders/…/T`` whose basename is a lone "T", so tmp is
+	   named "tmp" outright. */
+	const quickPicks = useMemo(() => {
+		if (!dirs) return [] as { path: string; name: string; tag: string }[];
+		const rows: { path: string; name: string; tag: string }[] = [
+			{ path: dirs.home, name: basename(dirs.home), tag: "home" },
+		];
+		if (dirs.tmp) rows.push({ path: dirs.tmp, name: "tmp", tag: "tmp" });
+		for (const p of dirs.recent) {
+			rows.push({ path: p, name: basename(p), tag: "recent" });
+		}
+		const seen = new Set<string>();
+		return rows.filter(({ path }) => {
+			if (!path || seen.has(path)) return false;
+			seen.add(path);
+			return true;
+		});
+	}, [dirs]);
+
 	const start = async () => {
 		if (!cwd.trim() || starting) return;
 		setStarting(true);
@@ -87,42 +111,49 @@ export function NewSessionScreen() {
 					>
 						working directory
 					</label>
+					{/* The quick-pick list is the primary path — tapping a row
+					   fills the field, so most sessions start with no typing at
+					   all. Each row is TAGGED (home / tmp / recent) so the
+					   choices read as a menu rather than an undifferentiated
+					   list of paths. The free-text field below stays for the
+					   uncommon "somewhere else" case. */}
+					{dirs ? (
+						<div className="flex flex-col gap-1">
+							{quickPicks.map(({ path, name, tag }) => (
+								<button
+									key={path}
+									type="button"
+									onClick={() => setCwd(path)}
+									className={cn(
+										"flex min-h-11 items-center gap-2 rounded-sm border border-control px-3 text-left active:bg-elevated",
+										cwd === path
+											? "border-accent bg-accent-wash"
+											: "bg-surface",
+									)}
+								>
+									<span className="shrink-0 font-mono text-mono-sm text-ink">
+										{name}
+									</span>
+									<span className="min-w-0 flex-1 truncate font-mono text-mono-sm text-ink-dim">
+										{shortenHome(path, dirs.home)}
+									</span>
+									<span className="shrink-0 rounded-sm bg-sunken px-1.5 py-0.5 text-meta text-ink-dim">
+										{tag}
+									</span>
+								</button>
+							))}
+						</div>
+					) : null}
 					<input
 						id="cwd-input"
 						value={cwd}
 						onChange={(e) => setCwd(e.target.value)}
+						placeholder="or type a path…"
 						spellCheck={false}
 						autoCapitalize="off"
 						autoCorrect="off"
-						className="min-h-11 rounded-sm border border-control bg-surface px-3 font-mono text-mono text-ink outline-none"
+						className="min-h-11 rounded-sm border border-control bg-surface px-3 font-mono text-mono text-ink outline-none placeholder:text-ink-dim"
 					/>
-					{dirs ? (
-						<div className="flex flex-col gap-1">
-							{[dirs.home, ...dirs.recent]
-								.filter(
-									(p, i, all) =>
-										p && all.indexOf(p) === i,
-								)
-								.map((p) => (
-									<button
-										key={p}
-										type="button"
-										onClick={() => setCwd(p)}
-										className={cn(
-											"flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-elevated",
-											cwd === p && "bg-accent-wash",
-										)}
-									>
-										<span className="shrink-0 font-mono text-mono-sm text-ink">
-											{basename(p)}
-										</span>
-										<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
-											{shortenHome(p, dirs.home)}
-										</span>
-									</button>
-								))}
-						</div>
-					) : null}
 				</section>
 
 				<section className="flex flex-col gap-2">
