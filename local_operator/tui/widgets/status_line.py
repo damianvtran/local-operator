@@ -858,6 +858,17 @@ class SubagentBand:
     #: The child's own age. ``None`` leaves the segment off rather than
     #: reporting the parent's cumulative active time under a child's title.
     duration: float | None = None
+    #: The child's own effort tier ("lo"/"med"/"hi"), recorded at launch on
+    #: ``AsyncJob.effort``. This exists because the child's MODEL is the one
+    #: thing the overlay exists to change, and a child launched with a
+    #: ``model_spec`` override runs a DIFFERENT model than the parent — for
+    #: which the parent's level is not merely stale but may name a rung that
+    #: model's ladder does not contain. ``_shown_effort`` used to blank the
+    #: segment entirely in that case (nothing beats a wrong number), but we now
+    #: KNOW the child's tier, so it can be named honestly beside its own model.
+    #: ``""`` = not recorded, and the segment falls back to the parent's level
+    #: only when the child inherited the parent's model (see ``_shown_effort``).
+    effort: str = ""
 
 
 class StatusLine:
@@ -1212,17 +1223,31 @@ class StatusLine:
     def _shown_effort(self) -> str:
         """The effort level for whichever model the band is describing.
 
-        Same rule as :meth:`_shown_model_name`, for the same reason: a child
-        built on the parent's spec IS running the parent's level (the spec is
-        copied whole, effort included), and that is the normal path, so blanking
-        it unconditionally would hide a true reading on the common case.
+        The overlay now carries the child's OWN tier (``SubagentBand.effort``,
+        from ``AsyncJob.effort`` recorded at launch), and it wins whenever it is
+        set: the tier is a launch fact true of any model the child runs, so it
+        is the honest reading even for a different-model child — which is the
+        case that used to show nothing.
 
-        A DIFFERENT model gets nothing rather than a guess. The overlay carries
-        no level of its own, and the segment's whole contract is that it names
-        the level in force — an empty segment says "not known here", which is
-        the only honest thing the band can say about a ladder it cannot see.
+        Only when the overlay carries no tier does the old inherit-if-same-model
+        rule apply: a child built on the parent's spec IS running the parent's
+        level (the spec is copied whole, effort included), so blanking that
+        would hide a true reading on the common path; a DIFFERENT model with no
+        recorded tier still gets nothing rather than a level its ladder may not
+        contain, which is the only honest thing the band can say about a ladder
+        it cannot see.
         """
         if self._subagent is not None:
+            # The overlay's OWN tier wins when it carries one: it was recorded
+            # at the child's launch and is true regardless of which model the
+            # child runs, so it is the honest reading even on a different-model
+            # child — the case that previously showed nothing at all.
+            if self._subagent.effort:
+                return self._subagent.effort
+            # No recorded tier: fall back to the parent's level ONLY when the
+            # child inherited the parent's model (the spec is copied whole,
+            # effort included). A different model with no recorded tier still
+            # gets nothing rather than a level its ladder may not contain.
             if self._subagent.model_label == self._model_label:
                 return self._effort
             return ""

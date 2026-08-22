@@ -1069,6 +1069,57 @@ async def test_the_launch_prompt_is_recorded_on_the_job(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_launch_role_and_effort_are_recorded_on_the_job(tmp_path, monkeypatch):
+    """The child's ROLE and effort TIER are stamped on the job at registration,
+    on the same rule as `prompt`: the title and the status band name what kind
+    of child this is and at what level, and a job still QUEUED behind the
+    capacity gate (which never entered its runner) must still be able to say
+    both. Effort is recorded here rather than derived from the resolved model
+    spec because a tier does not survive that resolution — two tiers can point
+    at one model, and a child on the parent's own model still ran at a chosen
+    level the band should name."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    job_id = parent._launch_subagent(
+        label="research", prompt="map the repo", agent="scout", effort="hi"
+    )
+    job = parent.jobs.get(job_id)
+    assert job is not None
+    assert job.agent_role == "scout"
+    assert job.effort == "hi"
+
+    await wait_for(
+        lambda: (settled := parent.jobs.get(job_id)) is not None and settled.status == "completed"
+    )
+    settled = parent.jobs.get(job_id)
+    # Both survive settlement, like `prompt`: the page stays honest after the
+    # child finishes.
+    assert settled is not None
+    assert settled.agent_role == "scout" and settled.effort == "hi"
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_task_launched_without_an_effort_records_none(tmp_path, monkeypatch):
+    """The None-means-not-recorded convention: a plain task with no tier records
+    `effort=None`, distinct from a recorded value, so the band's inherit-if-
+    same-model fallback (not a printed level) applies."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    job_id = parent._launch_subagent(label="plain", prompt="do the work")
+    job = parent.jobs.get(job_id)
+    assert job is not None
+    assert job.agent_role == "task"
+    assert job.effort is None
+    await wait_for(
+        lambda: (settled := parent.jobs.get(job_id)) is not None and settled.status == "completed"
+    )
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_scout_preamble_reaches_the_provider_turn(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     stream = OneShotStream()

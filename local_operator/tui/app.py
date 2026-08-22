@@ -6957,6 +6957,13 @@ class OperatorApp(App[None]):
             prompt=str(getattr(job, "prompt", None) or ""),
             events=getattr(job, "trajectory", None) or [],
             progress=str((getattr(job, "latest_details", None) or {}).get("progress") or ""),
+            # Launch-time identity: the child's role and effort tier, recorded
+            # on the job at registration (`AsyncJob.agent_role`/`effort`). The
+            # title names them so the page says WHAT kind of child this is; the
+            # band below gets the effort by a separate path (`_point_band_at`)
+            # because it belongs to the model segment there.
+            agent_role=str(getattr(job, "agent_role", None) or ""),
+            effort=str(getattr(job, "effort", None) or ""),
         )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(job_id)
@@ -7021,6 +7028,15 @@ class OperatorApp(App[None]):
                 context_tokens=stats.context_tokens,
                 context_window=stats.context_window,
                 cost=cost,
+                # The child's own effort tier, recorded at launch on
+                # `AsyncJob.effort`. Carried so the band names the level even
+                # for a child on a DIFFERENT model than the parent — the case
+                # `_shown_effort` used to blank, because the parent's level is
+                # not a fact about another model's ladder. Empty when not
+                # recorded, and the band then falls back to inherit-if-same-
+                # model. Role is deliberately NOT carried: it is an identity
+                # fact the page title owns, not a property of the model segment.
+                effort=str(getattr(job, "effort", None) or ""),
                 # No duration. The page's title carries the child's age three
                 # rows above this, and the band's right group was otherwise
                 # reproducing the row beneath it cell for cell. The band keeps

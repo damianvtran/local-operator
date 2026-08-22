@@ -791,6 +791,15 @@ class SubagentView(Vertical):
         self._status = "running"
         self._queued = False
         self._elapsed = "0s"
+        #: The child's ROLE and effort TIER, recorded on the job at launch
+        #: (``AsyncJob.agent_role``/``effort``). Shown in the title so the page
+        #: names WHAT kind of child this is and at what level, not only its
+        #: label — a scout reads very differently from a full task. Empty
+        #: means not recorded; the ladder omits the field rather than inventing
+        #: one, and the default "task" role is treated as noise (see
+        #: ``_title_row``).
+        self._agent_role = ""
+        self._effort = ""
         #: The job's settled ``result_text``, verbatim. Read for ONE fact the
         #: page cannot otherwise know: a job cancelled while still parked never
         #: ran, so its duration is parked time and the bare word ``cancelled``
@@ -855,6 +864,8 @@ class SubagentView(Vertical):
         events: Sequence[Any],
         prompt: str = "",
         progress: str = "",
+        agent_role: str = "",
+        effort: str = "",
     ) -> None:
         """Point the page at a job's current state and reconcile the body.
 
@@ -880,6 +891,11 @@ class SubagentView(Vertical):
         self._queued = queued
         self._elapsed = elapsed
         self._outcome = strip_control_sequences(outcome or "").strip()
+        # Role and effort are launch-time facts and never change under a running
+        # child, but they still ride every refresh so a page that opened before
+        # the job was fully registered picks them up on the next poll.
+        self._agent_role = strip_control_sequences(agent_role or "").strip()
+        self._effort = strip_control_sequences(effort or "").strip()
         self._running = status == "running" and not queued
         gone = status == "gone"
 
@@ -1033,7 +1049,20 @@ class SubagentView(Vertical):
         # length paints a stale header. Sound on its own, rather than by way
         # of the spinner happening to repaint eight times a second.
         tools = sum(1 for entry in self._entries if entry.kind == "tool")
-        state = (self._label, self._status, self._queued, self._elapsed, tools, width, spinner)
+        # Role and effort are part of what the title paints, so they belong in
+        # the memo key: without them a page retargeted from a task to a scout
+        # (same label width, different role) would keep the stale header.
+        state = (
+            self._label,
+            self._status,
+            self._queued,
+            self._elapsed,
+            tools,
+            width,
+            spinner,
+            self._agent_role,
+            self._effort,
+        )
         if self._chrome_state == state:
             return
         self._chrome_state = state
@@ -1061,7 +1090,7 @@ class SubagentView(Vertical):
         self._rule.update(self._rule_text, layout=False)
 
     def _title_row(self, width: int, spinner: str, tools: int) -> Text:
-        """``Subagent · <label>  <glyph> <status> · <elapsed> · <n> tools``.
+        """``Subagent · <role> · <label>  <glyph> <status> · <effort> · <elapsed> · <n> tools``.
 
         The breadcrumb is dim and the LABEL carries the base ink, which
         inverts the usage card's ``Usage  <target>`` weighting on purpose:
@@ -1069,6 +1098,16 @@ class SubagentView(Vertical):
         noun only says which surface you are on and the label is the title of
         the page being read — and it is the same string the band row beneath
         already paints at ``fg``.
+
+        The ROLE rides the breadcrumb (``Subagent · scout · <label>``) because
+        it is an identity fact about the page, read together with the surface
+        name. The default ``task`` role is SUPPRESSED as noise — every child is
+        a task unless told otherwise, so printing it says nothing — while a
+        ``scout`` or any other non-default role is named. The EFFORT tier sits
+        with the status group (``running · hi · 2m23s``): it qualifies the run
+        the way the band's effort segment qualifies the model, and it is kept
+        longer than the elapsed clock because the tier is part of why the page
+        was opened, where the clock is the same value the band already carries.
 
         Seams are ``faint`` and values ``dim``, one tone per role.
 
@@ -1118,6 +1157,14 @@ class SubagentView(Vertical):
         else:
             word_choices = [word]
         glyph_style = Style(color=theme_mod.semantic_color(token))
+        # The role rides the breadcrumb but is the MOST disposable field: it is
+        # identity sugar the label already half-carries, so it is the first
+        # thing to leave when the row tightens (the ``role_present`` loop is the
+        # INNERMOST below — a rung is tried WITH the role first and WITHOUT it
+        # second, so the role yields before any status field or the clock). The
+        # default ``task`` role is never shown: every child is a task unless
+        # told otherwise, so the word says nothing a reader did not assume.
+        role_seg = self._agent_role if self._agent_role and self._agent_role != "task" else ""
         # Most disposable first. The glyph is never dropped: it is the one
         # field that survives a colourless frame and the only one that still
         # answers "is this running" at a width where nothing else fits.
@@ -1134,30 +1181,55 @@ class SubagentView(Vertical):
                 if tools:
                     tail.append((f" · {tools} tool{'' if tools == 1 else 's'}", dim))
                 tail.append((f" · {self._elapsed}", dim))
+                # Effort sits AFTER elapsed in the list, so it is dropped LATER
+                # (the ladder peels ``tail`` from the front): the tier is part
+                # of why the page was opened, where the clock only repeats the
+                # band. It renders between the state word and the clock —
+                # ``running · hi · 2m23s`` — because it qualifies the run the
+                # way the band's effort segment qualifies the model.
+                if self._effort:
+                    tail.append((f" · {self._effort}", dim))
                 tail.append((f" {word_choice}", dim))
                 rungs = len(tail) if keep_word else len(tail) + 1
                 for dropped in range(rungs):
                     fields = tail[dropped:]
-                    # The label gets whatever the fields do not want, floored
-                    # at eight cells so it never vanishes entirely — it is the
-                    # page's subject. The fixed chrome is the breadcrumb AND
-                    # the glyph: counting only the 13 breadcrumb cells left
-                    # the budget one short, so a rung whose label consumed it
-                    # exactly was rejected and the ladder fell through —
-                    # non-monotone in width, with the state word visible at
-                    # 35 cells and gone again at 36-40 where it still fit.
-                    spend = sum(cell_len(text) for text, _ in fields) + 13 + cell_len(glyph)
-                    label = truncate_cells(self._label, max(8, width - spend))
-                    row = Text(no_wrap=True, overflow="ellipsis")
-                    row.append("Subagent", style=dim)
-                    row.append(" · ", style=faint)
-                    row.append(label, style=fg)
-                    row.append("  ", style=dim)
-                    row.append(glyph, style=glyph_style)
-                    for text, style in reversed(fields):
-                        row.append(text, style=style)
-                    if cell_len(row.plain) <= width:
-                        return row
+                    # The role is the MOST disposable field on the row: at each
+                    # rung the layout is tried WITH it and then WITHOUT it, so
+                    # the role leaves before any tail field or the clock does
+                    # (a narrower width never loses a status field to keep the
+                    # role). Only offered when there is a non-default role to
+                    # show; otherwise the single ``False`` pass is the old row.
+                    for keep_role in (True, False) if role_seg else (False,):
+                        role_chrome = cell_len(f"{role_seg} · ") if keep_role else 0
+                        # The label gets whatever the fields do not want,
+                        # floored at eight cells so it never vanishes entirely —
+                        # it is the page's subject. The fixed chrome is the
+                        # breadcrumb AND the glyph (and the role, when shown):
+                        # counting only the 13 breadcrumb cells left the budget
+                        # one short, so a rung whose label consumed it exactly
+                        # was rejected and the ladder fell through — non-monotone
+                        # in width, with the state word visible at 35 cells and
+                        # gone again at 36-40 where it still fit.
+                        spend = (
+                            sum(cell_len(text) for text, _ in fields)
+                            + 13
+                            + cell_len(glyph)
+                            + role_chrome
+                        )
+                        label = truncate_cells(self._label, max(8, width - spend))
+                        row = Text(no_wrap=True, overflow="ellipsis")
+                        row.append("Subagent", style=dim)
+                        row.append(" · ", style=faint)
+                        if keep_role:
+                            row.append(role_seg, style=dim)
+                            row.append(" · ", style=faint)
+                        row.append(label, style=fg)
+                        row.append("  ", style=dim)
+                        row.append(glyph, style=glyph_style)
+                        for text, style in reversed(fields):
+                            row.append(text, style=style)
+                        if cell_len(row.plain) <= width:
+                            return row
         # Narrower than the breadcrumb itself: keep the two things that
         # identify the page, and let the label take the ellipsis.
         row = Text(no_wrap=True, overflow="ellipsis")
