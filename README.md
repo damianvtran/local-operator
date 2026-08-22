@@ -69,10 +69,11 @@ schedule its own follow-ups.
 - **Approval-gated execution.** Reads are automatic; writes and shell commands
   ask first. `/approvals auto` (or `--yolo`) opts out deliberately, per
   session or as a saved default.
-- **Parallel work.** The agent fans out background subagents for independent
-  slices, keeps working while they run, and reports back — you can peek at,
-  steer, or cancel any of them. Reusable agent profiles and multi-agent teams
-  are built in.
+- **An agent workforce, not just an agent.** Fan work out to concurrent
+  subagents with tool-restricted roles (a `reviewer` that cannot edit what it
+  reviews), author reusable agent profiles, and save whole teams — a manager
+  plus a roster — you launch by name with `/team`. Peek at, steer, pause, or
+  cancel any worker mid-flight.
 - **A session you can leave and come back to.** Transcripts persist,
   `/resume` picks up where you left off, and context compaction runs itself
   before the window fills, so long sessions don't fall off a cliff.
@@ -176,7 +177,8 @@ left, and what did this session cost?
 | `/usage`, `/context` | Provider quota and spend · what's occupying the context window |
 | `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
 | `/search` | Configure web-search providers and load balancing |
-| `/skills`, `/mcp`, `/team` | List loaded skills · MCP servers · manage teams |
+| `/team` | Launch a saved team: `/team <name> <request>` puts a manager and roster on it |
+| `/skills`, `/mcp` | List loaded skills · MCP servers |
 | `/theme`, `/rename` | Pick from 20+ built-in themes (arrows preview live) · rename the session |
 
 ### Keys worth knowing
@@ -265,14 +267,31 @@ The same controls are available in-app via `/search`.
 
 ### 🤝 Subagents, agent profiles, and teams
 
-Ask for parallel work and the agent splits it into concurrent background
-subagents, each with a role (`reviewer`, `coder`, `scout`, …) that carries
-vetted guidance. You can watch, steer, pause, or cancel any of them from the
-TUI's subagent panel.
+This is where Local Operator stops being a chatbot and starts being a staff.
 
-Roles and specialists are reusable **agent profiles** (`agent` tool), and a
-manager-plus-roster **team** can be saved and launched by name. Agents can
-also be managed from the CLI:
+**Subagents.** Ask for parallel work and the agent fans it out into concurrent
+background workers, then keeps working while they run. Each worker is
+addressable: peek at its transcript, send it a note, ask it a question, steer
+it onto a different course, pause it, or resume it later — all without
+burning its attention on status meetings.
+
+**Roles are capability boundaries, not just prompts.** A subagent launched as
+`reviewer` carries vetted review guidance *and loses the tools to edit code*
+— it can read and run tests but cannot alter what it reviews, which is what
+keeps a review honest. Packaged starters ship for `reviewer`, `coder`,
+`architect`, `manager`, `designer`, and `scout`, and you can author your own
+**agent profiles**: reusable roles and named specialists with their own
+instruction sets, matched to tasks by semantic routing. When a profile gives
+bad guidance, you fix the profile once — not every prompt that uses it.
+
+**Teams.** A saved roster — a manager plus members with counts — layered with
+two briefs the individual agents never hard-code: a *collaboration* brief (how
+this group works together, who blocks a release) and a *project* brief (what
+product this instance owns). Swap the project brief and the same roster staffs
+a different product. Launch one with `/team <name> <request>` and the manager
+delegates from there.
+
+Agents can also be managed from the CLI:
 
 ```bash
 local-operator agents create "My Agent"
