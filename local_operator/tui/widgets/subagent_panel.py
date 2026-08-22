@@ -59,7 +59,16 @@ GLYPH_QUEUED = "⏳"
 #: persisted roster on resume (see ``AsyncJobManager`` status ``interrupted``).
 #: Its own mark — neither ✓ (it did not finish) nor ✗ (it did not fail): the
 #: run was cut off, and if its transcript survived it can be resumed.
-GLYPH_INTERRUPTED = "⇥"
+#:
+#: ``↺`` (U+21BA) over the earlier ``⇥``: the tab-arrow read as a Tab key once
+#: the accompanying word dropped under the panel's narrow-width reduction
+#: (design review round 1, D1), whereas the open circle-arrow says "suspended,
+#: pick it back up" — which is exactly the resumability the state carries, so
+#: it doubles as the D2 cue. Chosen for width too: it is ``east_asian_width=N``
+#: (locked to one cell) and outside the emoji-presentation block, so unlike the
+#: media-control marks (``⏸``/``⏯``, siblings of the wide ``⏳`` queued glyph) it
+#: cannot balloon to a two-cell colour emoji and shear the time column.
+GLYPH_INTERRUPTED = "↺"
 
 #: Rows the panel spends on chrome rather than on jobs: the ``Subagents``
 #: caption. Named because :meth:`SubagentPanel.predicted_rows` adds it to the
