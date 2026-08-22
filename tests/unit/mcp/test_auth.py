@@ -9,6 +9,7 @@ through the real SQLite store.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -1763,6 +1764,71 @@ class TestInflightRefreshCoordination:
         await self._drive_auth_flow(provider)
 
         assert lock_calls["n"] == 0  # never entered the coordination path
+
+    @pytest.mark.asyncio
+    async def test_a_transport_error_mid_flow_releases_the_sdk_lock(self) -> None:
+        """httpx re-raises a transport fault INTO the auth flow mid-yield. The
+        manual pump must close the SDK's inner generator so its ``context.lock``
+        (held across the whole flow) is released — otherwise every later request
+        to this server deadlocks. Regression guard for the F1 blocker."""
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="valid", refresh_token="r", expires_in=3600)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+
+        provider = build_oauth_provider(
+            self.URL, self._cfg(), store=store, endpoints=self._endpoints()
+        )
+
+        import httpx
+
+        gen = provider.async_auth_flow(httpx.Request("POST", self.URL))
+        # Advance to the first yield (the request the SDK wants sent), then throw
+        # a transport error INTO the flow the way httpx's _send_handling_auth
+        # does on a failed send.
+        await gen.__anext__()
+        with pytest.raises(httpx.ConnectError):
+            await gen.athrow(httpx.ConnectError("connection reset"))
+        with contextlib.suppress(Exception):
+            await gen.aclose()
+
+        # The SDK holds context.lock across async_auth_flow; if the inner
+        # generator was left suspended it would still be held here.
+        assert not provider.context.lock.locked(), "SDK context.lock leaked after a mid-flow error"
+
+    @pytest.mark.asyncio
+    async def test_closing_the_flow_early_releases_the_sdk_lock(self) -> None:
+        """httpx always ``aclose()``s the outer auth flow in a ``finally``. When
+        it does so before the flow finished, the inner SDK generator must be
+        closed too so the lock is released (GeneratorExit path of F1)."""
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="valid", refresh_token="r", expires_in=3600)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+
+        provider = build_oauth_provider(
+            self.URL, self._cfg(), store=store, endpoints=self._endpoints()
+        )
+
+        import httpx
+
+        gen = provider.async_auth_flow(httpx.Request("POST", self.URL))
+        await gen.__anext__()  # advance to the first yield
+        await gen.aclose()  # close before feeding a response
+
+        assert not provider.context.lock.locked(), "SDK context.lock leaked after early close"
 
     @pytest.mark.asyncio
     async def test_no_endpoints_falls_back_to_sdk_refresh(

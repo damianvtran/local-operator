@@ -383,6 +383,52 @@ class TestStartupSettleReporting:
         await manager.disconnect_all()
 
 
+class TestStartupSettleStaleRound:
+    """A continuation that fails AFTER its round was superseded must not write
+    the new round's startup accounting or fire its settle callback (F2)."""
+
+    @pytest.mark.asyncio
+    async def test_stale_failed_continuation_does_not_touch_the_current_round(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"fast": {"type": "stdio", "command": "fast-cmd"},'
+            ' "slow": {"type": "stdio", "command": "slow-cmd"}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        slow_release = asyncio.Event()
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            if name == "slow":
+                await asyncio.wait_for(slow_release.wait(), timeout=10)
+                raise RuntimeError("slow failed after the gate")
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        settled: list[bool] = []
+        manager.on_startup_settled = lambda: settled.append(True)
+
+        await manager.discover_and_connect()
+        assert manager.startup_settling() is True
+
+        # Supersede the round the way reload()/dispose() would, WITHOUT going
+        # through _connect_round (which would legitimately reset the accumulators
+        # anyway): bump the epoch so the in-flight continuation is now stale.
+        manager._epoch += 1
+
+        # Now let the stale continuation fail. It must not record into the
+        # (freshly bumped) round's accumulator, nor fire the settle callback.
+        slow_release.set()
+        await asyncio.sleep(0.05)
+
+        assert settled == []
+        assert manager.startup_failures() == {}
+        await manager.disconnect_all()
+
+
 class TestDeferredExecuteFailure:
     @pytest.mark.asyncio
     async def test_deferred_execute_error_when_connect_fails(

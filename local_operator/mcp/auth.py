@@ -1767,17 +1767,53 @@ def _make_refresh_coordinating_provider(
             # every ``response = yield`` and crash on ``response.status_code``).
             # Manual pumping is the only correct way to delegate a receiving
             # async generator — there is no ``yield from`` for them.
+            #
+            # The whole pump is wrapped so the inner generator is ALWAYS closed
+            # and any exception/cancellation is delivered INTO it, never dropped
+            # on the floor. This matters because the SDK's ``async_auth_flow``
+            # holds ``context.lock`` across its entire body: httpx re-raises a
+            # transport error mid-flow (``_send_handling_auth`` does
+            # ``raise exc`` after ``response.aclose()``), and if we let that
+            # unwind past us without closing ``inner``, the SDK generator is
+            # suspended forever at its ``yield`` still holding the lock — every
+            # later request to this server then deadlocks on ``context.lock``.
+            # ``athrow`` runs the SDK's own ``finally`` (which releases the lock
+            # via the ``async with`` exit); ``aclose`` covers the GeneratorExit
+            # path when httpx closes the OUTER flow (its ``finally:
+            # await auth_flow.aclose()``).
             inner = super().async_auth_flow(request)
             try:
-                outgoing = await inner.__anext__()
-            except StopAsyncIteration:
-                return
-            while True:
-                response = yield outgoing
                 try:
-                    outgoing = await inner.asend(response)
+                    outgoing = await inner.__anext__()
                 except StopAsyncIteration:
                     return
+                while True:
+                    try:
+                        response = yield outgoing
+                    except GeneratorExit:
+                        # The outer flow is being closed (httpx's finally, or a
+                        # cancellation): close the inner one so the SDK unwinds
+                        # its lock, then let the close propagate.
+                        raise
+                    except BaseException as exc:  # noqa: BLE001
+                        # An exception thrown INTO us (httpx ``athrow`` on a
+                        # transport fault): deliver it into the SDK generator so
+                        # its ``finally`` runs and the lock is released, then
+                        # relay whatever it yields or re-raises.
+                        try:
+                            outgoing = await inner.athrow(exc)
+                        except StopAsyncIteration:
+                            return
+                        continue
+                    try:
+                        outgoing = await inner.asend(response)
+                    except StopAsyncIteration:
+                        return
+            finally:
+                # Unconditional: a normal return, a raise, or a GeneratorExit all
+                # pass through here, so the SDK generator (and its held lock) is
+                # never left suspended. Idempotent if already exhausted/closed.
+                await inner.aclose()
 
     return _RefreshCoordinatingOAuthProvider(**kwargs)
 

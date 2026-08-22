@@ -1714,14 +1714,25 @@ class McpManager:
                 # The startup toast has already been dismissed by the time an
                 # after-gate connect fails, so raise a fresh one via the UI hook.
                 self._fire_auth_required(name, auth_exc)
-            # Record the failure into the round accumulator (an auth requirement
-            # as its actionable text, else the raw reason) and settle this
-            # deferred server BEFORE firing tools-changed, so the front end that
-            # re-reports on settle sees the complete failure map.
-            if isinstance(auth_exc, McpAuthRequiredError):
-                self._startup_failures[name] = self._auth_required_text(name, auth_exc)
-            else:
-                self._startup_failures[name] = str(exc)
+            # Whether this continuation still belongs to the CURRENT round. A
+            # reload()/dispose() during the await bumps the epoch, and a stale
+            # continuation must not write the new round's startup accounting —
+            # the success arm below already guards on this, and the failure arm
+            # needs the same guard for the accumulator and the settle callback
+            # (F2). The waiter-settling and auth-required surfacing below are
+            # NOT guarded: a parked waiter must fail rather than hang, and the
+            # incident/toast reflect a real failure regardless of which round
+            # owns it.
+            current_round = not self._disposed and epoch == self._epoch
+            if current_round:
+                # Record the failure into the round accumulator (an auth
+                # requirement as its actionable text, else the raw reason) and
+                # settle this deferred server BEFORE firing tools-changed, so the
+                # front end that re-reports on settle sees the complete map.
+                if isinstance(auth_exc, McpAuthRequiredError):
+                    self._startup_failures[name] = self._auth_required_text(name, auth_exc)
+                else:
+                    self._startup_failures[name] = str(exc)
             # Re-fetch the waiter: a reload during the await may have swapped
             # it, and settling the stale one would strand the current waiters.
             _settle_future_error(self._connect_futures.get(name), exc)
@@ -1729,7 +1740,8 @@ class McpManager:
             self._tools_by_server.pop(name, None)  # drop the deferred slice
             self._unregister_origins(name)
             self._rebuild_agent_names()
-            self._settle_deferred(name)
+            if current_round:
+                self._settle_deferred(name)
             self._fire_tools_changed()
             return
         if self._disposed or epoch != self._epoch:
