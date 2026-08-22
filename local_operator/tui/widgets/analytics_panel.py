@@ -207,6 +207,36 @@ def _semantic(name: str) -> Style:
     return Style(color=theme_mod.semantic_color(name))
 
 
+#: The glyph that marks a section header. A single low-weight bullet in the
+#: accent tint, set one column into the left margin so the eye finds the section
+#: starts down the panel without the shouting of all-caps. The app nowhere else
+#: uses all-caps headers — its list sections (``/agent``, ``/team``, ``/skills``)
+#: are lowercase bold ``fg`` — so the analytics headers follow that voice and add
+#: only this quiet marker to delineate the larger sections a scrolling report has.
+_SECTION_MARK = "▌"
+
+
+def _section_header(title: str, meta: str = "") -> Text:
+    """A section header in the app's own voice: title-case, bold ``fg``, marked.
+
+    NOT all-caps (review: the app uses that pattern nowhere else). The ``▌``
+    accent bar in the left margin is the delineation — it gives a scrolling
+    report a scannable left edge for its major sections the way a rule would,
+    without a full-width line between every group. ``meta`` is a dim trailing
+    note (a count, the estimate caveat) that qualifies the section without
+    competing with its name.
+    """
+    fg_bold = Style(color=theme_mod.semantic_color("fg"), bold=True)
+    accent = Style(color=theme_mod.semantic_color("accent"))
+    dim = Style(color=theme_mod.semantic_color("dim"))
+    row = Text()
+    row.append(_SECTION_MARK + " ", style=accent)
+    row.append(title, style=fg_bold)
+    if meta:
+        row.append(f"   {meta}", style=dim)
+    return row
+
+
 def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     """Render one aggregate as a list of ``Text`` lines for the screen body.
 
@@ -216,7 +246,6 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     """
     width = max(40, width)
     fg = _semantic("fg")
-    label = _semantic("label")
     dim = _semantic("dim")
     accent = _semantic("accent")
 
@@ -237,14 +266,12 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
         return lines
 
     # -- headline totals -----------------------------------------------------
-    section = Text()
-    section.append("TOTALS", style=label + Style(bold=True))
-    section.append(f"   {aggregate.calls} calls", style=dim)
+    calls_meta = f"{aggregate.calls} calls"
     if aggregate.ok_calls != aggregate.calls:
-        # Failed-call count is real information, not chrome — keep it legible.
-        section.append(f" ({aggregate.calls - aggregate.ok_calls} failed)", style=dim)
-    section.append("   measured", style=_semantic("faint"))
-    lines.append(section)
+        # Failed-call count is real information, not chrome — keep it in the meta.
+        calls_meta += f" ({aggregate.calls - aggregate.ok_calls} failed)"
+    calls_meta += " · measured"
+    lines.append(_section_header("Totals", calls_meta))
 
     def kv(name: str, value: str, note: str = "") -> Text:
         row = Text()
@@ -303,16 +330,11 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     lines.append(Text())
 
     # -- input attribution (estimated) --------------------------------------
-    heading = Text()
-    heading.append("WHERE INPUT WENT", style=label + Style(bold=True))
-    # ``dim`` not ``faint`` (D1): the word "estimated" is the whole reason this
-    # section reads differently from TOTALS, so it must be legible, not the
-    # lowest-contrast text on the panel. The distinction is ALSO carried at the
-    # data level — the heading is marked ``≈`` and every percentage below is
-    # prefixed ``~`` — so it survives when this heading has scrolled under the
-    # pinned header (the case the design round flagged in 02-by-session).
-    heading.append("   ≈ estimated split of context tokens", style=dim)
-    lines.append(heading)
+    # The estimate caveat rides the section meta (``dim``, not ``faint``): the
+    # word "estimated" is why this section reads differently from Totals, and it
+    # is ALSO carried at the data level — the ``≈`` mark and the ``~`` on every
+    # percentage below — so the distinction survives the heading scrolling away.
+    lines.append(_section_header("Where input went", "≈ estimated split of context tokens"))
 
     rows = _component_rows(aggregate)
     if not rows:
@@ -359,11 +381,11 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
         name_col = 0
 
     if aggregate.by_provider:
-        lines.append(_group_section("BY PROVIDER", aggregate.by_provider, width, name_col))
+        lines.append(_group_section("By provider", aggregate.by_provider, width, name_col))
         lines.append(Text())
 
     if session_labelled:
-        lines.append(_group_section("BY SESSION", session_labelled, width, name_col))
+        lines.append(_group_section("By session", session_labelled, width, name_col))
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
@@ -404,11 +426,10 @@ def _group_section(
     cost column this feature adds always survives.
     """
     fg = _semantic("fg")
-    label = _semantic("label")
     dim = _semantic("dim")
 
-    block = Text()
-    block.append(title, style=label + Style(bold=True))
+    # Same marked, title-case header as every other section (no all-caps).
+    block = _section_header(title)
 
     # Sort by cost when any of these groups is priced, else by tokens. Keyed on
     # the tuple so an unpriced group sorts by tokens as a tiebreak rather than
@@ -501,11 +522,23 @@ class AnalyticsScreen(ModalScreen[None]):
             return 88
 
     def _title_text(self) -> Text:
-        label = Style(color=theme_mod.semantic_color("label"))
+        # ``fg`` bold, matching the ``/usage`` panel's title (and the app's list
+        # headers) rather than the violet ``label`` — one title voice across the
+        # overlays. A ``─`` rule under it (second line) delineates the pinned
+        # header from the scrolling body, the same device ``/usage`` uses.
+        fg = Style(color=theme_mod.semantic_color("fg"), bold=True)
         faint = Style(color=theme_mod.semantic_color("faint"))
-        title = Text()
-        title.append("Usage analytics", style=label + Style(bold=True))
-        title.append("  ·  all sessions", style=faint)
+        # ``no_wrap`` + crop so the rule (and the title's suffix) CROP to the
+        # widget's real content box instead of wrapping. ``_card_width`` floors
+        # at 40, but the painted title box is narrower on a sub-46-col terminal
+        # (review MINOR): an unbounded ``─`` run would wrap to a second line and
+        # eat into the fixed ``height: 3``. Cropping keeps the rule one line at
+        # any width; the report rows already truncate per-row for the same reason.
+        title = Text(no_wrap=True, overflow="crop")
+        title.append("Usage analytics", style=fg)
+        title.append("   all sessions", style=faint)
+        title.append("\n")
+        title.append("─" * max(1, self._card_width()), style=faint)
         return title
 
     def _hint_text(self, *, scrollable: bool) -> Text:

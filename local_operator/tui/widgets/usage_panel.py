@@ -67,6 +67,23 @@ MARK_UNKNOWN = "○"
 #: account-wide windows above it rather than as a peer that gates everything.
 TIER_INDENT = "  "
 
+#: The scrollbar occupies the body's rightmost column. Its gutter is reserved in
+#: EVERY state (see :meth:`UsagePanel._body_content_width`), not only while the
+#: bar is drawn: reserving it conditionally would slide the report's
+#: right-aligned numbers one column left the instant the bar appeared, which is
+#: exactly the reflow the transcript avoids with ``scrollbar-gutter: stable``.
+SCROLLBAR_GUTTER_CELLS = 1
+
+#: Track vs thumb glyphs. The track is a hairline so the reserved column reads
+#: as a place to aim a drag rather than a right-hand border (the same reason the
+#: transcript's idle bar is ``edge``, not ``dim``); the thumb is a solid block a
+#: pointer can grab. Colours are semantic and mirror the transcript scrollbar's
+#: idle/active intent: ``edge`` track, ``muted`` idle thumb, ``accent`` while a
+#: drag is in flight. (No hover tint — a hand-painted ``Static`` has no cheap
+#: per-cell hover, and the gesture that matters, the grab, is the active state.)
+SCROLLBAR_TRACK = "│"
+SCROLLBAR_THUMB = "█"
+
 #: Panel geometry. The width cap is a measure, not a fraction of the terminal:
 #: a label, a bar and two numbers need about seventy cells and gain nothing from
 #: two hundred. The width margin keeps the card off the screen's edge padding.
@@ -535,6 +552,15 @@ class UsagePanel(Static):
         # paint. The dock can grow without resizing this overlay, so Textual
         # emits no resize event for the panel itself.
         self._layout_shown: tuple[int, int, int] | None = None
+        #: True between a mouse-down on the scrollbar and its release. Held so the
+        #: thumb can light to ``accent`` while a drag is in flight (its only
+        #: "active" affordance) and so a move only scrolls when it CONTINUES a
+        #: grab — a bare hover over the column must not drag the report.
+        self._dragging = False
+        #: Where on the thumb the grab took hold (rows from the thumb's top), so
+        #: the thumb tracks the pointer instead of jumping its top to it. A track
+        #: click seeds this with half the thumb so the thumb centres on the click.
+        self._drag_grab = 0
         self.display = False
 
     # -- state ---------------------------------------------------------------
@@ -730,6 +756,105 @@ class UsagePanel(Static):
         event.stop()
         self._scroll_by(-1)
 
+    # -- drag-scroll ---------------------------------------------------------
+    # The scrollbar is grabbable. Every handler stops the event for the same
+    # reason the wheel does: the card floats over the transcript, so a gesture
+    # left to bubble would drag both the quota list and the conversation behind
+    # it. Coordinates arrive widget-relative, but this widget (unlike the picker)
+    # carries CSS padding, so `get_content_offset_capture` maps the pointer
+    # through the widget's LIVE gutter to the content box the composed rows fill.
+    # Reading the gutter rather than a padding constant is also what keeps the
+    # hit-test correct in the CSS-less test host (gutter 0) and while `-squeezed`
+    # (top padding dropped) without either case being special-cased here.
+    def on_mouse_down(self, event) -> None:  # noqa: ANN001 - Textual event type
+        """Begin a drag if the press landed in the scrollbar column.
+
+        A press on the thumb grabs it where it was touched (so it tracks the
+        pointer rather than snapping its top to the cursor); a press on the bare
+        track jumps the thumb's centre there and then drags from that point. A
+        press anywhere else in the card is left to the base widget.
+        """
+        hit = self._scrollbar_hit(event)
+        if hit is None:
+            return
+        event.stop()
+        row_in_body, thumb_top, thumb_len = hit
+        if thumb_top <= row_in_body < thumb_top + thumb_len:
+            self._drag_grab = row_in_body - thumb_top
+        else:
+            # Track click: centre the thumb on the pointer, then drag from there.
+            self._drag_grab = thumb_len // 2
+            self._apply_thumb_top(row_in_body - self._drag_grab)
+        self._dragging = True
+        self.capture_mouse()
+        self._repaint()
+
+    def on_mouse_move(self, event) -> None:  # noqa: ANN001 - Textual event type
+        """While grabbed, map the pointer's body row to a new offset."""
+        if not self._dragging:
+            return
+        event.stop()
+        budget = self._body_budget()
+        first_row, _ = self._body_region(budget)
+        row_in_body = self._content_row(event) - first_row
+        self._apply_thumb_top(row_in_body - self._drag_grab)
+
+    def on_mouse_up(self, event) -> None:  # noqa: ANN001 - Textual event type
+        """Release the grab; the offset stays where the drag left it."""
+        if not self._dragging:
+            return
+        event.stop()
+        self._dragging = False
+        self.release_mouse()
+        self._repaint()
+
+    def _content_offset(self, event):  # noqa: ANN001, ANN201 - Textual event type
+        """Pointer position in the content box (composed-row coordinates).
+
+        ``get_content_offset_capture`` subtracts the widget's live gutter
+        (padding here), so ``(0, 0)`` is the title cell regardless of the card's
+        padding — which differs between the real stylesheet, the CSS-less test
+        host, and the ``-squeezed`` state. Kept as one call so the down/move/hit
+        paths cannot drift on how they read coordinates.
+        """
+        return event.get_content_offset_capture(self)
+
+    def _content_row(self, event) -> int:  # noqa: ANN001 - Textual event type
+        return self._content_offset(event).y
+
+    def _scrollbar_hit(self, event) -> tuple[int, int, int] | None:  # noqa: ANN001
+        """``(row_in_body, thumb_top, thumb_len)`` if the press is on the bar.
+
+        ``None`` when the body is not scrollable, when the press is left of the
+        reserved gutter column, or when it is above/below the track. Sharing the
+        region and thumb maths with the painter is what keeps the grab target
+        exactly under the glyph the user sees.
+        """
+        body = self._body()
+        budget = self._body_budget()
+        total = len(body.lines)
+        if total <= budget:
+            return None
+        offset = self._content_offset(event)
+        # The bar is the single content column just past the body's composed
+        # width (the reserved gutter). Content x, so no padding term is needed.
+        if offset.x != self._body_content_width():
+            return None
+        first_row, count = self._body_region(budget)
+        row_in_body = offset.y - first_row
+        if not 0 <= row_in_body < count:
+            return None
+        thumb_top, thumb_len = self._scrollbar_thumb(total, budget)
+        return row_in_body, thumb_top, thumb_len
+
+    def _apply_thumb_top(self, thumb_top: int) -> None:
+        """Move the offset so the thumb's top lands at ``thumb_top`` and repaint."""
+        body = self._body()
+        budget = self._body_budget()
+        target = self._offset_from_thumb_top(thumb_top, len(body.lines), budget)
+        self._offset = max(0, min(self._max_offset(), target))
+        self._repaint()
+
     def _scroll_by(self, delta: int) -> None:
         """Scroll, CLAMPED rather than wrapping.
 
@@ -755,6 +880,19 @@ class UsagePanel(Static):
 
     def _content_width(self) -> int:
         return max(1, self.panel_width() - PANEL_PADDING_CELLS)
+
+    def _body_content_width(self) -> int:
+        """Width the SCROLLING rows are composed to — one column narrower.
+
+        The rightmost body column is the scrollbar's, reserved in every state
+        (see ``SCROLLBAR_GUTTER_CELLS``). Composing the report to this width
+        rather than the full content width is what pins the report's
+        right-aligned numbers: they measure the same available cells whether or
+        not the bar is currently drawn, so toggling scrollable/not-scrollable
+        never slides a column sideways. The chrome rows (title, rule, footer)
+        keep the full width — the bar lives only in the body window.
+        """
+        return max(1, self._content_width() - SCROLLBAR_GUTTER_CELLS)
 
     def _rows_above_dock(self) -> int:
         return overlay.rows_above_dock(self)
@@ -812,10 +950,101 @@ class UsagePanel(Static):
                 return start
         return raw
 
+    # -- scrollbar -----------------------------------------------------------
+    # ONE source of truth for "which composed rows are the scrolling viewport",
+    # shared by the painter (_paint_scrollbar) and the hit-test (the mouse
+    # handlers). Deriving it twice is how a bar ends up drawn one row off from
+    # where a drag thinks it is.
+    def _note_shown(self) -> bool:
+        """Whether the pinned failed-refresh note occupies a chrome row.
+
+        Mirrors the condition in :meth:`_compose_rows`; the note sits between the
+        rule and the window, so it shifts where the body region begins.
+        """
+        return bool(self._refresh_failed and self._reports)
+
+    def _body_region(self, budget: int) -> tuple[int, int]:
+        """``(first_row, row_count)`` of the scrolling viewport in composed rows.
+
+        ``first_row`` is the index of the first body row: title (0), rule (1),
+        then the optional failed-refresh note. ``row_count`` is the viewport
+        height — the budget, NOT ``len(window)``: the track is a fixed-height
+        reference the thumb slides inside, so it spans the give-back blanks a
+        short block leaves below the window as well as the window itself. The
+        spacer row above the meta is deliberately outside this span, so it stays
+        blank (the pinned-height tests read it).
+        """
+        return 2 + (1 if self._note_shown() else 0), budget
+
+    def _scrollbar_thumb(self, total: int, budget: int) -> tuple[int, int]:
+        """``(thumb_top, thumb_len)`` inside a ``budget``-tall track.
+
+        Proportional both ways, the standard model: the thumb is the fraction of
+        the track that the viewport is of the content (``budget/total``), and its
+        top is that fraction of the free travel that the offset is of its range.
+        Guards ``total`` (a scrolled body has ``total > budget >= 1``, but the
+        division is defended anyway) and a zero travel range (a thumb as tall as
+        the track never moves).
+        """
+        track = max(1, budget)
+        thumb = max(1, min(track, round(track * budget / total))) if total > 0 else track
+        span = track - thumb
+        max_off = self._max_offset()
+        top = round(span * self._offset / max_off) if (span > 0 and max_off > 0) else 0
+        return max(0, min(span, top)), thumb
+
+    def _offset_from_thumb_top(self, thumb_top: int, total: int, budget: int) -> int:
+        """Invert :meth:`_scrollbar_thumb`: a thumb top → the offset that places it.
+
+        The drag's whole job. Clamped to the thumb's travel and scaled back onto
+        the offset range, so dragging the thumb to the track's bottom lands on
+        ``_max_offset`` exactly and a track with no travel is a no-op.
+        """
+        _, thumb = self._scrollbar_thumb(total, budget)
+        span = max(1, budget) - thumb
+        max_off = self._max_offset()
+        if span <= 0 or max_off <= 0:
+            return 0
+        return round(max(0, min(span, thumb_top)) / span * max_off)
+
+    def _paint_scrollbar(self, rows: list[Text], budget: int, total: int) -> None:
+        """Overlay the bar on the viewport rows' rightmost (reserved) column.
+
+        Mutates ``rows`` in place: each viewport row is padded to the body width
+        the report was composed to (``_body_content_width``) and then the track
+        or thumb glyph is appended in the one gutter column beyond it, so the
+        report's numbers never move and the bar never widens the card. Only the
+        ``budget`` viewport rows are touched — the spacer and the meta below keep
+        their full width and their emptiness.
+        """
+        first_row, count = self._body_region(budget)
+        thumb_top, thumb_len = self._scrollbar_thumb(total, budget)
+        body_width = self._body_content_width()
+        edge = Style(color=theme_mod.semantic_color("edge"))
+        # `muted` idle, `accent` while grabbed — the transcript scrollbar's
+        # idle/active intent, minus the hover step a hand-painted Static cannot
+        # afford per cell. The grab is the state worth signalling.
+        thumb_idle = Style(color=theme_mod.semantic_color("muted"))
+        thumb_active = Style(color=theme_mod.semantic_color("accent"))
+        for i in range(count):
+            index = first_row + i
+            if index >= len(rows):
+                break
+            row = rows[index]
+            row.pad_right(max(0, body_width - row.cell_len))
+            on_thumb = thumb_top <= i < thumb_top + thumb_len
+            glyph = SCROLLBAR_THUMB if on_thumb else SCROLLBAR_TRACK
+            style = (thumb_active if self._dragging else thumb_idle) if on_thumb else edge
+            row.append(glyph, style=style)
+
     # -- rendering -----------------------------------------------------------
     def _body(self) -> UsageBody:
         dim = Style(color=theme_mod.semantic_color("dim"))
-        width = self._content_width()
+        # The body is one column narrower than the chrome: its rightmost cell is
+        # the scrollbar gutter, reserved so the report's numbers do not reflow
+        # when the bar appears. Chrome rows (title/rule/footer) span the full
+        # width — the bar is painted only over the body window.
+        width = self._body_content_width()
         if self._error:
             danger = Style(color=theme_mod.semantic_color("danger"))
             # Error text commonly comes from a provider and is unbounded. The
@@ -969,6 +1198,14 @@ class UsagePanel(Static):
             position.append(str(len(lines)), style=dim)
             rows.append(position)
         rows.append(self._hint_row(scrolled))
+        # The bar is the last thing painted, over the reserved rightmost column
+        # of the viewport rows, and ONLY when the body actually overflows: an
+        # unscrollable report reserves the gutter (so nothing reflows) but shows
+        # no bar, matching the `↑↓`/position chrome, which also appear only when
+        # `scrolled`. It adds no row and changes no width, so `_repaint`'s pinned
+        # height and `_body_budget` are untouched.
+        if scrolled:
+            self._paint_scrollbar(rows, budget, len(lines))
         return rows
 
     def _window_rows(self, body: UsageBody, budget: int) -> tuple[list[Text], int]:

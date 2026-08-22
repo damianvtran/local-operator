@@ -1337,15 +1337,33 @@ AnalyticsScreen .analytics-panel {
 }
 
 #analytics-title {
+    /* Title line + a `─` rule under it (two lines), then a blank padding row
+     * before the scrolling body. */
     width: 100%;
-    height: 2;
+    height: 3;
     padding-bottom: 1;
 }
 
 #analytics-scroll {
     width: 100%;
     height: 1fr;
+    /* A grabbable scrollbar consistent with the transcript's: `edge` keeps it
+     * structurally quiet when idle, hover lights it to `muted` so a pointer
+     * finds a target to drag. `scrollbar-gutter: stable` reserves the column so
+     * the report's right-aligned number columns do not shift when the thumb
+     * appears. Textual's own scrollbar is draggable, so styling it IS the
+     * "grab and drag to scroll" affordance. */
     scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-sunken;
+    /* `muted` idle (not `edge`) so this bar reads as the SAME chrome as the
+     * hand-painted `/usage` thumb, whose idle glyph is `muted` (design D1/D2):
+     * an `edge`-idle bar was near-invisible next to the bright `/usage` one, so
+     * the two overlays spoke two scrollbar languages and scroll was hard to
+     * discover here. Hover/active still step up so the grab target is obvious. */
+    scrollbar-color: $lo-muted;
+    scrollbar-color-hover: $lo-muted;
+    scrollbar-color-active: $lo-accent;
 }
 
 #analytics-body {
