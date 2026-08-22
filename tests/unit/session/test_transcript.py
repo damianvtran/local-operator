@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
@@ -28,6 +29,58 @@ async def test_append_message_writes_jsonl(transcript):
     assert raw["type"] == "message"
     assert raw["payload"]["role"] == "user"
     assert raw["payload"]["content"][0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_append_recreates_a_vanished_directory(tmp_path):
+    """The session must survive its directory being deleted underneath it.
+
+    A sibling process's startup sweep (or a user tidying ``sessions/`` by
+    hand) can remove a directory that still looks empty — the gap between
+    Session construction and the first turn is as long as the user takes to
+    type. The old behaviour was fatal: the first append raised
+    ``FileNotFoundError: .../transcript.jsonl`` and the whole session died.
+    The append now recreates the directory and rebuilds the file from the
+    in-memory entries, so nothing already appended is lost either.
+    """
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("before the deletion"))
+
+    shutil.rmtree(directory)  # what the racing sweep used to do
+
+    await transcript.append_message(Message.assistant("after the deletion"))
+
+    lines = transcript.path.read_text().splitlines()
+    assert len(lines) == 2  # rebuilt complete, not truncated to the new row
+    texts = [json.loads(line)["payload"]["content"][0]["text"] for line in lines]
+    assert texts == ["before the deletion", "after the deletion"]
+
+
+@pytest.mark.asyncio
+async def test_append_rebuilds_when_only_the_file_vanished(tmp_path):
+    """The quieter variant of the vanished-directory wound (review R1-1).
+
+    Deleting just ``transcript.jsonl`` with the directory intact never
+    raises: ``"a"`` mode recreates the file, so the append "succeeds" while
+    the file silently holds one row and memory holds the whole session — a
+    resume would then replay a single message as if the rest never
+    happened. The append must notice the file is gone and rebuild it
+    complete from the in-memory entries.
+    """
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("one"))
+    await transcript.append_message(Message.assistant("two"))
+
+    transcript.path.unlink()  # the user tidied the file, not the directory
+
+    await transcript.append_message(Message.user("three"))
+
+    lines = transcript.path.read_text().splitlines()
+    assert len(lines) == 3  # rebuilt complete, not restarted at one row
+    texts = [json.loads(line)["payload"]["content"][0]["text"] for line in lines]
+    assert texts == ["one", "two", "three"]
 
 
 @pytest.mark.asyncio
