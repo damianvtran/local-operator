@@ -60,8 +60,9 @@ schedule its own follow-ups.
 ## ✨ Why Local Operator
 
 - **A real terminal UI, not a REPL.** A full-screen [Textual](https://textual.textualize.io/)
-  app with streamed responses, expandable tool cards, session resume, themes,
-  and a status line that tells you what the agent is doing and what it costs.
+  app with streamed responses, expandable tool cards, session resume, 20+
+  built-in themes with live preview, and a status line that tells you what
+  the agent is doing and what it costs.
 - **Sign in with the account you already have.** OAuth login for OpenAI
   (ChatGPT), Anthropic (Claude), Kimi, xAI, Z.AI, and Qwen — or bring an API
   key, or run entirely offline with Ollama.
@@ -136,10 +137,12 @@ your signed-in providers offer, with fuzzy filtering:
 </p>
 
 Ask for parallel work and the agent delegates: the subagent dock shows each
-worker's status live, and you can open any of them to watch its transcript:
+worker's status, spend, and progress live, and you can open any of them to
+watch its transcript. (This shot also shows one of the 20+ built-in themes —
+`/theme` previews them live as you arrow through the list.)
 
 <p align="center">
-  <img src="./static/tui-subagents.png" alt="The subagent panel with several background workers running concurrently" width="720">
+  <img src="./static/tui-subagents.png" alt="The subagent dock in an alternate built-in theme: three concurrent workers with elapsed time, context usage, and cost per worker, above the shared todo list" width="720">
 </p>
 
 Coming back later is `/resume` — a picker over your recent sessions, each
