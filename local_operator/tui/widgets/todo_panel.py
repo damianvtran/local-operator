@@ -407,11 +407,16 @@ class TodoPanel(Container):
         then clips to width uniformly.
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
-        # The single-phase back-compat path is chosen on phase COUNT alone, not
-        # the name: any lone phase renders headerless, because a header on the
-        # only phase is redundant with the root ``Todos`` line and would break
-        # the byte-identical guarantee the existing goldens depend on.
-        if len(phases) == 1:
+        # The headerless back-compat path is the IMPLICIT single phase only, so
+        # the panel and the ``view`` receipt make the identical choice (design
+        # §5.2 — one list spelled one way). ``builtin._todo_view_text`` gates its
+        # headerless output on exactly this predicate
+        # (``len == 1 and name == _IMPLICIT_PHASE``); gating on COUNT alone here
+        # dropped a lone EXPLICITLY-named phase's header in the dock while the
+        # receipt kept it, so the two surfaces disagreed (U5). The byte-identical
+        # flat store still routes here because a legacy flat ``init`` coerces to
+        # exactly one implicit ``"Todos"`` phase.
+        if len(phases) == 1 and phases[0]["name"] == _IMPLICIT_PHASE:
             lines = self._build_flat(phases[0]["items"])
         else:
             lines = self._build_phased(phases, hidden)
@@ -539,17 +544,32 @@ class TodoPanel(Container):
             considered = [p for p in phases if p["name"] not in hidden]
 
         active_idx = _active_phase_index(considered)
-        total = len(considered)
 
         # Root progression line — always shown, never counted in the item cap,
         # mirroring the single-phase header's status as the one non-negotiable
         # line. omp's ``Todos · i/n`` (interactive-mode.ts:2280): muted name, dim
         # progression, because stage progression is context, not the count the
         # panel exists to add.
+        #
+        # The ``stage`` label is load-bearing (D1/U1). Without it, ``Todos · 2/3``
+        # wears the EXACT ``done/total`` grammar of the phase headers one line
+        # below (``Auth · 0/2``), in the same column and ink — so a reader parses
+        # the root as a completion fraction and sees "finished" while work
+        # remains, the one thing a progress panel must never say. The root's
+        # number is a phase POINTER, not a count; the word breaks the collision.
+        # It is spelled over the ABSOLUTE phase set (``phases``), not the collapsed
+        # ``considered`` view, so an auto-hidden settled phase cannot make three
+        # stages read as two — the stage total is a fact about the plan, not
+        # about what currently fits on screen. Multi-phase always has >= 2
+        # phases (a lone implicit phase routes to ``_build_flat``), so the stage
+        # line is present in every state, including all-settled-and-hidden where
+        # the count used to collapse to a bare ``Todos`` (U6).
+        active_stage = _active_phase_index(phases)
+        total_stages = len(phases)
         root = Text(no_wrap=True, overflow="ellipsis")
         root.append("Todos", style=muted)
-        if total:
-            root.append(f" · {active_idx + 1}/{total}", style=dim)
+        if total_stages:
+            root.append(f" · stage {active_stage + 1}/{total_stages}", style=dim)
 
         # Items hidden from THIS view that the affordance line must confess.
         # Split done/open so an affordance can never label an open item "done" —
@@ -615,21 +635,59 @@ class TodoPanel(Container):
         room = max(1, self._body_rows() - 1)  # after the root line
         show_affordance = room > 1
         body_cap = room - 1 if show_affordance else room
-        if len(body) > body_cap:
-            for _text, is_item, is_open in body[body_cap:]:
-                if not is_item:
-                    continue
-                if is_open:
-                    hidden_open += 1
-                else:
-                    hidden_done += 1
-            body = body[:body_cap]
+        # Guarantee at least one ITEM survives (U2). On the shortest terminals
+        # ``body_cap`` is 1 and the walking viewport puts a phase header at
+        # ``body[0]``, so a naive ``body[:cap]`` kept the header and painted zero
+        # todos — the panel read as empty though six existed, strictly worse than
+        # the flat list it replaces. ``_fit_body`` drops the header before the
+        # item, matching the flat path's ``room == 1 keeps the item`` floor.
+        body, dropped = self._fit_body(body, body_cap)
+        for _text, is_item, is_open in dropped:
+            if not is_item:
+                continue
+            if is_open:
+                hidden_open += 1
+            else:
+                hidden_done += 1
 
         lines = [root]
         lines.extend(text for text, _is_item, _is_open in body)
         if show_affordance:
             lines.append(self._affordance_row(hidden_done, hidden_open))
         return lines
+
+    def _fit_body(
+        self, body: list[tuple[Text, bool, bool]], cap: int
+    ) -> tuple[list[tuple[Text, bool, bool]], list[tuple[Text, bool, bool]]]:
+        """Clip the flattened header+item rows to ``cap`` while GUARANTEEING at
+        least one item survives when any exists (U2).
+
+        Returns ``(kept, dropped)``; ``dropped`` is what the affordance count
+        must confess. A naive ``body[:cap]`` regressed the short terminal: with
+        ``cap == 1`` the walking viewport puts a phase HEADER at ``body[0]``, so
+        the slice kept the header and painted zero todos — the panel read as
+        empty though six existed, strictly worse than the flat list it replaces
+        (which keeps the item at the same height). When the slice is all chrome
+        but items exist below the fold, trade the lowest-priority kept header for
+        the first dropped item, so a real todo is always visible. This is the
+        phased mirror of ``_build_flat``'s ``room == 1 keeps the item`` floor:
+        an item is worth more than a header whose count the root line implies.
+        """
+        if cap <= 0:
+            return [], list(body)
+        kept = body[:cap]
+        dropped = body[cap:]
+        if not any(is_item for _t, is_item, _o in kept) and any(
+            is_item for _t, is_item, _o in dropped
+        ):
+            first_item = next(i for i, (_t, is_item, _o) in enumerate(dropped) if is_item)
+            item = dropped[first_item]
+            # Evict the trailing kept row (a header — the slice is all headers)
+            # to make room, and hand it to ``dropped`` so the count stays whole.
+            evicted = kept[-1]
+            kept = [*kept[:-1], item]
+            dropped = [evicted, *dropped[:first_item], *dropped[first_item + 1 :]]
+        return kept, dropped
 
     def _phase_header_row(self, name: str, done: int, total: int) -> Text:
         """A phase header ``PhaseName · done/total`` — muted name, dim progress,
@@ -653,9 +711,17 @@ class TodoPanel(Container):
         case, hidden settled phases), ``+N more`` when any open item is hidden.
         Expanded: ``ctrl+t to collapse``, plus a ``+N more`` prefix if the row
         budget still had to drop items (expanded is bounded by ``_body_rows()``
-        too, §7.6). Dim throughout: chrome, not a todo.
+        too, §7.6).
+
+        The hidden-count prefix stays ``dim`` (chrome — a running total), but the
+        ``ctrl+t`` hotkey token steps up to ``muted`` (D3/U3): fully ``dim`` it is
+        4.18:1 on the band's ground, and this line is the ONLY signal the toggle
+        exists, so a user who never squints at it never learns the panel expands.
+        ``muted`` is 7.93:1 — the same call ``_item_row`` makes for the one row
+        that asks for action (the blocked reason).
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
         row = Text(no_wrap=True, overflow="ellipsis")
         total_hidden = hidden_done + hidden_open
         if total_hidden:
@@ -663,7 +729,7 @@ class TodoPanel(Container):
                 row.append(f"+{total_hidden} more · ", style=dim)
             else:
                 row.append(f"+{hidden_done} done · ", style=dim)
-        row.append("ctrl+t to collapse" if self._expanded else "ctrl+t to expand", style=dim)
+        row.append("ctrl+t to collapse" if self._expanded else "ctrl+t to expand", style=muted)
         return row
 
     # -- budgets --------------------------------------------------------------
