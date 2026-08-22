@@ -15,8 +15,11 @@ Rewrite constraints (docs/REWRITE.md section E + backward-compat contracts):
 - No module-level import of textual / providers / session internals / TUI:
   those are lazy-imported at the point of use so ``import local_operator.cli``
   stays cheap and cannot break while parallel rewrite streams are mid-flight.
-- Exit codes preserved: 0 success, -1 legacy error banner; ``exec`` returns
-  0/1 per the README contract.
+- Exit codes: 0 success, 1 on error; ``exec`` returns 0/1 per the README
+  contract. (Failure paths previously returned -1, which a shell reports as
+  255 — colliding with the xargs/ssh "command not found" sentinel and
+  contradicting the exec 0/non-zero contract. Item A13 changed them to 1; a
+  quiet cancel returns 130, the SIGINT convention.)
 
 Example Usage:
     local-operator --hosting deepseek --model deepseek-chat
@@ -680,7 +683,7 @@ def config_open_command() -> int:
             "\n\033[1;31mError: Configuration file does not exist.  Create one with "
             "`config create`.\033[0m"
         )
-        return -1
+        return 1
 
     try:
         if platform.system() == "Windows":
@@ -693,7 +696,7 @@ def config_open_command() -> int:
         return 0
     except Exception as e:
         print(f"\n\033[1;31mError opening configuration file: {e}\033[0m")
-        return -1
+        return 1
 
 
 def config_edit_command(args: argparse.Namespace) -> int:
@@ -829,7 +832,7 @@ def mobile_command(args: argparse.Namespace) -> int:
             print("  it is never printed here, so it cannot leak into a transcript.")
             return 0
         print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
-        return -1
+        return 1
 
     if command == "status":
         result = mobile_install.status()
@@ -855,7 +858,7 @@ def mobile_command(args: argparse.Namespace) -> int:
         result = mobile_install.service_action(command)
         if not result["ok"]:
             print(f"\n\033[1;31m{result['error']}\033[0m")
-            return -1
+            return 1
         print(f"mobile daemon {command} ok")
         return 0
 
@@ -906,7 +909,7 @@ def mobile_command(args: argparse.Namespace) -> int:
         return 0
 
     print("usage: lop mobile {install|status|start|stop|restart|logs|password|uninstall|serve}")
-    return -1
+    return 1
 
 
 def serve_command(host: str, port: int, reload: bool) -> int:
@@ -924,7 +927,7 @@ def serve_command(host: str, port: int, reload: bool) -> int:
             f"\n\033[1;31m{missing_extra_error('server', 'The HTTP API server')}\033[0m",
             file=sys.stderr,
         )
-        return -1
+        return 1
 
     print(f"Starting server at http://{host}:{port}")
     if reload:
@@ -998,10 +1001,10 @@ def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
             name = input("\033[1;36mEnter name for new agent: \033[0m").strip()
             if not name:
                 print("\n\033[1;31mError: Agent name cannot be empty\033[0m")
-                return -1
+                return 1
         except (KeyboardInterrupt, EOFError):
             print("\n\033[1;31mAgent creation cancelled\033[0m")
-            return -1
+            return 1
 
     from local_operator.agents import AgentEditFields  # lazy: heavy module
 
@@ -1073,7 +1076,7 @@ def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
         )
     except ValueError as exc:
         print(f"\n\033[1;31mError: {exc}\033[0m")
-        return -1
+        return 1
     print("\n\033[1;32m╭─ Created New Team ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Name: {team.name}\033[0m")
     print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
@@ -1087,7 +1090,7 @@ def teams_show_command(name: str, team_registry: Any) -> int:
     team = team_registry.get_team_by_name(name)
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
-        return -1
+        return 1
     print(f"\n\033[1;32m╭─ Team {team.name} ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
     if team.description:
@@ -1112,7 +1115,7 @@ def teams_delete_command(name: str, team_registry: Any) -> int:
     team = team_registry.get_team_by_name(name)
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
-        return -1
+        return 1
     team_registry.delete_team(team.id)
     print(f"\n\033[1;32mSuccessfully deleted team: {name}\033[0m")
     return 0
@@ -1130,7 +1133,7 @@ def agents_delete_command(
         matching_agents = [a for a in agents if a.name == name]
         if not matching_agents:
             print(f"\n\033[1;31mError: No agent found with name: {name}\033[0m")
-            return -1
+            return 1
 
         agent = matching_agents[0]
         agent_registry.delete_agent(agent.id)
@@ -1144,7 +1147,7 @@ def agents_delete_command(
         api_key = credential_manager.get_credential("RADIENT_API_KEY")
         if not api_key:
             print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
-            return -1
+            return 1
         config_manager = ConfigManager(config_dir)
         base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
         radient_client = RadientClient(api_key=api_key, base_url=base_url)
@@ -1157,10 +1160,10 @@ def agents_delete_command(
             return 0
         except Exception as e:
             print(f"\n\033[1;31mError deleting agent from Radient: {e}\033[0m")
-            return -1
+            return 1
     else:
         print("\n\033[1;31mError: Must provide --name or --id for delete\033[0m")
-        return -1
+        return 1
 
 
 # --- Additive subcommand handlers (rewrite) --------------------------------
@@ -1185,7 +1188,7 @@ def login_command(args: argparse.Namespace) -> int:
         from local_operator.providers.auth_cli import run_login
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
-        return -1
+        return 1
     auth_store, credential_manager = _build_auth_stack(config_dir())
     try:
         return run_login(getattr(args, "provider", None), credential_manager, auth_store)
@@ -1199,7 +1202,7 @@ def logout_command(args: argparse.Namespace) -> int:
         from local_operator.providers.auth_cli import run_logout
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
-        return -1
+        return 1
     auth_store, _credential_manager = _build_auth_stack(config_dir())
     try:
         return run_logout(args.provider, auth_store)
@@ -1213,7 +1216,7 @@ def login_status_command() -> int:
         from local_operator.providers.auth_cli import list_logins
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
-        return -1
+        return 1
     auth_store, credential_manager = _build_auth_stack(config_dir())
     try:
         return list_logins(auth_store, credential_manager)
@@ -1295,7 +1298,7 @@ def mcp_command(args: argparse.Namespace) -> int:
         from local_operator.mcp import config as mcp_config
     except ImportError:
         print("\n\033[1;31mError: MCP support is not available in this build\033[0m")
-        return -1
+        return 1
 
     if args.mcp_command == "list":
         servers = mcp_config.list_effective_servers(Path.cwd())
@@ -1313,7 +1316,7 @@ def mcp_command(args: argparse.Namespace) -> int:
         for item in getattr(args, "server_env", None) or []:
             if "=" not in item:
                 print(f"\n\033[1;31mError: --env expects KEY=VALUE, got: {item}\033[0m")
-                return -1
+                return 1
             key, value = item.split("=", 1)
             env[key] = value
         return mcp_config.add_server(
@@ -1346,7 +1349,7 @@ def mcp_command(args: argparse.Namespace) -> int:
         return mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
 
     print(f"\n\033[1;31mError: Invalid mcp command: {args.mcp_command}\033[0m")
-    return -1
+    return 1
 
 
 # --- Session factory facade -------------------------------------------------
@@ -1390,7 +1393,7 @@ def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
             f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m",
             file=sys.stderr,
         )
-        return -1
+        return 1
     os.chdir(run_in_path)
     # These are OPERATOR notices, not data: they must go to stderr so they
     # never interleave into the `exec --json` event stream on stdout.
@@ -1504,7 +1507,7 @@ def _preflight_hosting_model(
         # the two consistent is what stops the next person wiring this into the
         # exec route from reintroducing a stdout leak.
         print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
-        return -1
+        return 1
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
 
@@ -1589,7 +1592,7 @@ def _preflight_api_key(
         f"login {canonical}`.\033[0m",
         file=sys.stderr,
     )
-    return -1
+    return 1
 
 
 #: Third-party modules the `server` extra provides. Used to decide whether a
@@ -1813,7 +1816,7 @@ def main() -> int:
                     print(
                         "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
                     )
-                    return -1
+                    return 1
                 config_manager = ConfigManager(base_dir)
                 base_url = config_manager.get_config_value(
                     "radient_base_url", "https://api.radienthq.com"
@@ -1826,17 +1829,17 @@ def main() -> int:
                     agent = agent_registry.get_agent_by_name(args.name)
                     if not agent:
                         print(f"\n\033[1;31mError: No agent found with name: {args.name}\033[0m")
-                        return -1
+                        return 1
                 elif getattr(args, "id", None):
                     try:
                         agent = agent_registry.get_agent(args.id)
                         agent_id_to_overwrite = args.id
                     except KeyError:
                         print(f"\n\033[1;31mError: No agent found with ID: {args.id}\033[0m")
-                        return -1
+                        return 1
                 else:
                     print("\n\033[1;31mError: Must provide --name or --id for push\033[0m")
-                    return -1
+                    return 1
                 zip_path, _ = agent_registry.export_agent(agent.id)
                 try:
                     agent_id = agent_registry.upload_agent_to_radient(
@@ -1855,7 +1858,7 @@ def main() -> int:
                     return 0
                 except Exception as e:
                     print(f"\n\033[1;31mError pushing agent to Radient: {e}\033[0m")
-                    return -1
+                    return 1
             elif args.agents_command == "pull":
                 # Pull agent from Radient
                 from local_operator.clients.radient import RadientClient  # lazy
@@ -1878,7 +1881,7 @@ def main() -> int:
                     return 0
                 except Exception as e:
                     print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
-                    return -1
+                    return 1
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "teams":
@@ -1949,13 +1952,13 @@ def main() -> int:
                     # (`exec --json` with a bad or absent hosting/model) is the
                     # most likely one to be scripted.
                     print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
-                    return -1
+                    return 1
                 except Exception as exc:  # noqa: BLE001
                     print(
                         f"\n\033[1;31mError: preflight failed: {exc}\033[0m",
                         file=sys.stderr,
                     )
-                    return -1
+                    return 1
                 key_result = _preflight_api_key(hosting, CredentialManager(base_dir))
                 if key_result is not None:
                     return key_result
@@ -2021,7 +2024,7 @@ def main() -> int:
                 else:
                     # This case should logically not happen
                     print("\n\033[1;31mError: Failed to create or retrieve agent.\033[0m")
-                    return -1
+                    return 1
 
         # Legacy behavior: the auto-save config value persists interactive
         # sessions via the registry's autosave agent (exec is excluded —
@@ -2068,7 +2071,7 @@ def main() -> int:
                         "build/install (missing 'local_operator.tui'); remove "
                         "--tui to use the plain REPL.\033[0m"
                     )
-                    return -1
+                    return 1
                 use_tui = False
 
         # asyncio is imported HERE, not at module scope. It is the heaviest
@@ -2194,7 +2197,7 @@ def main() -> int:
             "\n\033[1;33mPlease review and correct the error to continue.\033[0m",
             file=sys.stderr,
         )
-        return -1
+        return 1
 
 
 if __name__ == "__main__":

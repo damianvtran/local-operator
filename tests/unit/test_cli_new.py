@@ -491,7 +491,7 @@ def test_agents_delete_command_not_found() -> None:
     registry = MagicMock()
     registry.list_agents.return_value = []
     args = argparse.Namespace(name="Ghost", agent_id=None)
-    assert agents_delete_command(args, registry, Path(".")) == -1
+    assert agents_delete_command(args, registry, Path(".")) == 1
     registry.delete_agent.assert_not_called()
 
 
@@ -660,10 +660,10 @@ def test_main_management_command_dispatch(
 
 
 def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:
-    """Red-banner handling survives: any exception -> message + exit -1."""
+    """Red-banner handling survives: any exception -> message + exit 1."""
     with patch("local_operator.cli.ConfigManager", side_effect=Exception("Test error")):
         with patch("sys.argv", ["program"]):
-            assert main() == -1
+            assert main() == 1
     # STDERR: main() wraps the exec dispatch, so its error presenter must not
     # write to the `exec --json` data channel. Asserting the stream is the
     # point of the test now, not incidental.
@@ -817,7 +817,7 @@ def test_main_preflight_missing_hosting(
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program"]):
-        assert main() == -1
+        assert main() == 1
     # stderr, matching its sibling _preflight_api_key: an error message belongs
     # on the diagnostic channel regardless of which front end asked for it.
     err = capsys.readouterr().err
@@ -886,7 +886,7 @@ def test_preflight_api_key_fatal_by_default(
     somewhere harder to read.
     """
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    assert cli._preflight_api_key("openai", _bare_credential_manager()) == -1
+    assert cli._preflight_api_key("openai", _bare_credential_manager()) == 1
     err = capsys.readouterr().err
     assert "OPENAI_API_KEY" in err and "Error" in err
 
