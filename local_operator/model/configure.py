@@ -2859,18 +2859,17 @@ class SessionStreamFn:
                 context_tokens = (
                     usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
                 )
-            # Dollar cost is computed HERE, where the exact model that served the
-            # call is known — not at aggregation, where differently-priced
-            # models are already summed. This is the SAME arithmetic the status
-            # band runs every repaint (``cost_for_usage``), so the analytics
-            # dollar total can never disagree with the live band. A model with
-            # no published price records cost_known=False rather than a
-            # misleading $0. Runs on the event loop, but after the stream is
-            # consumed (see ``_record_stream``) and behind a memoised price
-            # lookup — a dict hit and four multiplies — so it adds no
-            # perceptible latency, and it is fully guarded: a pricing failure
-            # must never cost the turn its analytics, let alone the turn itself.
-            cost_micro, cost_known = self._cost_micro(request.model, usage)
+            # Cost is NOT priced here (review C1). The snapshot carries the
+            # provider, model id, and every token count, which is everything
+            # ``cost_for_usage`` needs — so the pricing (including the
+            # ``resolve_model_info`` lookup, which can block for seconds on a
+            # COLD memo: a TTL rollover, an lru_cache eviction, or a subagent on
+            # a registry-unknown model override) runs on the recorder's
+            # background thread, next to the SQLite write, and never on the event
+            # loop this turn is unwinding on. The same hazard ``subagent_panel``
+            # deliberately takes off-thread. It is still the SAME
+            # ``cost_for_usage`` the status band uses, so the analytics dollar
+            # total cannot disagree with the live band.
             record_call(
                 CallSnapshot(
                     ts_ms=int(_time.time() * 1000),
@@ -2885,31 +2884,10 @@ class SessionStreamFn:
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,
                     ok=ok,
-                    cost_micro=cost_micro,
-                    cost_known=cost_known,
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
-
-    @staticmethod
-    def _cost_micro(model: ModelSpec, usage: Usage) -> tuple[int, bool]:
-        """``(cost in micro-USD, price known)`` for one call, never raising.
-
-        Resolves the model's price (memoised per TTL bucket) and prices the
-        usage through ``cost_for_usage`` — the one money computation the whole
-        app shares. Returns ``(0, False)`` for a model with no published price,
-        which the report renders as an unknown share rather than a false $0.
-        Micro-USD (USD × 1e6) as an INTEGER so the store's SUM is exact.
-        """
-        try:
-            info = resolve_model_info(model.provider, model.model_id)
-            if not (info.input_price or info.output_price):
-                return 0, False
-            dollars = cost_for_usage(model.provider, info, usage)
-            return int(round(dollars * 1_000_000)), True
-        except Exception:  # noqa: BLE001 — an unpriceable model is not an error
-            return 0, False
 
     async def close(self) -> None:
         await self._http.aclose()

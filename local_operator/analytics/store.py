@@ -39,6 +39,7 @@ from local_operator.analytics.model import (
     CallSnapshot,
     UsageAggregate,
     apportion_components,
+    price_snapshot,
 )
 from local_operator.paths import config_dir
 
@@ -129,6 +130,18 @@ _INSERT_SQL = (
     f"VALUES ({', '.join('?' for _ in _CALL_COLUMNS)})"
 )
 
+#: The insert WITHOUT the cost columns, for a database where the migration to
+#: add them failed (review C2). The two cost values are dropped from both the
+#: column list and each row tuple so a missing column cannot fail every write.
+_CALL_COLUMNS_NO_COST = tuple(c for c in _CALL_COLUMNS if c not in ("cost_micro", "cost_known"))
+_INSERT_SQL_NO_COST = (
+    f"INSERT INTO calls ({', '.join(_CALL_COLUMNS_NO_COST)}) "
+    f"VALUES ({', '.join('?' for _ in _CALL_COLUMNS_NO_COST)})"
+)
+#: Positions of the two cost values in ``_row_values`` output, so the cost-less
+#: path can drop exactly them. They sit right after ``context_tokens``.
+_COST_VALUE_INDICES = (11, 12)
+
 
 def default_db_path() -> Path:
     """The shared analytics database, next to the other per-user stores."""
@@ -144,6 +157,10 @@ def _row_values(snapshot: CallSnapshot) -> tuple[Any, ...]:
     reads as "unknown" rather than a fabricated breakdown.
     """
     components = apportion_components(snapshot.component_chars, snapshot.context_tokens)
+    # Price on THIS (writer) thread — never the event loop (review C1). See
+    # ``price_snapshot``: a cold ``resolve_model_info`` can block for seconds,
+    # which is fine on the background writer and unacceptable on the turn's loop.
+    cost_micro, cost_known = price_snapshot(snapshot)
     return (
         snapshot.ts_ms,
         snapshot.session_id,
@@ -156,8 +173,8 @@ def _row_values(snapshot: CallSnapshot) -> tuple[Any, ...]:
         snapshot.cache_write_tokens,
         snapshot.reasoning_tokens,
         snapshot.context_tokens,
-        int(snapshot.cost_micro),
-        1 if snapshot.cost_known else 0,
+        int(cost_micro),
+        1 if cost_known else 0,
         *(components[key] for key in COMPONENT_KEYS),
     )
 
@@ -191,6 +208,14 @@ class AnalyticsStore:
         #: first connections at once do not race on ``executescript``.
         self._init_lock = threading.Lock()
         self._initialized = False
+        #: Whether the cost columns exist on THIS database. A fresh DB always
+        #: has them (the ``CREATE TABLE`` includes them); an old one gets them
+        #: from ``_migrate``. If a migration ALTER genuinely fails (a locked or
+        #: corrupt DB), this stays False and both the insert and the aggregate
+        #: silently drop the cost columns rather than referencing a column that
+        #: does not exist — which would otherwise fail EVERY write and blank the
+        #: whole screen (review C2). Token analytics keep working; cost reads 0.
+        self._has_cost = True
 
     # -- connection ----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection | None:
@@ -254,8 +279,7 @@ class AnalyticsStore:
                 pass
             self._local.conn = None
 
-    @staticmethod
-    def _migrate(conn: sqlite3.Connection) -> None:
+    def _migrate(self, conn: sqlite3.Connection) -> None:
         """Add columns that a database from an older release is missing.
 
         ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a
@@ -265,18 +289,25 @@ class AnalyticsStore:
         pre-cost call reads as "unpriced", never as a confident $0. Called under
         ``_init_lock`` on open; a failure here degrades to the pre-migration
         shape rather than raising, because analytics is never a hard dependency.
+
+        Sets ``self._has_cost`` from what is ACTUALLY present afterward: if an
+        ALTER failed, cost is dropped from the insert and the aggregate so a
+        missing column cannot fail every write and blank the screen (review C2).
         """
         try:
             existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(calls)").fetchall()}
         except Exception:  # noqa: BLE001 — an unreadable schema is a no-op migration
+            self._has_cost = False
             return
         for name, definition in _MIGRATION_COLUMNS:
             if name in existing:
                 continue
             try:
                 conn.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
+                existing.add(name)
             except Exception:  # noqa: BLE001 — a failed add leaves the older shape
                 logger.debug("analytics: could not add column %s", name, exc_info=True)
+        self._has_cost = all(name in existing for name, _ in _MIGRATION_COLUMNS)
 
     @staticmethod
     def _now_ms() -> int:
@@ -306,9 +337,18 @@ class AnalyticsStore:
         if conn is None:
             return 0
         rows = [_row_values(s) for s in snapshots]
+        if self._has_cost:
+            insert_sql = _INSERT_SQL
+        else:
+            # Migration to add the cost columns failed: drop the two cost values
+            # so the insert matches the older table shape (review C2).
+            insert_sql = _INSERT_SQL_NO_COST
+            rows = [
+                tuple(v for i, v in enumerate(row) if i not in _COST_VALUE_INDICES) for row in rows
+            ]
         for attempt in range(_WRITE_RETRIES):
             try:
-                conn.executemany(_INSERT_SQL, rows)
+                conn.executemany(insert_sql, rows)
                 conn.commit()
                 return len(snapshots)
             except sqlite3.OperationalError as exc:
@@ -439,12 +479,15 @@ class AnalyticsStore:
         component_sum = ", ".join(f"SUM(c_{key})" for key in COMPONENT_KEYS)
         # Order is a contract with ``_aggregate_from_row``, which indexes this
         # tuple positionally: cost_micro and cost_known_calls come after the
-        # token sums and before the component sums.
+        # token sums and before the component sums. When the cost columns are
+        # absent (a failed migration, review C2), substitute constant 0 sums so
+        # the positions still line up and the report shows $— instead of the
+        # query failing on a missing column.
+        cost_cols = "SUM(cost_micro), SUM(cost_known)" if self._has_cost else "0, 0"
         base_cols = (
             "COUNT(*), SUM(ok), SUM(input_tokens), SUM(output_tokens), "
             "SUM(cache_read_tokens), SUM(cache_write_tokens), "
-            "SUM(reasoning_tokens), SUM(context_tokens), "
-            "SUM(cost_micro), SUM(cost_known)"
+            f"SUM(reasoning_tokens), SUM(context_tokens), {cost_cols}"
         )
         try:
             top = conn.execute(

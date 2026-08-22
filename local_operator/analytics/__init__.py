@@ -42,6 +42,7 @@ from local_operator.analytics.model import (
     CallSnapshot,
     UsageAggregate,
     apportion_components,
+    price_snapshot,
     snapshot_component_chars,
     split_system_prompt,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "CallSnapshot",
     "UsageAggregate",
     "apportion_components",
+    "price_snapshot",
     "snapshot_component_chars",
     "split_system_prompt",
     "AnalyticsRecorder",

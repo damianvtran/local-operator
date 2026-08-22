@@ -105,6 +105,33 @@ def test_report_marks_unpriced_and_partial():
     assert "$—" in text  # the unpriced provider row
 
 
+def test_cost_marker_legend_shown_only_when_marks_present():
+    # D1: a legend explains + and $— — but only when one is actually on screen.
+    partial = _agg()
+    partial.by_provider["ollama"] = UsageAggregate(
+        calls=5, context_tokens=100, cost_micro=0, cost_known_calls=0
+    )
+    text_with_marks = "\n".join(line.plain for line in build_report(partial, 120))
+    assert "lower bound" in text_with_marks
+    assert "no published price" in text_with_marks
+
+    # A fully-priced run (no + or $—) draws no legend.
+    clean = _agg()  # all cost_known_calls == calls, no unpriced provider
+    text_clean = "\n".join(line.plain for line in build_report(clean, 120))
+    assert "lower bound" not in text_clean
+
+
+def test_tables_share_a_name_column():
+    # D2: BY PROVIDER and BY SESSION align — the tokens column starts at the
+    # same offset in both, because they share one name_col.
+    agg = _agg()
+    lines = [line.plain for line in build_report(agg, 120)]
+    text = "\n".join(lines)
+    prov = next(li for li in text.splitlines() if "anthropic" in li)
+    sess = next(li for li in text.splitlines() if "my session" in li)
+    assert prov.index(" tokens") == sess.index(" tokens")
+
+
 def test_narrow_table_drops_cache_keeps_cost():
     agg = _agg()
     narrow = "\n".join(line.plain for line in build_report(agg, 58))

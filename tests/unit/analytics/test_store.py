@@ -46,6 +46,9 @@ def _snap(
         ok=ok,
         cost_micro=cost_micro,
         cost_known=cost_known,
+        # Pre-priced so the store records these exact figures rather than
+        # re-pricing the fixture's fake model (which has no price table entry).
+        priced=True,
     )
 
 
@@ -162,6 +165,43 @@ def test_migration_adds_cost_columns_to_old_db(tmp_path):
     # A new priced call can be recorded into the migrated DB.
     assert store.record_batch([_snap(cost_micro=500, cost_known=True)]) == 1
     assert store.aggregate().cost_micro == 500
+    store.close()
+
+
+def test_recording_degrades_when_cost_columns_absent(tmp_path):
+    # C2: if the cost columns cannot be added (simulated by forcing _has_cost
+    # False against a table that lacks them), recording must NOT fail every
+    # write — it drops cost and keeps token analytics; the report shows $—.
+    import sqlite3
+
+    from local_operator.analytics.store import _COMPONENT_COLUMNS
+
+    db = tmp_path / "nocost.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER, {_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    store._connect()  # runs the migration, which will add the columns
+    # Force the degraded path: pretend the migration failed.
+    store._has_cost = False
+    assert store.record_batch([_snap(input_tokens=100, cost_micro=999, cost_known=True)]) == 1
+    agg = store.aggregate()
+    assert agg.calls == 1
+    assert agg.input_tokens == 100  # token analytics survive
+    assert agg.cost_micro == 0  # cost degraded to $— rather than failing
+    assert agg.cost_is_known is False
     store.close()
 
 
