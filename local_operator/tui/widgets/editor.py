@@ -2071,7 +2071,21 @@ class Editor(TextArea):
             if sep:
                 lead = len(argument) - len(argument.lstrip())
                 name = argument[lead:].split(" ", 1)[0]
-                if name and name.lower() in self._name_choices:
+                # ``/team chart`` is #258's two-level form: ``chart`` is a
+                # RESERVED subcommand in the first argument slot (the team name
+                # the chart wants lives in the SECOND slot, after ``chart ``), so
+                # the first token is never a roster name to paint. Guarding it
+                # here — mirroring the same reserved-word exclusion in
+                # :meth:`_name_switch_hint` — keeps the highlight correct even if
+                # a team were literally registered as ``chart`` (talked to as
+                # ``/team =chart``, whose first token is ``=chart`` not ``chart``)
+                # and, more importantly, means a future change that widened the
+                # snapshot or read the second-slot token could not resurrect a
+                # ``chart`` mispaint. The first-token rule already makes the
+                # realistic case correct (``chart`` is not in the roster); this
+                # makes it correct by construction.
+                reserved = word in ("team", "teams") and name.lower() == "chart"
+                if name and not reserved and name.lower() in self._name_choices:
                     # The argument tail begins one cell past the command token
                     # (its terminating space), then any extra spaces the user
                     # typed before the name.
@@ -2749,12 +2763,9 @@ class Editor(TextArea):
             # not a valid member of the new family, and no list is open to
             # re-derive the right roster until the buffer returns to a single
             # line. Uses the LEADING word, not the caret-anchored one, because the
-            # caret is normally down in the message body.
-            # Keep the snapshot only for a live multi-line LEADING name command
-            # whose family still matches what the snapshot was filled for (see
-            # the family-gate rationale above). The leading family is named out
-            # so the guard reads as the two conditions it is: "still a multi-line
-            # name command" AND "same roster family".
+            # caret is normally down in the message body. The leading family is
+            # named out so the guard below reads as its two conditions: "still a
+            # multi-line name command" AND "same roster family".
             leading_family = self._name_command_family(self._leading_command_word())
             keep = self._is_multiline_name_command() and (
                 self._name_choices_family == leading_family

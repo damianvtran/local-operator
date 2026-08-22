@@ -2355,3 +2355,40 @@ async def test_name_token_soft_wraps_across_rows_on_a_multiline_body() -> None:
                 if fg == green:
                     painted += text
         assert painted == long_name
+
+
+@pytest.mark.asyncio
+async def test_team_chart_subcommand_never_paints_a_name() -> None:
+    """`/team chart <name>` paints ONLY the `/team` token — never `chart`, never
+    the name (single-line AND multiline).
+
+    Guards the #258 integration: `/team` is two-level — `chart` is a reserved
+    SUBCOMMAND in the first argument slot, and the team NAME the chart wants
+    lives in the SECOND slot after `chart `. The highlighter reads the name as
+    the FIRST argument token, which for a chart request is `chart` — not a roster
+    member — so no name run is emitted and `chart` stays prose. The test injects
+    `chart` AND the second-slot name into `_name_choices` adversarially: even if
+    both were roster members, the first-token rule must keep the whole argument
+    prose, so a future refactor that reads the name via a caret-anchored helper
+    (which would resolve the second-slot token) is caught here.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        # Adversarial snapshot: both the reserved subcommand word and the
+        # second-slot name are present, so only the first-token rule prevents a
+        # mispaint.
+        adversarial = frozenset({"chart", "frontend-guild"})
+        for text in ("/team chart frontend-guild", "/team chart frontend-guild\nbody text"):
+            app.set_editor_text(text)
+            app.editor.set_name_choices(adversarial)
+            await pilot.pause()
+            cells = _slash_ink(app.editor)
+            # `/team` command token is lit...
+            assert _ink_of(cells, "/team") == signal
+            # ...and nothing on the row is painted with the argument-name colour:
+            # neither `chart` nor the second-slot name is highlighted.
+            assert all(fg != green for _, fg in cells)
