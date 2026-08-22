@@ -1728,6 +1728,50 @@ async def test_enum_tail_completion_shows_no_switch_hint() -> None:
         assert app.editor.picker._notice == ""
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command, notice",
+    [
+        ("logout", "no stored credentials — nothing to log out of."),
+        ("effort", "this model takes no effort setting"),
+    ],
+)
+async def test_app_owned_notice_survives_a_same_command_keystroke(
+    command: str, notice: str
+) -> None:
+    """CR4 regression (round 2): the U1/U2 hint write must NOT erase the app's
+    notices for the OTHER argument commands.
+
+    `/logout` (empty credential store) and `/effort` (a model with no effort
+    key) set an informational notice ONCE on the command-word change and never
+    re-set it per keystroke — for those empty-by-construction lists the notice
+    IS the whole content the user reads. The hint's `set_notice` runs on every
+    keystroke of the argument, so before the fix it called `set_notice("")` for
+    these non-name commands on the first query character and wiped the notice
+    (picker closed). The fix gates the write to NAME+message commands only, so a
+    same-command keystroke must leave the app-owned notice intact.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # Open the argument list, then set the notice the app would set on the
+        # command-word change (the harness does not model the empty-list case,
+        # so we set it directly — the regression is purely in the editor's
+        # per-keystroke resync, not in how the notice first arrives).
+        app.editor.text = f"/{command} "
+        await pilot.pause()
+        app.editor.picker.set_notice(notice)
+        await pilot.pause()
+        assert app.editor.picker._notice == notice, "premise: the notice is shown"
+        # Type a query character on the SAME command — this re-runs _sync_picker.
+        app.editor.text = f"/{command} x"
+        await pilot.pause()
+        assert (
+            app.editor.picker._notice == notice
+        ), "the app-owned notice must survive a same-command keystroke (CR4)"
+
+
 # ---------------------------------------------------------------------------
 # slash-command syntax highlighting — the render pass paints the recognized
 # command word, the recognized name, and a muted unknown word, and nothing else.

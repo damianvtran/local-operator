@@ -2532,8 +2532,20 @@ class Editor(TextArea):
             # empty) or the name is edited (the space is gone), so it never sits
             # over a live message. Managed here because for these commands the
             # notice channel is otherwise unused (the app sets it to "").
-            hint = self._name_switch_hint(list_argument)
-            self._picker.set_notice(hint or "")
+            #
+            # GATED to NAME+message commands only (CR4, round 2). `set_notice`
+            # runs on EVERY keystroke of the argument, but the app owns the
+            # notice channel for the OTHER argument commands — `/logout` ("no
+            # stored credentials…"), `/effort` ("this model takes no effort
+            # setting"), `/mcp`'s builder notices — and sets them ONCE on the
+            # command-word change (`on_argument_query_opened`), never per
+            # keystroke. An unconditional write here called `set_notice("")` on
+            # each resync of those commands and erased a notice that is, for an
+            # empty-by-construction list, the entire content the user is reading.
+            # Only `/team`·`/agent` reach this write, and for those the app
+            # always sets the notice to "", so the hint owns the channel cleanly.
+            if self._is_name_argument_command(self._argument_command):
+                self._picker.set_notice(self._name_switch_hint(list_argument) or "")
         argument = slash_argument(self.text, self.MODEL_COMMANDS)
         if argument is None:
             if self._model_picker.is_open():
