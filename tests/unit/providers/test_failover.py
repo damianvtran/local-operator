@@ -2878,15 +2878,79 @@ class TestRotationPermutations:
 
         assert served == ["acct-b"]
         rows = {r.data["access"]: r for r in store.list_credentials("anthropic")}
-        # The 429 names the family the request ran on, so the block is scoped
-        # to it: the account is out of rotation for opus, but a fable request
-        # (a family the opus verdict says nothing about) still sees the row.
-        # The preflight upgrades to an account-wide block when a shared
-        # window turns out to be the binding one.
+        # usageAwareFallback is OFF here: no preflight probe exists to upgrade
+        # a family block to an account-wide one on this path, so rotation keeps
+        # the pre-existing account-wide semantics.
+        assert store.is_blocked(rows["acct-a"].id, "anthropic")
+        assert not store.is_blocked(rows["acct-b"].id, "anthropic")
+
+    async def test_usage_aware_rotation_scopes_the_429_block_to_the_family(
+        self, tmp_path: Any
+    ) -> None:
+        """With usage-aware routing on, a usage-limit 429 blocks the family.
+
+        The opt-in counterpart of the previous test: the preflight's usage
+        probe can upgrade a family block to an account-wide one the moment a
+        shared window is the binding limit, so rotation may scope the block
+        to the family the request ran on — the account stays in rotation for
+        every other family."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "anthropic",
+            {
+                "type": "oauth",
+                "access": "acct-a",
+                "refresh": "r",
+                "expires": None,
+                "email": "a@example.com",
+            },
+        )
+        store.upsert_credential(
+            "anthropic",
+            {
+                "type": "oauth",
+                "access": "acct-b",
+                "refresh": "r",
+                "expires": None,
+                "email": "b@example.com",
+            },
+        )
+        served: list[str | None] = []
+
+        def first_account_exhausted(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            if api_key == "acct-a":
+                raise ProviderError(
+                    429, "quota reset pending", retryable=True, retry_after_ms=3 * 3_600_000
+                )
+            served.append(api_key)
+            return _clean_stream()
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(first_account_exhausted)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = self._no_sleep()  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5"),
+                store,
+                {"retry": {"enabled": True, "usageAwareFallback": True}},
+                client_for,
+                session_id="s0",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert served == ["acct-b"]
+        rows = {r.data["access"]: r for r in store.list_credentials("anthropic")}
+        # Scoped to the family the request ran on: opus is blocked, fable
+        # still resolves the row, and no account-wide block was written.
         assert store.is_blocked_for_model(rows["acct-a"].id, "anthropic", "claude-opus-5")
         assert not store.is_blocked_for_model(rows["acct-a"].id, "anthropic", "claude-fable-5")
         assert not store.is_blocked(rows["acct-a"].id, "anthropic")
-        assert not store.is_blocked(rows["acct-b"].id, "anthropic")
 
     async def test_a_429d_oauth_row_falls_through_to_an_api_key_row(self, tmp_path: Any) -> None:
         """OAuth → API key inside one provider. ``rotate_sibling`` only counts

@@ -2005,6 +2005,7 @@ async def _recover_quota_blocked(
     honest "nothing left" the caller already handles. Never raises: a probe
     that cannot get a definite answer leaves the block standing.
     """
+    from local_operator.providers.auth_store import OAuthAccess as _OAuthRecord
     from local_operator.providers.usage import fetch_usage, usage_health
 
     if not isinstance(auth, CredentialLister):
@@ -2062,8 +2063,6 @@ async def _recover_quota_blocked(
             model_id,
             health.state,
         )
-        from local_operator.providers.auth_store import OAuthAccess as _OAuthRecord
-
         return _OAuthRecord(
             access_token=token,
             credential_id=row.id,
@@ -2162,7 +2161,18 @@ async def _resolve_access_for_provider(
                 if record is None:
                     return await _key()
             elif ctx.last_chance:
-                _rotate_sibling(auth, provider, session_id, ctx.error, ctx.previous_key, model_id)
+                # Family-scoped rotation blocks ride only with usage-aware
+                # routing: on the opt-out path no preflight probe exists to
+                # upgrade a family block to an account-wide one, so rotation
+                # keeps the pre-existing account-wide semantics there.
+                _rotate_sibling(
+                    auth,
+                    provider,
+                    session_id,
+                    ctx.error,
+                    ctx.previous_key,
+                    model_id if scoped_blocks else "",
+                )
                 record = await _access()
                 if record is None:
                     return await _key()
