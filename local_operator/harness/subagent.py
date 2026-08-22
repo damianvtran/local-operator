@@ -356,6 +356,20 @@ def _make_runner(
                 # this module composes the child, and its transcript directory
                 # is what makes the child resumable later.
                 comms.attach(job_id, child, child._transcript.directory)
+                # The child's transcript directory is the WHOLE basis of resume,
+                # and it becomes known only here (the runner just built the
+                # child). The job-manager roster hook fired at registration —
+                # before this session_dir existed — so persist again now that
+                # the record carries a resumable directory, or a crash between
+                # launch and settle would leave a snapshot naming a child with
+                # no way to reach its transcript. Best-effort: a failed persist
+                # must never stop the child from running.
+                schedule_persist = getattr(parent_session, "_schedule_subagent_persist", None)
+                if callable(schedule_persist):
+                    try:
+                        schedule_persist()
+                    except Exception:  # noqa: BLE001 - persistence is not load-bearing here
+                        logger.warning("could not persist roster after attach", exc_info=True)
             await emit(SubagentStartEvent(job_id=job_id, label=label, agent_id=child.agent_id))
             unsubscribe = child.subscribe(
                 _make_relay(job_id, label, job, emit, report_progress, final)
