@@ -688,25 +688,57 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
     }
 
 
+#: The ONLY ``AsyncJob`` fields the roster snapshot carries. An allowlist, not
+#: an exclude set, because the whole task-row list is re-appended on every
+#: roster move and custom entries are never reclaimed (``compact_file`` folds
+#: only the message prune journal) — so anything unbounded here is written once
+#: per surviving child per move, i.e. O(children²) bytes of superseded data on
+#: disk. The fields kept are all small and bounded: the identity, the timings
+#: the panel prices elapsed from, the model/usage/window it paints, and the
+#: routing/queue flags a restore needs. Everything a reader might want beyond
+#: this — the child's full ``result_text``, its verbatim ``prompt`` (documented
+#: "Unbounded on purpose"), the ``trajectory``, the live ``output_tail`` — is
+#: recoverable on demand from the child's OWN transcript via ``hub op='peek'``,
+#: the same argument the trajectory exclusion already made, carried to its
+#: conclusion.
+_ROSTER_ROW_FIELDS = frozenset(
+    {
+        "id",
+        "type",
+        "status",
+        "start_time",
+        "started_at",
+        "settled_at",
+        "label",
+        "queued",
+        "agent_id",
+        "owner_id",
+        "model_label",
+        "context_window",
+        "usage",
+        "restored",
+    }
+)
+
+#: Cap on the one free-text field the row keeps. ``error_text`` drives the
+#: panel's one-line summary for a restored FAILED row, so it is worth keeping —
+#: but a stack trace or a giant provider error must not reintroduce the
+#: unbounded-growth M1 fix removes, so it is clipped to a sentence's worth.
+_ROSTER_ERROR_CAP = 2_000
+
+
 def _subagent_job_row(job: AsyncJob) -> dict[str, Any]:
-    """One task job as a persistable dict for the roster snapshot.
+    """One task job as a slim, bounded dict for the roster snapshot.
 
-    Drops the two fields that are heavy and reconstructable, keeping the
-    snapshot small enough to re-write on every roster move:
-
-    - ``trajectory`` holds up to ``TRAJECTORY_CAP`` serialized child events —
-      hundreds of dicts per child — and a resumed reader recovers the same
-      detail on demand from the child's own transcript via ``hub op='peek'``,
-      so persisting it would cost the transcript a large write per event for a
-      view nobody has opened.
-    - the abort ``signal`` and asyncio ``task`` never survive a process anyway
-      (``model_dump`` already omits them; they are runtime handles).
-
-    Everything the subagent panel paints — label, status, timings, model,
-    usage, context window, prompt — is kept. ``model_dump(mode="json")`` makes
-    the nested ``Usage`` JSON-native.
+    Projects the job onto :data:`_ROSTER_ROW_FIELDS` (see its note for why an
+    allowlist rather than an exclude set), plus a length-capped ``error_text``
+    so a restored failed row can still say why it failed. ``model_dump(
+    mode="json")`` makes the nested ``Usage`` JSON-native.
     """
-    return job.model_dump(mode="json", exclude={"trajectory"})
+    row = job.model_dump(mode="json", include=set(_ROSTER_ROW_FIELDS))
+    if job.error_text:
+        row["error_text"] = job.error_text[:_ROSTER_ERROR_CAP]
+    return row
 
 
 def _parsed_usage(payload: dict[str, Any]) -> Usage | None:

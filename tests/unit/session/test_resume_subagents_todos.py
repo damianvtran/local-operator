@@ -263,6 +263,16 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     assert entries
     latest = entries[-1].payload["details"]
     # Job rows carry the manager's own ``id`` key; comms records carry job_id.
-    assert any(r["id"] == job_id for r in latest["jobs"])
+    row = next(r for r in latest["jobs"] if r["id"] == job_id)
     assert any(r["job_id"] == job_id for r in latest["records"])
+    # The snapshot is a SLIM projection: the unbounded fields a heavy child
+    # carries (its full reply, its verbatim prompt, its trajectory, its live
+    # output tail) must not be written — they are recoverable from the child's
+    # own transcript, and re-appending them on every roster move is the
+    # O(children^2) footprint the projection exists to prevent (review R1 M1).
+    for heavy in ("result_text", "prompt", "trajectory", "output_tail", "latest_details"):
+        assert heavy not in row, f"{heavy} must not be in the roster snapshot"
+    # But the fields the panel actually paints ARE kept.
+    for kept in ("id", "label", "status", "start_time"):
+        assert kept in row
     await parent.dispose()

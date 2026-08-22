@@ -283,34 +283,45 @@ class AsyncJobManager:
         so the panel, the ``jobs`` tool, and ``hub op='list'`` show the children
         the previous process launched.
 
-        A row that was ``running`` when the process died is downgraded to
+        A row that was actually RUNNING when the process died is downgraded to
         ``interrupted`` here: its asyncio task is gone, so it is not live, and
         presenting it as ``running`` would spin a status the manager can never
-        settle. Every restored row is flagged ``restored`` and carries no task,
-        signal, or runner — it is a historical record. Rows are NOT re-run;
-        resuming one is an explicit ``hub op='resume'`` that starts a fresh job
-        against the old transcript.
+        settle. A row that was still ``queued`` (parked behind the capacity
+        gate, ``status == "running"`` with ``queued == True``) never ran and has
+        no transcript, so it is NOT interrupted — it is simply gone; it is
+        dropped rather than restored, matching the comms side, which already
+        skips it in ``snapshot()`` because its record has no ``session_dir``.
+        Every restored row is flagged ``restored`` and carries no runtime
+        handles (an ``AsyncJob`` serializes none — the abort signal and asyncio
+        task live in the manager's own ``_signals``/``_tasks`` maps, which the
+        snapshot never touched — so there is nothing to clear). Rows are NOT
+        re-run; resuming one is an explicit ``hub op='resume'`` that starts a
+        fresh job against the old transcript.
 
         Idempotent-ish: a row whose id is already present (a live job of this
         session) is left untouched, so a mis-timed double restore cannot
         clobber a running child.
+
+        Deliberately does NOT fire ``on_roster_change``: rehydrating the table
+        is not a roster *change* the owner needs to persist — the snapshot being
+        read is already on disk — and notifying here would re-append a
+        byte-identical snapshot on every resume (and, if a host ever constructs
+        a Session off-loop, raise a spurious warning from the persist spawn).
         """
-        changed = False
         for row in rows:
             if row.id in self._jobs:
                 continue
             if row.status == "running":
+                if row.queued:
+                    # Parked and never started, so it has no transcript to show
+                    # or resume; a ``⇥ interrupted`` row for it would invite a
+                    # resume that finds nothing. Drop it entirely.
+                    continue
                 # No task backs it any more; a live-looking row would spin a
                 # spinner forever and invite a cancel that finds nothing.
                 row.status = "interrupted"
             row.restored = True
-            # A restored row owns no runtime handles; drop any the snapshot
-            # carried so nothing downstream tries to await or cancel a task
-            # that does not exist.
             self._jobs[row.id] = row
-            changed = True
-        if changed:
-            self._notify_roster_change()
 
     # -- registration -------------------------------------------------------
 
@@ -394,6 +405,12 @@ class AsyncJobManager:
         progress = self._progress_fn(job_id)
         task = asyncio.ensure_future(self._run_job(job, runner(job_id, signal, progress)))
         self._tasks[job_id] = task
+        # The queued -> running transition is a status-affecting task-row change
+        # like register/settle/cancel, so it notifies too: without this the flag
+        # move only reaches disk at the next roster event, and a snapshot taken
+        # in between would restore the row as if it were still parked.
+        if job.type == "task":
+            self._notify_roster_change()
         return True
 
     # -- delivery -----------------------------------------------------------

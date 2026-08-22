@@ -67,10 +67,25 @@ async def test_restored_rows_are_never_swept() -> None:
     PREVIOUS session's stamp, which is already past the window — so an
     unguarded sweep would evict every rehydrated child on the first pass."""
     manager = AsyncJobManager(retention_ms=1)
-    # settled_at far in the past → past the 1 ms window immediately.
+    # Two rows the same age (settled far in the past → past the 1 ms window):
+    # one restored, one an ordinary settled row. The control proves the sweep
+    # WOULD evict at this age, so the restored row surviving the SAME call is
+    # the exemption changing the outcome, not the age being safe.
     manager.restore([_row("ccc", status="completed", settled_at=1.0)])
+    manager._jobs["ddd"] = _row("ddd", status="completed", settled_at=1.0)
     manager._sweep_due()  # the sweep the runner calls after every settle
-    assert manager.get("ccc") is not None
+    assert manager.get("ccc") is not None  # restored: exempt
+    assert manager.get("ddd") is None  # ordinary same-age row: evicted
+
+
+@pytest.mark.asyncio
+async def test_a_queued_row_is_dropped_not_restored_as_interrupted() -> None:
+    """A parked task (status running + queued) never started and has no
+    transcript, so restoring it as ``interrupted`` would paint a resumable row
+    for a child that never ran. It is dropped instead."""
+    manager = AsyncJobManager()
+    manager.restore([_row("qqq", status="running", queued=True)])
+    assert manager.get("qqq") is None
 
 
 @pytest.mark.asyncio
@@ -93,7 +108,7 @@ async def test_restore_never_clobbers_a_live_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_roster_change_hook_fires_on_register_settle_and_restore() -> None:
+async def test_roster_change_hook_fires_on_register_and_settle() -> None:
     calls: list[str] = []
     manager = AsyncJobManager(on_roster_change=lambda: calls.append("x"))
 
@@ -105,10 +120,19 @@ async def test_roster_change_hook_fires_on_register_settle_and_restore() -> None
     before_settle = len(calls)
     await wait_for(lambda: manager.get(job_id).status == "completed")  # type: ignore[union-attr]
     assert len(calls) > before_settle  # settle fired it again
-    before_restore = len(calls)
-    manager.restore([_row("zzz")])
-    assert len(calls) > before_restore  # restore fired it too
     await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_restore_does_not_fire_the_roster_hook() -> None:
+    """Rehydrating the table is not a roster CHANGE to persist: the snapshot
+    being read is already on disk, so notifying would re-append a byte-identical
+    one on every resume (and could raise off-loop)."""
+    calls: list[str] = []
+    manager = AsyncJobManager(on_roster_change=lambda: calls.append("x"))
+    manager.restore([_row("zzz")])
+    assert calls == []
+    assert manager.get("zzz") is not None  # but the row WAS restored
 
 
 @pytest.mark.asyncio
