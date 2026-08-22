@@ -2750,8 +2750,14 @@ class Editor(TextArea):
             # re-derive the right roster until the buffer returns to a single
             # line. Uses the LEADING word, not the caret-anchored one, because the
             # caret is normally down in the message body.
+            # Keep the snapshot only for a live multi-line LEADING name command
+            # whose family still matches what the snapshot was filled for (see
+            # the family-gate rationale above). The leading family is named out
+            # so the guard reads as the two conditions it is: "still a multi-line
+            # name command" AND "same roster family".
+            leading_family = self._name_command_family(self._leading_command_word())
             keep = self._is_multiline_name_command() and (
-                self._name_choices_family == self._name_command_family(self._leading_command_word())
+                self._name_choices_family == leading_family
             )
             if not keep:
                 self._name_choices = frozenset()
