@@ -419,12 +419,13 @@ class OwnedSessionHandle(SessionHandle):
         )
 
     def _reconcile_streaming(self) -> None:
-        """Align ``streaming`` with ``is_streaming`` at the two safe moments:
-        initial attach and command boundaries. NEVER from the per-event
-        handler -- the terminal AgentEndEvent fires while ``is_streaming`` is
-        still True (it clears in the turn's ``finally``), so a reconcile there
-        would re-stick the projection to True permanently."""
-        self._fold.set_state(streaming=bool(getattr(self._session, "is_streaming", False)))
+        """Seed/align ``streaming`` from the session flag at attach and command
+        boundaries, delegating the safety rule to ``ProjectionFold`` (which
+        ignores the flag once it has folded a turn-terminal event -- see
+        ``ProjectionFold.reconcile_streaming``). NEVER called from the
+        per-event handler: the fold's lifecycle events own ``streaming``
+        there."""
+        self._fold.reconcile_streaming(bool(getattr(self._session, "is_streaming", False)))
 
     def _refresh_todos(self) -> None:
         try:

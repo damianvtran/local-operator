@@ -282,22 +282,19 @@ class TuiSessionHandle(SessionHandle):
         )
 
     def _reconcile_streaming(self) -> None:
-        """Align ``streaming`` with the session's ``is_streaming`` flag at the
-        two moments the fold cannot be trusted on its own: initial attach (the
-        AgentStartEvent may predate the subscription) and command boundaries
-        (a prompt/abort/new/resume just changed turn state).
+        """Seed/align ``streaming`` from the session flag at attach and command
+        boundaries, delegating the safety rule to ``ProjectionFold`` (which
+        owns lifecycle authority and ignores the flag once it has folded a
+        turn-terminal event -- see ``ProjectionFold.reconcile_streaming``).
 
-        Crucially this is NOT called from the per-event handler. There the
-        terminal ``AgentEndEvent`` fires while ``is_streaming`` is still True
-        (the flag clears in the turn's ``finally``), so a reconcile there would
-        re-stick the projection to True with no later event to fix it -- the
-        exact bug this method's absence from the hot path prevents.
+        Deliberately NOT called from the per-event handler: the fold's own
+        lifecycle events own ``streaming`` there.
         """
         try:
             session = self._session()
         except RuntimeError:
             return
-        self._fold.set_state(streaming=bool(getattr(session, "is_streaming", False)))
+        self._fold.reconcile_streaming(bool(getattr(session, "is_streaming", False)))
 
     def _refresh_todos(self) -> None:
         try:

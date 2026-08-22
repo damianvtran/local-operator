@@ -201,6 +201,40 @@ async def test_agent_end_clears_streaming_despite_stale_is_streaming() -> None:
 
 
 @pytest.mark.asyncio
+async def test_command_boundary_reconcile_cannot_restick_after_abort() -> None:
+    """F1 regression: on the abort/error path the session emits AgentEndEvent
+    INLINE while its ``is_streaming`` flag is still True (it clears several
+    awaits later, in the turn's ``finally``). A mobile command landing in that
+    window runs ``refresh`` → ``_reconcile_streaming`` with the stale True. The
+    fold must ignore it because it has already folded a terminal event, so the
+    projection stays ``streaming=False`` instead of re-sticking to "in
+    progress" with no later event to correct it.
+    """
+    from local_operator.harness.types import AgentEndEvent, AgentStartEvent
+
+    handle, session = make_handle()
+    handle.subscribe(lambda: None)
+
+    session.is_streaming = True
+    session.emit(AgentStartEvent(generation=1))
+    # Aborted turn: end event folded, but the session flag has NOT cleared yet.
+    session.emit(AgentEndEvent(aborted=True, generation=1))
+    assert handle._fold.projection.streaming is False
+
+    # A command lands before the finally clears is_streaming: reconcile sees
+    # the stale True and must NOT raise streaming back up.
+    await handle.refresh()
+    assert handle._fold.projection.streaming is False, (
+        "command-boundary reconcile re-stuck streaming=True from the stale "
+        "is_streaming flag on the abort path"
+    )
+
+    # A genuine next turn still reconciles up normally (latch cleared on start).
+    session.emit(AgentStartEvent(generation=2))
+    assert handle._fold.projection.streaming is True
+
+
+@pytest.mark.asyncio
 async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> None:
     """A phone that subscribes mid-turn never saw the AgentStartEvent, so the
     fold alone would open on a stale ``streaming=False``. Attach seeds the live

@@ -243,6 +243,15 @@ class ProjectionFold:
         self._subagent_started_at: dict[str, float] = {}
         # The working line's clock origin and the label's current source.
         self._activity_started_at: float | None = None
+        # Whether the fold has folded a turn-terminal event (agent_end /
+        # turn_end) that no later agent_start has superseded. This is what
+        # makes ``reconcile_streaming`` safe on the abort/error path: there the
+        # session emits AgentEndEvent INLINE while its ``is_streaming`` flag is
+        # still True (the flag clears several awaits later, in the turn's
+        # ``finally``), so a mobile command landing in that window must not be
+        # allowed to raise ``streaming`` back to True over the fold's correct
+        # False. Seeded False so a mid-turn attach can still seed streaming up.
+        self._streaming_ended = False
         # Approval/ask requests waiting on the user, FIFO. Owned sessions can
         # have several at once (a parallel tool batch); the phone renders the
         # front one and a "1 of N" badge. See push_pending/pop_pending.
@@ -330,8 +339,10 @@ class ProjectionFold:
         p = self.projection
         if isinstance(event, AgentStartEvent):
             p.streaming = True
+            self._streaming_ended = False
         elif isinstance(event, AgentEndEvent):
             p.streaming = False
+            self._streaming_ended = True
             p.queued_count = 0
             p.stop_reason = "aborted" if event.aborted else "completed"
             self._close_open_message()
@@ -343,6 +354,7 @@ class ProjectionFold:
                 )
         elif isinstance(event, TurnEndEvent):
             p.streaming = False
+            self._streaming_ended = True
         elif isinstance(event, MessageStartEvent):
             if isinstance(event.message, Message) and event.message.role == "assistant":
                 entry = TranscriptEntry(
@@ -626,6 +638,30 @@ class ProjectionFold:
         self.projection.pending = self._pending_queue[0] if self._pending_queue else None
         self.projection.pending_count = len(self._pending_queue)
         self._bump()
+
+    def reconcile_streaming(self, is_streaming: bool) -> None:
+        """Align ``streaming`` with the session's own ``is_streaming`` flag at
+        the moments the fold cannot derive it from events alone: initial attach
+        (a phone subscribing mid-turn never witnessed the ``agent_start``) and
+        command boundaries (a prompt/abort/new/resume just changed turn state).
+
+        Once the fold has folded a turn-terminal event (``_streaming_ended``),
+        the fold is authoritative and reconcile does nothing: the session's
+        ``is_streaming`` is briefly, lyingly still True on the abort/error path
+        (it emits ``agent_end`` INLINE and clears the flag several awaits later,
+        in the turn's ``finally``), so honouring the flag in that window is the
+        exact bug this guard prevents — a command landing there would re-stick
+        the phone on "in progress" with no later event to correct it. Before any
+        terminal — a fresh attach that missed ``agent_start`` mid-turn, or a
+        turn whose end the fold has not observed — the flag is the only truth
+        there is, so reconcile trusts it in both directions. A later
+        ``agent_start`` clears the latch so the next turn reconciles normally.
+        """
+        if self._streaming_ended:
+            return
+        if self.projection.streaming != bool(is_streaming):
+            self.projection.streaming = bool(is_streaming)
+            self._bump()
 
     def set_state(
         self,
