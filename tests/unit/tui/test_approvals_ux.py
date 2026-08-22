@@ -63,6 +63,32 @@ async def _boot(pilot, app: OperatorApp) -> None:
             return
 
 
+async def _wait_prompt(pilot, app: OperatorApp) -> None:
+    """Settle until the in-flight gate's question is mounted.
+
+    Replaces a fixed `pilot.pause(0.3)` that bet on how long the gate takes to
+    arm and raise its card; the observable the next assertion needs is the
+    ``ApprovalPrompt`` on screen, so wait for exactly that. The ceiling is a
+    deadlock guard, not a timing assumption.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app.query(ApprovalPrompt):
+            return
+
+
+async def _settle(pilot, ticks: int = 6) -> None:
+    """Let the event loop drain for a bounded number of idle ticks.
+
+    Used where the assertion is a NEGATIVE — that no prompt mounted — which
+    cannot be polled for (there is no state to wait to appear); a fixed handful
+    of idle waits gives any erroneous mount the chance to happen so its absence
+    is meaningful.
+    """
+    for _ in range(ticks):
+        await pilot.pause()
+
+
 async def _type(pilot, app: OperatorApp, text: str) -> None:
     """Put ``text`` in the composer the way typing does, and settle the lists.
 
@@ -534,7 +560,13 @@ async def test_the_band_and_the_gate_agree_through_every_route(config_dir: Path)
 
         async def gate_runs_without_asking() -> bool:
             pending = asyncio.ensure_future(gate("bash", "run: echo hi"))
-            await pilot.pause(0.2)
+            # Wait for whichever terminal state the mode produces: an auto gate
+            # returns immediately, an asking gate mounts a prompt. Polling both
+            # replaces a fixed `pause(0.2)` that bet the slower one had settled.
+            for _ in range(200):
+                await pilot.pause()
+                if pending.done() or app.query(ApprovalPrompt):
+                    break
             if pending.done():
                 return await pending
             # A prompt is on screen: the gate is armed. Answer it so the test
@@ -587,7 +619,7 @@ async def test_the_live_prompt_is_untouched_by_the_default_machinery(
         gate = _gate(session)
 
         first = asyncio.ensure_future(gate("bash", "run: one"))
-        await pilot.pause(0.3)
+        await _wait_prompt(pilot, app)
         # The live question is the docked card; the transcript keeps the
         # RECEIPT once it is answered. Two widgets, two jobs.
         assert app.query(ApprovalPrompt), "the prompt no longer mounts"
@@ -597,7 +629,7 @@ async def test_the_live_prompt_is_untouched_by_the_default_machinery(
 
         # …and one refusal is not a mode: the next ask still asks.
         second = asyncio.ensure_future(gate("write", "write: two"))
-        await pilot.pause(0.3)
+        await _wait_prompt(pilot, app)
         assert app.query(ApprovalPrompt)
         await pilot.press("y")
         assert await asyncio.wait_for(second, 2) is True
@@ -608,7 +640,7 @@ async def test_the_live_prompt_is_untouched_by_the_default_machinery(
         app._deny_queued_approvals()
         third = asyncio.ensure_future(gate("bash", "run: three"))
         assert await asyncio.wait_for(third, 2) is False
-        await pilot.pause(0.2)
+        await _settle(pilot)
         # No question was raised for the stopped turn's ask...
         assert not app.query(ApprovalPrompt), "a stopped turn's ask mounted a question"
         # ...and no receipt was written for a decision the user never made.
@@ -632,7 +664,7 @@ async def test_the_allow_all_key_reports_and_paints_like_the_command(
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         pending = asyncio.ensure_future(_gate(session)("bash", "run: one"))
-        await pilot.pause(0.3)
+        await _wait_prompt(pilot, app)
         await pilot.press("A")
         assert await asyncio.wait_for(pending, 2) is True
 

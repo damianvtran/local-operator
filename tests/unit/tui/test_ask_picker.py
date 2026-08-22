@@ -730,6 +730,24 @@ def _painted_rows(app) -> list[str]:  # type: ignore[no-untyped-def]
     return [text for text in (strip.text.strip() for strip in strips) if text]
 
 
+async def _until(pilot, predicate, *, ceiling: int = 200) -> None:  # type: ignore[no-untyped-def]
+    """Idle-pump until PREDICATE holds, bounded by a deadlock guard.
+
+    Replaces a fixed ``pilot.pause(<seconds>)`` bet on how long a repaint, a
+    focus move or an answer takes. ``pilot.pause()`` with no argument returns
+    when the event loop next goes idle — as soon as the awaited work is actually
+    done — so polling the observable state the next assertion needs is both
+    faster and steadier than a wall-clock sleep, which loses its bet and flakes
+    under the parallel CPU contention of ``-n``. The ceiling is generous on
+    purpose: it exists only to fail a genuine deadlock, never to stand in for a
+    timing assumption.
+    """
+    for _ in range(ceiling):
+        await pilot.pause()
+        if predicate():
+            return
+
+
 @pytest.mark.asyncio
 async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() -> None:
     """The blocker this layout exists for: at 100x14 the card drew a question,
@@ -1242,15 +1260,15 @@ async def test_escape_skips_the_question_from_the_composer() -> None:
 
         # Answer the first question on the card, then move to the composer.
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await pilot.pause()
         await pilot.click(Editor)
-        await pilot.pause(0.1)
+        await _until(pilot, lambda: isinstance(app.screen.focused, Editor))
         assert isinstance(app.screen.focused, Editor)
 
         await pilot.press("escape")
         # The question is settled, the card is gone, and the answer survived.
         assert await asyncio.wait_for(asked, 2) == {"first": ["Alpha"]}
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: not app.query(AskPickerScreen))
         assert not app.query(AskPickerScreen)
 
 
@@ -1279,7 +1297,10 @@ async def test_the_footer_names_only_keys_that_work_where_the_caret_is() -> None
         assert "↑↓" in focused_footer and "enter" in focused_footer
 
         await pilot.click(Editor)
-        await pilot.pause(0.2)
+        # The footer repaints when focus lands in the composer; wait for that
+        # repaint (the routed keys stand down) rather than betting on its wall
+        # time. This is the state the assertions below read from the compositor.
+        await _until(pilot, lambda: "↑↓" not in _painted_footer(app))
         # Read what was PAINTED, not what a fresh render would produce.
         #
         # This is the assertion the first version of this test got wrong.
@@ -1343,6 +1364,16 @@ async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> N
         card = app._ask_screen
         assert card is not None
 
+        # The fixed pauses in THIS test are deliberate and must not be converted
+        # to idle-waits. It probes a wall-clock ordering race: a key parked in the
+        # composer must not commit once the card has advanced past the question it
+        # was aimed at. The `pause(0.1)` after the click lets focus/routing settle
+        # so the press is held rather than dropped; `action_accept()` must run
+        # while the key is still parked (before the ~180 ms ANSWER_KEY_HOLD_S timer
+        # fires); and the trailing pump outlasts that window so any wrong commit
+        # would already have happened. An idle-wait cannot express "before a real
+        # timer fires" and made this test commit the stale key under CPU
+        # contention — the exact bug it exists to catch.
         await pilot.click(Editor)
         await pilot.pause(0.1)
         await pilot.press("2")  # aimed at question 1: "Canary"
@@ -1385,7 +1416,9 @@ async def test_a_multi_select_advertises_no_key_it_cannot_be_answered_by() -> No
             await pilot.pause()
 
         await pilot.click(Editor)
-        await pilot.pause(0.2)
+        # Wait for the composer-mode footer to repaint (the gesture replaces the
+        # ordinal range) rather than betting on its wall time.
+        await _until(pilot, lambda: "answer here" in _painted_footer(app))
         footer = _painted_footer(app)
         # No ORDINAL range is claimed — a digit cannot answer a multi-select.
         # What is offered instead is the explicit gesture that reaches the card
@@ -1395,7 +1428,7 @@ async def test_a_multi_select_advertises_no_key_it_cannot_be_answered_by() -> No
         assert "esc" in footer, footer
         # ...and the digit that would have been claimed indeed answers nothing.
         await pilot.press("1")
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert not asked.done(), "a digit answered a multi-select"
 
         asked.cancel()
@@ -1426,7 +1459,9 @@ async def test_the_composer_footer_keeps_its_exit_on_a_narrow_card() -> None:
             for _ in range(16):
                 await pilot.pause()
             await pilot.click(Editor)
-            await pilot.pause(0.2)
+            # Wait for the composer-mode footer to repaint (its exit becomes the
+            # last hint standing at these narrow widths) rather than sleeping.
+            await _until(pilot, lambda: "esc skip" in _painted_footer(app))
 
             footer = _painted_footer(app)
             # The exit survives WHOLE — not truncated, not ellipsised.
@@ -1464,26 +1499,26 @@ async def test_the_footer_follows_the_draft_as_it_is_typed() -> None:
         for _ in range(16):
             await pilot.pause()
         await pilot.click(Editor)
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: "answer" in _painted_footer(app))
         assert "answer" in _painted_footer(app), "the routed keys were never offered"
 
         # Opening a draft withdraws the offer, on the frame the user sees.
         for character in "drop":
             await pilot.press(character)
-        await pilot.pause(0.3)
+        await _until(pilot, lambda: "answer" not in _painted_footer(app))
         withdrawn = _painted_footer(app)
         assert "answer" not in withdrawn, withdrawn
         assert "esc" in withdrawn, withdrawn
         # ...and the key it stopped advertising really is a text character now.
         await pilot.press("1")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: app.query_one(Editor).text == "drop1")
         assert not asked.done(), "a routed key answered while a draft was open"
         assert app.query_one(Editor).text == "drop1"
 
         # Clearing the draft brings the offer back, and it works.
         for _ in range(len("drop1")):
             await pilot.press("backspace")
-        await pilot.pause(0.3)
+        await _until(pilot, lambda: "answer" in _painted_footer(app))
         restored = _painted_footer(app)
         assert "answer" in restored, restored
         await pilot.press("1")
@@ -1515,7 +1550,7 @@ async def test_a_multi_select_is_reachable_by_an_explicit_gesture() -> None:
         for _ in range(16):
             await pilot.pause()
         await pilot.click(Editor)
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: "answer here" in _painted_footer(app))
 
         # The footer NAMES it, or it is a key nobody can discover.
         assert "answer here" in _painted_footer(app), _painted_footer(app)
@@ -1524,7 +1559,7 @@ async def test_a_multi_select_is_reachable_by_an_explicit_gesture() -> None:
         # because the full-width assertion passes against any truncation.
 
         await pilot.press("tab")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: isinstance(app.screen.focused, AskPickerScreen))
         assert isinstance(app.screen.focused, AskPickerScreen)
 
         await pilot.press("space")
@@ -1553,7 +1588,9 @@ async def test_the_gesture_sheds_its_word_before_the_exit() -> None:
             for _ in range(16):
                 await pilot.pause()
             await pilot.click(Editor)
-            await pilot.pause(0.25)
+            # Wait for the composer-mode footer to repaint with the gesture hint
+            # rather than sleeping; the exit and the Tab key are what settle in.
+            await _until(pilot, lambda: "esc skip" in _painted_footer(app))
 
             footer = _painted_footer(app)
             # The exit survives WHOLE, and the Tab key is still named.
@@ -1586,13 +1623,13 @@ async def test_the_gesture_preserves_a_draft_and_leaves_routable_cards_alone() -
         editor.focus()
         for character in "hold that":
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.1)
+        await _until(pilot, lambda: app.query_one(Editor).text == "hold that")
         asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
         for _ in range(16):
             await pilot.pause()
 
         await pilot.press("tab")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: isinstance(app.screen.focused, AskPickerScreen))
         assert isinstance(app.screen.focused, AskPickerScreen)
         assert app.query_one(Editor).text == "hold that", "the gesture ate the draft"
 
@@ -1610,9 +1647,11 @@ async def test_the_gesture_preserves_a_draft_and_leaves_routable_cards_alone() -
         for _ in range(16):
             await pilot.pause()
         await pilot.click(Editor)
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: isinstance(app.screen.focused, Editor))
         await pilot.press("tab")
-        await pilot.pause(0.2)
+        # A routable card must NOT pull focus, so the caret stays in the editor;
+        # pump the loop to let any (wrong) handover happen — it does not.
+        await pilot.pause()
         assert isinstance(app.screen.focused, Editor)
         # ...because it is answerable from where the caret already is.
         await pilot.press("1")
@@ -1637,7 +1676,7 @@ async def test_rewording_a_draft_never_moves_the_keyboard() -> None:
         editor.focus()
         for character in "hmm":
             await pilot.press(character)
-        await pilot.pause(0.1)
+        await _until(pilot, lambda: app.query_one(Editor).text == "hmm")
         asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
         for _ in range(16):
             await pilot.pause()
@@ -1645,13 +1684,16 @@ async def test_rewording_a_draft_never_moves_the_keyboard() -> None:
         # Delete the line to reword it...
         for _ in range(len("hmm")):
             await pilot.press("backspace")
-        await pilot.pause(0.3)
+        # The keyboard must stay in the editor through the delete-to-empty (the
+        # handover fires on that condition, wrongly, before the fix); pump the
+        # loop to let any handover happen — it does not.
+        await _until(pilot, lambda: app.query_one(Editor).text == "")
         assert isinstance(app.screen.focused, Editor), "rewording moved the keyboard"
 
         # ...and the retyped message lands in the composer, answering nothing.
         for character in "just checking":
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.3)
+        await _until(pilot, lambda: app.query_one(Editor).text == "just checking")
         assert app.query_one(Editor).text == "just checking"
         assert not asked.done()
         card = app._ask_screen
@@ -1693,7 +1735,7 @@ async def test_the_card_repaints_itself_when_its_inputs_move_untriggered() -> No
         card = app._ask_screen
         assert card is not None
         await pilot.click(Editor)
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: "answer" in _painted_footer(app))
         assert "answer" in _painted_footer(app)
 
         # Move the input WITHOUT any repaint: set the buffer directly on the
@@ -1704,8 +1746,7 @@ async def test_the_card_repaints_itself_when_its_inputs_move_untriggered() -> No
 
         # One tick of the app's own poll and the card notices by itself.
         app._refresh_band()
-        for _ in range(6):
-            await pilot.pause(0.05)
+        await _until(pilot, lambda: card.footer_fingerprint() == card._painted_fingerprint)
         assert (
             card.footer_fingerprint() == card._painted_fingerprint
         ), "the card did not repaint itself when its inputs had moved"
@@ -1786,7 +1827,7 @@ async def test_sending_a_message_does_not_hand_the_keyboard_to_the_question() ->
         editor.focus()
         for character in "please check the schema":
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.1)
+        await _until(pilot, lambda: app.query_one(Editor).text == "please check the schema")
 
         asked = asyncio.create_task(
             app.request_user_choice([_question(multi=True, labels=("Drop", "next"))])
@@ -1798,19 +1839,19 @@ async def test_sending_a_message_does_not_hand_the_keyboard_to_the_question() ->
         # Send it. The send empties the buffer, which must NOT be read as the
         # user finishing with the composer.
         await pilot.press("enter")
-        for _ in range(10):
-            await pilot.pause(0.05)
+        await _until(pilot, lambda: session.prompts[-1:] == ["please check the schema"])
         assert session.prompts[-1:] == ["please check the schema"], session.prompts
         assert isinstance(app.screen.focused, Editor), "sending handed over the keyboard"
 
         # The next message is typed, not answered.
         for character in "ok next":
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: app.query_one(Editor).text == "ok next")
         assert app.query_one(Editor).text == "ok next"
         await pilot.press("enter")
-        for _ in range(10):
-            await pilot.pause(0.05)
+        # Pump the loop so the send fully drains; the assertion is that this
+        # chat message did NOT answer the agent's question.
+        await _until(pilot, lambda: app.query_one(Editor).text == "")
         assert not asked.done(), "a chat message answered the agent's question"
 
         asked.cancel()
@@ -1839,7 +1880,7 @@ async def test_a_collapsed_card_never_takes_the_keyboard() -> None:
         editor.focus()
         for character in "hmm":
             await pilot.press(character)
-        await pilot.pause(0.1)
+        await _until(pilot, lambda: app.query_one(Editor).text == "hmm")
 
         asked = asyncio.create_task(app.request_user_choice([_long_question()]))
         for _ in range(16):
@@ -1850,7 +1891,10 @@ async def test_a_collapsed_card_never_takes_the_keyboard() -> None:
 
         for _ in range(len("hmm")):
             await pilot.press("backspace")
-        await pilot.pause(0.3)
+        # A collapsed card must never take the keyboard, so focus stays in the
+        # editor through the delete-to-empty; pump the loop to let any (wrong)
+        # handover fire — it does not.
+        await _until(pilot, lambda: app.query_one(Editor).text == "")
         assert isinstance(app.screen.focused, Editor)
 
         asked.cancel()
@@ -1881,13 +1925,13 @@ async def test_a_live_question_does_not_break_slash_completion() -> None:
 
         editor = app.query_one(Editor)
         editor.focus()
-        await pilot.pause(0.1)
+        await _until(pilot, lambda: isinstance(app.screen.focused, Editor))
         for character in "/mod":
             await pilot.press(character)
-        await pilot.pause(0.3)
+        await _until(pilot, lambda: app.query_one(Editor).text == "/mod")
 
         await pilot.press("tab")
-        await pilot.pause(0.3)
+        await _until(pilot, lambda: app.query_one(Editor).text == "/model ")
         assert app.query_one(Editor).text == "/model ", app.query_one(Editor).text
 
         asked.cancel()

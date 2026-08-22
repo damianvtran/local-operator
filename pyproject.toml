@@ -114,6 +114,12 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    # Distributes the suite across worker processes (`pytest -n`). The suite is
+    # overwhelmingly wait-bound — Textual pilot tests spend their wall time
+    # letting the event loop settle, not on CPU — so parallelism cuts CI wall
+    # time roughly linearly with the runner's core count while leaving total
+    # CPU work unchanged. See the `-n auto` note on `addopts` below.
+    "pytest-xdist",
     "pytest-textual-snapshot",
     "pip-audit",
     # Independent decoder used to verify our own PNG encoder's output.
@@ -232,5 +238,29 @@ reportPrivateImportUsage = false
 #   .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 [tool.pytest.ini_options]
-addopts = "-vv -s"
+# `-n auto` distributes the suite across one worker process per logical core.
+# The suite is dominated by Textual pilot tests that spend their wall time
+# waiting for the event loop to settle rather than on CPU, so this scales CI
+# wall time down roughly with the core count (4 on GitHub's ubuntu-latest)
+# without changing what each test does. Run `-n0` locally to serialise for a
+# debugger (`--pdb`/`-s` need a single process).
+#
+# The old `-vv -s` was dropped deliberately: `-vv` prints a line per test,
+# which is ~5.8k lines of I/O that buys nothing in CI logs, and `-s`
+# (capture disabled) both adds that noise and is incompatible with xdist,
+# which needs to capture worker output. Tests assert on return values and
+# rendered frames, never on uncaptured stdout, so neither flag was load-bearing.
+addopts = "-n auto"
 testpaths = ["tests"]
+
+# Coverage is measured through pytest-cov (`--cov`), which understands xdist
+# and merges each worker's data automatically — the plain `coverage run -m
+# pytest` the CI used before collects nothing from the worker subprocesses.
+# Branch coverage stays off to match the historical line-only 80% gate.
+[tool.coverage.run]
+source = ["local_operator"]
+
+[tool.coverage.report]
+# The gate the `test` job enforces; kept here so a local `pytest --cov` fails
+# the same way CI does instead of only printing a number.
+fail_under = 80

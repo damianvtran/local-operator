@@ -81,21 +81,28 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests with coverage
+        # pytest-cov (not `coverage run -m pytest`) because the suite now runs
+        # under xdist: coverage has to be collected inside each worker
+        # subprocess and merged, which pytest-cov does automatically and a
+        # top-level `coverage run` cannot. `-n auto` (from addopts) gives one
+        # worker per logical core — 4 on GitHub's ubuntu-latest. The 80% floor
+        # is enforced by `fail_under` in [tool.coverage.report], so the step no
+        # longer parses the percentage out of the report by hand.
+        #
+        # Do NOT oversubscribe (`-n` greater than the core count) here. It looks
+        # tempting because the suite is wait-bound, and it does help on a
+        # many-core dev box that still has idle cores at `-n 8`. On this 4-vCPU
+        # runner it does not: it left wall time unchanged and starved three
+        # timing-sensitive tests (a parked job, a late-parking tool, a held
+        # key) whose deadlines are real wall clock, turning them red. One worker
+        # per core is the stable point.
         run: |
-          coverage run -m pytest -v
-          COVERAGE_PERCENTAGE=$(coverage report | awk '/TOTAL/ {print $NF}' | tr -d '%')
-          echo "Coverage Percentage: $COVERAGE_PERCENTAGE"
-          if (( $(echo "$COVERAGE_PERCENTAGE >= 80" | bc -l) )); then
-            echo "Coverage check passed!"
-          else
-            echo "Coverage check failed. Minimum coverage is 80%"
-            exit 1
-          fi
-
-      - name: Generate coverage HTML report
-        run: coverage html
+          pytest --cov --cov-report=term-missing:skip-covered --cov-report=html
 
       - name: Upload coverage report
+        # `if: always()` so a coverage-threshold failure still uploads the HTML,
+        # which is exactly when you want to see which lines dropped.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report-${{ matrix.python-version }}

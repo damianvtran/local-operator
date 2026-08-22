@@ -161,6 +161,35 @@ def rows(app: OperatorApp) -> list[str]:
     return [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
 
 
+async def _settled_rows(pilot: Any, app: OperatorApp, ceiling: int = 200) -> list[str]:
+    """The painted frame, read only once it has stopped reflowing.
+
+    Tests that assert on a row's REFLOWED GEOMETRY — which choices were shed at
+    a given width, whether anything bleeds past the terminal, whether a receipt
+    stays on one row — must not read a mid-reflow frame. A single ``pilot.pause()``
+    yields exactly one idle tick, and an approval row that is still collapsing to
+    fit a narrow width paints a truncated intermediate frame (a dangling ``…`` or
+    a half-shed clause) on that tick. Reading it makes a width-parametrized test
+    fail intermittently under load with a truncated row the settled frame never
+    shows — the failure mode that a fixed ``pause(0.2)`` used to paper over by
+    outlasting the reflow.
+
+    Waits for the CONDITION the geometry assertions depend on instead: the frame
+    is stable when two consecutive idle ticks paint the identical row set. The
+    ceiling is a deadlock guard, not a timing assumption, so a slow or contended
+    machine costs nothing and a genuinely stuck frame still fails rather than
+    hanging.
+    """
+    previous: list[str] = []
+    for _ in range(ceiling):
+        await pilot.pause()
+        current = rows(app)
+        if current == previous:
+            return current
+        previous = current
+    return previous
+
+
 async def _boot(pilot: Any, app: OperatorApp) -> None:
     """Wait for the session to be ADOPTED, rather than for a fixed duration.
 
@@ -192,7 +221,7 @@ async def _boot(pilot: Any, app: OperatorApp) -> None:
 async def _submit(pilot: Any, app: OperatorApp, text: str) -> None:
     app.query_one(Editor).text = text
     await pilot.press("enter")
-    await pilot.pause(0.1)
+    await pilot.pause()
 
 
 @pytest.mark.asyncio
@@ -236,7 +265,7 @@ async def test_escape_stops_a_running_turn() -> None:
         editor = app.query_one(Editor)
         editor.text = "kept"
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.aborts == []
         assert editor.text == "kept"
         # Focus MUST stay in the composer. TextArea binds Escape to `blur`, which
@@ -246,7 +275,7 @@ async def test_escape_stops_a_running_turn() -> None:
 
         session.streaming = True
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.aborts == ["interrupted"]
         assert app.screen.focused is editor
 
@@ -274,7 +303,7 @@ async def test_empty_assistant_message_mounts_no_block() -> None:
                 )
             )
         )
-        await pilot.pause(0.3)
+        await pilot.pause()
 
         assert not app.query(AssistantBlock)
         painted = rows(app)
@@ -345,7 +374,7 @@ async def test_n_denies_one_tool_and_lets_the_turn_continue() -> None:
         ask = await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(ask("write", "write: /etc/hosts"))
-        await pilot.pause(0.3)
+        await pilot.pause()
 
         await pilot.press("n")
         assert await asyncio.wait_for(pending, 2) is False
@@ -369,7 +398,7 @@ async def test_escape_denies_the_prompt_and_stops_the_turn() -> None:
         session.streaming = True
         first = asyncio.ensure_future(ask("write", "write: /etc/hosts"))
         second = asyncio.ensure_future(ask("bash", "run: rm -rf /"))
-        await pilot.pause(0.3)
+        await pilot.pause()
 
         await pilot.press("escape")
         # BOTH asks are settled by the one press, and the turn is stopped.
@@ -389,16 +418,16 @@ async def test_allow_all_latches_for_the_session() -> None:
         await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         first = asyncio.ensure_future(ask("bash", "run: make"))
-        await pilot.pause(0.3)
+        await pilot.pause()
         await pilot.press("A")
         assert await asyncio.wait_for(first, 2) is True
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         # No prompt is mounted for the second ask at all.
         before = len(app.query(ApprovalPrompt))
         second = asyncio.ensure_future(ask("write", "write: out.txt"))
         assert await asyncio.wait_for(second, 2) is True
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert len(app.query(ApprovalPrompt)) == before
 
 
@@ -417,7 +446,7 @@ async def test_interrupt_denies_a_parked_approval() -> None:
         ask = await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(ask("bash", "run: sleep 99"))
-        await pilot.pause(0.3)
+        await pilot.pause()
 
         app.action_interrupt()
         assert await asyncio.wait_for(pending, 2) is False
@@ -433,10 +462,10 @@ async def test_clearing_the_transcript_settles_a_pending_approval() -> None:
         await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: make"))
-        await pilot.pause(0.3)
+        await pilot.pause()
 
         app.query_one(TranscriptView).clear_blocks()
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert await asyncio.wait_for(pending, 2) is False
 
 
@@ -458,18 +487,18 @@ async def test_escape_closes_an_open_picker_before_it_stops_anything() -> None:
 
         editor = app.query_one(Editor)
         editor.text = "/"
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert editor.picker.is_open()
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert not editor.picker.is_open()  # the list closed…
         assert session.aborts == []  # …and the turn was NOT stopped
 
         # The very next Esc stops the turn — no dead press in between, and focus
         # never leaves the composer.
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.aborts == ["interrupted"]
         assert app.screen.focused is editor
 
@@ -492,13 +521,13 @@ async def test_a_queued_ask_is_denied_rather_than_re_asked_after_a_stop() -> Non
         session.streaming = True
         first = asyncio.ensure_future(ask("bash", "run: one"))
         second = asyncio.ensure_future(ask("bash", "run: two"))
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert len(app.query(ApprovalPrompt)) == 1  # serialized, not stacked
 
         app.action_interrupt()
         assert await asyncio.wait_for(first, 2) is False
         assert await asyncio.wait_for(second, 2) is False
-        await pilot.pause(0.2)
+        await pilot.pause()
         # No fresh question was mounted for the stopped turn.
         assert not app.query(ApprovalPrompt)
 
@@ -518,12 +547,12 @@ async def test_allow_all_is_seen_by_an_already_queued_ask() -> None:
         ask = await _booted_gate(pilot, session)
         first = asyncio.ensure_future(ask("bash", "run: one"))
         second = asyncio.ensure_future(ask("write", "write: two"))
-        await pilot.pause(0.3)
+        await pilot.pause()
 
         await pilot.press("A")
         assert await asyncio.wait_for(first, 2) is True
         assert await asyncio.wait_for(second, 2) is True  # never asked again
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert not app.query(ApprovalPrompt)
 
 
@@ -547,7 +576,7 @@ async def test_lowercase_a_does_not_disarm_the_gate() -> None:
             await pilot.pause(0.02)
 
         await pilot.press("a")
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert not pending.done()  # the question is still being asked
         assert app._approve_all is False
         # The card KEEPS focus and keeps the question answerable.
@@ -576,19 +605,19 @@ async def test_approvals_command_restores_prompting() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
         app._run_slash_command("/approvals auto")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app._approve_all is True
         # The band's alarm is a bare `!` in the trailing cell now — the session
         # name took the words that used to be there.
         assert any(row.rstrip().endswith("!") for row in rows(app))
 
         app._run_slash_command("/approvals ask")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app._approve_all is False
         assert not any(row.rstrip().endswith("!") for row in rows(app))
         # And the gate really asks again.
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert app.query(ApprovalPrompt)
         await pilot.press("n")
         assert await asyncio.wait_for(pending, 2) is False
@@ -616,7 +645,7 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
         session.streaming = True
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.aborts == ["interrupted"]
         assert app.is_running  # one press NEVER exits
         assert any("ctrl+c again to exit" in row for row in rows(app))
@@ -628,7 +657,7 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
         assert not any("--resume" in row for row in rows(app))
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert not app.is_running
 
     assert app.resume_hint() == "lop --resume sess"
@@ -648,11 +677,11 @@ async def test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit() -> None:
         session.streaming = True
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
         # Age the first press past the window without waiting for it.
         app._last_interrupt_at -= DOUBLE_INTERRUPT_WINDOW_S + 1
         await pilot.press("ctrl+c")
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert app.is_running
         assert session.aborts == ["interrupted", "interrupted"]
         # One hint, not one per press: it is replaced rather than repeated.
@@ -670,11 +699,11 @@ async def test_an_empty_message_end_keeps_the_streamed_prose() -> None:
         app.post_message(TurnStarted())
         app.post_message(AssistantMessageStart())
         app.post_message(AssistantDelta("hello from the model"))
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert any("hello from the model" in row for row in rows(app))
 
         app.post_message(AssistantMessageEnd(""))
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert any("hello from the model" in row for row in rows(app))
         assert len(app.query(AssistantBlock)) == 1
 
@@ -732,15 +761,15 @@ async def test_clearing_the_transcript_does_not_disarm_later_prompts() -> None:
         session.streaming = True
 
         first = asyncio.ensure_future(ask("bash", "run: one"))
-        await pilot.pause(0.3)
+        await pilot.pause()
         app.query_one(TranscriptView).clear_blocks()
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert await asyncio.wait_for(first, 2) is False  # its widget is gone
         assert session.aborts == []  # the turn was NOT stopped
 
         # The next tool of the same run still gets to ask.
         second = asyncio.ensure_future(ask("write", "write: two"))
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert app.query(ApprovalPrompt), "a later tool of a live turn must still ask"
         await pilot.press("y")
         assert await asyncio.wait_for(second, 2) is True
@@ -763,10 +792,10 @@ async def test_approvals_ask_clears_a_latched_deny() -> None:
         assert app._approvals_are_denied(app._turn_epoch) is True
 
         app._run_slash_command("/approvals ask")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app._approvals_are_denied(app._turn_epoch) is False
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert app.query(ApprovalPrompt)
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
@@ -787,7 +816,7 @@ async def test_the_resume_hint_is_withheld_until_the_session_is_on_disk() -> Non
         # FakeSession's id has no directory on disk, so there is nothing to offer.
         assert app.resume_hint() == ""
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
         painted = rows(app)
         assert any("ctrl+c again to exit" in row for row in painted)
         assert not any("--resume" in row for row in painted)
@@ -811,8 +840,7 @@ async def test_the_prompt_never_hides_its_target_or_overflows(width: int) -> Non
         view.append_block(
             ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
         )
-        await pilot.pause(0.2)
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
 
         # Nothing bleeds past the terminal at any width.
         assert not [row for row in painted if cell_len(row) > width]
@@ -839,10 +867,9 @@ async def test_the_answered_receipt_stays_on_one_row(width: int) -> None:
         await _boot(pilot, app)
         block = ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
         app.query_one(TranscriptView).append_block(block)
-        await pilot.pause(0.1)
+        await pilot.pause()
         block.resolve(True, answer="y")
-        await pilot.pause(0.2)
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
 
         # Found by the outcome GLYPH, not by the word: below ~32 columns the
         # receipt sheds `allowed` to keep the hazard clause, which is the same
@@ -872,8 +899,10 @@ async def test_the_hint_row_sheds_whole_choices(width: int) -> None:
     async with app.run_test(size=(width, 24)) as pilot:
         await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("bash", "run: make"))
-        await pilot.pause(0.2)
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        # Read the SETTLED frame: this asserts on the hint row's reflowed geometry
+        # (which choices were shed at this width), and a mid-reflow frame paints a
+        # truncated `…` the next assertion forbids. See _settled_rows.
+        painted = await _settled_rows(pilot, app)
         hint = next((row.strip() for row in painted if "deny" in row or "n/y" in row), "")
         assert hint, "the prompt must always advertise at least one answer"
         assert "…" not in hint
@@ -910,8 +939,7 @@ async def test_a_dangerous_ask_never_paints_like_a_safe_one(width: int) -> None:
         view = app.query_one(TranscriptView)
         view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /tmp/x/keys"))
         view.append_block(ApprovalBlock("write_file", "write: /tmp/x/keys"))
-        await pilot.pause(0.2)
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
         # Matched on the leading glyph, not the tool name: at the narrowest widths
         # the hazard IS the glyph (`!` for `?`), which is the behaviour under test
         # rather than a reason to miss the row.
@@ -945,8 +973,7 @@ async def test_a_narrow_prompt_keeps_the_end_of_the_path(detail: str, expected_t
     async with app.run_test(size=(52, 24)) as pilot:
         await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
-        await pilot.pause(0.2)
-        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        painted = await _settled_rows(pilot, app)
         ask = next(row for row in painted if "write_file" in row)
         assert expected_tail in ask, ask
 
@@ -968,14 +995,14 @@ async def test_a_turn_start_racing_the_stop_cannot_revive_a_denied_ask() -> None
         await _boot(pilot, app)
         session.streaming = True
         first = asyncio.ensure_future(_approval_gate(session)("bash", "run: one"))
-        await pilot.pause(0.25)
+        await pilot.pause()
         second = asyncio.ensure_future(_approval_gate(session)("execute", "run: rm -rf /"))
-        await pilot.pause(0.15)
+        await pilot.pause()
 
         # The race: a turn boundary is already queued when the stop lands.
         app.post_message(TurnStarted())
         app.action_interrupt()
-        await pilot.pause(0.4)
+        await pilot.pause()
 
         assert await asyncio.wait_for(first, 2) is False
         assert await asyncio.wait_for(second, 2) is False
@@ -998,11 +1025,11 @@ async def test_approvals_auto_answers_the_question_on_screen() -> None:
         await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert app.query(ApprovalPrompt)
 
         app._run_slash_command("/approvals auto")
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert await asyncio.wait_for(pending, 2) is True
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert [row for row in painted if "allowed" in row]
@@ -1030,7 +1057,7 @@ async def test_the_prompt_cannot_be_repainted_from_a_tool_argument() -> None:
         await _boot(pilot, app)
         block = ApprovalBlock("bash", f"run: {payload}")
         app.query_one(TranscriptView).append_block(block)
-        await pilot.pause(0.2)
+        await pilot.pause()
 
         assert "\x1b" not in block.description
         assert "\x1b" not in block.tool_name
@@ -1055,16 +1082,16 @@ async def test_a_pending_prompt_does_not_widen_the_tool_ledger() -> None:
         await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(ToolCard("t1", "bash", {}, ""))
-        await pilot.pause(0.1)
+        await pilot.pause()
         settled = view.tool_name_col
 
         block = ApprovalBlock("mcp__linear_create_initiative", "run: x")
         view.append_block(block)
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert view.tool_name_col == settled
 
         block.resolve(False, answer="n")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert view.tool_name_col == settled
 
 
@@ -1077,12 +1104,12 @@ async def test_clearing_the_transcript_forgets_the_ledger_width() -> None:
         await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(ToolCard("t1", "mcp__linear_create_initiative", {}, ""))
-        await pilot.pause(0.1)
+        await pilot.pause()
         widened = view.tool_name_col
         assert widened > 8
 
         view.clear_blocks()
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert view.tool_name_col == 8
 
 
@@ -1106,7 +1133,7 @@ async def test_a_tall_notice_is_separated_from_what_precedes_it() -> None:
         )
         view.append_block(short)
         view.append_block(tall)
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert tall.spans_multiple_rows()
         assert tall.has_class("gap-above")
 
@@ -1129,7 +1156,7 @@ async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
-        await pilot.pause(0.1)
+        await pilot.pause()
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert [row for row in painted if "composing" in row]
         # No size until there is one: a `0 B` that never moves reads as stuck.
@@ -1140,7 +1167,7 @@ async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
                 ToolCallComposeEvent(tool_call_id="c1", tool_name="write", argument_bytes=14079)
             )
         )
-        await pilot.pause(0.1)
+        await pilot.pause()
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert [row for row in painted if "13.7 KB" in row]
 
@@ -1152,7 +1179,7 @@ async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
                 )
             )
         )
-        await pilot.pause(0.1)
+        await pilot.pause()
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert len([row for row in painted if "write" in row]) == 1
         assert not [row for row in painted if "composing" in row]
@@ -1189,7 +1216,7 @@ async def test_an_adopted_row_times_the_tool_not_the_dictation() -> None:
                 )
             )
         )
-        await pilot.pause(0.1)
+        await pilot.pause()
         card = next(iter(app.query(ToolCard)))
         assert card._duration is not None
         assert card._duration < 0.4, f"the dictation was billed to the tool: {card._duration}"
@@ -1213,7 +1240,7 @@ async def test_the_composing_row_sheds_its_label_before_its_facts() -> None:
                 ToolCallComposeEvent(tool_call_id="c1", tool_name="write", argument_bytes=12700)
             )
         )
-        await pilot.pause(0.1)
+        await pilot.pause()
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         row = next(row for row in painted if "12.4 KB" in row)
         assert "composing" not in row
@@ -1263,7 +1290,7 @@ async def test_a_dictated_name_moves_its_own_row_but_not_the_shared_column() -> 
         settled = ToolCard("s1", "read", {}, None)
         view.append_block(settled)
         settled.mark_done("read a file")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         def settled_row() -> str:
             return next(
@@ -1273,14 +1300,14 @@ async def test_a_dictated_name_moves_its_own_row_but_not_the_shared_column() -> 
 
         before = settled_row()
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="mcp")))
-        await pilot.pause(0.15)
+        await pilot.pause()
         first = next(
             (s.text for s in app.screen._compositor.render_strips() if "composing" in s.text), ""
         )
         app.post_message(
             ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="mcp__" + "z" * 200))
         )
-        await pilot.pause(0.15)
+        await pilot.pause()
         renamed = next(
             (s.text for s in app.screen._compositor.render_strips() if "composing" in s.text), ""
         )
@@ -1549,14 +1576,14 @@ async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
         editor = app.query_one(Editor)
         editor.focus()
         editor.load_text("please clean up the stale rows and then")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
         for _ in range(100):
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
 
         # The question is up, the draft is intact, and the caret never moved.
         assert app.query(ApprovalPrompt), "no prompt was raised"
@@ -1566,7 +1593,7 @@ async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
         # The draft is what makes this the interesting case: with text in the
         # buffer the routing stands down entirely, so `y` is TYPED, not taken.
         await pilot.press("y")
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert not pending.done(), "a keystroke answered while a draft was open"
         # Typed into the buffer (at the caret, which `load_text` leaves at the
         # start) rather than taken as an answer. What matters is that the draft
@@ -1577,7 +1604,7 @@ async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
 
         # Clearing the draft hands the keys back: the card is answerable again.
         app.query_one(Editor).load_text("")
-        await pilot.pause(0.1)
+        await pilot.pause()
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
 
@@ -1602,10 +1629,10 @@ async def test_the_answer_keys_work_from_the_composer() -> None:
                 if app.query(ApprovalPrompt):
                     break
                 await pilot.pause(0.02)
-            await pilot.pause(0.2)
+            await pilot.pause()
 
             await pilot.click(Editor)
-            await pilot.pause(0.1)
+            await pilot.pause()
             await pilot.press(key)
             assert await asyncio.wait_for(pending, 2) is expected, key
             # The key answered instead of being typed.
@@ -1636,13 +1663,13 @@ async def test_typing_a_steer_at_a_live_prompt_never_answers_it() -> None:
                 if app.query(ApprovalPrompt):
                     break
                 await pilot.pause(0.02)
-            await pilot.pause(0.2)
+            await pilot.pause()
 
             await pilot.click(Editor)
-            await pilot.pause(0.1)
+            await pilot.pause()
             for character in phrase:
                 await pilot.press("space" if character == " " else character)
-            await pilot.pause(0.4)
+            await pilot.pause()
 
             # Nothing was authorised...
             assert not pending.done(), (phrase, "typing a steer answered the prompt")
@@ -1676,7 +1703,7 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
 
         lines = app.query(ApprovalPrompt).first().render_lines_for_test()
         assert lines, "the card drew nothing at a size it can draw at"
@@ -1713,7 +1740,7 @@ async def test_the_card_advertises_only_keys_that_do_something() -> None:
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
 
         prompt = app.query(ApprovalPrompt).first()
         lines = prompt.render_lines_for_test()
@@ -1756,7 +1783,7 @@ async def test_a_card_that_shows_no_options_cannot_approve() -> None:
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
 
         prompt = app.query(ApprovalPrompt).first()
         lines = prompt.render_lines_for_test()
@@ -1766,16 +1793,16 @@ async def test_a_card_that_shows_no_options_cannot_approve() -> None:
 
         # ...and the permissive keys are refused while it cannot show them.
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert not pending.done(), "y approved from a card showing no options"
         await pilot.press("A")
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert not pending.done(), "A approved from a card showing no options"
         assert app._approve_all is False, "the session gate was disarmed invisibly"
         # Enter is refused for the same reason: the cursor is on a preselected
         # row the user was never shown.
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert not pending.done(), "enter committed an unseen selection"
 
         # Denial is always available.
@@ -1801,7 +1828,7 @@ async def test_a_prompt_hidden_by_a_shrink_comes_back_on_re_grow() -> None:
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
         prompt = app.query(ApprovalPrompt).first()
         assert prompt.render_lines_for_test(), "no card to begin with"
 
@@ -1846,9 +1873,9 @@ async def test_a_held_answer_key_resolves_cleanly_on_every_second_key() -> None:
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
         await pilot.click(Editor)
-        await pilot.pause(0.1)
+        await pilot.pause()
         return pending
 
     # Enter takes the answer.
@@ -1869,7 +1896,7 @@ async def test_a_held_answer_key_resolves_cleanly_on_every_second_key() -> None:
         await pilot.press("y")
         await pilot.press("escape")
         assert await asyncio.wait_for(pending, 2) is False
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert app.query_one(Editor).text == "", "a stray character outlived the question"
 
     # A printable key means it was typing all along.
@@ -1879,7 +1906,7 @@ async def test_a_held_answer_key_resolves_cleanly_on_every_second_key() -> None:
         pending = await _live(pilot, app, session)
         await pilot.press("y")
         await pilot.press("e")
-        await pilot.pause(0.4)
+        await pilot.pause()
         assert not pending.done(), "typing answered the prompt"
         assert app.query_one(Editor).text == "ye"
         pending.cancel()
@@ -1906,9 +1933,9 @@ async def test_a_held_key_never_answers_a_question_it_was_not_meant_for() -> Non
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
         await pilot.click(Editor)
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         await pilot.press("y")
         assert app._held_answer_key is not None, "the key was not held"
@@ -1916,7 +1943,7 @@ async def test_a_held_key_never_answers_a_question_it_was_not_meant_for() -> Non
         assert app._approval is not None
         app._approval.resolve(False, answer="n")
         assert await asyncio.wait_for(first, 2) is False
-        await pilot.pause(0.4)
+        await pilot.pause()
 
         # Nothing is left parked, and the session gate was not disarmed.
         assert app._held_answer_key is None
@@ -1957,7 +1984,7 @@ async def test_a_prompt_arriving_mid_sentence_does_not_take_the_caret() -> None:
 
         for character in "yes do it":
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.4)
+        await pilot.pause()
 
         assert not pending.done(), "typing through the mount answered the prompt"
         assert app._approve_all is False
@@ -1994,14 +2021,14 @@ async def test_a_resize_while_typing_never_moves_the_keyboard() -> None:
         editor.focus()
         for character in "wait a":
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         pending = asyncio.ensure_future(ask("bash", "run: rm -rf /data"))
         for _ in range(100):
             if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert isinstance(app.screen.focused, Editor)
 
         await pilot.resize_terminal(99, 30)
@@ -2010,7 +2037,7 @@ async def test_a_resize_while_typing_never_moves_the_keyboard() -> None:
         assert isinstance(app.screen.focused, Editor), "a resize took the keyboard"
 
         await pilot.press("y")
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert not pending.done(), "a resize let a typed character authorise the call"
         assert app._approve_all is False
         assert app.query_one(Editor).text == "wait ay"
@@ -2050,7 +2077,7 @@ async def test_answering_one_prompt_does_not_move_the_caret_off_a_draft() -> Non
         editor.focus()
         for character in "hold on":
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert isinstance(app.screen.focused, Editor)
 
         # The approval settles from somewhere else entirely.
@@ -2093,7 +2120,7 @@ async def test_nothing_takes_the_keyboard_from_someone_mid_sentence() -> None:
         editor.focus()
         for character in draft:
             await pilot.press("space" if character == " " else character)
-        await pilot.pause(0.1)
+        await pilot.pause()
         futures = []
         if overlap:
             futures.append(
@@ -2189,7 +2216,7 @@ async def test_esc_stops_the_turn_and_offers_to_stop_the_subagents() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert session.aborts == ["interrupted"]
         # The children are NOT stopped by the first press.
@@ -2209,9 +2236,9 @@ async def test_a_second_esc_stops_the_subagents_and_confirms_it() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert session.subagent_cancels == ["interrupted"]
         assert any("stopped 2 subagents" in row for row in rows(app))
@@ -2235,12 +2262,12 @@ async def test_a_slow_second_esc_does_not_stop_the_subagents() -> None:
         session.running_children = 1
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         # Age the offer past its window without waiting for it.
         assert app._stop_offered_at is not None, "the first press must make the offer"
         app._stop_offered_at -= DOUBLE_STOP_WINDOW_S + 1
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert session.subagent_cancels == [], "an expired offer must not escalate"
 
@@ -2255,7 +2282,7 @@ async def test_esc_with_no_children_says_nothing_about_subagents() -> None:
         session.streaming = True
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert session.aborts == ["interrupted"]
         assert not any("subagent" in row for row in rows(app))
@@ -2275,11 +2302,11 @@ async def test_esc_stops_subagents_even_when_the_parent_turn_has_ended() -> None
         session.running_children = 3
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert any("3 subagents still running" in row for row in rows(app))
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.subagent_cancels == ["interrupted"]
         assert any("stopped 3 subagents" in row for row in rows(app))
 
@@ -2295,7 +2322,7 @@ async def test_esc_with_nothing_running_still_never_clears_the_composer() -> Non
         editor.load_text("a half-typed prompt")
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert editor.text == "a half-typed prompt"
         assert session.aborts == []
@@ -2322,7 +2349,7 @@ async def test_ctrl_c_clears_a_draft_before_arming_the_exit_ladder() -> None:
         editor.load_text("draft to be scrapped")
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert editor.text == ""
         assert not any("ctrl+c again to exit" in row for row in rows(app))
@@ -2343,9 +2370,9 @@ async def test_two_ctrl_c_presses_from_a_draft_do_not_exit() -> None:
         app.query_one(Editor).load_text("draft")
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert app.is_running, "a double-tap from a draft must never quit"
         assert any("ctrl+c again to exit" in row for row in rows(app))
@@ -2361,12 +2388,12 @@ async def test_ctrl_c_on_an_empty_composer_keeps_the_exit_ladder() -> None:
         session.streaming = True
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.aborts == ["interrupted"]
         assert any("ctrl+c again to exit" in row for row in rows(app))
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.3)
+        await pilot.pause()
         assert not app.is_running
 
 
@@ -2382,7 +2409,7 @@ async def test_whitespace_only_draft_is_not_treated_as_a_draft() -> None:
         app.query_one(Editor).load_text("   \n  ")
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert session.aborts == ["interrupted"]
         assert any("ctrl+c again to exit" in row for row in rows(app))
@@ -2404,17 +2431,17 @@ async def test_clearing_the_transcript_disarms_the_stop_offer() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app._stop_offered_at is not None
 
         app.action_clear_transcript()
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app._stop_offered_at is None
         assert app._stop_notice is None
 
         # And the next Esc is a FIRST press, not an escalation.
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.subagent_cancels == []
 
 
@@ -2435,11 +2462,11 @@ async def test_a_stop_offer_does_not_survive_into_a_new_session() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app._stop_offered_at is not None, "the offer must be armed first"
 
         await app._reload_session()
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert app._stop_offered_at is None
         assert app._stop_notice is None
@@ -2464,13 +2491,13 @@ async def test_ctrl_c_never_files_an_aside_question_in_prompt_history() -> None:
         await _boot(pilot, app)
         editor = app.query_one(Editor)
         app._open_aside()
-        await pilot.pause(0.1)
+        await pilot.pause()
         editor.load_text("is my salary competitive?")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert editor._records_history is False, "the aside must suppress recording"
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.15)
+        await pilot.pause()
 
         assert not any(
             "salary" in entry for entry in editor.prompt_history()
@@ -2502,13 +2529,13 @@ async def test_a_late_second_esc_is_acknowledged_rather_than_silently_ignored() 
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert any("esc again to stop them" in row for row in rows(app))
 
         # The window lapses without a second press.
         app._stop_offered_at = time.monotonic() - (DOUBLE_STOP_WINDOW_S + 1)
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         # Nothing was stopped — that part is by design — but the row CHANGED,
         # so the press is visibly acknowledged.
@@ -2536,12 +2563,12 @@ async def test_children_finishing_between_presses_is_not_reported_as_a_denial() 
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         # They finish on their own before the user's second press lands.
         session.running_children = 0
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         painted = rows(app)
         assert any(
@@ -2566,10 +2593,10 @@ async def test_a_stop_that_spares_background_jobs_says_so() -> None:
         session.running_bash_jobs = 1
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         app._stop_offered_at = time.monotonic()
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         painted = rows(app)
         assert any("stopped 1 subagent" in row for row in painted)
@@ -2591,10 +2618,10 @@ async def test_the_confirmation_stays_quiet_when_nothing_was_spared() -> None:
         session.running_bash_jobs = 0
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         app._stop_offered_at = time.monotonic()
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert not any("background job" in row for row in rows(app))
 
@@ -2617,7 +2644,7 @@ async def test_the_offer_retires_its_promise_when_the_window_closes() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert any("esc again to stop them" in row for row in rows(app))
 
         # Wait out the real window rather than reaching into the timer.
@@ -2644,10 +2671,10 @@ async def test_taking_the_offer_is_not_undone_by_the_expiry_timer() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         app._stop_offered_at = time.monotonic()
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.subagent_cancels == ["interrupted"]
 
         # The first press's timer fires somewhere in here and must do nothing.
@@ -2676,14 +2703,14 @@ async def test_the_ladder_row_keeps_its_place_in_the_transcript() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         # A notice arrives after the offer, as the aborted turn's own does.
         app._append_block(NoticeBlock("interrupted", "info"))
         await pilot.pause()
 
         app._stop_offered_at = time.monotonic()
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         painted = [row for row in rows(app) if row.strip()]
         ladder = next(i for i, row in enumerate(painted) if "stopped 2 subagents" in row)
@@ -2706,7 +2733,7 @@ async def test_ctrl_c_says_where_the_draft_went() -> None:
         await pilot.pause()
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         painted = rows(app)
         assert any(
@@ -2749,7 +2776,7 @@ async def test_an_armed_offer_never_outranks_a_waiting_approval() -> None:
         app._stop_offer_count = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await pilot.pause()
 
         assert (
             session.subagent_cancels == []
@@ -2776,18 +2803,18 @@ async def test_the_late_row_promises_the_number_of_presses_it_actually_costs() -
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         # The window lapses, so this press cannot escalate — it re-arms.
         app._stop_offered_at = time.monotonic() - (DOUBLE_STOP_WINDOW_S + 1)
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert session.subagent_cancels == []
         assert any("esc again within" in row for row in rows(app))
 
         # ONE further press, exactly as the row now promises.
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert session.subagent_cancels == [
             "interrupted"
@@ -2813,7 +2840,7 @@ async def test_a_buried_ladder_row_moves_to_where_the_user_is_looking() -> None:
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         first = app._stop_notice
         assert first is not None
 
@@ -2832,7 +2859,7 @@ async def test_a_buried_ladder_row_moves_to_where_the_user_is_looking() -> None:
         # A later press must produce a row the user can actually see.
         session.streaming = True
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         # The append scrolls the transcript; let the layout settle before
         # asking where the row landed.
         for _ in range(5):
@@ -2867,7 +2894,7 @@ async def test_the_expired_row_recounts_rather_than_restating_a_stale_number() -
         session.running_children = 2
 
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert any("2 subagents still running" in row for row in rows(app))
 
         # They finish on their own inside the window.
@@ -2914,7 +2941,7 @@ async def test_a_stale_highlight_copies_but_cannot_arm_the_exit_ladder() -> None
         assert not getattr(editor, "_selecting", False), "no drag should be in flight"
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         # The copy takes the key, and nothing else moves: no abort, the draft
         # still there, and the ladder unarmed.
@@ -2925,7 +2952,7 @@ async def test_a_stale_highlight_copies_but_cannot_arm_the_exit_ladder() -> None
         # The range is still live, so this press copies again — it must NOT
         # have started counting rungs.
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app.is_running, "a second reflexive tap exited the app"
         assert session.aborts == [], "the second tap became an abort"
 
@@ -2981,12 +3008,12 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
         assert editor._copied, "the receipt is still true and must not be retired here"
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert session.aborts == [], "a retired copy still diverted the key"
         assert editor.text == "", "the draft was not cleared"
         assert "a half-typed prompt I do not want to lose" in editor.prompt_history()
 
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert app.is_running, "the second tap quit with the draft lost"
