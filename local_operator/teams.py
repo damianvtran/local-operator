@@ -52,7 +52,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -68,16 +68,46 @@ MAX_TEAM_INSTRUCTIONS_CHARS = 8_000
 #: or slashes — ``/team feature-release ship it`` has to parse unambiguously.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
+#: How deep an org (a team whose members are themselves teams) may nest before
+#: the resolver stops descending. Eight levels is far past any real human org
+#: and keeps the resolver, the tidy-tree layout, and the render all bounded: a
+#: reference deeper than this is truncated with a visible "depth limit" node
+#: rather than followed. It also backstops the cycle guard — even a
+#: mis-detected cycle cannot run away past this. Lives here, in the MODEL layer,
+#: because depth is a property of the data, not of any one widget that draws it.
+MAX_ORG_DEPTH = 8
+
 
 class TeamMember(BaseModel):
-    """One roster slot: a named agent/role, possibly more than one copy."""
+    """One roster slot: a named agent/role, or a nested TEAM, possibly repeated."""
 
-    role: str = Field(..., description="Role or specialist agent name.")
+    role: str = Field(
+        ...,
+        description="Role/specialist name, or team name when kind='team'.",
+    )
     count: int = Field(
         default=1,
         ge=1,
         le=16,
         description="How many of this role to run.",
+    )
+    # NEW discriminator. Absent ("agent") in every existing ``team.yml``, so old
+    # files load unchanged — the field defaults to "agent" and validation is a
+    # no-op on a roster that never mentions it, which is the whole point of a
+    # default rather than a required key (a required field would silently drop
+    # every stored team through ``_load``'s except-and-skip).
+    #
+    # "team" marks this slot as a reference to ANOTHER team by name, turning a
+    # flat roster into an "org" (a team of teams). The referenced name still
+    # lives in ``role`` rather than a new field so that ``member_names()``,
+    # ``member_count()``, and every existing reader keep working without
+    # knowing nesting exists — a team slot simply reads as its team name. One
+    # roster, one authored order: a separate ``subteams`` list would split the
+    # roster into two lists the author has to keep mentally merged and would
+    # force every reader to concatenate them.
+    kind: Literal["agent", "team"] = Field(
+        default="agent",
+        description="'agent' (a role/specialist) or 'team' (a nested sub-team).",
     )
 
     @field_validator("role")
@@ -132,11 +162,17 @@ class Team(BaseModel):
         return name
 
     def roster_lines(self) -> list[str]:
-        """One scannable line per slot, manager first."""
+        """One scannable line per slot, manager first.
+
+        A nested-team slot is badged ``(team)`` so a reader (and ``team show``)
+        can tell an org apart from a flat roster — a member named ``pod`` and a
+        sub-team named ``pod`` would otherwise render identically.
+        """
         lines = [f"- manager: {self.manager} (you, when this team is invoked)"]
         for member in self.members:
             suffix = f" x{member.count}" if member.count > 1 else ""
-            lines.append(f"- {member.role}{suffix}")
+            badge = " (team)" if member.kind == "team" else ""
+            lines.append(f"- {member.role}{badge}{suffix}")
         return lines
 
     def member_count(self) -> int:
@@ -360,17 +396,34 @@ class TeamRegistry:
 
 
 def parse_members(raw: Iterable[str] | None) -> list[TeamMember]:
-    """Parse ``coder`` / ``coder:2`` tokens into roster slots.
+    """Parse ``coder`` / ``coder:2`` / ``team:pod`` / ``team:pod:2`` tokens.
 
     Two members of the same role collapse into one slot with a summed count
     so a caller can pass ``--member coder --member coder`` or ``coder:2``.
+
+    A leading ``team:`` prefix marks the slot as a nested TEAM (an org): the
+    name after the prefix is a team name, and ``team:pod:2`` is two independent
+    copies of the ``pod`` sub-org. This is the ONE place the tool authors
+    nesting; a bare token (no ``team:`` prefix) stays ``kind='agent'`` so the
+    existing ``coder`` / ``coder:2`` grammar is untouched. Agent and team slots
+    live in one keyed namespace here (``(kind, role)``) so a member ``pod`` and
+    a sub-team ``pod`` do not collapse into each other.
     """
-    slots: dict[str, int] = {}
-    order: list[str] = []
+    slots: dict[tuple[Literal["agent", "team"], str], int] = {}
+    order: list[tuple[Literal["agent", "team"], str]] = []
     for token in raw or ():
         text = (token or "").strip()
         if not text:
             continue
+        kind: Literal["agent", "team"] = "agent"
+        # ``team:`` is a case-insensitive prefix on the WHOLE token, stripped
+        # before the ``role:count`` split so ``team:pod:2`` still parses its
+        # count. A bare ``pod:2`` is unaffected — no prefix, stays an agent.
+        if text[:5].lower() == "team:":
+            kind = "team"
+            text = text[5:].strip()
+            if not text:
+                raise ValueError(f"invalid team member {token!r}: no team name")
         role, sep, count_text = text.partition(":")
         role = role.strip()
         if not role:
@@ -383,11 +436,12 @@ def parse_members(raw: Iterable[str] | None) -> list[TeamMember]:
                 raise ValueError(f"invalid member count in {token!r}") from exc
         if count < 1:
             raise ValueError(f"member count must be >= 1 in {token!r}")
-        if role not in slots:
-            order.append(role)
-            slots[role] = 0
-        slots[role] += count
-    return [TeamMember(role=role, count=slots[role]) for role in order]
+        key = (kind, role)
+        if key not in slots:
+            order.append(key)
+            slots[key] = 0
+        slots[key] += count
+    return [TeamMember(role=role, count=slots[(kind, role)], kind=kind) for (kind, role) in order]
 
 
 def _bounded(text: str) -> str:

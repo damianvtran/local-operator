@@ -2125,27 +2125,15 @@ class Session:
         qualifies, so a private chat agent's prompt is never pulled in by a
         coincidental name.
         """
-        key = (name or "").strip()
-        if not key:
-            return (None, None, "", "")
-        from local_operator.agent_profiles import is_specialist, resolve_profile
+        # Delegates to the ONE shared resolver in ``agent_profiles`` so this
+        # session path, ``/agent`` attach, and the org-chart resolver cannot
+        # disagree about which of a role/specialist/seed a name picks (the A1
+        # bug was that disagreement). This method stays as the session's named
+        # entry point — callers here and the tests that pin the order reference
+        # it — but the logic lives in one place now.
+        from local_operator.agent_profiles import resolve_profile_or_specialist
 
-        profile = resolve_profile(key, registry=self.agent_registry)
-        if profile is not None and profile.agent_id is not None:
-            return ("role", profile, "", profile.name)
-        if self.agent_registry is not None:
-            try:
-                specialist = self.agent_registry.get_agent_by_name(key)
-                if specialist is not None and is_specialist(specialist):
-                    prompt = (
-                        self.agent_registry.get_agent_system_prompt(specialist.id) or ""
-                    ).strip()
-                    return ("specialist", None, prompt, str(specialist.name))
-            except Exception:  # noqa: BLE001 - registry problems mean "not found"
-                pass
-        if profile is not None:
-            return ("seed", profile, "", profile.name)
-        return (None, None, "", "")
+        return resolve_profile_or_specialist(name, registry=self.agent_registry)
 
     def attach_agent_profile(self, name: str) -> str | None:
         """Attach a named role/specialist's instructions to THIS session.

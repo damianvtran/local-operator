@@ -155,6 +155,10 @@ from local_operator.tui.widgets.editor import (
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.model_picker import ModelRow
+from local_operator.tui.widgets.org_chart_view import (
+    OrgChartView,
+    OrgChartViewDismissed,
+)
 from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
@@ -512,7 +516,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # `/team` is a listing and the listing is the receipt.
     SlashCommand(
         "team",
-        "List teams, or send a request to a team's manager",
+        "List teams, chart a team's org, or send a request to a team's manager",
         aliases=("teams",),
         arguments=ArgumentMode.OPTIONAL,
         # The request AFTER the team name is a prompt the manager is given, so an
@@ -672,6 +676,11 @@ BOOT_LAYOUT_CLASS = "boot"
 #: recede rather than disappear, or the page stops reading as the same app.
 #: Flipped in exactly two places, ``_open_subagent_view``/``_close_subagent_view``.
 SUBAGENT_LAYOUT_CLASS = "subagent"
+
+#: The screen class the org-chart mode adds, flipped only in
+#: ``_open_org_chart_view``/``_close_org_chart_view``. Named to match its
+#: ``Screen.org-chart`` tcss block, the sibling of ``Screen.subagent``.
+ORG_CHART_LAYOUT_CLASS = "org-chart"
 
 #: Class the SCREEN carries while the `/btw` aside card owns the composer. The
 #: transcript is inert then — Enter goes to the card — so it recedes behind it,
@@ -1418,6 +1427,13 @@ class OperatorApp(App[None]):
         # state and whatever held focus when it opened.
         self._subagent_view: SubagentView | None = None
         self._subagent_focus_restore: Any | None = None
+        # The org-chart mode (``/team chart``), a sibling of the subagent view
+        # with its own open/close and the same MODE contract: it hides the
+        # transcript and greys the dock, and Esc restores everything. Held here
+        # so the Esc chain and the approval/ask/clear yields can close it the
+        # same way they close the subagent view.
+        self._org_chart_view: Any | None = None
+        self._org_chart_focus_restore: Any | None = None
         # What the aside borrowed and owes back. The card has no input of its
         # own — the ONE composer is pointed at it — so opening the aside has to
         # stash whatever the user had half typed for the main chat, and Esc has
@@ -2355,6 +2371,9 @@ class OperatorApp(App[None]):
         # (reporting `gone` for every job) with the composer still read-only.
         # Leaving the mode first is the only outcome that is not a lie.
         self._close_subagent_view()
+        # The org-chart mode is reclaimed for the same reason: it hides the
+        # transcript being replaced, so it cannot outlive the conversation.
+        self._close_org_chart_view()
         # The aside goes too, and this is the general form of the interrupt
         # case. It is a question ABOUT a conversation that is being replaced,
         # answered from a context that is about to be torn down, and it is
@@ -2881,6 +2900,78 @@ class OperatorApp(App[None]):
             )
         return choices
 
+    def _team_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for the ``/team <…>`` list: team NAMES first, then `chart`.
+
+        Two-level, decided by the BUFFER like ``/mcp``'s builder. In the first
+        argument slot the TEAM NAMES come first and the reserved `chart`
+        subcommand row is appended AFTER them. Order matters because it decides
+        the default completion: ``argument_suggestions`` returns rows in list
+        order for an empty query, so a bare ``/team `` + Tab completes the sole
+        (or first) TEAM, never the subcommand. That preserves #250's invariant
+        (Tab fills the sole team and parks the switch/send hint) AND improves
+        collision-safety: the common action on ``/team `` is TALKING to a team,
+        so Tab must never silently open a chart when the user meant to message.
+        The `chart` row is still fully discoverable — it is visible in the list
+        and the normal matcher ranks it to the top the moment the user types
+        ``c``/``ch``/``chart`` (a typed query is scored, not list-ordered).
+
+        Once ``chart `` is in the buffer the second slot re-offers TEAM NAMES as
+        ``chart <name>`` compound rows that FEED the chart — completing one
+        lands the ready-to-run ``/team chart <name>``. The compound-name shape
+        is the same crank ``/mcp login <server>`` uses: the matcher compares
+        against the WHOLE argument, so the rows must carry the leading verb or
+        they would not match once it is typed.
+        """
+
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(editor.text, editor._argument_commands)
+        first, space, _rest = (argument or "").partition(" ")
+        teams = self._team_choices()
+        if first.lower() == "chart" and space:
+            # Second slot: `chart <query>` → team names feeding the chart.
+            return [
+                ArgumentChoice(
+                    f"chart {team.name}",
+                    team.description,
+                    detail=team.detail,
+                )
+                for team in teams
+            ]
+        # First slot: TEAM NAMES first (so bare Tab completes a team, not the
+        # subcommand — #250's invariant + collision-safety), then the `chart`
+        # subcommand row last.
+        rows: list[ArgumentChoice] = []
+        # U3 — a team whose name collides with the reserved `chart` word cannot
+        # be talked to via its plain name from the picker: completing `chart`
+        # routes to the SUBCOMMAND, not the team. So its row completes to the
+        # `=chart ` ESCAPE (the leading `=` forces the literal team name, past
+        # the subcommand check) and its detail names the escape, surfacing the
+        # way out at the one surface that creates the collision. Other teams are
+        # offered by their plain name unchanged.
+        for team in teams:
+            if team.name.casefold() == "chart":
+                rows.append(
+                    ArgumentChoice(
+                        f"={team.name}",
+                        team.description,
+                        detail=f"talk to team · {team.detail}",
+                    )
+                )
+            else:
+                rows.append(team)
+        # The subcommand row is offered AFTER the team names — discoverable and
+        # rank-able by query, but never the default Tab completion (see above).
+        rows.append(
+            ArgumentChoice(
+                "chart",
+                "Show a team's org chart",
+                detail="subcommand",
+            )
+        )
+        return rows
+
     def _team_list_block(self, teams: list[Any]) -> RichBlock:
         """A structured roster list for bare ``/team``.
 
@@ -2944,8 +3035,34 @@ class OperatorApp(App[None]):
                 return
             self._append_block(self._team_list_block(teams))
             return
+        # The first argument token is a small RESERVED subcommand namespace,
+        # exactly as `/mcp` reserves `login|logout|reauth`. One reserved word:
+        # `chart`. It wins in first position, which is safe for the common case
+        # because charting is what a user typing `/team chart` almost always
+        # means — but a team CAN legally be named `chart`, so there are two
+        # escape hatches (both shipped, see below and §6.2 of the design):
+        #   1. `/team chart chart` charts a team named `chart` (the second token
+        #      is the [name] argument) — falls out of the grammar, no code.
+        #   2. `/team =chart <request>` TALKS to a team named `chart`: a leading
+        #      `=` on the first token means "literal team name, never a
+        #      subcommand". `=` is not in `_NAME_RE`, so it can never be part of
+        #      a real team name and cannot itself collide.
+        first, _, rest = arg.partition(" ")
+        first = first.strip()
+        # Case-fold the subcommand match (minor-1): the picker and the editor's
+        # hint suppression both fold case, so ``/team Chart do x`` visually
+        # implies charting — routing it to the talk path (attaching a team
+        # literally named ``Chart``) would contradict what the UI just showed.
+        # Consistent with ``get_team_by_name``'s own casefold.
+        if first.casefold() == "chart":
+            self._cmd_team_chart(rest.strip(), registry, notice)
+            return
+        # Strip a single leading `=` escape before the name lookup, and skip the
+        # subcommand check for it — that is the whole point of the escape.
         name, _, request = arg.partition(" ")
         name = name.strip()
+        if name.startswith("="):
+            name = name[1:]
         request = request.strip()
         try:
             team = registry.get_team_by_name(name)
@@ -2982,6 +3099,63 @@ class OperatorApp(App[None]):
         # the echo policy exists to prevent.
         notice(f"sending to {team.name}. {team.manager} is coordinating.")
         self._submit_prompt(request)
+
+    def _cmd_team_chart(self, name: str, registry: Any, notice: NoticeFn) -> None:
+        """``/team chart [name]`` — open the org-chart mode for a team.
+
+        With a name, charts that team. Bare (`/team chart`), charts the team
+        currently ATTACHED to this session (`session.active_team`) — a manager
+        session is usually IN a team, and "show me my org" with no argument is
+        the common ask, so the bare form is useful rather than an error. If no
+        team is attached and none is named, we do not guess: we point at the
+        named form and the listing.
+
+        When the first token was `chart` AND a team is ALSO named `chart`, the
+        handler prints a one-line disambiguation note so a user who meant to
+        talk to that team learns the `=chart` escape rather than silently
+        getting its chart (the escape is obscure; this is how it is found).
+        """
+
+        session = self._session
+        target = name.strip()
+        if not target:
+            # Fall back to the attached team. The real session exposes
+            # ``active_team``; the fake exposes ``active_team_name`` — read a
+            # name off whichever is present so this works in both.
+            attached = getattr(session, "active_team", None)
+            attached_name = ""
+            if attached is not None:
+                attached_name = str(getattr(attached, "name", "") or "")
+            if not attached_name:
+                attached_name = str(getattr(session, "active_team_name", "") or "")
+            if not attached_name:
+                self._system_notice(
+                    "no team to chart. Name one with /team chart <name>, "
+                    "or /team to list teams.",
+                    "warning",
+                )
+                return
+            target = attached_name
+        try:
+            team = registry.get_team_by_name(target)
+        except Exception as exc:
+            self._system_notice(f"could not load team {target!r}: {exc}", "warning")
+            return
+        if team is None:
+            self._system_notice(
+                f"no team named {target!r} to chart. Run /team to list teams.",
+                "warning",
+            )
+            return
+        # Discoverability of the `=chart` escape (design §9): if the SUBJECT is a
+        # team literally named `chart`, the user who typed `/team chart` might
+        # have meant to talk to it. Say how.
+        if team.name.casefold() == "chart":
+            notice(
+                "charting the team named 'chart'. To talk to it instead, "
+                "use /team =chart <request>."
+            )
+        self._open_org_chart_view(team.name)
 
     # -- /agent -------------------------------------------------------------
     def _agent_profile_rows(self) -> list[tuple[str, str, str]]:
@@ -4405,6 +4579,7 @@ class OperatorApp(App[None]):
         #
         # Replaced rather than repeated, so three interrupts leave one hint.
         self._close_subagent_view()
+        self._close_org_chart_view()
         # The aside goes with it, for the reason the hint below exists at all.
         # The card floats over the transcript at one elevation step, so a
         # notice appended behind it is drawn where it cannot be read — and this
@@ -4532,6 +4707,11 @@ class OperatorApp(App[None]):
         if self._close_aside():
             return
         if self._close_subagent_view():
+            return
+        # The org-chart mode leaves on Esc the same way the subagent view does,
+        # and sits at the same precedence: a chart open over the conversation is
+        # dismissed before Esc means anything else.
+        if self._close_org_chart_view():
             return
         # A live `ask` picker takes Escape as "leave this question unanswered",
         # which is what its own footer advertises (`esc skip`) and what its
@@ -4920,6 +5100,10 @@ class OperatorApp(App[None]):
         # turn parked on an answer the user could not see they owed. The app
         # needs an answer, so the mode yields.
         self._close_subagent_view()
+        # The org-chart mode yields for the identical reason: it also hides the
+        # transcript the prompt is a block in, so a question raised while it is
+        # open would be invisible and the turn would park unanswerably.
+        self._close_org_chart_view()
         # The aside yields for the identical reason, one layer up: the card
         # floats OVER the transcript, so the question would be drawn behind it
         # while still taking focus off the composer the card is pointed at —
@@ -5015,6 +5199,7 @@ class OperatorApp(App[None]):
         # turn would be parked on an answer the user can neither see nor reach.
         # The same yield the approval prompt makes, for the same reason.
         self._close_subagent_view()
+        self._close_org_chart_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
         self._ask_screen = card
@@ -5433,6 +5618,7 @@ class OperatorApp(App[None]):
         # wiping a transcript the user cannot currently see is the one outcome
         # that would read as the key having done nothing.
         self._close_subagent_view()
+        self._close_org_chart_view()
         # Same rule for the aside card, and the same sentence: Ctrl+L acts on
         # the CONVERSATION, and the aside is a floating question about it that
         # is also holding the composer. Wiping the ledger under an open card
@@ -7032,6 +7218,77 @@ class OperatorApp(App[None]):
         """The page's ``esc`` hint was clicked — same exit as the key itself."""
         message.stop()
         self._close_subagent_view()
+
+    def _open_org_chart_view(self, team_name: str) -> None:
+        """Enter the full-page org-chart view for one team.
+
+        A MODE of this screen, cloned from :meth:`_open_subagent_view`: the
+        transcript region is replaced by the chart while the dock stays put and
+        greyed (``Screen.org-chart``). Opening it a second time RETARGETS the
+        page at the new team, the same convenience the subagent view offers, so
+        a reader can hop between charts without leaving the mode.
+
+        The org tree is resolved HERE (reads the team + agent registries) and
+        handed to the widget; the widget re-renders on zoom/expand without ever
+        re-resolving, so a repaint costs no registry I/O.
+        """
+
+        registry = self._team_registry()
+        agents = getattr(self._session, "agent_registry", None)
+        from local_operator.org_chart import resolve_org
+
+        root = resolve_org(team_name, teams=registry, agents=agents)
+        if self._org_chart_view is not None:
+            self._org_chart_view._team_name = team_name
+            self._org_chart_view.show(root)
+            return
+        # Captured before anything is blurred: this is where Esc puts the user
+        # back, almost always the composer.
+        self._org_chart_focus_restore = self.focused
+        view = OrgChartView(team_name)
+        self._org_chart_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(ORG_CHART_LAYOUT_CLASS)
+        self._set_composer_read_only(True)
+        # nit-1 — deliberate ordering. ``mount`` posts ``on_mount`` (which calls
+        # ``_repaint``) but does not run it synchronously; this ``show(root)``
+        # runs FIRST and seeds ``_root`` so the first painted frame is the chart,
+        # not an empty canvas. The mount-time ``_repaint`` then re-runs with
+        # ``_root`` already set — a cheap, idempotent second paint, NOT a no-op
+        # that depends on ``_root`` still being ``None`` (it is not None by then).
+        # Order matters: seed the data before the deferred repaint lands.
+        view.show(root)
+
+    def _close_org_chart_view(self) -> bool:
+        """Leave the org-chart mode and put the conversation back. True if open.
+
+        Mirror of :meth:`_close_subagent_view`: everything the mode changed is
+        restored here and nowhere else. The transcript was only hidden, so it
+        comes back with its blocks, scroll position, and any half-typed prompt
+        exactly as they were left.
+        """
+
+        view = self._org_chart_view
+        if view is None:
+            return False
+        self._org_chart_view = None
+        view.remove()
+        self.screen.remove_class(ORG_CHART_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._set_composer_read_only(False)
+        restore = self._org_chart_focus_restore
+        self._org_chart_focus_restore = None
+        try:
+            (restore or self._editor()).focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_org_chart_view_dismissed(self, message: OrgChartViewDismissed) -> None:
+        """The chart's ``esc`` hint was clicked — same exit as the key itself."""
+        message.stop()
+        self._close_org_chart_view()
 
     def _refresh_subagent_view(self, job_id: str | None = None) -> None:
         """Repaint the open view from the ledger's CURRENT state.
@@ -9763,14 +10020,17 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command in ("team", "teams"):
-            choices = self._team_choices()
-            picker.set_choices(choices)
             picker.set_notice("")
+            choices = self._team_argument_choices(editor)
+            picker.set_choices(choices)
             # Hand the editor a cheap immutable snapshot of the names so its
             # syntax highlighter can recognize the typed team name without
             # walking the registry on every render frame (see
-            # ``Editor.set_name_choices``).
-            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+            # ``Editor.set_name_choices``). Only the plain team names are
+            # highlightable as names — the `chart` subcommand row is not a team
+            # name, and the `chart <name>` compound rows are not typed as bare
+            # names — so the snapshot is the team names alone.
+            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
             return
         if message.command in ("agent", "agents"):
             choices = self._agent_choices()
@@ -9826,9 +10086,9 @@ class OperatorApp(App[None]):
         the same builders the opening used keeps one implementation of what
         each list offers.
 
-        Currently only ``/mcp`` is two-level; other commands never trigger the
-        editor's post, so a fall-through here is dead code rather than a
-        silent wrong list.
+        ``/mcp`` and ``/team`` are the two-level commands; other commands never
+        trigger the editor's post, so a fall-through here is dead code rather
+        than a silent wrong list.
         """
         message.stop()
         editor = self._editor()
@@ -9843,6 +10103,15 @@ class OperatorApp(App[None]):
             # a notice of its own that must survive the refill.
             picker.set_notice("")
             picker.set_choices(self._mcp_argument_choices(editor))
+        elif message.command in ("team", "teams"):
+            # `/team chart ` just gained its space: the first-slot rows (the
+            # `chart` subcommand + team names) must give way to the second-slot
+            # team list that FEEDS the chart. Refilled through the same builder
+            # the opening used, so the two levels stay one implementation.
+            picker = editor.picker
+            picker.set_notice("")
+            picker.set_choices(self._team_argument_choices(editor))
+            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
 
     def _credential_choices(self) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.
@@ -10328,6 +10597,7 @@ class OperatorApp(App[None]):
         # can neither see nor reach. Same yield the approval gate performs, for
         # the same reason.
         self._close_subagent_view()
+        self._close_org_chart_view()
         self._close_aside()
         block = KeyPromptBlock(provider_label, secret=secret, sole_path=sole_path)
         self._key_prompt = block
