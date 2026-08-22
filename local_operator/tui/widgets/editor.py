@@ -692,6 +692,15 @@ class Editor(TextArea):
         # list has opened at least once; a name hand-typed in full before the
         # list ever filled goes un-highlighted, an accepted affordance gap.
         self._name_choices: frozenset[str] = frozenset()
+        # Which command FAMILY (`team` vs `agent`) the snapshot above was filled
+        # for. The two families offer disjoint rosters, so a snapshot is only
+        # valid to paint against the family it came from. Tracked because the
+        # multiline branch of ``_sync_picker`` preserves the snapshot across a
+        # newline, and an atomic word-swap `/team <name>\n…` → `/agent <name>\n…`
+        # while already multiline would otherwise keep the team roster in place
+        # and paint a team name green under `/agent` (a name that is not a valid
+        # agent). ``None`` until a list has filled the snapshot.
+        self._name_choices_family: str | None = None
         # Per-render-pass memo for :meth:`_slash_runs` (CR1). ``render_line`` is
         # called once per visible screen row and the runs are identical for every
         # row of a frame; this caches the parse against a key of every input it
@@ -1054,6 +1063,42 @@ class Editor(TextArea):
         """
         return (name or "").lower() in self.NAME_ARGUMENT_COMMANDS
 
+    @staticmethod
+    def _name_command_family(name: str | None) -> str | None:
+        """The roster FAMILY a NAME+message command word belongs to.
+
+        ``team``/``teams`` share the team roster and ``agent``/``agents`` share
+        the agent roster, but the two rosters are disjoint — a team name is not a
+        valid agent and vice versa. The highlighter's name snapshot is therefore
+        only valid to paint against the family it was filled for, so both the
+        snapshot and the buffer's LEADING command word are reduced to a family
+        key and compared. ``None`` for anything that is not a NAME+message
+        command (its argument is not a roster name at all).
+        """
+        lowered = (name or "").lower()
+        if lowered in ("team", "teams"):
+            return "team"
+        if lowered in ("agent", "agents"):
+            return "agent"
+        return None
+
+    def _leading_command_word(self) -> str | None:
+        """The lower-cased command word on the buffer's FIRST non-blank line.
+
+        Distinct from :meth:`_command_word`, which #250 made caret-anchored (it
+        answers "which slash token is the caret on", for the inline mid-draft
+        picker). The highlighter and its snapshot preservation are about the
+        LEADING command — the one on ``first`` that owns a multi-line body — so
+        they must read that line regardless of where the caret sits (on the
+        message body the caret-anchored word would be ``None`` and the name would
+        wrongly go dark). Mirrors the parse in :meth:`_compute_slash_runs`.
+        """
+        line = next((line for line in self.text.split("\n") if line.strip()), "")
+        stripped = line.lstrip()
+        if not stripped.startswith("/"):
+            return None
+        return stripped[1:].partition(" ")[0].lower()
+
     def _name_switch_hint(self, list_argument: str) -> str | None:
         """The U1/U2 hint, or ``None`` when it must not show.
 
@@ -1112,9 +1157,15 @@ class Editor(TextArea):
         refresh the name would only light up on the NEXT keystroke, a visible
         lag. Gated on a real change so an unchanged re-push is not a repaint.
         """
-        if names == self._name_choices:
+        # The family the snapshot is valid for: the command whose argument list
+        # is open right now. Recorded alongside the names so the multiline
+        # preservation in ``_sync_picker`` can reject a snapshot inherited across
+        # a family switch (see :attr:`_name_choices_family`).
+        family = self._name_command_family(self._argument_command)
+        if names == self._name_choices and family == self._name_choices_family:
             return
         self._name_choices = names
+        self._name_choices_family = family
         self.refresh()
 
     @property
@@ -1958,11 +2009,6 @@ class Editor(TextArea):
         first = next((i for i, line in enumerate(lines) if line.strip()), None)
         if first is None:
             return None
-        # Single content-line discipline, identical to ``slash_context`` — once a
-        # newline follows the command line the buffer is a message body, and a
-        # stray command highlight there would contradict "this is prose".
-        if len(lines) > first + 1:
-            return None
         line = lines[first]
         indent = len(line) - len(line.lstrip())
         rest = line[indent:]
@@ -1972,13 +2018,38 @@ class Editor(TextArea):
         word_end = next((i for i, ch in enumerate(rest) if i > 0 and ch.isspace()), len(rest))
         cmd_start, cmd_end = indent, indent + word_end
         word = rest[1:word_end].lower()
+        # Single content-line discipline, identical to ``slash_context`` — once a
+        # newline follows the command line the buffer is a message body, and a
+        # stray command highlight there would contradict "this is prose".
+        #
+        # EXCEPT for the NAME+message commands. ``/team``·``/agent`` are DEFINED as
+        # ``/<cmd> <name> <free-text message>`` where the message is expected to
+        # span lines, and the command on the FIRST content line still dispatches
+        # as that command across the newline (``slash_command_for`` splits on
+        # ``maxsplit=1``, so ``/team lopdev\n…`` is still ``/team``). The command
+        # is therefore still live, so its command and name tokens must keep their
+        # highlight over a multi-line body — otherwise every token goes dark the
+        # instant the user adds a newline, which is exactly the reported bug.
+        # Only these commands are exempt; every ordinary command still goes dark
+        # on the newline that turns it into abandoned-command prose. This is a
+        # LEADING-command rule (the command on ``first``): #250's inline
+        # mid-draft commands are a separate, caret-anchored concern that the
+        # highlighter has never painted and this change does not touch.
+        multiline = len(lines) > first + 1
+        if multiline and not self._is_name_argument_command(word):
+            return None
         runs: list[tuple[int, int, str]] = []
         if word in self._command_names:
             runs.append((cmd_start, cmd_end, "text-area--slash-command"))
         else:
             # Suppress the "unknown" flash while the word is still being picked:
             # a prefix under an open command list is in progress, not wrong. The
-            # recognized and name highlights are unaffected by this gate.
+            # recognized and name highlights are unaffected by this gate. On a
+            # multi-line buffer the picker is already closed (``slash_context``
+            # returns None once a newline follows the leading word), so
+            # ``picking`` is naturally False — and an unknown word never reaches
+            # here on multiline anyway, since only recognized NAME+message words
+            # clear the guard above.
             picking = self._picker.mode is PickerMode.COMMAND and (
                 self._picker.is_open() or self._picker.is_pending()
             )
@@ -1986,19 +2057,23 @@ class Editor(TextArea):
                 runs.append((cmd_start, cmd_end, "text-area--slash-unknown"))
         # The NAME token, only for /team·/agent and only when the typed name is a
         # known team/agent (an exact snapshot hit — a half-typed name stays prose
-        # rather than flickering). ``slash_argument`` hands back everything after
-        # the command word's first space, so the name is its first token. The
-        # single-content-line guard above has already excluded any newline in the
-        # buffer, so the name is a plain whitespace-delimited token (CR3: no
-        # second newline split is needed after that guard).
+        # rather than flickering). The name is the first whitespace-delimited
+        # token of the command line's argument, read straight from the command
+        # line (``rest``) rather than through ``slash_argument``: that helper is
+        # caret-anchored and single-line (#250) and returns None both on the
+        # multi-line body these commands carry AND whenever the caret sits on the
+        # message rather than the name. Deriving from the first content line is
+        # byte-for-byte identical to the old single-line ``slash_argument`` path
+        # on a single-line buffer (that line IS the whole command there) and
+        # keeps painting the name once the message wraps or moves the caret away.
         if self._is_name_argument_command(word):
-            argument = slash_argument(self.text, self._argument_commands)
-            if argument is not None:
+            _, sep, argument = rest[1:].partition(" ")
+            if sep:
                 lead = len(argument) - len(argument.lstrip())
                 name = argument[lead:].split(" ", 1)[0]
                 if name and name.lower() in self._name_choices:
                     # The argument tail begins one cell past the command token
-                    # (the terminating space), then any extra spaces the user
+                    # (its terminating space), then any extra spaces the user
                     # typed before the name.
                     name_start = cmd_end + 1 + lead
                     runs.append((name_start, name_start + len(name), "text-area--slash-argument"))
@@ -2650,10 +2725,37 @@ class Editor(TextArea):
         if list_argument is None:
             self._argument_command = None
             self._argument_subcommand = None
-            # No argument list is open, so the name snapshot is stale: drop it so
-            # a highlight can never outlive the list that filled it (e.g. the
-            # command word was deleted back to `/tea`).
-            self._name_choices = frozenset()
+            # No argument list is open, so the name snapshot is ordinarily stale:
+            # drop it so a highlight can never outlive the list that filled it
+            # (e.g. the command word was deleted back to `/tea`).
+            #
+            # EXCEPT for a multi-line LEADING NAME+message command WHOSE FAMILY
+            # MATCHES the snapshot. `slash_argument` is single-line and (post
+            # #250) caret-anchored, so it returns None the instant the user adds
+            # a newline to `/team <name> <message>` — but that command's body is
+            # DEFINED to span lines and the leading command still dispatches, so
+            # its command and name tokens must stay highlighted. Clearing the
+            # snapshot here would blank the name token on the first newline (the
+            # reported bug), so keep it while the buffer is a live multi-line name
+            # command of the SAME family the snapshot was filled for.
+            #
+            # The family gate is what makes the within-family "cannot mispaint"
+            # guarantee hold across a family switch: an atomic word-swap
+            # `/team <team-name>\n…` → `/agent <team-name>\n…` while already
+            # multiline never re-opens a list (multiline suppresses it), so
+            # without this the team roster would survive and paint a team name
+            # green under `/agent`. Dropping the snapshot on a family mismatch
+            # falls the name token back to prose, which is correct: the name is
+            # not a valid member of the new family, and no list is open to
+            # re-derive the right roster until the buffer returns to a single
+            # line. Uses the LEADING word, not the caret-anchored one, because the
+            # caret is normally down in the message body.
+            keep = self._is_multiline_name_command() and (
+                self._name_choices_family == self._name_command_family(self._leading_command_word())
+            )
+            if not keep:
+                self._name_choices = frozenset()
+                self._name_choices_family = None
             self._picker.sync(self.text, cursor)
         else:
             command = self._command_word()
@@ -2670,6 +2772,7 @@ class Editor(TextArea):
                 # the previous command's names would highlight `/agent frontend`
                 # against team names.
                 self._name_choices = frozenset()
+                self._name_choices_family = None
                 self.post_message(ArgumentQueryOpened(command or ""))
             elif command in ("mcp", "team", "teams"):
                 # `/mcp` and `/team` are two-level: `/mcp` reserves verbs in the
@@ -2784,6 +2887,26 @@ class Editor(TextArea):
         line/slash split.
         """
         return slash_word(self.text, self._caret_offset(), self._command_names)
+
+    def _is_multiline_name_command(self) -> bool:
+        """Whether the buffer is a LEADING NAME+message command with a body.
+
+        The one state where the name snapshot must survive `_sync_picker`'s
+        "no argument list is open" branch: `/team <name>` (or `/agent …`) on the
+        first content line, followed by a newline and a message. `slash_argument`
+        reports no list on multiline (and #250 also anchors it at the caret), but
+        the leading command is still live and its name token must stay painted,
+        so recognition of the typed name has to keep the snapshot the list left
+        behind. Reads the LEADING word (:meth:`_leading_command_word`), not the
+        caret-anchored one, because the caret is usually down in the message
+        body. Ordinary commands never reach this — only the NAME+message ones
+        carry a multi-line body by design.
+        """
+        lines = self.text.split("\n")
+        first = next((i for i, line in enumerate(lines) if line.strip()), None)
+        if first is None or len(lines) <= first + 1:
+            return False
+        return self._is_name_argument_command(self._leading_command_word())
 
     def _complete_model(self, row: ModelRow) -> None:
         """Put ``row``'s selector in the ``/model`` argument without acting on it.
