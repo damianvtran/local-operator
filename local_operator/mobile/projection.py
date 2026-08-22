@@ -58,6 +58,7 @@ from local_operator.mobile.types import (
     SessionProjection,
     SubagentRow,
     TodoItem,
+    TodoPhase,
     TranscriptEntry,
 )
 
@@ -603,17 +604,36 @@ class ProjectionFold:
 
     # -- todos / pending / state -------------------------------------------
 
-    def set_todos(self, items: list[dict[str, str]]) -> None:
+    def set_todos(self, phases: list[dict[str, Any]]) -> None:
         """Refresh the todo list from the tool store. Called by the owner
         after every event batch: the store is the only writer, so re-reading
-        it is the fold — there is no todo event to listen for."""
+        it is the fold — there is no todo event to listen for.
+
+        The store is PHASED (``builtin.TODO_STORE`` holds
+        ``list[TodoPhase]``), so the argument is a list of phase dicts
+        ``{"name", "items":[{"text","status"[,"reason"]}]}``. It is run through
+        ``builtin._as_phases`` defensively: the same coercion every store
+        reader uses, so a hand-attached legacy flat list still projects as one
+        implicit ``"Todos"`` phase instead of rendering empty-text rows (the
+        bug this fold had when it iterated phase dicts as items)."""
+        # Imported at call time, not module top: keeps the mobile wire layer
+        # free of a hard import-time dependency on the tools package, which the
+        # registrant startup path deliberately avoids paying for.
+        from local_operator.tools.builtin import _as_phases
+
         self.projection.todos = [
-            TodoItem(
-                text=item.get("text", ""),
-                status=item.get("status", "pending"),  # type: ignore[arg-type]
-                reason=item.get("reason", ""),
+            TodoPhase(
+                name=str(phase.get("name", "")),
+                items=[
+                    TodoItem(
+                        text=item.get("text", ""),
+                        status=item.get("status", "pending"),  # type: ignore[arg-type]
+                        reason=item.get("reason", ""),
+                    )
+                    for item in phase.get("items", [])
+                ],
             )
-            for item in items
+            for phase in _as_phases(phases)
         ]
         self._bump()
 

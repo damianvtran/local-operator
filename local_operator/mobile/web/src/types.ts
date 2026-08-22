@@ -82,6 +82,14 @@ export interface TodoItem {
 	reason: string;
 }
 
+/** One named group of todos. The server stores todos phased; a single
+    implicit `"Todos"` phase carries a flat list and renders headerless (see
+    `TodosPanel`). */
+export interface TodoPhase {
+	name: string;
+	items: TodoItem[];
+}
+
 export interface SubagentRow {
 	job_id: string;
 	label: string;
@@ -134,7 +142,9 @@ export interface SessionProjection {
 	/** Record fresh but socket unreachable. */
 	degraded: boolean;
 	transcript: TranscriptEntry[];
-	todos: TodoItem[];
+	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
+	    list and renders without a header. */
+	todos: TodoPhase[];
 	subagents: SubagentRow[];
 	pending: PendingRequest | null;
 	/** How many requests are waiting in total (>= 1 while `pending` is set).

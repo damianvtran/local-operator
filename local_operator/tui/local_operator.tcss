@@ -1127,6 +1127,44 @@ SubagentRow:hover {
     background: $lo-overlay;
 }
 
+/* The todo list body is a scroll region, not a bare Static, so an EXPANDED
+ * list longer than the panel's height budget stays reachable by scrolling
+ * instead of being clipped away under `Screen { overflow: hidden }` (defect 1's
+ * overflow case). `height: auto` sizes it to its content in the common case —
+ * so a list that fits shows no scrollbar and the dock is exactly as tall as the
+ * list — and the `max_height` the panel sets per sync is what caps it to the
+ * budget and turns on the scrollbar only when the content genuinely exceeds it.
+ * `overflow-y: auto` is the scrollbar-on-demand that pairs with that cap;
+ * `overflow-x: hidden` because rows are already truncated to width in
+ * `_build` (`_row_cells`) and a horizontal scrollbar would be a second, silent
+ * two-cell width loss. It carries `.band-body` for the dock fill and rail. */
+#todo-scroll {
+    height: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+#todo-body {
+    height: auto;
+    width: 1fr;
+}
+
+/* The collapse/expand affordance is its OWN clickable widget (defect 2), so a
+ * `:hover` and an `on_click` can target JUST this row — a click in the list
+ * never toggles, and only this row lights on hover. `pointer: pointer` says the
+ * row is clickable before the click does (OSC 22, the same affordance
+ * `SubagentRow` and the subagent-view hints carry), and the hover ground is
+ * `$lo-overlay`, the SAME step `SubagentRow:hover` and `ToolCard:hover` use —
+ * "pointing at a row should always look the same". */
+#todo-affordance {
+    height: 1;
+    pointer: pointer;
+}
+
+#todo-affordance:hover {
+    background: $lo-overlay;
+}
+
 /* The row the full-page view is currently showing. The panel stays at full
  * ink in that mode because it is the one thing in the dock that still does
  * something — a row retargets the page — and an interactive list of identical

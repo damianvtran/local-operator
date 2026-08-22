@@ -996,6 +996,21 @@ class OperatorApp(App[None]):
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
         Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
+        # Scroll the EXPANDED todo list from the keyboard (U2). When an expanded
+        # list is longer than the panel can show, its overflow scrolls inside a
+        # non-focusable region (`#todo-scroll`, `can_focus = False` for U3), so a
+        # focus-then-arrow gesture cannot reach it and the hidden todos would be
+        # mouse-only while the footer implies `ctrl+t` reveals everything. These
+        # give a keyboard user a page-scroll path to the remainder.
+        #
+        # `ctrl+up`/`ctrl+down` because `TextArea` binds neither (audited: it
+        # binds up/down/pageup/pagedown but not the ctrl variants), so the
+        # composer keeps every cursor key it had, and they bubble (not
+        # `priority`) so a focused picker keeps first refusal. They no-op unless
+        # the panel is expanded AND overflowing, so they never shadow anything on
+        # the common path.
+        Binding("ctrl+down", "scroll_todos_down", "Scroll todos down", show=False),
+        Binding("ctrl+up", "scroll_todos_up", "Scroll todos up", show=False),
     ]
 
     def __init__(
@@ -8581,6 +8596,27 @@ class OperatorApp(App[None]):
         if self._todo_panel is not None:
             self._todo_panel.toggle_expanded()
             self._refresh_band()
+
+    def action_scroll_todos_down(self) -> None:
+        """``ctrl+down`` — page the expanded todo overflow toward the end (U2)."""
+        self._scroll_todos(down=True)
+
+    def action_scroll_todos_up(self) -> None:
+        """``ctrl+up`` — page the expanded todo overflow toward the start (U2)."""
+        self._scroll_todos(down=False)
+
+    def _scroll_todos(self, *, down: bool) -> None:
+        """Drive the todo panel's keyboard scroll, the one path both keys share.
+
+        A no-op before the panel exists, matching the app's other pre-boot key
+        handlers. The panel returns ``False`` when there is nothing to scroll
+        (collapsed, or expanded but fully on screen); this stays silent in that
+        case rather than emitting a notice on every stray press, because unlike
+        ``ctrl+t`` the gesture is only meaningful while an expanded list
+        overflows, and pressing it on a fully-shown list is a harmless miss.
+        """
+        if self._todo_panel is not None:
+            self._todo_panel.scroll_expanded(down=down)
 
     def action_cycle_effort(self) -> None:
         """``shift+tab`` — step one level up this model's ladder, wrapping.
