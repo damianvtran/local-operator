@@ -1659,6 +1659,76 @@ async def test_enum_tail_login_row_still_runs_on_enter() -> None:
 
 
 # ---------------------------------------------------------------------------
+# autofill discoverability hint (ux round 1, U1/U2) — at the parked-caret
+# moment, name both outcomes: blank Enter switches, a typed message sends.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_autofill_shows_the_switch_or_send_hint() -> None:
+    """The moment a name is autofilled with an empty tail, the picker's notice
+    row names both outcomes — the fix for U1/U2, where nothing on screen told
+    the user that Enter-now switches while type-then-Enter sends."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team frontend-guild"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.editor.text == "/team frontend-guild "
+        assert app.editor.picker._notice == Editor.NAME_SWITCH_HINT
+        # It shows in the picker's own notice place, not the transcript.
+        assert app.editor.picker.display
+
+
+@pytest.mark.asyncio
+async def test_the_hint_is_withdrawn_once_a_message_is_typed() -> None:
+    """Typing the first message character means the user chose "send" — the
+    hint must clear so it never sits over a live message."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team frontend-guild "
+        app.editor.move_cursor(app.editor._end_of_buffer())  # as the autofill leaves it
+        await pilot.pause()
+        assert app.editor.picker._notice == Editor.NAME_SWITCH_HINT
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.editor.text == "/team frontend-guild f"
+        assert app.editor.picker._notice == ""
+
+
+@pytest.mark.asyncio
+async def test_a_bare_name_list_shows_no_hint() -> None:
+    """While the row list is still up (`/team ` with no name chosen), the rows
+    answer the question — the hint would compete with them, so it stays away."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team "
+        await pilot.pause()
+        assert app.editor.picker.is_open()  # rows are showing
+        assert app.editor.picker._notice == ""
+
+
+@pytest.mark.asyncio
+async def test_enum_tail_completion_shows_no_switch_hint() -> None:
+    """The hint is for NAME+message commands only — an enum-tail argument like
+    `/login anthropic ` must never surface it."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login anthropic "
+        await pilot.pause()
+        assert app.editor.picker._notice == ""
+
+
+# ---------------------------------------------------------------------------
 # slash-command syntax highlighting — the render pass paints the recognized
 # command word, the recognized name, and a muted unknown word, and nothing else.
 # ---------------------------------------------------------------------------
@@ -1710,9 +1780,11 @@ async def test_unknown_command_word_gets_the_unknown_style_when_picker_closed() 
         await pilot.pause()
         assert not app.editor.picker.is_open()
         cells = _slash_ink(app.editor)
-        muted = theme_mod.semantic_color("muted").lower()
-        assert _ink_of(cells, "/") == muted
-        assert _ink_of(cells, "notacommand") == muted
+        # `dim`, darkened from `muted` in design round 1 (D1) so the inert
+        # "will be sent as text" read lands against the prose tail.
+        dim = theme_mod.semantic_color("dim").lower()
+        assert _ink_of(cells, "/") == dim
+        assert _ink_of(cells, "notacommand") == dim
         # The message tail after the space stays prose.
         fg = theme_mod.semantic_color("fg").lower()
         assert _ink_of(cells, " hello ") == fg
@@ -1731,9 +1803,13 @@ async def test_command_word_is_not_flagged_unknown_while_the_picker_is_open() ->
         assert app.editor.picker.is_open()
         assert app.editor.picker.mode is PickerMode.COMMAND
         cells = _slash_ink(app.editor)
-        muted = theme_mod.semantic_color("muted").lower()
-        # `/te` is not a full command, but no cell is painted the unknown colour.
-        assert all(fg != muted for _, fg in cells if _.strip())
+        dim = theme_mod.semantic_color("dim").lower()
+        # `/te` is not a full command, but no /-token cell is painted the unknown
+        # colour while the picker is choosing. Restrict to the command token so a
+        # coincidental `dim` elsewhere on the row (e.g. an unfocused chevron)
+        # cannot mask a real regression.
+        token = [fg for text, fg in cells if text.strip() in ("/", "/te", "te")]
+        assert token and all(fg != dim for fg in token)
 
 
 @pytest.mark.asyncio
@@ -1753,6 +1829,45 @@ async def test_recognized_team_name_gets_the_argument_style() -> None:
         assert _ink_of(cells, "frontend-guild") == green
         # The message tail is NOT highlighted — the whole point of the feature.
         assert _ink_of(cells, " fix it ") == fg
+
+
+@pytest.mark.asyncio
+async def test_a_name_token_that_soft_wraps_is_highlighted_across_both_rows() -> None:
+    """The wrap-boundary branch of ``_slash_cells`` (the intricate new math):
+    a name longer than the composer's content width breaks mid-token across two
+    screen rows, and BOTH halves must carry the argument-name style — otherwise
+    a long team/agent name would light up only until the wrap and read as broken.
+
+    Driven at a narrow width so the name (not just name+message) straddles a wrap
+    offset, which is exactly the ``wraps_on``/``section_end`` case the straight
+    single-row tests never reach. The snapshot is pushed AFTER the text settles
+    because the harness's ``on_argument_query_opened`` re-pushes its fixed team
+    rows on the space; the app's real ordering (list opens, THEN names arrive) is
+    unaffected — this only mirrors it deterministically for a bespoke name.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(24, 20)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # 29 chars, wider than the ~18-cell content box, so it must break inside
+        # the token rather than at the space before the message.
+        long_name = "frontend-platform-guild-alpha"
+        app.editor.text = f"/team {long_name} go now"
+        await pilot.pause()
+        app.editor.set_name_choices(frozenset({long_name}))
+        await pilot.pause()
+        wrapped = app.editor.wrapped_document
+        assert len(wrapped.get_offsets(0)) >= 2, "premise: the name itself wraps"
+        green = theme_mod.semantic_color("string").lower()
+        # Gather every green run across all the wrapped rows of document line 0.
+        painted = ""
+        for y in range(wrapped.height):
+            for text, fg in _slash_ink(app.editor, y):
+                if fg == green:
+                    painted += text
+        # The whole name is painted, contiguously, and nothing more — the message
+        # tail (`go now`) never picks up the argument-name colour.
+        assert painted == long_name
 
 
 @pytest.mark.asyncio

@@ -493,12 +493,16 @@ Editor .text-area--slash-argument {
     color: $lo-string;
 }
 /* A leading /word that resolves to NO command: dimmed so the user sees it is
- * inert text that WILL be sent, not a recognized command. `muted`, not a
- * danger colour — an unknown slash is a typo-in-progress, not an error to
- * alarm about (and it is suppressed entirely while the command picker is still
- * choosing the word). */
+ * inert text that WILL be sent, not a recognized command. `dim`, not a danger
+ * colour — an unknown slash is a typo-in-progress, not an error to alarm about
+ * (and it is suppressed entirely while the command picker is still choosing the
+ * word). `dim` over `muted` (design round 1, D1): against the prose tail (`fg`)
+ * `muted` was only ~1.74:1 apart — the eye read it as "slightly dimmer", not
+ * "inert / will be sent". `dim` lands ~2.9:1 below prose and ~4.18:1 above the
+ * input ground, so the degrade-to-text read is unmistakable without tipping
+ * into an alarm colour. */
 Editor .text-area--slash-unknown {
-    color: $lo-muted;
+    color: $lo-dim;
 }
 
 /* ── startup toast ───────────────────────────────────────────────────────
