@@ -2092,11 +2092,10 @@ def main() -> int:
                     hosting, _model = resolve_hosting_model_dry(exec_args)
                 except ValueError as exc:
                     # stderr: this is the FOREGROUND `exec --json` path, so
-                    # stdout is the event stream. The byte-identical twins in
-                    # exec_mode._spawn_background were fixed earlier and these
-                    # were missed — the flag combination that reaches them
-                    # (`exec --json` with a bad or absent hosting/model) is the
-                    # most likely one to be scripted.
+                    # stdout is the event stream. Return 1 (not -1) so the
+                    # scripted `exec --json` case exits with a clean non-zero;
+                    # the byte-identical twins in exec_mode._spawn_background
+                    # follow the same contract.
                     print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
                     return 1
                 except Exception as exc:  # noqa: BLE001
