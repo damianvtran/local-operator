@@ -77,6 +77,11 @@ def test_prompt_for_credential(temp_config, monkeypatch):
     """Test prompting for and saving a new credential."""
     manager = CredentialManager(config_dir=temp_config.parent)
 
+    # Pin the interactive branch: prompt_for_credential now reads a line from
+    # stdin when stdin is NOT a tty (the scripted-automation contract). Under
+    # pytest in CI stdin is not a tty, so without forcing isatty True this test
+    # would silently exercise the pipe path and ignore the getpass mock below.
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     # Mock getpass and print statements
     monkeypatch.setattr("getpass.getpass", lambda _: "new_test_key")
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
@@ -95,6 +100,11 @@ def test_missing_credential_raises_error(temp_config, monkeypatch):
     """Test that missing credential raises ValueError."""
     manager = CredentialManager(config_dir=temp_config.parent)
 
+    # Pin the interactive branch (see test_prompt_for_credential): this case
+    # asserts the empty-INTERACTIVE-input ValueError. The non-tty pipe path
+    # raises EOFError instead (covered separately by
+    # test_prompt_empty_piped_stdin_raises_eof), so force a tty here.
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     # Mock empty getpass input
     monkeypatch.setattr("getpass.getpass", lambda _: "")
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
