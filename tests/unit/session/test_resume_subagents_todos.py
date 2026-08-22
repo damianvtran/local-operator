@@ -150,6 +150,38 @@ async def test_a_completed_subagent_is_restored_and_resumable(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_role_and_effort_survive_a_resume(tmp_path, monkeypatch):
+    """The child's agent ROLE and effort TIER are on the roster allowlist, so a
+    restored row still names them.
+
+    Regression guard for the seam between two features that shipped together:
+    the roster snapshot is an ALLOWLIST (``_ROSTER_ROW_FIELDS``), so a field
+    that is stamped on the live job but not listed works in-process and then
+    silently blanks on every resume. The subagent page title and the status
+    band both read these two facts off the restored row, so a child a previous
+    process launched must come back saying what kind it was and at what effort —
+    exactly what the panel/model/usage fields already promise."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    # A non-default role and an explicit tier, so a blanked field would read as
+    # the default rather than as the value under test.
+    job_id = parent._launch_subagent(label="scan", prompt="look around", agent="scout", effort="hi")
+    await wait_for(lambda: _status(parent, job_id) == "completed")
+    await asyncio.sleep(0.05)  # let the post-settle roster snapshot land
+    await parent.dispose()
+
+    resumed = _session(tmp_path, IdleStream())
+    await resumed.async_init()
+    rows = [j for j in resumed.jobs.list() if j.type == "task"]
+    assert len(rows) == 1
+    assert rows[0].agent_role == "scout"
+    assert rows[0].effort == "hi"
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_running_child_restores_as_interrupted(tmp_path, monkeypatch):
     """A child still running when the process exits comes back as
     ``interrupted`` — not a spinning ``running`` its manager can never settle —
