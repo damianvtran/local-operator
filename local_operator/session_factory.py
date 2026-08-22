@@ -231,6 +231,22 @@ def resolve_agent(args: argparse.Namespace, agent_registry: AgentRegistry) -> Ag
     )
 
 
+def _no_model_message(hosting: str) -> str:
+    """Error text for a provider with no known default model.
+
+    Names two or three concrete, current model ids so the user has something to
+    type rather than a bare "model is not configured" that leaves them to guess
+    the vocabulary. Kept beside the resolver, stdlib-only, so the preflight path
+    stays off the model-configuration stack.
+    """
+    return (
+        f"Model name is not configured for hosting '{hosting}', and no default "
+        "is known for it. Set one with `local-operator config edit model_name "
+        "<model>` or the --model flag (e.g. gpt-4o, claude-3-5-sonnet-latest, "
+        "deepseek-chat)."
+    )
+
+
 def resolve_hosting_model(
     agent: AgentData | None, args: argparse.Namespace, config_manager: ConfigManager
 ) -> tuple[str, str]:
@@ -250,7 +266,15 @@ def resolve_hosting_model(
     if not hosting:
         raise ValueError("Hosting platform is not configured.")
     if not model_name:
-        raise ValueError("Model name is not configured.")
+        # A hosting with no model is not a dead end: every mainstream provider
+        # has a reasonable default, so resolve to it rather than raising. Only
+        # a provider with no known default (a custom/unregistered hosting) still
+        # errors, and its message now names current models to choose from.
+        from local_operator.model.defaults import default_model_for
+
+        model_name = default_model_for(hosting)
+        if not model_name:
+            raise ValueError(_no_model_message(hosting))
     return hosting, model_name
 
 

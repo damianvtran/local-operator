@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.model.catalogue import DEFAULT_TTL_S
+from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
 from local_operator.model.effort import default_effort, supported_efforts
 from local_operator.model.registry import (
     ModelInfo,
@@ -86,19 +87,10 @@ DEFAULT_TOP_P = 0.9
 
 # Per-hosting defaults preserved byte-for-byte from the legacy chain so
 # existing config files and CLI invocations keep picking the same model.
-DEFAULT_MODEL_NAMES: dict[str, str] = {
-    "deepseek": "deepseek-chat",
-    "openai": "gpt-4o",
-    "openrouter": "google/gemini-2.0-flash-001",
-    "anthropic": "claude-3-5-sonnet-latest",
-    "kimi": "moonshot-v1-32k",
-    "alibaba": "qwen-plus",
-    "google": "gemini-2.0-flash-001",
-    "mistral": "mistral-large-latest",
-    "radient": "auto",
-    "xai": "grok-3",
-    "zai": "glm-5.3",
-}
+# Re-exported from ``model.defaults`` (the stdlib-only home) so the preflight
+# path can read the map without importing this heavy module. Kept as a name here
+# because legacy callers and tests import ``configure.DEFAULT_MODEL_NAMES``.
+DEFAULT_MODEL_NAMES = _DEFAULT_MODEL_NAMES
 
 # Sensible ModelSpec fallbacks when the legacy registry knows nothing.
 UNKNOWN_CONTEXT_WINDOW = 128_000

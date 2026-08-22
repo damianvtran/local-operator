@@ -155,9 +155,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
-        "claude-3-5-sonnet-20240620, moonshot-v1-32k, qwen-plus, gemini-2.0-flash, "
-        "mistral-large-latest, test-model, deepseek/deepseek-chat)",
+        help="Model to use (e.g., gpt-4o, claude-3-5-sonnet-latest, deepseek-chat, "
+        "grok-3, glm-5.3, gemini-2.0-flash-001, qwen-plus, moonshot-v1-32k, "
+        "mistral-large-latest, deepseek/deepseek-chat). Optional: when omitted, "
+        "the provider's default model is used.",
     )
     parser.add_argument(
         "--run-in",
@@ -1602,7 +1603,19 @@ def _preflight_api_key(
     if api_key:
         return None
 
-    key_name = definition.env_keys if isinstance(definition.env_keys, str) else "API key"
+    from local_operator.cli_style import ERROR, WARNING, paint
+    from local_operator.providers.registry import env_key_name
+
+    # ``env_key_name`` returns None for a CALLABLE env_keys resolver (Anthropic
+    # picks between ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_API_KEY, so there is no
+    # single var to name). The old code fell back to the literal string "API
+    # key" and interpolated it into the command template, producing the invalid
+    # advice `credential update API key`. Only offer `credential update <NAME>`
+    # when there is a real env var name; otherwise recommend `login` only.
+    key_name = env_key_name(canonical)
+    credential_hint = f", `local-operator credential update {key_name}`" if key_name else ""
+    env_hint = f", or set {key_name} in the environment" if key_name else ""
+
     if not require_key:
         # Interactive start: name the fact and the remedies, then let the app
         # come up. `/login` is scoped to the TUI because the headless REPL has
@@ -1610,21 +1623,26 @@ def _preflight_api_key(
         # line stays visible on stderr (the TUI repaints over it, but its
         # splash carries the same warning).
         print(
-            f"\n\033[1;33mWarning: no credentials are configured for hosting "
-            f"platform '{hosting}'. Starting anyway — run `/login {canonical}` "
-            f"in the TUI, `local-operator login {canonical}` from a shell, or "
-            f"set {key_name} in the environment.\033[0m",
+            paint(
+                f"Warning: no credentials are configured for hosting platform "
+                f"'{hosting}'. Starting anyway — run `/login {canonical}` in the "
+                f"TUI, `local-operator login {canonical}` from a shell{env_hint}.",
+                WARNING,
+            ),
             file=sys.stderr,
         )
         return None
     # stderr: this fires on every fresh install and every typo'd --hosting,
     # i.e. it is the single most common `exec --json` failure, and a coloured
     # non-JSON line on stdout breaks the consumer it is trying to inform.
+    subject = key_name if key_name else "an API key"
     print(
-        f"\n\033[1;31mError: {key_name} is required for hosting platform "
-        f"'{hosting}' but is not configured. Set it via `local-operator "
-        f"credential update {key_name}`, the environment, or `local-operator "
-        f"login {canonical}`.\033[0m",
+        paint(
+            f"Error: {subject} is required for hosting platform '{hosting}' but "
+            f"is not configured. Set it via `local-operator login {canonical}`"
+            f"{credential_hint}, or the environment.",
+            ERROR,
+        ),
         file=sys.stderr,
     )
     return 1

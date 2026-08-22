@@ -82,7 +82,19 @@ def resolve_hosting_model(
     if not hosting:
         raise ValueError("Hosting platform is not configured.")
     if not model_name:
-        raise ValueError("Model name is not configured.")
+        # Fall back to the provider's default model rather than erroring on a
+        # single empty field — see session_factory.resolve_hosting_model, which
+        # this mirrors. A provider with no known default still raises.
+        from local_operator.model.defaults import default_model_for
+
+        model_name = default_model_for(hosting)
+        if not model_name:
+            raise ValueError(
+                f"Model name is not configured for hosting '{hosting}', and no "
+                "default is known for it. Set one with `local-operator config "
+                "edit model_name <model>` or the --model flag (e.g. gpt-4o, "
+                "claude-3-5-sonnet-latest, deepseek-chat)."
+            )
     return hosting, model_name
 
 
