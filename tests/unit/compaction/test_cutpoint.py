@@ -4,6 +4,7 @@ import pytest
 
 from local_operator.compaction.cutpoint import (
     _message_tokens,
+    extract_preserved_user_turns,
     find_cut_point,
     prepare_partitions,
 )
@@ -463,3 +464,56 @@ def test_an_assistant_reissuing_an_already_answered_id_is_not_a_valid_cut():
         "the cut kept an assistant whose only matching result precedes it, so "
         "the kept window opens with a call nothing answers"
     )
+
+
+# ---------------------------------------------------------------------------
+# Verbatim user-turn preservation: the structural half of "never summarize a
+# user turn". These pin the extraction; the session tests pin the round trip.
+# ---------------------------------------------------------------------------
+
+
+def test_extract_preserves_every_user_turn_verbatim():
+    """Every ``Message(role="user")`` in the summarized block comes back with
+    its id and its EXACT text — no paraphrase, no dropped turn. Discriminates
+    against summarizing the user side: the pre-fix path carried none of these
+    out, so this list would be empty."""
+    to_summarize = [
+        Message.user("NEVER touch billing.py"),
+        _assistant_with_call("c1"),
+        _tool_result("c1"),
+        Message.user("use the existing helper, don't add a new one"),
+        Message.assistant("working on it"),
+    ]
+    preserved = extract_preserved_user_turns(to_summarize)
+    assert [t["text"] for t in preserved] == [
+        "NEVER touch billing.py",
+        "use the existing helper, don't add a new one",
+    ]
+    assert preserved[0]["id"] == to_summarize[0].id
+    assert preserved[1]["id"] == to_summarize[3].id
+
+
+def test_extract_skips_non_user_and_empty_turns():
+    """Assistant/tool content is NOT preserved verbatim (it is what the summary
+    is for), and an empty user turn (a bare pasted screenshot) carries no
+    constraint, so the preserved block never accrues blanks."""
+    to_summarize = [
+        Message.assistant("assistant prose"),
+        _tool_result("c9"),
+        Message(role="user", content=[]),
+        Message.user("real instruction"),
+    ]
+    preserved = extract_preserved_user_turns(to_summarize)
+    assert [t["text"] for t in preserved] == ["real instruction"]
+
+
+def test_extract_id_filter_excludes_injected_user_role_content():
+    """The production discriminator: a rendered history has prior markers and
+    injected deliveries as plain user Messages. Only ids known to be genuine
+    prompts are lifted, so a previous summary is never carried forward
+    verbatim. Discriminates the no-filter path (which returns BOTH)."""
+    genuine = Message.user("NEVER touch billing.py")
+    rendered_marker = Message.user("<previous-context-summary>paraphrase</...>")
+    to_summarize = [rendered_marker, genuine, Message.assistant("ok")]
+    preserved = extract_preserved_user_turns(to_summarize, {genuine.id})
+    assert [t["text"] for t in preserved] == ["NEVER touch billing.py"]

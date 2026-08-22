@@ -265,8 +265,14 @@ async def test_the_receipt_reports_a_real_reduction(tmp_path):
     """tokens_before is the figure the gate acted on and tokens_after the
     estimate of the rebuilt history, so their difference is a saving a receipt
     can quote — and the end EVENT carries the same pair, which is what the TUI
-    notice renders."""
-    stream = ScriptedStream(["reply"] * 4)
+    notice renders.
+
+    The assistant replies carry real bulk: user turns are now preserved
+    VERBATIM across a pass (never summarized), so the compressible content is
+    the ASSISTANT/tool side. A fixture whose only bulk was user filler would
+    show no reduction after the fix — correctly, because there is nothing left
+    to compress — which is a property of that fixture, not of the receipt."""
+    stream = ScriptedStream(["assistant reply " * 60] * 4)
     session = make_session(tmp_path, stream, model=TEXT_MODEL)
     await talk(session, turns=4)
 
@@ -307,7 +313,9 @@ async def test_the_receipt_quotes_the_figure_the_gate_acted_on(tmp_path):
     """
     from local_operator.harness.types import Usage
 
-    stream = ScriptedStream(["reply"] * 4)
+    # Bulky assistant replies so there is summarizable content once the user
+    # turns are preserved verbatim (see the sibling reduction test).
+    stream = ScriptedStream(["assistant reply " * 60] * 4)
     session = make_session(tmp_path, stream, model=TEXT_MODEL)
     await talk(session, turns=4)
     # A provider reading far above anything the tiny fixture history could

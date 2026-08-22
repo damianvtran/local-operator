@@ -28,12 +28,37 @@ from local_operator.harness.types import AgentMessage, CustomMessage, Message
 
 from .tokens import _encode_len, estimate_tokens
 
-__all__ = ["find_cut_point", "prepare_partitions"]
+__all__ = ["find_cut_point", "prepare_partitions", "extract_preserved_user_turns"]
 
 
 def _is_compaction_marker(message: AgentMessage) -> bool:
     """True for the custom entry that replays a prior compaction summary."""
     return isinstance(message, CustomMessage) and message.custom_type == "compaction_summary"
+
+
+#: Marks a user turn re-injected VERBATIM by a prior compaction pass (see
+#: ``Session._run_compaction``). It rides ``provider_payload`` — harness
+#: bookkeeping the wire builders never ship as content — and persists through
+#: the transcript, so it survives a resume the same way the ``pruned`` flag
+#: does.
+PRESERVED_USER_TURN_KEY = "compaction_preserved"
+
+
+def _is_preserved_user_turn(message: AgentMessage) -> bool:
+    """True for a user turn a prior pass already preserved verbatim.
+
+    Such a turn is carried-forward, already-compacted context — not new
+    history — so :func:`find_cut_point` must not count it as "worth
+    summarizing", exactly as it excludes the marker. Without this, pressing
+    /compact twice in a row re-fires on nothing but the marker and the
+    preserved turns, spending a pass for zero headroom (and the preserved
+    turns' own bytes make the second pass look like it has new work).
+    """
+    return (
+        isinstance(message, Message)
+        and bool(message.provider_payload)
+        and bool(message.provider_payload.get(PRESERVED_USER_TURN_KEY))
+    )
 
 
 def _message_tokens(message: AgentMessage) -> int:
@@ -249,7 +274,11 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     # skip trivial ones. So a lone message still counts when it outweighs the
     # entire recency budget the caller asked to protect: at that size it is not
     # a trivial rewrite, it is the problem.
-    summarizable = [m for m in messages[:index] if not _is_compaction_marker(m)]
+    summarizable = [
+        m
+        for m in messages[:index]
+        if not _is_compaction_marker(m) and not _is_preserved_user_turn(m)
+    ]
     if not summarizable:
         return None
     if len(summarizable) == 1 and _message_tokens(summarizable[0]) < keep_recent_tokens:
@@ -268,3 +297,46 @@ def prepare_partitions(
     if not 0 < cut <= len(messages):
         raise ValueError(f"invalid cut point {cut} for {len(messages)} messages")
     return list(messages[:cut]), list(messages[cut:])
+
+
+def extract_preserved_user_turns(
+    to_summarize: Sequence[AgentMessage],
+    genuine_user_ids: set[str] | None = None,
+) -> list[dict[str, str]]:
+    """Verbatim ``{"id", "text"}`` for every USER turn in the summarized block.
+
+    The structural half of "never summarize a user turn": a summarizer
+    paraphrases assistant/tool content, and a paraphrased user constraint
+    ("use the existing helper, don't add a new one" / "NEVER touch billing.py")
+    is exactly how an agent later does the forbidden thing. So user-authored
+    text is lifted out of what the summarizer sees and re-injected verbatim on
+    both the live and the replay path (see ``Session._run_compaction`` and
+    ``Transcript.build_llm_history``).
+
+    ``genuine_user_ids`` is the crucial discriminator in production. The block
+    passed here is the RENDERED history, where a prior compaction marker and
+    every injected user-role delivery (wake, hub, session-incident, todo
+    reminder) have ALREADY been rendered from a ``CustomMessage`` into a plain
+    ``Message(role="user")`` — structurally indistinguishable from a real
+    prompt. Preserving those would carry a previous summary forward verbatim
+    and nest summaries across generations. The caller therefore passes the ids
+    of the genuine user turns (the ``Message(role="user")`` entries in the LIVE
+    context, which injected content is a ``CustomMessage`` in), and only those
+    ids are lifted. When it is omitted (unit tests over raw message lists with
+    no rendered markers), every user ``Message`` qualifies.
+
+    Empty-text turns (a bare pasted screenshot) carry no constraint to protect
+    and are skipped so the preserved block does not accrue blank messages
+    every pass.
+    """
+    preserved: list[dict[str, str]] = []
+    for message in to_summarize:
+        if not isinstance(message, Message) or message.role != "user":
+            continue
+        if genuine_user_ids is not None and message.id not in genuine_user_ids:
+            continue
+        text = message.text
+        if not text:
+            continue
+        preserved.append({"id": message.id, "text": text})
+    return preserved
