@@ -1152,6 +1152,26 @@ async def _prepare(
     )
 
 
+def _collapse_sdk_missing_failures(
+    failures: dict[str, str], discovery_key: str, sdk_missing_error: str
+) -> dict[str, str]:
+    """Collapse an all-servers-failed-for-a-missing-SDK map to one entry.
+
+    When the MCP SDK is not installed the manager fails every configured server
+    with the SAME install instruction. Reported ONCE, as the setup problem it
+    is: N identical 90-character notices (one toast line plus one transcript
+    error per server, every launch) is noise proportional to server count for a
+    single cause, and it accuses the servers of a fault that is not theirs.
+    Compared by identity against the manager's own constant rather than by
+    substring, so re-wording it cannot silently disable this. Anything else is
+    returned unchanged. Shared by the boot snapshot and the settled re-report so
+    both surfaces collapse the same way.
+    """
+    if failures and set(failures.values()) == {sdk_missing_error}:
+        return {discovery_key: sdk_missing_error}
+    return failures
+
+
 async def wire_mcp_into_session(
     session: Session,
     builtin_tools: list[AgentTool],
@@ -1230,18 +1250,22 @@ async def wire_mcp_into_session(
         message = str(entry.get("error", "unknown error"))
         failures[path.partition("mcp:")[2] or MCP_DISCOVERY_KEY] = message
 
-    if failures and set(failures.values()) == {MCP_SDK_MISSING_ERROR}:
-        # The SDK is not installed, so the manager failed every configured server
-        # with the same install instruction. Reported ONCE, as the setup problem
-        # it is: N identical 90-character notices (one toast line plus one
-        # transcript error per server, every launch) is noise proportional to
-        # server count for a single cause, and it accuses the servers of a fault
-        # that is not theirs. Compared by identity against the manager's own
-        # constant rather than by substring, so re-wording it cannot silently
-        # disable this.
-        failures = {MCP_DISCOVERY_KEY: MCP_SDK_MISSING_ERROR}
+    failures = _collapse_sdk_missing_failures(failures, MCP_DISCOVERY_KEY, MCP_SDK_MISSING_ERROR)
 
-    if not has_ui:
+    settling = False
+    try:
+        settling = manager.startup_settling()
+    except Exception:  # noqa: BLE001 — a missing accessor must not break wiring
+        logger.debug("MCP startup_settling() unavailable", exc_info=True)
+
+    # Headless callers are one-shot and do not stay alive for the settle
+    # re-report, so they print what the gate knows. But a PROVISIONAL failure
+    # (a server still connecting past the gate) must not be announced as a hard
+    # failure on stderr either — the same false alarm the toast used to raise.
+    # While settling, print only the failures already terminal at the gate; a
+    # server still deferred is neither connected nor failed yet, and its entry
+    # (if any) is a not-yet-final one the settled re-report owns.
+    if not has_ui and not settling:
         for name, message in failures.items():
             subject = "MCP discovery" if name == MCP_DISCOVERY_KEY else f"MCP server {name}"
             print(f"\033[1;33mWarning: {subject}: {message}\033[0m", file=sys.stderr)
@@ -1251,7 +1275,47 @@ async def wire_mcp_into_session(
         connected=tuple(manager.get_connected_servers()),
         failures=failures,
         tool_count=len(mcp_tools),
+        settling=settling,
     )
+
+    # Re-report once the round settles: the boot snapshot above was taken at the
+    # 250 ms gate while OAuth HTTP servers were still connecting. When the last
+    # deferred server reaches a terminal state, rebuild ``session.mcp_startup``
+    # from the manager's COMBINED tally (every failure, the final connected set)
+    # and hand it to whatever front-end sink the session installed. Wired even
+    # when ``settling`` is False right now: a fast machine can still defer a
+    # server between this read and the callback install, and an unused callback
+    # is free.
+    def _on_startup_settled() -> None:
+        try:
+            settled_failures = _collapse_sdk_missing_failures(
+                manager.startup_failures(), MCP_DISCOVERY_KEY, MCP_SDK_MISSING_ERROR
+            )
+            outcome = McpStartupOutcome(
+                configured=tuple(manager.get_all_server_names()),
+                connected=tuple(manager.get_connected_servers()),
+                failures=settled_failures,
+                tool_count=len(manager.get_tools()),
+                settling=False,
+            )
+        except Exception:  # noqa: BLE001 — a settle rebuild must never break the manager
+            logger.debug("MCP settled outcome rebuild failed", exc_info=True)
+            return
+        session.mcp_startup = outcome
+        if not has_ui:
+            # A late failure that the gate never printed still deserves the
+            # stderr line the settling guard above withheld.
+            for name, message in settled_failures.items():
+                subject = "MCP discovery" if name == MCP_DISCOVERY_KEY else f"MCP server {name}"
+                print(f"\033[1;33mWarning: {subject}: {message}\033[0m", file=sys.stderr)
+        sink = getattr(session, "_on_mcp_startup_settled", None)
+        if sink is not None:
+            try:
+                sink(outcome)
+            except Exception:  # noqa: BLE001 — a UI hook must never break the manager
+                logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
+
+    manager.on_startup_settled = _on_startup_settled
 
     # The NON-MCP base is READ BACK from the session on every refresh, not
     # snapshotted once. Session capability tools live in that inventory even

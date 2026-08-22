@@ -235,6 +235,200 @@ class TestFastStartupGate:
         await manager.disconnect_all()
 
 
+class TestStartupSettleReporting:
+    """The startup outcome is reported after the round SETTLES, not at the gate.
+
+    A server that misses the 250 ms gate (OAuth HTTP servers, which do metadata
+    discovery + refresh before connecting) is still connecting when the boot
+    snapshot is taken. A single fast failure must not flip the report to
+    "N of M up — failed: X" while the slow successes are in flight; the manager
+    accumulates the combined tally and fires ``on_startup_settled`` once every
+    deferred server has reached a terminal state.
+    """
+
+    @pytest.mark.asyncio
+    async def test_settling_true_until_deferred_drains_then_callback_fires(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = McpManager(str(project))
+        slow_release = asyncio.Event()
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            if name == "slow":
+                await asyncio.wait_for(slow_release.wait(), timeout=10)
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        settled: list[bool] = []
+        manager.on_startup_settled = lambda: settled.append(True)
+
+        await manager.discover_and_connect()
+
+        # At the gate: fast is live, slow is deferred, so the round is settling.
+        assert manager.startup_settling() is True
+        assert settled == []
+        assert manager.startup_failures() == {}
+
+        # Release the deferred connect; its continuation settles the round.
+        slow_release.set()
+        await asyncio.sleep(0.05)
+
+        assert manager.startup_settling() is False
+        assert settled == [True]  # fired exactly once
+        assert manager.startup_failures() == {}
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_fast_failure_does_not_settle_while_slow_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A server failing FAST leaves the round settling until the slow one
+        lands, and the settled failure map names the fast failure alone."""
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"boom": {"type": "stdio", "command": "boom-cmd"},'
+            ' "slow": {"type": "stdio", "command": "slow-cmd"}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        slow_release = asyncio.Event()
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            if name == "boom":
+                raise RuntimeError("boom: spawn failed")
+            await asyncio.wait_for(slow_release.wait(), timeout=10)
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        settled: list[dict[str, str]] = []
+        manager.on_startup_settled = lambda: settled.append(manager.startup_failures())
+
+        await manager.discover_and_connect()
+
+        # boom failed at the gate; slow is deferred, so NOT settled yet even
+        # though a failure already exists.
+        assert manager.startup_settling() is True
+        assert settled == []
+        assert "boom" in manager.startup_failures()
+
+        slow_release.set()
+        await asyncio.sleep(0.05)
+
+        assert manager.startup_settling() is False
+        assert len(settled) == 1
+        # The settled failure map names the fast failure and not the slow
+        # success that eventually landed.
+        assert set(settled[0]) == {"boom"}
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_all_fast_means_not_settling_and_no_callback(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When every server settles inside the gate the boot snapshot is final:
+        nothing was deferred, so the settle callback never fires."""
+        manager = McpManager(str(project))
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        settled: list[bool] = []
+        manager.on_startup_settled = lambda: settled.append(True)
+
+        await manager.discover_and_connect()
+
+        assert manager.startup_settling() is False
+        assert settled == []  # never armed
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_deferred_failure_recorded_in_settled_map(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A server that fails AFTER the gate contributes its failure to the
+        settled tally — the exact case a gate-only snapshot never saw."""
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"fast": {"type": "stdio", "command": "fast-cmd"},'
+            ' "slow": {"type": "stdio", "command": "slow-cmd"}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        slow_release = asyncio.Event()
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            if name == "slow":
+                await asyncio.wait_for(slow_release.wait(), timeout=10)
+                raise RuntimeError("slow exploded after the gate")
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        settled: list[dict[str, str]] = []
+        manager.on_startup_settled = lambda: settled.append(manager.startup_failures())
+
+        await manager.discover_and_connect()
+        assert manager.startup_settling() is True
+
+        slow_release.set()
+        await asyncio.sleep(0.05)
+
+        assert manager.startup_settling() is False
+        assert len(settled) == 1
+        assert "slow" in settled[0]
+        await manager.disconnect_all()
+
+
+class TestStartupSettleStaleRound:
+    """A continuation that fails AFTER its round was superseded must not write
+    the new round's startup accounting or fire its settle callback (F2)."""
+
+    @pytest.mark.asyncio
+    async def test_stale_failed_continuation_does_not_touch_the_current_round(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"fast": {"type": "stdio", "command": "fast-cmd"},'
+            ' "slow": {"type": "stdio", "command": "slow-cmd"}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        slow_release = asyncio.Event()
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            if name == "slow":
+                await asyncio.wait_for(slow_release.wait(), timeout=10)
+                raise RuntimeError("slow failed after the gate")
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        settled: list[bool] = []
+        manager.on_startup_settled = lambda: settled.append(True)
+
+        await manager.discover_and_connect()
+        assert manager.startup_settling() is True
+
+        # Supersede the round the way reload()/dispose() would, WITHOUT going
+        # through _connect_round (which would legitimately reset the accumulators
+        # anyway): bump the epoch so the in-flight continuation is now stale.
+        manager._epoch += 1
+
+        # Now let the stale continuation fail. It must not record into the
+        # (freshly bumped) round's accumulator, nor fire the settle callback.
+        slow_release.set()
+        await asyncio.sleep(0.05)
+
+        assert settled == []
+        assert manager.startup_failures() == {}
+        await manager.disconnect_all()
+
+
 class TestDeferredExecuteFailure:
     @pytest.mark.asyncio
     async def test_deferred_execute_error_when_connect_fails(
@@ -1288,7 +1482,7 @@ class TestAuthRequiredHandling:
         seen: list[tuple[str, str]] = []
         manager.on_auth_required = lambda name, msg: seen.append((name, msg))
         manager._fire_auth_required("notion", McpAuthRequiredError("https://mcp.notion.com/mcp"))
-        assert seen == [("notion", "needs authorization — run /mcp login notion")]
+        assert seen == [("notion", "run /mcp login notion to authorize")]
 
     def test_fire_auth_required_survives_a_raising_sink(self) -> None:
         """A broken UI hook must not take down the connect machinery."""

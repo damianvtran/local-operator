@@ -53,6 +53,16 @@ class McpStartupOutcome:
     connected: tuple[str, ...] = ()
     failures: dict[str, str] = field(default_factory=dict)
     tool_count: int = 0
+    #: True while servers deferred past the 250 ms startup gate are still
+    #: connecting, so this outcome is a PROVISIONAL snapshot, not the final
+    #: tally. OAuth HTTP servers do metadata discovery and a possible token
+    #: refresh before their transport opens, so they routinely miss the gate;
+    #: reporting failures from a settling snapshot names a server as failed
+    #: while it is in fact mid-handshake and about to succeed. Front ends
+    #: suppress the failure surface while this is True and re-report once the
+    #: manager fires ``on_startup_settled`` with a settled (``settling=False``)
+    #: outcome. False when nothing was deferred — the gate snapshot was final.
+    settling: bool = False
 
     @property
     def failed(self) -> bool:
@@ -70,5 +80,15 @@ class McpStartupOutcome:
         announcing "0 connected" while a connect is still in flight would be
         both alarming and wrong. The status band still shows the count in that
         window, and it ticks up when the connect lands.
+
+        A SETTLING snapshot is never reportable: while servers deferred past the
+        gate are still connecting, any failure in this snapshot may belong to a
+        server that is in fact mid-handshake, and any success tally is
+        incomplete. Reporting it would flash "N of M up — failed: X" a beat
+        before the slow OAuth servers land. The manager re-reports a settled
+        (``settling=False``) outcome once the round drains, and THAT one is what
+        the user sees. The live status band covers the in-between window.
         """
+        if self.settling:
+            return False
         return bool(self.connected) or bool(self.failures)

@@ -1050,6 +1050,14 @@ class Session:
         # the latter is an empty outcome. See session/mcp_status.py for why the
         # record does not live in the mcp package.
         self.mcp_startup: McpStartupOutcome | None = None
+        # Front-end sink fired once the MCP startup round SETTLES — i.e. every
+        # server deferred past the 250 ms gate has reached a terminal state and
+        # ``mcp_startup`` has been rebuilt with the combined tally. A full-screen
+        # TUI installs it to re-raise the boot toast/notice with the final
+        # numbers instead of the provisional gate snapshot; headless callers
+        # leave it None (they already print on settle in the factory). Signature:
+        # (McpStartupOutcome). See session_factory.wire_mcp_into_session.
+        self._on_mcp_startup_settled: Callable[[Any], None] | None = None
         self._aside_thunks: list[Aside] = []
         self._continuation_queue: list[AgentMessage] = []
         # Latest provider-reported usage. SEEDED from the replayed transcript

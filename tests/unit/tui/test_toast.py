@@ -164,6 +164,37 @@ def test_servers_still_connecting_past_the_gate_stay_quiet() -> None:
     assert format_mcp_startup(pending) is None
 
 
+def test_a_settling_snapshot_with_a_failure_stays_quiet() -> None:
+    """A failure in a SETTLING snapshot must not be toasted: servers deferred
+    past the gate are still connecting, and one of them failing fast would
+    otherwise flash "N of M up — failed: X" a beat before the slow OAuth
+    servers land. The manager re-reports a settled outcome once the round
+    drains, and THAT one is what the user sees."""
+    settling = McpStartupOutcome(
+        configured=("notion", "linear"),
+        connected=(),
+        failures={"notion": "needs authorization"},
+        settling=True,
+    )
+    assert format_mcp_startup(settling) is None
+
+
+def test_the_same_failure_toasts_once_the_round_has_settled() -> None:
+    """The settled (``settling=False``) re-report is the one that surfaces."""
+    settled = McpStartupOutcome(
+        configured=("notion", "linear"),
+        connected=("linear",),
+        failures={"notion": "needs authorization"},
+        settling=False,
+    )
+    payload = format_mcp_startup(settled)
+    assert payload is not None
+    text, _duration = payload
+    lines = text.plain.split("\n")
+    assert lines[0] == f"{ICON_MCP} MCP: 1 of 2 servers up"
+    assert lines[1] == "failed: notion — needs authorization"
+
+
 def test_a_hard_discovery_failure_does_not_invent_a_server_tally() -> None:
     """The config layer never produced a server list on that path, so "0 of 0
     servers up" would be meaningless and quietly wrong about what broke."""

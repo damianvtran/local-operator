@@ -869,6 +869,29 @@ class McpManager:
         # mid-session expiry) need this dedicated hook to reach the user as a
         # toast. Signature: (server_name, message).
         self.on_auth_required: Callable[[str, str], None] | None = None
+        # UI/session-installed sink fired ONCE per discovery round when every
+        # server that missed the 250 ms startup gate has reached a terminal
+        # state (connected or failed). It exists because the boot report is a
+        # SNAPSHOT taken at the gate: OAuth HTTP servers do PRM/ASM discovery and
+        # a possible token refresh before their transport opens, so they almost
+        # always miss the gate and are still connecting when the snapshot is
+        # taken. A single server that fails FAST would otherwise flip the report
+        # to "N of M up — failed: X" while the slow successes are still in
+        # flight, reporting the momentary authed count as if it were final. This
+        # fires when the round actually settles so the front end can re-report
+        # the COMBINED outcome once. Signature: (). Never fires when no server
+        # was deferred (the gate snapshot was already final).
+        self.on_startup_settled: Callable[[], None] | None = None
+        # Combined per-server startup failures for the CURRENT round, accumulated
+        # across both the gate pass and the background continuations, so the
+        # settled outcome names every failure and not just the ones fast enough
+        # to lose the race to the gate. Reset at the start of each round; a
+        # server that later connects is cleared from it.
+        self._startup_failures: dict[str, str] = {}
+        # Servers deferred past the gate this round and not yet settled. When it
+        # drains, ``on_startup_settled`` fires. Emptiness is also how the front
+        # end tells "the boot snapshot was final" from "still connecting".
+        self._startup_deferred: set[str] = set()
         # Servers already toasted for an auth requirement, so a dead grant that
         # a tool call keeps retrying does not re-raise the toast on every
         # attempt. Cleared per server when it connects again.
@@ -1080,6 +1103,10 @@ class McpManager:
         self._configs = configs
         self._sources = sources
         self._disposed = False
+        # Fresh accumulators for this round: the settled outcome is built from
+        # these, not from the gate snapshot alone (see on_startup_settled).
+        self._startup_failures = {}
+        self._startup_deferred = set()
 
         result = McpLoadResult()
         if configs and not _sdk_available():
@@ -1096,7 +1123,9 @@ class McpManager:
         for name, cfg in configs.items():
             errors = validate_server_config(name, cfg)
             if errors:
-                result.errors[name] = "; ".join(errors)
+                message = "; ".join(errors)
+                result.errors[name] = message
+                self._startup_failures[name] = message
                 continue
             tasks[name] = asyncio.get_running_loop().create_task(self._connect_server(name, cfg))
 
@@ -1115,13 +1144,16 @@ class McpManager:
                 # Actionable, not raw: the startup toast is where a user first
                 # learns a server needs a login, and "run /mcp login <name>" is
                 # the one thing they can do about it.
-                result.errors[name] = self._auth_required_text(name, exc)
+                message = self._auth_required_text(name, exc)
+                result.errors[name] = message
+                self._startup_failures[name] = message
                 logger.info("MCP server %r needs authorization: %s", name, exc)
                 waiter = self._connect_futures.pop(name, None)
                 _settle_future_error(waiter, exc)
                 continue
             except Exception as exc:
                 result.errors[name] = str(exc)
+                self._startup_failures[name] = str(exc)
                 logger.warning("MCP server %r failed to connect: %s", name, exc)
                 # A parked waiter (reload) must fail, not hang (MCP-08).
                 waiter = self._connect_futures.pop(name, None)
@@ -1133,6 +1165,11 @@ class McpManager:
         for name, task in tasks.items():
             if name in done_names:
                 continue
+            # Deferred past the gate: its terminal state is not yet known, so it
+            # joins the settle set. When this set drains (every deferred server
+            # connected or failed), the round is settled and the front end can
+            # re-report the combined outcome instead of the gate snapshot.
+            self._startup_deferred.add(name)
             # Still pending at the gate: defer from cache, or contribute nothing.
             cached = self.tool_cache.get(name) if self.tool_cache is not None else None
             if cached:
@@ -1554,11 +1591,17 @@ class McpManager:
     def _auth_required_text(name: str, exc: McpAuthRequiredError) -> str:
         """The startup-toast wording for a server that needs an OAuth login.
 
-        Names the command that fixes it. The same string lands in the durable
-        transcript notice and in ``/mcp``, so one helper keeps all three
-        surfaces agreeing.
+        Leads with the COMMAND that fixes it rather than the diagnosis. The
+        toast renders this after a ``failed: <name> — `` prefix and then clamps
+        to the card width, so the tail is what gets truncated: putting
+        ``run /mcp login <name>`` first keeps the one actionable thing on screen
+        even on a narrow terminal, where ``needs authorization — run /mcp login
+        <name>`` used to sever the command mid-word (design review D1). One
+        ``—`` only, so the composed line is not a chain of dashes (D4). The same
+        string lands in the durable transcript notice and in ``/mcp``, so one
+        helper keeps all three surfaces agreeing.
         """
-        return f"needs authorization — run /mcp login {name}"
+        return f"run /mcp login {name} to authorize"
 
     def _fire_auth_required(self, name: str, exc: McpAuthRequiredError) -> None:
         """Notify the UI that ``name`` needs an OAuth login (best-effort).
@@ -1602,6 +1645,48 @@ class McpManager:
             self._notify_tasks.add(task)
             task.add_done_callback(self._notify_tasks.discard)
 
+    def _settle_deferred(self, name: str) -> None:
+        """Mark one deferred server settled; fire the round callback when last.
+
+        Called from the background continuation once ``name`` reaches a terminal
+        state (connected or failed), whatever the outcome. When the deferred set
+        empties, the discovery round is fully settled and ``on_startup_settled``
+        fires so the front end re-reports the COMBINED outcome — the gate
+        snapshot it reported first was taken while these servers were still
+        connecting. Fires at most once per round (the set is only refilled by a
+        new ``_connect_round``); a manager with nothing deferred never arms it.
+        """
+        self._startup_deferred.discard(name)
+        if self._startup_deferred:
+            return
+        sink = self.on_startup_settled
+        if sink is None:
+            return
+        try:
+            sink()
+        except Exception:  # noqa: BLE001 — a UI hook must never break the manager
+            logger.debug("mcp on_startup_settled sink raised", exc_info=True)
+
+    def startup_failures(self) -> dict[str, str]:
+        """The combined per-server startup failures for the current round.
+
+        Accumulated across the gate pass and the background continuations, so it
+        names every failure and not only the ones that lost the race to the
+        250 ms gate. This is what the settled re-report reads instead of a
+        second, momentary ``get_connected_servers`` snapshot.
+        """
+        return dict(self._startup_failures)
+
+    def startup_settling(self) -> bool:
+        """True while servers deferred past the startup gate are still settling.
+
+        The boot report reads this to mark its snapshot provisional: a settling
+        outcome suppresses the failure/success surface until
+        ``on_startup_settled`` fires with the complete tally. False means the
+        gate snapshot was already final (nothing was deferred, or every deferred
+        server has since settled)."""
+        return bool(self._startup_deferred)
+
     async def _finish_pending(
         self, name: str, task: asyncio.Task[ServerConnection], epoch: int
     ) -> None:
@@ -1609,6 +1694,10 @@ class McpManager:
         try:
             conn = await task
         except asyncio.CancelledError:
+            # A cancelled continuation is teardown/reload, not a settled server:
+            # the deferred set is reset wholesale by the next round, so do NOT
+            # fire the settle callback off a cancellation (it would report a
+            # half-torn-down round).
             return
         except Exception as exc:
             logger.warning("MCP server %r failed to connect after the gate: %s", name, exc)
@@ -1631,6 +1720,25 @@ class McpManager:
                 # The startup toast has already been dismissed by the time an
                 # after-gate connect fails, so raise a fresh one via the UI hook.
                 self._fire_auth_required(name, auth_exc)
+            # Whether this continuation still belongs to the CURRENT round. A
+            # reload()/dispose() during the await bumps the epoch, and a stale
+            # continuation must not write the new round's startup accounting —
+            # the success arm below already guards on this, and the failure arm
+            # needs the same guard for the accumulator and the settle callback
+            # (F2). The waiter-settling and auth-required surfacing below are
+            # NOT guarded: a parked waiter must fail rather than hang, and the
+            # incident/toast reflect a real failure regardless of which round
+            # owns it.
+            current_round = not self._disposed and epoch == self._epoch
+            if current_round:
+                # Record the failure into the round accumulator (an auth
+                # requirement as its actionable text, else the raw reason) and
+                # settle this deferred server BEFORE firing tools-changed, so the
+                # front end that re-reports on settle sees the complete map.
+                if isinstance(auth_exc, McpAuthRequiredError):
+                    self._startup_failures[name] = self._auth_required_text(name, auth_exc)
+                else:
+                    self._startup_failures[name] = str(exc)
             # Re-fetch the waiter: a reload during the await may have swapped
             # it, and settling the stale one would strand the current waiters.
             _settle_future_error(self._connect_futures.get(name), exc)
@@ -1638,14 +1746,23 @@ class McpManager:
             self._tools_by_server.pop(name, None)  # drop the deferred slice
             self._unregister_origins(name)
             self._rebuild_agent_names()
+            if current_round:
+                self._settle_deferred(name)
             self._fire_tools_changed()
             return
         if self._disposed or epoch != self._epoch:
             if conn.stack is not None:
                 with suppress(Exception):
                     await conn.stack.aclose()
+            # A disposed/superseded round is not a settled one: leave the settle
+            # callback to the round that is actually current.
             return
+        # A late success clears any earlier failure recorded for this server and
+        # settles it. Order matches the failure arm: accounting first, then the
+        # tools-changed fire that may trigger the settle re-report.
+        self._startup_failures.pop(name, None)
         self._register_connection(conn)  # settles the waiter future
+        self._settle_deferred(name)
         self._fire_tools_changed()
 
     def _register_connection(self, conn: ServerConnection) -> None:
