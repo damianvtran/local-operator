@@ -22,7 +22,7 @@ import asyncio
 
 import pytest
 
-from local_operator.harness.jobs import AsyncJob, AsyncJobManager
+from local_operator.harness.jobs import AsyncJob, AsyncJobManager, JobStatus
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:
@@ -34,7 +34,7 @@ async def wait_for(predicate, timeout: float = 2.0) -> None:
         await asyncio.sleep(0.01)
 
 
-def _row(job_id: str, status: str = "completed", **kw) -> AsyncJob:
+def _row(job_id: str, status: JobStatus = "completed", **kw) -> AsyncJob:
     return AsyncJob(id=job_id, type="task", status=status, start_time=1.0, label=job_id, **kw)
 
 
