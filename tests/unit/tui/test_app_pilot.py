@@ -140,6 +140,13 @@ class FakeSession:
         #: assign a real ``TeamRegistry``; everyone else pays nothing.
         self.team_registry: Any | None = None
         self.attached_teams: list[Any] = []
+        #: Optional agent registry for ``/agent``, same opt-in shape as
+        #: ``team_registry``: tests that exercise profiles assign a real
+        #: ``AgentRegistry``; everyone else pays nothing.
+        self.agent_registry: Any | None = None
+        #: Names ``attach_agent_profile`` was asked for, so a `/agent` test
+        #: can assert the attach happened without a real system-prompt stamp.
+        self.attached_agents: list[str] = []
 
     @property
     def session_id(self) -> str:
@@ -184,6 +191,24 @@ class FakeSession:
 
     def attach_team(self, team: Any) -> None:
         self.attached_teams.append(team)
+
+    def attach_agent_profile(self, name: str) -> str | None:
+        # Same resolution scope as the real session (role or specialist,
+        # never an ordinary conversational row), driven by the optional
+        # registry, so `/agent` tests exercise the real filtering rules.
+        from local_operator.agent_profiles import is_specialist, resolve_profile
+
+        profile = resolve_profile(name, registry=self.agent_registry)
+        if profile is not None:
+            self.attached_agents.append(profile.name)
+            return profile.name
+        if self.agent_registry is None:
+            return None
+        agent = self.agent_registry.get_agent_by_name(name)
+        if agent is None or not is_specialist(agent):
+            return None
+        self.attached_agents.append(str(agent.name))
+        return str(agent.name)
 
     @property
     def variables(self) -> Any:

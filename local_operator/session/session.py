@@ -1745,6 +1745,67 @@ class Session:
                     )
         self._goal_state.team_brief = preamble or ""
 
+    def attach_agent_profile(self, name: str) -> str | None:
+        """Attach a named role/specialist's instructions to THIS session.
+
+        The TUI's ``/agent <name>`` surface. Distinct from launching the
+        profile as a subagent (``task(agent=...)``): here the user chooses to
+        make the CURRENT conversation speak with that profile's instruction
+        set, no child process or fresh session involved.
+
+        The instructions ride the volatile tail (see ``build_system_blocks``)
+        exactly like :meth:`attach_team`'s brief, so an attach mid-session
+        never invalidates the cached persona prefix. Interaction with a team
+        is deliberate: the two briefs live in SEPARATE fields and coexist — a
+        ``/team`` manager can adopt a specialist's voice without dropping the
+        roster — while a later ``/agent`` replaces only the earlier agent
+        brief, because the user is switching hats, not stacking them.
+
+        Resolution mirrors :meth:`attach_team`'s manager path: a delegation
+        role via ``resolve_profile`` (registry first, then packaged seeds),
+        else a registry row explicitly marked as a specialist. Ordinary
+        conversational/autosave rows are refused — honouring one would stamp a
+        private chat agent's prompt onto this session under a name collision.
+
+        Returns the resolved profile's display name, or ``None`` when nothing
+        by that name is a role or specialist (the caller reports it; a typo
+        must not half-attach anything).
+        """
+        key = (name or "").strip()
+        if not key:
+            return None
+        from local_operator.agent_profiles import is_specialist, resolve_profile
+
+        profile = resolve_profile(key, registry=self.agent_registry)
+        if profile is not None and profile.preamble:
+            self._goal_state.agent_brief = profile.preamble.strip()
+            return profile.name
+        if profile is not None:
+            # A real role with empty instructions: attaching it changes
+            # nothing, but the NAME resolved, so report success rather than
+            # sending the user to hunt for a typo that does not exist.
+            self._goal_state.agent_brief = ""
+            return profile.name
+        if self.agent_registry is None:
+            return None
+        try:
+            specialist = self.agent_registry.get_agent_by_name(key)
+            prompt = (
+                self.agent_registry.get_agent_system_prompt(specialist.id)
+                if specialist is not None and is_specialist(specialist)
+                else ""
+            )
+        except Exception:  # noqa: BLE001 - registry problems mean "not found"
+            return None
+        if specialist is None or not is_specialist(specialist):
+            return None
+        # Tagged with the specialist's name so the model can tell whose voice
+        # this is — the same shape a role preamble already carries.
+        self._goal_state.agent_brief = (
+            f"[agent: {specialist.name}]\n{prompt.strip()}" if prompt.strip() else ""
+        )
+        return str(specialist.name)
+
     @property
     def variables(self) -> Any:
         """The session's variable store, including memory-only credentials.

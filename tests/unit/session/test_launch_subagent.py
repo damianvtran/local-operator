@@ -219,6 +219,77 @@ def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatc
     assert "Review before merge." in brief
 
 
+def test_attach_agent_profile_resolves_roles_and_specialists(tmp_path, monkeypatch):
+    """`/agent` scope: registry role wins, explicit specialist works, an
+    ordinary conversational row is refused even on an exact name match."""
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    role = registry.create_agent(
+        _agent_fields(name="auditor", description="Audit changes", tags=["role"])
+    )
+    registry.set_agent_system_prompt(role.id, "You audit changes.")
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="dashboard-sme",
+            description="Dashboard release practices",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(specialist.id, "Follow the dashboard checklist.")
+    private = registry.create_agent(_agent_fields(name="private-chat", description="Notes"))
+    registry.set_agent_system_prompt(private.id, "PRIVATE USER CONTEXT")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    # A registered role rides the tail with its role preamble.
+    assert parent.attach_agent_profile("auditor") == "auditor"
+    assert "You audit changes." in parent._goal_state.agent_brief
+    assert parent._goal_state.agent_brief.startswith("[role: auditor]")
+
+    # A later /agent REPLACES the earlier agent brief (switching hats, not
+    # stacking them) — and a specialist resolves through its explicit marker.
+    assert parent.attach_agent_profile("dashboard-sme") == "dashboard-sme"
+    assert "Follow the dashboard checklist." in parent._goal_state.agent_brief
+    assert "You audit changes." not in parent._goal_state.agent_brief
+    assert parent._goal_state.agent_brief.startswith("[agent: dashboard-sme]")
+
+    # An ordinary conversational agent must NOT be attachable by name.
+    assert parent.attach_agent_profile("private-chat") is None
+    assert "PRIVATE USER CONTEXT" not in parent._goal_state.agent_brief
+
+    # A packaged starter resolves without being installed, so /agent works on
+    # a fresh registry too.
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    assert parent._goal_state.agent_brief.startswith("[role: reviewer]")
+
+    assert parent.attach_agent_profile("no-such-name") is None
+
+
+def test_agent_brief_coexists_with_team_brief(tmp_path, monkeypatch):
+    """The two briefs live in separate fields: attaching an agent must not
+    drop the roster a /team manager is coordinating, and vice versa."""
+    from datetime import datetime, timezone
+
+    from local_operator.teams import Team, TeamMember
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    parent.attach_team(
+        Team(
+            id="t1",
+            name="feature-release",
+            created_date=datetime.now(timezone.utc),
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions="Review before merge.",
+        )
+    )
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    assert "Review before merge." in parent._goal_state.team_brief
+    assert parent._goal_state.agent_brief.startswith("[role: reviewer]")
+
+
 @pytest.mark.asyncio
 async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monkeypatch):
     """A manager session's children inherit collaboration and project context
