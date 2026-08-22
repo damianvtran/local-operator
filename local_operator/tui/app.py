@@ -11143,7 +11143,16 @@ class OperatorApp(App[None]):
         # docstring forbids, and the recalled text is not lost either way —
         # it stays queued and rides the next boundary. The recall simply
         # declines, and the user can Esc again once the buffer is empty.
+        #
+        # But a silent decline is the one Esc failure that reads as a dropped
+        # keystroke (design round 1, D1): the user pressed the key they press
+        # to cancel, saw nothing move, and has no way to know the buffer is
+        # the obstacle. The recovery is one line, replaced on repeat like the
+        # ladder's own rows.
         if editor.text.strip():
+            self._replace_stop_notice(
+                "queued steer kept — clear the composer, esc again to recall it", "note"
+            )
             return
         text = message.text
         # The steer recorded itself in prompt history on submit; the recall

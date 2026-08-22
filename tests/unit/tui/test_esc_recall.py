@@ -264,6 +264,9 @@ async def test_recall_declines_over_a_half_typed_draft() -> None:
         assert editor.text == "half typed"
         assert [m.text for m in session.queued_steering()] == ["queued steer"]
         assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        # And the decline is not silent: the one row names the obstacle and
+        # the recovery (design round 1, D1).
+        assert any("esc again to recall" in text for text in _notice_texts(app))
 
 
 @pytest.mark.asyncio
