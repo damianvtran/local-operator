@@ -4790,6 +4790,15 @@ class Session:
         Malformed rows are dropped individually rather than failing the whole
         load: a resume that lost one child's row is far better than one that
         booted with an empty panel because a single entry was unreadable.
+
+        A restored row has NO in-process page detail: the slim snapshot
+        projection (:func:`_subagent_job_row`) drops ``prompt``, ``result_text``
+        and ``trajectory``, so opening a restored child's full-page view shows
+        an empty body (the view folds those and handles ``None`` without
+        raising). That is the accepted tradeoff of not writing a child's full
+        output to the parent transcript on every roster move — the detail lives
+        in the CHILD's own transcript and is recovered by resuming or
+        ``hub op='peek'``-ing it, never by re-reading it here.
         """
         details = self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
         if not details:
