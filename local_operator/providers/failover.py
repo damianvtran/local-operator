@@ -24,7 +24,9 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+
+import httpx
 
 from local_operator.harness.types import (
     AbortSignal,
@@ -34,6 +36,7 @@ from local_operator.harness.types import (
     StreamEvent,
 )
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort
+from local_operator.model.registry import model_family
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
@@ -1087,6 +1090,15 @@ class FailoverRouteState:
     on_change: RouteChangeHandler | None = None
     primary_retry_at_ms: int = 0
     on_settle: RouteSettleHandler | None = None
+    #: Set when the pin was placed by a QUOTA verdict (the usage-aware
+    #: preflight), not a transport failure. Quota resets on a schedule the
+    #: usage endpoint can answer definitively, so a quota pin is re-probed at
+    #: every message boundary regardless of ``primary_retry_at_ms`` — a
+    #: cooldown sized to a 24h advertised reset would otherwise glue the
+    #: session to a fallback for a day after the primary's 5-hour window
+    #: reopened. Transport pins keep the cooldown: their recovery is not
+    #: cheaply observable.
+    quota_pinned: bool = False
     #: Per-target bench: ``(selector, effort) -> earliest ms it may be asked
     #: again``. Written when a FALLBACK target exhausts its provider during a
     #: walk, consulted by the next walk's first pass and by preflight's
@@ -1108,6 +1120,7 @@ class FailoverRouteState:
         reason: str,
         *,
         cooldown_ms: int = 0,
+        quota: bool = False,
     ) -> None:
         if self.active == target:
             # Already on this route: nothing changed, so nothing is re-armed.
@@ -1120,12 +1133,18 @@ class FailoverRouteState:
             # whole session even after the primary recovered. The docstring
             # above promises a retry "only after primary_retry_at_ms", which
             # is a deadline set when the route CHANGES, not on every use.
+            # The quota origin is sticky in the same direction: once a pin
+            # was placed on quota evidence it stays quota evidence (the
+            # preflight is the only quota pinner, and it re-pins on the same
+            # verdict), so a re-activation must not downgrade the marker.
+            self.quota_pinned = self.quota_pinned or quota
             return
         if cooldown_ms > 0:
             self.primary_retry_at_ms = max(
                 self.primary_retry_at_ms,
                 int(time.time() * 1000) + cooldown_ms,
             )
+        self.quota_pinned = quota
         self.active = target
         if self.on_change is not None:
             result = self.on_change(target, reason)
@@ -1173,6 +1192,7 @@ class FailoverRouteState:
         """
         self.active = None
         self.primary_retry_at_ms = 0
+        self.quota_pinned = False
 
     async def clear_settled(self, reason: str) -> None:
         """Return the route to the primary and NOTIFY ``on_settle``.
@@ -1278,6 +1298,8 @@ class FailoverAuthStore(Protocol):
         session_id: str | None,
         error: BaseException,
         api_key: str | None = None,
+        *,
+        family: str = "",
     ) -> bool: ...  # pragma: no cover
 
 
@@ -1543,10 +1565,17 @@ async def stream_with_failover(
         )
         if route_state is not None and target != primary_target:
             cooldown_ms = max(60_000, reported.retry_after_ms or 0) if reported else 60_000
+            # A pin placed on quota evidence (a 429 walk, not a transport
+            # outage) is re-probed at every message boundary: the usage
+            # endpoint answers definitively whether the primary recovered,
+            # and a cooldown sized to an advertised 24h reset would otherwise
+            # glue the session to this fallback a whole day past the
+            # primary's window reopening. Transport pins keep the cooldown.
             await route_state.activate(
                 target,
                 "provider failure",
                 cooldown_ms=cooldown_ms,
+                quota=reported is not None and reported.kind == "quota",
             )
         state = AuthRetryKeyState()
         error: BaseException | None = None
@@ -1568,6 +1597,7 @@ async def stream_with_failover(
         # already spent was skipped at the top of this walk, before it could
         # touch the route pin.
         server_fault_requests = server_faults_by_target.get(route_key, 0)
+        quota_recovery_attempted = False
         # Attempts this target's FIRST bearer spent before rotation started, so
         # the restore below can hand back the remainder of the user's budget
         # instead of a fresh one.
@@ -1595,6 +1625,7 @@ async def stream_with_failover(
                     state,
                     error,
                     read_only=request.isolated,
+                    family=model_family(spec.model_id),
                 )
                 token = access.access_token if access is not None else None
                 if token != current_token:
@@ -1606,6 +1637,35 @@ async def stream_with_failover(
                         spent_before_rotation = max(spent_before_rotation, transport_retries + 1)
                     current_token = token
                     transport_retries = 0  # fresh credential ⇒ fresh budget
+                # Isolated requests take this too: they skip the preflight
+                # entirely, so without the probe an errand would die on
+                # "all credentials unusable" behind blocks the usage endpoint
+                # says are stale. The probe only CLEARS blocks a fresh
+                # verdict supersedes — it never writes one, never pins — so
+                # it cannot move the concurrent turn's routing the way a
+                # block or pin would. Gated on the same opt-in as the
+                # preflight: it costs one usage fetch per blocked row, and a
+                # session that has not asked for usage-aware routing keeps
+                # the cheaper verdict-only behaviour.
+                if (
+                    access is None
+                    and retry.usage_aware_fallback
+                    and not quota_recovery_attempted
+                    and (error is None or is_usage_limit_error(error))
+                ):
+                    # Every resolve path came back empty on a quota-shaped
+                    # situation (or on the very first resolve, before any
+                    # error exists): the cascade is hiding accounts behind
+                    # quota blocks, and a family-scoped block can be hiding
+                    # an account that serves THIS family. Probe the blocks
+                    # before declaring the provider dead — at most once per
+                    # target, so a provider whose usage endpoint disagrees
+                    # with its wire answers cannot loop the walk.
+                    quota_recovery_attempted = True
+                    recovered = await _recover_quota_blocked(auth, provider, spec.model_id)
+                    if recovered is not None:
+                        access = recovered
+                        error = None
                 if access is None and error is not None:
                     # Rotation is exhausted: no other credential exists. The
                     # small pre-rotation allowance exists ONLY to get a turn
@@ -1892,6 +1952,151 @@ async def stream_with_failover(
     raise ProviderError(None, f"Failover exhausted for '{primary_selector}'", retryable=False)
 
 
+def _rotate_sibling(
+    auth: FailoverAuthStore,
+    provider: str,
+    session_id: str | None,
+    error: BaseException,
+    api_key: str | None,
+    family: str,
+) -> None:
+    """Step (c) of the a/b/c rotation, with the family dimension attached.
+
+    A usage-limit verdict that binds ONLY on a model-family cap (Anthropic's
+    ``7 day (Fable)``) must block the failing credential for THAT family, not
+    for the whole account: the shared 5-hour / 7-day windows still serve every
+    other family, and an account-wide block is exactly what later made an
+    opus request report "all credentials unusable" on an account whose only
+    spent window was Fable's. Stores that predate scoped blocks keep the old
+    two-argument behaviour.
+    """
+    try:
+        auth.rotate_sibling(provider, session_id, error, api_key=api_key, family=family)
+    except TypeError:
+        auth.rotate_sibling(provider, session_id, error, api_key=api_key)
+
+
+async def _recover_quota_blocked(
+    auth: FailoverAuthStore,
+    provider: str,
+    model_id: str,
+) -> "OAuthAccess | None":
+    """Probe accounts that quota blocks hid from the cascade, for THIS family.
+
+    The reactive mirror of the preflight's blocked-account recovery. A quota
+    block is an EARLIER verdict, and a family-scoped one is a verdict about
+    ONE model family: when every account carries such a block (each written
+    by a fable-5 request that genuinely could not be served), a request for a
+    different family resolves to ``None`` and dies with "all credentials
+    unusable" while spendable shared quota sits behind the blocks. Before
+    accepting that, ask each blocked row's OWN usage whether the family this
+    request names is actually spent; a row whose shared windows still hold
+    headroom is unblocked (for that family) and served.
+
+    Returns the recovered record, or ``None`` when no row recovers — the
+    honest "nothing left" the caller already handles. Never raises: a probe
+    that cannot get a definite answer leaves the block standing.
+    """
+    from local_operator.providers.usage import fetch_usage, usage_health
+
+    if not isinstance(auth, CredentialLister):
+        return None
+    family = model_family(model_id)
+    try:
+        rows = [
+            row
+            for row in auth.list_credentials(provider)
+            if row.credential_type == "oauth" and row.disabled_cause is None
+        ]
+    except Exception:
+        return None
+    for row in rows:
+        if not _is_blocked_for(auth, row.id, provider, family):
+            continue  # the cascade already sees this row; not our gap
+        fresh = getattr(auth, "ensure_oauth_fresh", None)
+        if not callable(fresh):
+            return None  # stores without per-row refresh cannot be probed
+        refresh_row = cast("Callable[[int], Awaitable[dict[str, Any] | None]]", fresh)
+        try:
+            creds = await refresh_row(row.id)
+        except Exception:
+            creds = None
+        if not creds:
+            continue
+        token = creds.get("access")
+        if not token:
+            definition = _provider_definition(provider)
+            key_fn = definition.get_api_key if definition is not None else None
+            token = key_fn(creds) if key_fn else None
+        if not token:
+            continue
+        try:
+            async with httpx.AsyncClient() as probe_client:
+                report = await fetch_usage(
+                    probe_client,
+                    provider,
+                    access_token=token,
+                    account_id=creds.get("account_id"),
+                )
+        except Exception:
+            report = None
+        if report is None:
+            continue
+        health = usage_health(report, model_id)
+        if health.state not in ("healthy", "reserve"):
+            continue  # genuinely spent for this family: the block stands
+        if family:
+            _clear_block(auth, row.id, provider, f"model:{family}")
+        _clear_block(auth, row.id, provider, "")
+        logger.info(
+            "quota recovery: credential %d for %s serves %s again (%s)",
+            row.id,
+            provider,
+            model_id,
+            health.state,
+        )
+        from local_operator.providers.auth_store import OAuthAccess as _OAuthRecord
+
+        return _OAuthRecord(
+            access_token=token,
+            credential_id=row.id,
+            account_id=creds.get("account_id"),
+            email=creds.get("email"),
+            org_id=creds.get("org_id"),
+            kind="oauth",
+            raw=creds,
+        )
+    return None
+
+
+def _provider_definition(provider: str) -> Any:
+    from local_operator.providers.registry import get_provider_definition
+
+    return get_provider_definition(provider)
+
+
+def _is_blocked_for(
+    auth: FailoverAuthStore, credential_id: int, provider: str, family: str
+) -> bool:
+    probe = getattr(auth, "is_blocked_for", None)
+    if callable(probe):
+        return bool(probe(credential_id, provider, family))
+    return bool(getattr(auth, "is_blocked", lambda *_a: False)(credential_id, provider))
+
+
+def _clear_block(auth: FailoverAuthStore, credential_id: int, provider: str, scope: str) -> None:
+    clear = getattr(auth, "clear_block", None)
+    if not callable(clear):
+        return
+    try:
+        if scope:
+            clear(credential_id, provider, block_scope=scope)
+        else:
+            clear(credential_id, provider)
+    except TypeError:
+        clear(credential_id, provider)
+
+
 async def _resolve_access_for_provider(
     auth: FailoverAuthStore,
     provider: str,
@@ -1900,6 +2105,7 @@ async def _resolve_access_for_provider(
     error: BaseException | None,
     *,
     read_only: bool = False,
+    family: str = "",
 ) -> "OAuthAccess | None":
     """Bridge AuthStore into the a/b/c resolver shape, returning the
     :class:`~local_operator.providers.auth_store.OAuthAccess` record (or
@@ -1927,13 +2133,23 @@ async def _resolve_access_for_provider(
             flags["read_only"] = True
         return flags
 
+    def _family_flags(force_refresh: bool) -> dict[str, Any]:
+        """``family`` rides only when named: stores (and test doubles) that
+        predate model-scoped quota blocks declare the bare signature."""
+        flags: dict[str, Any] = _flags(force_refresh)
+        if family:
+            flags["family"] = family
+        return flags
+
     async def _access(*, force_refresh: bool = False) -> "OAuthAccess | None":
         if oauth_store is None:
             return None
-        return await oauth_store.get_oauth_access(provider, session_id, **_flags(force_refresh))
+        return await oauth_store.get_oauth_access(
+            provider, session_id, **_family_flags(force_refresh)
+        )
 
     async def _key(*, force_refresh: bool = False) -> str | None:
-        return await auth.get_api_key(provider, session_id, **_flags(force_refresh))
+        return await auth.get_api_key(provider, session_id, **_family_flags(force_refresh))
 
     async def resolver(ctx: ApiKeyResolveContext) -> str | None:
         try:
@@ -1942,7 +2158,7 @@ async def _resolve_access_for_provider(
                 if record is None:
                     return await _key()
             elif ctx.last_chance:
-                auth.rotate_sibling(provider, session_id, ctx.error, api_key=ctx.previous_key)
+                _rotate_sibling(auth, provider, session_id, ctx.error, ctx.previous_key, family)
                 record = await _access()
                 if record is None:
                     return await _key()

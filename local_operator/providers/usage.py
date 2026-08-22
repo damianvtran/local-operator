@@ -308,6 +308,14 @@ class QuotaHealth:
     #: these to tell "everything is spent" from "one secondary window is spent"
     #: without re-deriving the binding set from the raw report.
     binding_labels: tuple[str, ...] = ()
+    #: Family slugs of the SCOPED windows in the binding set (Anthropic's
+    #: ``7 day (Fable)`` yields ``("fable",)``). This is the dimension a
+    #: credential block must be scoped to: a verdict whose only binding
+    #: windows are family caps stops THAT family on the account, not every
+    #: model the account serves — the shared 5-hour / 7-day windows still
+    #: gate the rest. Empty when the binding set is account-wide or the
+    #: report carries no family-scoped rows.
+    binding_families: tuple[str, ...] = ()
 
 
 def usage_health(
@@ -383,6 +391,9 @@ def usage_health(
             reset_after_ms=reset_after,
             scope=scope,
             binding_labels=tuple(limit.label for limit in zero_balance),
+            binding_families=tuple(
+                dict.fromkeys(limit.tier for limit in zero_balance if limit.tier)
+            ),
         )
 
     remaining = min(value for _limit, value in measured)
@@ -420,6 +431,7 @@ def usage_health(
         reset_after_ms=reset_after,
         scope=scope,
         binding_labels=tuple(limit.label for limit in binding),
+        binding_families=tuple(dict.fromkeys(limit.tier for limit in binding if limit.tier)),
     )
 
 

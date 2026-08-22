@@ -2872,7 +2872,14 @@ class TestRotationPermutations:
 
         assert served == ["acct-b"]
         rows = {r.data["access"]: r for r in store.list_credentials("anthropic")}
-        assert store.is_blocked(rows["acct-a"].id, "anthropic")
+        # The 429 names the family the request ran on, so the block is scoped
+        # to it: the account is out of rotation for opus, but a fable request
+        # (a family the opus verdict says nothing about) still sees the row.
+        # The preflight upgrades to an account-wide block when a shared
+        # window turns out to be the binding one.
+        assert store.is_blocked_for(rows["acct-a"].id, "anthropic", "opus")
+        assert not store.is_blocked_for(rows["acct-a"].id, "anthropic", "fable")
+        assert not store.is_blocked(rows["acct-a"].id, "anthropic")
         assert not store.is_blocked(rows["acct-b"].id, "anthropic")
 
     async def test_a_429d_oauth_row_falls_through_to_an_api_key_row(self, tmp_path: Any) -> None:
