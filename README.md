@@ -288,8 +288,20 @@ bad guidance, you fix the profile once — not every prompt that uses it.
 two briefs the individual agents never hard-code: a *collaboration* brief (how
 this group works together, who blocks a release) and a *project* brief (what
 product this instance owns). Swap the project brief and the same roster staffs
-a different product. Launch one with `/team <name> <request>` and the manager
-delegates from there.
+a different product. `/team` lists your saved teams:
+
+<p align="center">
+  <img src="./static/tui-teams.png" alt="The /team picker listing saved teams, each with its description and a 'N roles · led by manager' summary" width="720">
+</p>
+
+<p align="center"><i>The team picker (rows below the first are illustrative examples). Launch one with <code>/team &lt;name&gt; &lt;request&gt;</code> — the current agent becomes that roster's manager and delegates from there:</i></p>
+
+<p align="center">
+  <img src="./static/tui-team-command.png" alt="Sending a real request to a team: /team lopdev Can you implement a mobile relay functionality in lop using tailwind, shadcn" width="720">
+</p>
+
+Sending a request to a team is one line — the manager breaks it down and puts
+the right roles on it.
 
 Agents can also be managed from the CLI:
 
