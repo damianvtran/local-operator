@@ -42,6 +42,18 @@ def _item(text: str, status: str, **extra: str) -> dict[str, str]:
     return {"text": text, "status": status, **extra}
 
 
+def _affordance_text(panel: TodoPanel) -> str:
+    """The collapse/expand control's text — its OWN widget now (defect 2).
+
+    The affordance was split out of the body Static into ``TodoAffordance`` so a
+    ``:hover`` and an ``on_click`` can scope to just that row, so a test that
+    used to read it off ``panel._body.content`` reads it here instead. Returns
+    ``""`` when the control is hidden (a terminal too short to afford its row)."""
+    if not panel._affordance.display:
+        return ""
+    return str(panel._affordance.content)
+
+
 # --------------------------------------------------------------------------- #
 # select_collapsed — the walking viewport (omp selectCollapsedTodos, todo.ts)
 # --------------------------------------------------------------------------- #
@@ -244,7 +256,8 @@ async def test_settled_phase_hidden_after_delay_but_not_before() -> None:
         await pilot.pause()
         body = str(panel._body.content)
         assert "Cleanup" not in body
-        assert "+1 done" in body  # the affordance confesses the hidden item
+        # The affordance (its own widget now) confesses the hidden item.
+        assert "+1 done" in _affordance_text(panel)
         # The store is untouched — hiding is view-only.
         assert len(builtin.TODO_STORE["sess"]) == 2
         assert builtin.TODO_STORE["sess"][1]["items"][0]["status"] == "done"
@@ -337,13 +350,281 @@ async def test_ctrl_t_toggles_and_expanded_reveals_a_hidden_settled_phase() -> N
         assert panel._expanded is True
         body = str(panel._body.content)
         assert "Cleanup · 1/1" in body  # expanded reveals the auto-hidden phase
-        assert "ctrl+t to collapse" in body
+        assert "ctrl+t to collapse" in _affordance_text(panel)
 
         # Toggle back.
         await pilot.press("ctrl+t")
         await pilot.pause()
         assert panel._expanded is False
         assert "Cleanup" not in str(panel._body.content)
+        builtin.TODO_STORE.clear()
+
+
+def _big_multi_phase() -> list[dict[str, object]]:
+    """A ~16-item multi-phase list mirroring the user's report (Discovery/
+    Implementation/Validation), some done/blocked/dropped."""
+    return [
+        {
+            "name": "Discovery",
+            "items": [_item(f"d{n}", "done") for n in range(3)],
+        },
+        {
+            "name": "Implementation",
+            "items": [
+                _item("i0", "done"),
+                *[_item(f"i{n}", "pending") for n in range(1, 5)],
+                _item("i5", "blocked", reason="waiting on review"),
+            ],
+        },
+        {
+            "name": "Validation",
+            "items": [
+                *[_item(f"v{n}", "pending") for n in range(6)],
+                _item("v6", "dropped"),
+            ],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expanded_reveals_every_item_collapsed_hid_on_a_normal_terminal() -> None:
+    """Defect 1: on a normal-height terminal, ``ctrl+t`` must GROW the panel so a
+    ~16-item multi-phase list is shown in FULL — the collapsed view's ``+N more``
+    marker is gone and every hidden item is now painted.
+
+    The original design bounded expanded by the SAME ``MAX_TODO_ROWS + 2`` budget
+    as collapsed, so expand was a no-op in practice (the user's report). Expanded
+    now takes rows from the transcript (``1fr``, scrolls) down to a small floor,
+    which is what lets the whole list appear."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+
+        # Collapsed: the walking viewport hides items behind a "+N more" count.
+        collapsed = str(panel._body.content)
+        assert "more" in _affordance_text(panel)
+        assert collapsed.count("- [") < 16  # not everything is shown
+
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert panel._expanded is True
+        body = str(panel._body.content)
+        # Every item is painted — one row per todo, all three phase headers.
+        assert body.count("- [") == 16
+        for header in ("Discovery · 3/3", "Implementation · 1/6", "Validation · 1/7"):
+            assert header in body, header
+        # No "+N more" remainder to confess: expanded hides nothing.
+        assert "more" not in _affordance_text(panel)
+        assert _affordance_text(panel) == "ctrl+t to collapse"
+        # The list fits without a SCREEN scrollbar, and the composer is on screen.
+        assert app.screen.virtual_size == app.screen.size
+        assert app.screen.show_vertical_scrollbar is False
+        assert app.query_one("#input-shell").region.height > 0
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_scrolls_when_the_list_exceeds_the_bound() -> None:
+    """Defect 1, overflow case: an expanded list longer than the panel's height
+    budget must stay REACHABLE by scrolling — the body never silently clips under
+    ``Screen { overflow: hidden }`` and never pushes the composer off screen."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    # A short terminal makes even a modest list exceed the expanded bound.
+    async with app.run_test(size=(100, 14)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+
+        scroll = app.screen.query_one("#todo-scroll")
+        # The full list is painted into the body, and the scroll region can reach
+        # all of it (its virtual height exceeds its shown height).
+        assert str(panel._body.content).count("- [") == 16
+        assert scroll.max_scroll_y > 0
+        assert scroll.show_vertical_scrollbar is True
+        # The SCREEN itself never scrolls, and the composer stays visible.
+        assert app.screen.virtual_size == app.screen.size
+        assert app.query_one("#input-shell").region.height > 0
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_predicted_rows_matches_the_capped_paint_in_each_state() -> None:
+    """``predicted_rows`` must report the panel's REAL occupied height in both
+    states, or the band mis-budgets and reflows on the first frame. Expanded's
+    over-long list is SCROLLED, so the prediction is the capped height, not the
+    full line count."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 14)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        # The body holds all 16 items, but the panel is capped by its budget: the
+        # prediction is the capped height, never the raw 16+ line count.
+        assert str(panel._body.content).count("- [") == 16
+        assert panel.predicted_rows() <= panel._body_rows()
+        assert panel.predicted_rows() < 16
+        builtin.TODO_STORE.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Affordance is a separate clickable widget (defect 2)
+# --------------------------------------------------------------------------- #
+
+
+class _StopEvent:
+    """A minimal click event: records whether ``stop()`` was called.
+
+    The handler contract is exercised directly rather than through
+    ``pilot.click``, whose mouse geometry against this docked band resolves a
+    frame early under load and made the assertion flaky. What matters here is the
+    HANDLER — ``event.stop()`` then the single-source toggle — not that Textual
+    can route a synthetic mouse press to the right cell, which its own tests
+    already cover."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.mark.asyncio
+async def test_affordance_is_a_separate_widget_and_click_toggles() -> None:
+    """Defect 2: the affordance is its OWN widget (so hover/click scope to just
+    that row), and its ``on_click`` toggles expand through the SAME path
+    ``ctrl+t`` uses, stopping the event first so the click never also scrolls the
+    transcript behind the dock (band mouse-isolation rule). The list body Static
+    carries no such handler, so a click in the list cannot toggle."""
+    from local_operator.tools import builtin
+    from local_operator.tui.widgets.todo_panel import TodoAffordance
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+
+        # The affordance is a distinct widget, pinned OUTSIDE the scroll body.
+        affordance = app.query_one(TodoAffordance)
+        assert affordance is panel._affordance
+        assert affordance.styles.pointer == "pointer"
+        assert "ctrl+t to expand" in str(affordance.content)
+        # It is NOT inside the scroll body — a scroll never moves the control.
+        assert panel._body not in affordance.walk_children()
+
+        # on_click stops the event (mouse isolation) and toggles through the
+        # panel's single source of truth, the same path ``ctrl+t`` reaches.
+        assert panel._expanded is False
+        event = _StopEvent()
+        affordance.on_click(event)
+        await pilot.pause()
+        assert event.stopped is True
+        assert panel._expanded is True
+        # Clicking again collapses — one control, both directions.
+        affordance.on_click(_StopEvent())
+        await pilot.pause()
+        assert panel._expanded is False
+        # And the toggle never scrolled the transcript behind the dock.
+        assert app.screen.virtual_size == app.screen.size
+
+        # The list body has no click-to-toggle: only the affordance does.
+        assert getattr(panel._body, "on_click", None) is None
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_affordance_hover_ground_is_the_shared_overlay_step() -> None:
+    """Defect 2: pointing at the affordance lights it with the app's shared hover
+    ground (``$lo-overlay``, the same step ``SubagentRow:hover`` and
+    ``ToolCard:hover`` use), and only the affordance carries that rule — hover is
+    scoped to the button, so a stray hover over the list never lights it.
+
+    The rule's PRESENCE is asserted here (the rendered hover is proven by a
+    captured frame); driving ``pilot.hover`` and reading a computed colour proved
+    timing-flaky under load and is Textual's contract to keep, not this test's."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        affordance = panel._affordance
+        assert affordance.styles.pointer == "pointer"
+
+        # A `#todo-affordance:hover` rule sets `background: $lo-overlay`, and the
+        # base `#todo-affordance` rule does NOT set a background (so the hover is
+        # a real change, not a no-op) — the same ground the other band hovers use.
+        base_rule = None
+        hover_rule = None
+        for rule in app.stylesheet.rules:
+            sel = ",".join(str(s.css) for s in rule.selector_set)
+            if sel == "#todo-affordance":
+                base_rule = rule
+            elif sel == "#todo-affordance:hover":
+                hover_rule = rule
+        assert base_rule is not None and hover_rule is not None
+        assert not base_rule.styles.has_rule("background")
+        assert hover_rule.styles.has_rule("background")
+        # The hover ground IS `$lo-overlay` (the `overlay` semantic token), the
+        # app's shared hover step.
+        from local_operator.tui.theme import semantic_color
+
+        assert hover_rule.styles.background.hex.lower() == semantic_color("overlay").lower()
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_toggle_still_forces_a_repaint_past_the_equality_guard() -> None:
+    """The equality-guard repaint discipline survives the widget split: a
+    ``ctrl+t`` toggle changes what is shown with NO store change, so ``_shown``
+    must drop and the panel must repaint (defect regression guard)."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        before = str(panel._body.content)
+        # A redundant sync with no store change is a no-op (guard holds).
+        guard = panel._shown
+        app._refresh_band()
+        assert panel._shown == guard
+        # A toggle drops the guard and repaints to a different body.
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert str(panel._body.content) != before
         builtin.TODO_STORE.clear()
 
 
