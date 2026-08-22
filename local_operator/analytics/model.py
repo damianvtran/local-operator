@@ -161,9 +161,15 @@ class CallSnapshot:
 def snapshot_component_chars(request: Any) -> dict[str, int]:
     """Measure each context component's character length from a ChatRequest.
 
-    Runs on the event loop, so it only READS lengths — no tokenising, no
-    copying message bodies. Benchmarked well under 1 ms on a 340k-token
-    context (four blocks, 30 tools, 120 messages).
+    Runs on the event loop, so it does the least work that still measures the
+    right thing: string-length reads for the prompt blocks and messages (no
+    tokenising, no copying message bodies), plus one compact ``json.dumps`` per
+    tool for the schema size (review A3 — this is real work that grows with
+    tool count, not a bare length read, but it is the only honest proxy for
+    what a provider serialises for a tool and it is bounded and one-shot).
+    Benchmarked at 0.02 ms (small) to 0.34 ms (a 291k-token context, 60 tools,
+    200 messages) — and it runs AFTER the response stream is consumed, never on
+    the path the user is waiting on, so even the worst case is imperceptible.
 
     ``tool_schemas`` mirrors what a provider serialises beside the prompt: the
     tool name, description, and compact JSON of its parameters. It is counted
@@ -272,15 +278,23 @@ class UsageAggregate:
 
     @property
     def total_tokens(self) -> int:
-        """Every token the providers billed: input (incl. cache) + output.
+        """Every token the providers billed: full input context + output.
 
-        ``input_tokens`` here is the provider's own input number. Cache reads
-        and writes are reported separately because providers disagree on
-        whether ``input_tokens`` already includes them; ``context_tokens`` is
-        the normalised full-context size and is the right denominator for the
-        component split, so it is kept distinct from this headline total.
+        ``context_tokens`` — not ``input_tokens`` — is the input half, because
+        providers disagree on whether ``input_tokens`` already counts cache.
+        Anthropic (this agent's primary provider) reports ``input_tokens``
+        EXCLUDING cache reads/writes, so ``input_tokens + output_tokens`` would
+        undercount a cached turn by the entire cache volume — usually the bulk
+        of it (review A1). ``context_tokens`` is normalised upstream to the full
+        input actually read (``input + cache_read + cache_write`` on Anthropic,
+        ``== input`` on OpenAI where input already includes cache), so it is the
+        one field that means "everything the provider read" on every provider.
+
+        A call the provider gave no context total for still reports its output;
+        its input simply reads as 0 here, which is honest — an unknown input is
+        not a zero-token turn, but it is the only number we can stand behind.
         """
-        return self.input_tokens + self.output_tokens
+        return self.context_tokens + self.output_tokens
 
     @property
     def cache_hit_rate(self) -> float | None:

@@ -141,11 +141,27 @@ def test_aggregate_generation_and_cache_rate():
     )
     # generation = output - reasoning (thinking is a subset of output).
     assert agg.generation_tokens == 380
-    # total billed = input + output (cache reported separately).
-    assert agg.total_tokens == 1500
+    # total billed = full input context (incl. cache) + output. context_tokens
+    # is the normalised full input, so 9200 + 500 = 9700 — NOT input+output,
+    # which would drop the cache volume on a cache-exclusive provider (A1).
+    assert agg.total_tokens == 9700
     # cache hit rate = cache_read / context, capped at 1.0.
     assert agg.cache_hit_rate is not None
     assert round(agg.cache_hit_rate, 4) == round(8000 / 9200, 4)
+
+
+def test_total_tokens_includes_cache_on_cache_exclusive_provider():
+    # Anthropic reports input_tokens EXCLUDING cache; context_tokens normalises
+    # to the full input. total_tokens must use context (A1 regression): a 100k
+    # cached turn must not report ~7k.
+    agg = UsageAggregate(
+        input_tokens=5000,  # fresh input only (Anthropic shape)
+        cache_read_tokens=90_000,
+        cache_write_tokens=5000,
+        output_tokens=2000,
+        context_tokens=100_000,  # input + cache_read + cache_write
+    )
+    assert agg.total_tokens == 102_000  # context + output, not input + output
 
 
 def test_aggregate_cache_rate_none_without_context():

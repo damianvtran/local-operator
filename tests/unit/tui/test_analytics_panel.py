@@ -73,6 +73,33 @@ def test_proportion_bar_fills():
     assert bar.count("█") == 5 and bar.count("·") == 5
 
 
+def test_proportion_bar_nonzero_floors_to_one_cell():
+    # D3: a small nonzero fraction must show at least one filled cell so a real
+    # 1% contributor is distinguishable from an empty (rounds-to-zero) row.
+    bar = proportion_bar(0.01, 24)  # would round to 0 filled cells
+    assert bar.count("█") == 1
+    # A genuine zero still renders empty.
+    assert proportion_bar(0.0, 24).count("█") == 0
+
+
+def test_format_percent_floors_near_100():
+    # D4: 99.6% must not round up to a flat, suspicious-looking 100%.
+    assert format_percent(0.996) == "99%"
+    assert format_percent(1.0) == "100%"  # a genuine full rate still shows 100%
+
+
+def test_estimate_is_marked_at_data_level():
+    # D1: the estimated split must be marked as an estimate on the DATA (~ on
+    # each percentage), so the distinction survives the heading scrolling away.
+    import re
+
+    text = _text(_agg())
+    assert "≈ estimated" in text
+    # Every WHERE-INPUT-WENT percentage carries a ~ prefix (modelled, not
+    # measured); the TOTALS section carries none.
+    assert re.search(r"~\s*\d+%", text)
+
+
 def test_empty_aggregate_says_no_data():
     text = _text(UsageAggregate())
     assert "No usage recorded yet" in text

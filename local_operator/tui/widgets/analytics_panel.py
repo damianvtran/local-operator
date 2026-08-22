@@ -58,25 +58,47 @@ def format_tokens(n: int) -> str:
     n = int(n)
     if n < 1000:
         return str(n)
-    if n < 1_000_000:
-        return f"{n / 1000:.1f}k".replace(".0k", "k")
-    if n < 1_000_000_000:
-        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    # Compare the ROUNDED value to each ceiling, not the raw one: 999_950
+    # rounds to "1000.0k" under a raw ``n < 1_000_000`` check (review A5), so a
+    # number that rounds up to the next unit is promoted to that unit here.
+    for divisor, suffix, ceiling in (
+        (1000, "k", 1_000_000),
+        (1_000_000, "M", 1_000_000_000),
+    ):
+        if n < ceiling and round(n / divisor, 1) < ceiling / divisor:
+            return f"{n / divisor:.1f}{suffix}".replace(f".0{suffix}", suffix)
     return f"{n / 1_000_000_000:.1f}B".replace(".0B", "B")
 
 
 def format_percent(fraction: float | None) -> str:
-    """``73%`` / ``—`` for an unmeasurable rate."""
+    """``73%`` / ``—`` for an unmeasurable rate.
+
+    ``100%`` is reserved for a genuinely complete rate (review D4): a value that
+    is merely close — 99.6% — floors to ``99%`` rather than rounding up to a
+    flat ``100%`` that reads as mocked or broken next to the cache-read total it
+    is derived from. Only an exact 1.0 prints ``100%``.
+    """
     if fraction is None:
         return "—"
-    return f"{round(fraction * 100)}%"
+    pct = fraction * 100
+    if 99 < pct < 100:
+        return "99%"
+    return f"{round(pct)}%"
 
 
 def proportion_bar(fraction: float, width: int) -> str:
-    """A filled proportion bar of ``width`` cells for ``fraction`` in 0..1."""
+    """A filled proportion bar of ``width`` cells for ``fraction`` in 0..1.
+
+    A NONZERO fraction always fills at least one cell (review D3): without the
+    floor, any component under ~2% rounded to an all-dots bar indistinguishable
+    from a rounding-to-zero one, so a real 2% contributor read as empty. Only a
+    genuine zero renders as no fill.
+    """
     width = max(1, width)
     fraction = max(0.0, min(1.0, fraction))
     filled = int(round(fraction * width))
+    if filled == 0 and fraction > 0:
+        filled = 1
     return "█" * filled + "·" * (width - filled)
 
 
@@ -131,19 +153,20 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     fg = _semantic("fg")
     label = _semantic("label")
     dim = _semantic("dim")
-    faint = _semantic("faint")
     accent = _semantic("accent")
 
     lines: list[Text] = []
 
     if aggregate.calls == 0:
         line = Text()
-        line.append("No usage recorded yet.", style=dim)
+        line.append("No usage recorded yet.", style=fg)
         lines.append(line)
         hint = Text()
+        # ``dim`` not ``faint``: this is the one line telling a first-time user
+        # how the screen fills, so it must be legible, not decorative (D2).
         hint.append(
-            "Analytics accrue as sessions make provider calls. " "Come back after a few turns.",
-            style=faint,
+            "Analytics accrue as sessions make provider calls. Come back after a few turns.",
+            style=dim,
         )
         lines.append(hint)
         return lines
@@ -153,7 +176,9 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     section.append("TOTALS", style=label + Style(bold=True))
     section.append(f"   {aggregate.calls} calls", style=dim)
     if aggregate.ok_calls != aggregate.calls:
-        section.append(f" ({aggregate.calls - aggregate.ok_calls} failed)", style=faint)
+        # Failed-call count is real information, not chrome — keep it legible.
+        section.append(f" ({aggregate.calls - aggregate.ok_calls} failed)", style=dim)
+    section.append("   measured", style=_semantic("faint"))
     lines.append(section)
 
     def kv(name: str, value: str, note: str = "") -> Text:
@@ -161,7 +186,10 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
         row.append(f"  {name:<22}", style=dim)
         row.append(value, style=fg)
         if note:
-            row.append(f"  {note}", style=faint)
+            # ``dim`` not ``faint`` (D2): the note carries the actual cache and
+            # thinking/generation breakdown — the substance a diagnostics reader
+            # came for — so it must clear the contrast floor.
+            row.append(f"  {note}", style=dim)
         return row
 
     lines.append(kv("Total billed", format_tokens(aggregate.total_tokens) + " tokens"))
@@ -193,24 +221,36 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     # -- input attribution (estimated) --------------------------------------
     heading = Text()
     heading.append("WHERE INPUT WENT", style=label + Style(bold=True))
-    heading.append("   estimated split of context tokens", style=faint)
+    # ``dim`` not ``faint`` (D1): the word "estimated" is the whole reason this
+    # section reads differently from TOTALS, so it must be legible, not the
+    # lowest-contrast text on the panel. The distinction is ALSO carried at the
+    # data level — every percentage below is prefixed ``~`` and every value is
+    # tagged ``est.`` — so it survives when this heading has scrolled under the
+    # pinned header (the case the design round flagged in 02-by-session).
+    heading.append("   ≈ estimated split of context tokens", style=dim)
     lines.append(heading)
 
     rows = _component_rows(aggregate)
     if not rows:
         empty = Text()
-        empty.append("  no component data yet", style=faint)
+        empty.append("  no component data yet", style=dim)
         lines.append(empty)
     else:
-        label_col = min(34, max(len(r.label) for r in rows) + 1)
+        # One guaranteed space of gutter between the label and its bar (D5): the
+        # longest label is exactly ``label_col`` wide, so without the trailing
+        # gap its bar butts against the final glyph while every shorter row has
+        # air. The ``+ 2`` reserves that gutter for every row uniformly.
+        label_col = min(36, max(len(r.label) for r in rows) + 2)
         value_col = max(len(format_tokens(r.value)) for r in rows)
-        bar_width = max(8, min(24, width - label_col - value_col - 12))
+        # ``~NN%`` is one cell wider than ``NN%``; size the column for it.
+        bar_width = max(8, min(24, width - label_col - value_col - 13))
         for row in rows:
             line = Text()
             line.append(f"  {row.label:<{label_col}}", style=fg)
             line.append(proportion_bar(row.fraction, bar_width), style=accent)
             line.append(f" {format_tokens(row.value):>{value_col}}", style=fg)
-            line.append(f" {format_percent(row.fraction):>4}", style=dim)
+            # ``~`` marks the percentage as modelled, not measured (D1).
+            line.append(f" ~{format_percent(row.fraction):>3}", style=dim)
             lines.append(line)
     lines.append(Text())
 
@@ -245,14 +285,13 @@ def _group_section(
     fg = _semantic("fg")
     label = _semantic("label")
     dim = _semantic("dim")
-    faint = _semantic("faint")
 
     block = Text()
     block.append(title, style=label + Style(bold=True))
 
     ordered = sorted(groups.items(), key=lambda kv: kv[1].total_tokens, reverse=True)
     if not ordered:
-        block.append("\n  (none)", style=faint)
+        block.append("\n  (none)", style=dim)
         return block
 
     name_col = min(30, max(len(name) for name, _ in ordered) + 1)
@@ -261,13 +300,12 @@ def _group_section(
         block.append(f"  {name:<{name_col}}", style=fg)
         block.append(f"{format_tokens(agg.total_tokens):>8} tokens", style=fg)
         cache = format_percent(agg.cache_hit_rate)
+        # ``dim`` for both columns (D2): the call count and cache rate are the
+        # per-row substance, not decoration, so neither may drop below the
+        # contrast floor the way ``faint`` did.
         block.append(f"   {agg.calls:>4} calls", style=dim)
-        block.append(f"   {cache:>4} cache", style=faint)
+        block.append(f"   {cache:>4} cache", style=dim)
     return block
-
-
-class AnalyticsDismissed:
-    """Sentinel result for the screen's dismiss (kept simple: no payload)."""
 
 
 class AnalyticsScreen(ModalScreen[None]):
@@ -305,13 +343,18 @@ class AnalyticsScreen(ModalScreen[None]):
                 self._scroll = scroll
                 self._body = Static(id="analytics-body")
                 yield self._body
-            yield Static(self._hint_text(), id="analytics-hint")
+            self._hint = Static(self._hint_text(scrollable=False), id="analytics-hint")
+            yield self._hint
 
     def on_mount(self) -> None:
         self._repaint()
+        # After layout settles: ``max_scroll_y`` is only meaningful once the
+        # body has been measured against the viewport.
+        self.call_after_refresh(self._sync_hint)
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         self._repaint()
+        self.call_after_refresh(self._sync_hint)
 
     def _card_width(self) -> int:
         try:
@@ -327,11 +370,28 @@ class AnalyticsScreen(ModalScreen[None]):
         title.append("  ·  all sessions", style=faint)
         return title
 
-    def _hint_text(self) -> Text:
+    def _hint_text(self, *, scrollable: bool) -> Text:
+        # The scroll affordance is advertised only when there is something to
+        # scroll (D5): the empty state and any report that fits told the user to
+        # scroll a screen that could not, which reads as a dead control.
         faint = Style(color=theme_mod.semantic_color("faint"))
         hint = Text()
-        hint.append("esc back · ↑↓ scroll", style=faint)
+        hint.append("esc back", style=faint)
+        if scrollable:
+            hint.append(" · ↑↓ scroll", style=faint)
         return hint
+
+    def _sync_hint(self) -> None:
+        """Show the scroll hint only when the body overflows its viewport."""
+        hint = getattr(self, "_hint", None)
+        scroll = getattr(self, "_scroll", None)
+        if hint is None or scroll is None or not hint.is_mounted:
+            return
+        try:
+            scrollable = scroll.max_scroll_y > 0
+        except Exception:  # noqa: BLE001 — before layout, assume not scrollable
+            scrollable = False
+        hint.update(self._hint_text(scrollable=scrollable))
 
     def _report_lines(self) -> list[Text]:
         return build_report(self._aggregate, self._card_width())

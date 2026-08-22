@@ -2848,12 +2848,17 @@ class SessionStreamFn:
 
             context_tokens = usage.context_tokens
             if not context_tokens:
-                # Providers that omit an explicit context size: fall back to the
-                # input total (which IS the context they read) so the component
-                # split still has a denominator. Cache-inclusive vs -exclusive
-                # differences are already normalised into context_tokens
-                # upstream; this fallback only fires when nothing was reported.
-                context_tokens = usage.input_tokens + usage.cache_read_tokens
+                # Providers that omit an explicit context size: reconstruct the
+                # full input the same way the wire clients normalise
+                # ``context_tokens`` (clients.py) — input plus BOTH cache
+                # halves — so the component split has the right denominator and
+                # the headline total is not short by the cache-write volume on
+                # a cache-writing provider (review A2). Cache-inclusive
+                # providers report ``context_tokens`` directly, so this fallback
+                # only fires when nothing was reported at all.
+                context_tokens = (
+                    usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+                )
             record_call(
                 CallSnapshot(
                     ts_ms=int(_time.time() * 1000),
