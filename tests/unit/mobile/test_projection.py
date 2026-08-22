@@ -177,7 +177,7 @@ def test_mid_run_turn_end_does_not_settle_streaming() -> None:
         ToolExecutionEndEvent(
             tool_call_id="c1",
             tool_name="bash",
-            result=ToolResult(tool_call_id="c1", text="ok", is_error=False),
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")], is_error=False),
         )
     )
     fold.fold_event(TurnEndEvent(message=Message.assistant()))

@@ -11,6 +11,7 @@ tests stay off the real provider and event loop machinery.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -26,7 +27,7 @@ class FakeSession:
         self.model = None
         self.conversation_name = ""
         self.is_streaming = False
-        self._handlers: list = []
+        self._handlers: list[Any] = []
         self._named: list[tuple[str, bool]] = []
         self._complete_calls: list[tuple[str, str]] = []
         # The naming call's reply must be wrapped in the <title> tag the
