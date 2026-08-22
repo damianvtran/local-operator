@@ -229,3 +229,48 @@ change.
   failure that motivated the code, not what the line does. Match that density;
   a comment that restates the code is noise, and a change with a non-obvious
   reason needs the reason recorded.
+
+## Usage analytics (`local_operator/analytics/`)
+
+Every provider call across every session contributes to one shared, on-disk
+ledger (`<config_dir>/analytics.db`, SQLite/WAL/0600). `/analytics /usage`
+opens an Esc-dismissable screen summarising token consumption: authoritative
+provider counts (input/output/cache, and the thinking-vs-generation split of
+output) plus an *estimated* breakdown of input across the system prompt, custom
+instructions (agent/team profiles), tool inventory, tool schemas, environment,
+knowledge, conversation, and tool results.
+
+Things that will bite you if you forget them:
+
+- **Recording is off the critical path and best-effort.** The wrapper is
+  `SessionStreamFn._record_stream` in `model/configure.py`: it forwards the
+  provider stream unchanged and records ONLY after the stream is fully
+  consumed, so a turn's latency is untouched. The one on-loop cost is
+  `analytics.model.snapshot_component_chars` (character-length reads;
+  benchmarks under 0.4 ms even on a 340k-token context) — it must run on the
+  loop because the transcript mutates the messages after the call. Tokenising,
+  apportioning, and the SQLite write all happen on the recorder's background
+  thread. Nothing in analytics may raise into a turn; every path is guarded.
+
+- **One writer thread, one write connection.** `AnalyticsRecorder` funnels both
+  call samples and session-name upserts through a single queue drained by one
+  daemon thread. Do NOT add a second thread that writes to the store: two
+  threads opening their first connection to a freshly-created SQLite file race
+  in a way that leaves the writer unable to see its own commits (this cost a
+  round of flaky tests). Reads open a fresh short-lived connection
+  (`AnalyticsStore._read_connection`) so a report always sees the newest commit
+  rather than a stale WAL snapshot.
+
+- **Parallel-safe by the engine, not by us.** Several `lop` sessions write to
+  the one file at once; WAL + `busy_timeout` + a bounded busy-retry make that
+  atomic. The retry lives on the background thread, so accuracy under
+  contention costs a session nothing.
+
+- **The component split is an ESTIMATE and is labelled as one.** The provider
+  bills one input total; the split is that total apportioned by character
+  length (largest-remainder rounding, so it sums exactly). Authoritative counts
+  and estimates must never be presented as the same kind of number — the screen
+  says "estimated split of context tokens" for a reason.
+
+- **Adding a component is a schema migration.** `COMPONENT_KEYS` maps to one
+  `c_<key>` column each in `store._SCHEMA`; bump the schema and default 0.

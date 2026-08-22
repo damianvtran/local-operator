@@ -106,6 +106,7 @@ def _openai_sse_with_tool_call() -> bytes:
                     "prompt_tokens": 40,
                     "completion_tokens": 7,
                     "prompt_tokens_details": {"cached_tokens": 12},
+                    "completion_tokens_details": {"reasoning_tokens": 3},
                 },
             },
         ]
@@ -152,6 +153,9 @@ async def test_openai_compat_text_tool_usage() -> None:
     usage_events = [e for e in events if isinstance(e, StreamUsageEvent)]
     assert usage_events and usage_events[0].usage.input_tokens == 40
     assert usage_events[0].usage.cache_read_tokens == 12  # prompt_tokens_details.cached_tokens
+    # completion_tokens_details.reasoning_tokens is the thinking slice of the
+    # completion, a subset of output that analytics splits out.
+    assert usage_events[0].usage.reasoning_tokens == 3
 
     end = events[-1]
     assert isinstance(end, StreamEndEvent)
@@ -682,6 +686,7 @@ def _public_responses_sse() -> bytes:
                         "input_tokens": 80,
                         "output_tokens": 9,
                         "input_tokens_details": {"cached_tokens": 48},
+                        "output_tokens_details": {"reasoning_tokens": 4},
                     },
                 },
             },
@@ -776,6 +781,8 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     assert json.loads("".join(event.argument_delta for event in tool_events)) == {"city": "Paris"}
     usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][0]
     assert (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens) == (80, 9, 48)
+    # output_tokens_details.reasoning_tokens is the thinking slice of output.
+    assert usage.reasoning_tokens == 4
     assert events[-1].stop_reason == "toolUse"
 
 
