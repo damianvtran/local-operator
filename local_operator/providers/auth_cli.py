@@ -156,6 +156,7 @@ def run_login(
                 storage_provider, {"key": result, "source": "login", "type": "api_key"}
             )
             print(f"Stored API key for '{storage_provider}'.")
+            _apply_login_defaults(storage_provider)
         return 0
 
     # OAuth credentials dict; stamp authorized_at if missing.
@@ -166,8 +167,47 @@ def run_login(
     print(f"Logged in to '{storage_provider}'{suffix}.")
     if result.get("grant_note"):
         print(f"Note: {result['grant_note']}")
+    _apply_login_defaults(storage_provider)
     _ = row
     return 0
+
+
+def _apply_login_defaults(provider_id: str) -> None:
+    """Make a fresh login usable: adopt it as hosting when none is set.
+
+    Before this, ``login <provider>`` stored the credential but never touched
+    the config, so the very recovery the missing-key error recommends
+    (``local-operator login openai``) looped straight back to "Hosting platform
+    is not configured" — the credential existed but nothing pointed the app at
+    it. Now, when config hosting is empty, the just-logged-in provider becomes
+    the hosting and its default model becomes ``model_name``, and we print what
+    was set so the change is not silent.
+
+    When hosting is ALREADY set we touch nothing and print nothing: a user
+    logging into a second provider to switch models later has not asked to
+    change their default, and silently repointing it would be a surprise.
+
+    Imported lazily and guarded: this is a convenience on top of a login that
+    already succeeded, so a config write failure (read-only dir) must not turn a
+    successful login into a failure.
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.model.defaults import default_model_for
+        from local_operator.paths import config_dir
+
+        manager = ConfigManager(config_dir())
+        if manager.get_config_value("hosting"):
+            return
+        manager.set_config_value("hosting", provider_id)
+        model = default_model_for(provider_id) or ""
+        message = f"Set default hosting to '{provider_id}'"
+        if model and not manager.get_config_value("model_name"):
+            manager.set_config_value("model_name", model)
+            message += f" and model to '{model}'"
+        print(f"{message}.")
+    except Exception as exc:  # noqa: BLE001 — never fail a completed login
+        print(f"Note: logged in, but could not set default hosting/model: {exc}")
 
 
 def run_logout(provider_id: str, auth_store: "AuthStore") -> int:

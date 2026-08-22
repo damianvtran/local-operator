@@ -127,3 +127,49 @@ def test_ensure_log_dir_returns_none_when_uncreatable(
     monkeypatch.setenv(CONFIG_DIR_ENV, str(blocked))
 
     assert ensure_log_dir() is None
+
+
+# --- Agent home dir (item 12) -----------------------------------------------
+
+
+def test_agent_home_dir_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from local_operator.paths import AGENT_HOME_ENV, agent_home_dir
+
+    monkeypatch.delenv(AGENT_HOME_ENV, raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert agent_home_dir() == tmp_path / "local-operator-home"
+
+
+def test_agent_home_dir_honours_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from local_operator.paths import AGENT_HOME_ENV, agent_home_dir
+
+    monkeypatch.setenv(AGENT_HOME_ENV, str(tmp_path / "custom"))
+    assert agent_home_dir() == tmp_path / "custom"
+
+
+def test_default_agent_cwd_portable_without_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.paths import AGENT_HOME_ENV, default_agent_cwd
+
+    monkeypatch.delenv(AGENT_HOME_ENV, raising=False)
+    # Portable ~/-relative string when no override, so an exported agent record
+    # replicates on another machine.
+    assert default_agent_cwd() == "~/local-operator-home"
+
+
+def test_default_agent_cwd_absolute_with_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator.paths import AGENT_HOME_ENV, default_agent_cwd
+
+    monkeypatch.setenv(AGENT_HOME_ENV, str(tmp_path / "custom"))
+    # Absolute override so the stored cwd cannot diverge from the created dir.
+    assert default_agent_cwd() == str(tmp_path / "custom")
+
+
+def test_ensure_agent_home_dir_creates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from local_operator.paths import AGENT_HOME_ENV, ensure_agent_home_dir
+
+    target = tmp_path / "made" / "home"
+    monkeypatch.setenv(AGENT_HOME_ENV, str(target))
+    result = ensure_agent_home_dir()
+    assert result == target and target.is_dir()

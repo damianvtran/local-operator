@@ -635,6 +635,32 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert len(lines) == 2
 
 
+def test_spawn_background_unconfigured_hosting_returns_one(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Item 18 contract: the ``exec --background`` preflight failure exits 1.
+
+    Pins the exact regression that round-1 review MAJOR 1 caught — the sites
+    returned ``-1``, which ``exit(main())`` maps to process exit 255, exactly
+    the wrapped-negative outcome item 18 exists to eliminate. A dry-run that
+    raises ``ValueError`` (nothing configured) must surface as a clean ``1`` and
+    must NOT reach ``subprocess.Popen``: a preflight failure never spawns.
+    """
+    monkeypatch.setattr(
+        exec_mode,
+        "resolve_hosting_model_dry",
+        lambda args: (_ for _ in ()).throw(ValueError("Hosting platform is not configured.")),
+    )
+    popen_mock = MagicMock()
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+
+    code = exec_mode.run_exec("do a thing", ExecArgs(background=True))
+
+    assert code == 1  # not -1 / 255
+    popen_mock.assert_not_called()
+    assert "Hosting platform is not configured." in capsys.readouterr().err
+
+
 def test_ledger_reader_tolerates_partial_line(tmp_path: Path, monkeypatch) -> None:
     """CL-11: a truncated trailing line (crash mid-write) never breaks reads."""
     logs_dir = tmp_path / "logs"

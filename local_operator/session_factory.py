@@ -231,6 +231,35 @@ def resolve_agent(args: argparse.Namespace, agent_registry: AgentRegistry) -> Ag
     )
 
 
+class HostingNotConfiguredError(ValueError):
+    """Raised when no hosting provider is resolved at all.
+
+    A dedicated subclass (rather than a bare ``ValueError`` matched by message)
+    so two callers can treat this ONE condition as "first-run setup", not
+    "error": the CLI preflight lets the interactive TUI open in a setup state
+    instead of dying, and the TUI's boot-failure handler shows the guided
+    ``/login`` affordance rather than a red "session failed to start". It stays
+    a ``ValueError`` subclass so every existing ``except ValueError`` that
+    reported the legacy message shape keeps working unchanged.
+    """
+
+
+def _no_model_message(hosting: str) -> str:
+    """Error text for a provider with no known default model.
+
+    Names two or three concrete, current model ids so the user has something to
+    type rather than a bare "model is not configured" that leaves them to guess
+    the vocabulary. Kept beside the resolver, stdlib-only, so the preflight path
+    stays off the model-configuration stack.
+    """
+    return (
+        f"Model name is not configured for hosting '{hosting}', and no default "
+        "is known for it. Set one with `local-operator config edit model_name "
+        "<model>` or the --model flag (e.g. gpt-4o, claude-3-5-sonnet-latest, "
+        "deepseek-chat)."
+    )
+
+
 def resolve_hosting_model(
     agent: AgentData | None, args: argparse.Namespace, config_manager: ConfigManager
 ) -> tuple[str, str]:
@@ -248,9 +277,17 @@ def resolve_hosting_model(
         model_name or getattr(args, "model", None) or config_manager.get_config_value("model_name")
     )
     if not hosting:
-        raise ValueError("Hosting platform is not configured.")
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
     if not model_name:
-        raise ValueError("Model name is not configured.")
+        # A hosting with no model is not a dead end: every mainstream provider
+        # has a reasonable default, so resolve to it rather than raising. Only
+        # a provider with no known default (a custom/unregistered hosting) still
+        # errors, and its message now names current models to choose from.
+        from local_operator.model.defaults import default_model_for
+
+        model_name = default_model_for(hosting)
+        if not model_name:
+            raise ValueError(_no_model_message(hosting))
     return hosting, model_name
 
 
@@ -1435,7 +1472,20 @@ async def create_session(
     hosting/model configuration is missing.
     """
 
+    # Create the agent's working-directory home HERE, lazily, rather than
+    # unconditionally in main() before dispatch (where it hardcoded the path
+    # and ignored the override). A session is a path that actually runs a task,
+    # so an agent whose cwd is the default ``~/local-operator-home`` has a real
+    # directory to land in. Best-effort: a session must not fail to build just
+    # because the workspace root could not be created (a read-only home), so a
+    # creation error degrades to the process cwd the same way an unset cwd does.
+    from local_operator.paths import ensure_agent_home_dir
     from local_operator.session.session import Session
+
+    try:
+        ensure_agent_home_dir()
+    except OSError:
+        pass
 
     effective_cwd = cwd if cwd is not None else os.getcwd()
     plan = await _prepare(

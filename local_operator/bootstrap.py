@@ -82,7 +82,21 @@ def resolve_hosting_model(
     if not hosting:
         raise ValueError("Hosting platform is not configured.")
     if not model_name:
-        raise ValueError("Model name is not configured.")
+        # Fall back to the provider's default model rather than erroring on a
+        # single empty field — see session_factory.resolve_hosting_model, which
+        # this mirrors. A provider with no known default still raises.
+        from local_operator.model.defaults import default_model_for
+
+        model_name = default_model_for(hosting)
+        if not model_name:
+            # Reuse the resolver's own message rather than inlining a copy: the
+            # two are the SAME error (no default model for this hosting) and a
+            # second literal here drifts from it the first time either is
+            # reworded. Imported lazily to keep this off the session_factory
+            # stack until the rare no-default path is actually hit.
+            from local_operator.session_factory import _no_model_message
+
+            raise ValueError(_no_model_message(hosting))
     return hosting, model_name
 
 

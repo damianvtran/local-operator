@@ -226,10 +226,33 @@ def mark_pulse_color(phase: float) -> str:
 #: the same word for the same state, so the two never disagree on screen.
 MODEL_PENDING = "connecting…"
 
+#: The model row's word in the first-run SETUP state — no session, no model,
+#: the app parked waiting on the user's `/login`. This is the same word the
+#: status band shows in setup state (app._enter_setup_state sets
+#: `model_label="setup"`), and that agreement is the whole point: leaving the
+#: `MODEL_PENDING` sentinel up here made the splash read `connecting…` while
+#: the band read `setup`, so the first screen a new user sees told them "it's
+#: busy, wait" (the opposite of "you need to act") and looked hung (D1). The
+#: two MUST answer "what state is this" with the same word.
+MODEL_SETUP = "setup"
+
 #: The few affordances a first-time user actually needs. ``/`` and ``/help``
 #: are kept separate on purpose: one is the inline picker, the other prints the
 #: full two-column list — a user who has met neither cannot infer the other.
 HINTS: tuple[tuple[str, str], ...] = (
+    ("/", "command picker"),
+    ("/help", "all commands"),
+    ("ctrl+d", "quit"),
+)
+
+#: The affordance table in the first-run SETUP state. `/login` leads because it
+#: is the one command this state exists to teach, and the fixed key/description
+#: table is where the eye scans for "what can I type" — the orange notice line
+#: that also names `/login` is exactly the line that truncates first (D2/D3), so
+#: relying on it alone left a scanning user pointed at the picker and quit but
+#: never at the action that unblocks them.
+HINTS_SETUP: tuple[tuple[str, str], ...] = (
+    ("/login", "set up a provider"),
     ("/", "command picker"),
     ("/help", "all commands"),
     ("ctrl+d", "quit"),
@@ -279,6 +302,15 @@ TIPS: tuple[str, ...] = (
     "/goal sets the objective that /loop iterates toward",
 )
 
+#: The tip the SETUP state opens on, in place of the pinned ``TIPS[0]``. The
+#: rotation normally pins its first entry to ``/resume`` on the argument that
+#: resumption is the question a RETURNING user arrives with (see the pool doc
+#: above) — but the setup state is the definitional non-returning user, with no
+#: prior sessions to resume, so the most-read row would advertise a command that
+#: does nothing for them (D4). Once a session exists the rotation resumes into
+#: the normal ring, so this only replaces the opening frame.
+TIP_SETUP = "/login <provider> sets up a provider (e.g. /login openai)"
+
 #: The tip's prefix: the app's own `info` glyph, the mark every quiet one-line
 #: receipt in the transcript already carries (D14). A word — `tip:` — would cost
 #: five cells of the sentence to label a line whose tone already says what it is,
@@ -313,7 +345,7 @@ TIP_ROTATE_INTERVAL_S = 12.0
 #: exists to refuse, and a number that silently went stale the first time a tip
 #: was reworded. Measured against the LONGEST entry, so the widest tip in the
 #: pool is the one that decides, and the invariant holds by construction.
-TIP_MIN_WIDTH = max(cell_len(f"{TIP_GLYPH} {tip}") for tip in TIPS)
+TIP_MIN_WIDTH = max(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP))
 
 #: Warning body without its remedy, for widths that cannot hold the full
 #: `— /login <provider>` tail. A half-printed command is worse than none: the
@@ -360,6 +392,12 @@ class WelcomeInfo:
     #: stacking would shove the lockup the way a transcript notice already
     #: does. ``None`` when nothing has been announced.
     notice: str | None = None
+    #: First-run SETUP state: the app opened with nothing configured so the user
+    #: can `/login` from here (see ``app._enter_setup_state``). It changes what
+    #: the empty splash SAYS — the model row's idle word, the affordance the
+    #: hint table leads with, and which tip opens the rotation — so the screen
+    #: reads as "you need to act" rather than "a session is still booting".
+    setup: bool = False
 
 
 def app_version() -> str:
@@ -380,6 +418,7 @@ def session_welcome_info(
     providers: Any | None,
     *,
     notice: str | None = None,
+    setup: bool = False,
 ) -> WelcomeInfo:
     """Snapshot the facts the welcome view shows.
 
@@ -429,6 +468,7 @@ def session_welcome_info(
         cwd=os.getcwd(),
         missing_credential=missing,
         notice=notice or None,
+        setup=setup,
     )
 
 
@@ -566,11 +606,17 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     # `deepseek-chat-v3.1`, so one app answered "which model" with opposite
     # halves of the same string (D10). A display name in the band beside a raw
     # selector here would be that defect again.
-    label = (
-        format_model_label(info.model_label, short=False, name=info.model_name)
-        if info.model_label
-        else MODEL_PENDING
-    )
+    # With no model resolved yet the word depends on WHY there is no model. In
+    # the first-run setup state the app is deliberately parked waiting on the
+    # user, so the row says `setup` (the same word the band shows) rather than
+    # `connecting…`, which would claim a session is being awaited when none is
+    # (D1). Only outside setup is `connecting…` the truth.
+    if info.model_label:
+        label = format_model_label(info.model_label, short=False, name=info.model_name)
+    elif info.setup:
+        label = MODEL_SETUP
+    else:
+        label = MODEL_PENDING
     # Guarded on `info.model_label`, not on the width alone: with no session yet
     # `label` is the `MODEL_PENDING` sentinel while `info.model_label` is "", and
     # shortening "" returns "" — so below 11 columns (`cell_len("connecting…")`)
@@ -606,11 +652,15 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     return rows
 
 
-def _hint_lines(width: int) -> list[Text]:
+def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     """Hint rows, left-aligned to a shared key column, block-centered.
 
     Centering each row independently would ragged the key column; the rows are
     a table, so the TABLE is what gets centered.
+
+    ``setup`` swaps in the first-run table (:data:`HINTS_SETUP`), whose leading
+    row teaches ``/login`` — the one command the setup state exists to teach and
+    the affordance the notice line drops first at narrow widths (D3).
 
     Three width tiers, because the alternative — letting the final truncation
     pass eat the descriptions — turns "command picker" into "command pi…",
@@ -620,6 +670,7 @@ def _hint_lines(width: int) -> list[Text]:
     2. the tight key column (longest key plus one space),
     3. keys only, which still names every affordance the user can try.
     """
+    hints = HINTS_SETUP if setup else HINTS
     # The same tint pair the PICKER uses for name/description (fg over muted),
     # not a step quieter. These rows are a preview of the picker — one of them
     # literally says "/  command picker" — and rendering the identical
@@ -630,7 +681,7 @@ def _hint_lines(width: int) -> list[Text]:
 
     key_column = 0
     for candidate in (HINT_KEY_WIDTH, HINT_KEY_WIDTH_TIGHT):
-        block = max(candidate + cell_len(desc) for _, desc in HINTS)
+        block = max(candidate + cell_len(desc) for _, desc in hints)
         if block <= width:
             key_column = candidate
             break
@@ -641,10 +692,10 @@ def _hint_lines(width: int) -> list[Text]:
     # the same ragged-edge effect that was removed from inside the status stack,
     # surviving one level up.
     if not key_column:
-        return [Text(key, style=key_style, no_wrap=True) for key, _ in HINTS]
+        return [Text(key, style=key_style, no_wrap=True) for key, _ in hints]
 
     lines: list[Text] = []
-    for key, desc in HINTS:
+    for key, desc in hints:
         line = Text(no_wrap=True)
         line.append(key.ljust(key_column), style=key_style)
         line.append(desc, style=desc_style)
@@ -652,7 +703,7 @@ def _hint_lines(width: int) -> list[Text]:
     return lines
 
 
-def _tip_lines(width: int, index: int) -> list[Text]:
+def _tip_lines(width: int, index: int, *, setup: bool = False) -> list[Text]:
     """The tip at ``index``, as ONE row — or no row at all when ``width`` is tight.
 
     The row count is a function of ``width`` alone. That is the contract the
@@ -664,6 +715,10 @@ def _tip_lines(width: int, index: int) -> list[Text]:
     width threshold rather than a per-tip length test.
 
     ``index`` is taken modulo the pool so callers can keep a monotonic counter.
+    ``setup`` swaps the OPENING tip (the pinned ``index == 0`` frame every launch
+    lands on) for :data:`TIP_SETUP`, so a first-run user is not pitched
+    ``/resume`` with nothing to resume (D4). Later rotation frames keep the
+    normal ring — by the time the row has turned over there is a session.
     """
     if width < TIP_MIN_WIDTH:
         return []
@@ -675,9 +730,10 @@ def _tip_lines(width: int, index: int) -> list[Text]:
     # at, which is the one failure mode that would make a rotating row annoying.
     glyph_style = Style(color=theme_mod.semantic_color("faint"))
     body_style = Style(color=theme_mod.semantic_color("dim"))
+    body = TIP_SETUP if (setup and index % len(TIPS) == 0) else TIPS[index % len(TIPS)]
     line = Text(no_wrap=True)
     line.append(f"{TIP_GLYPH} ", style=glyph_style)
-    line.append(TIPS[index % len(TIPS)], style=body_style)
+    line.append(body, style=body_style)
     return [line]
 
 
@@ -748,8 +804,8 @@ def build_welcome_lines(
     # actionable login warning last.
     status_without_version = [row for row in status_full if row[0] != _PRIORITY_VERSION]
     status = list(status_without_version)
-    hints = _hint_lines(width)
-    tip = _tip_lines(width, tip_index)
+    hints = _hint_lines(width, setup=info.setup)
+    tip = _tip_lines(width, tip_index, setup=info.setup)
     show_hints = False
     show_tip = False
     show_wordmark = False

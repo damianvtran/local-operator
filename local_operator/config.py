@@ -253,6 +253,43 @@ class ConfigManager:
         self.config_file = self.config_dir / CONFIG_FILE_NAME
         self.config = self._load_config()
 
+    def _handle_bad_config(self, detail: str) -> None:
+        """Report an unreadable config.yml and move it aside to config.yml.bad.
+
+        Backing the file up rather than deleting it keeps the user's edits
+        recoverable, and renaming it (rather than leaving it) is what stops the
+        very next launch from failing identically: a broken file that stays in
+        place turns one bad edit into a permanent lockout. Best-effort \u2014 if the
+        rename cannot happen (read-only dir), the load still degrades to
+        defaults, which is the whole point of catching this.
+        """
+        from local_operator.cli_style import ERROR, WARNING, paint
+
+        print(paint(f"Error: {detail}", ERROR, stream=sys.stderr), file=sys.stderr)
+        # Timestamp the backup so a SECOND bad edit does not clobber the first:
+        # a plain `.bad` suffix means two broken saves in a row silently lose
+        # the earlier recoverable copy, defeating the point of keeping it. The
+        # timestamp is second-resolution, which is finer than a human can make
+        # two edits, so collisions do not happen in practice.
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = self.config_file.with_suffix(self.config_file.suffix + f".bad.{stamp}")
+        try:
+            self.config_file.replace(backup)
+            print(
+                paint(
+                    f"Moved the invalid file to {backup} and starting with defaults. "
+                    "Run `local-operator config create` to write a fresh one.",
+                    WARNING,
+                    stream=sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+        except OSError:
+            print(
+                paint("Starting with default configuration.", WARNING, stream=sys.stderr),
+                file=sys.stderr,
+            )
+
     def _load_config(self) -> Config:
         """Load configuration from file or create with defaults if none exists.
 
@@ -260,11 +297,36 @@ class ConfigManager:
             Config: The configuration object
         """
         if not self.config_file.exists():
-            self.config_dir.mkdir(parents=True, exist_ok=True)
+            # 0700 at CREATION only (item 17): config.yml and the transcripts and
+            # credentials beside it are the same sensitivity class as the log dir
+            # (paths.ensure_log_dir), and the default 0755 exposed the directory
+            # to every other account on a shared host. Never chmod an existing
+            # dir on upgrade — a user may have widened it on purpose.
+            self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             return _fresh_default_config()
 
         with open(self.config_file, "r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or deepcopy(vars(DEFAULT_CONFIG))
+            # A hand-edited config.yml with a YAML syntax error, or one whose
+            # top level parses to something other than a mapping (a bare list or
+            # scalar), used to raise a raw traceback straight out of startup \u2014
+            # the CLI died before it could say which file was wrong. Catch both:
+            # name the path and the parse error on one line, move the bad file
+            # aside to config.yml.bad so the next launch starts clean instead of
+            # failing identically forever, and point at `config create`. stderr
+            # because ConfigManager is built on the `exec --json` path, whose
+            # stdout is the event stream.
+            try:
+                loaded = yaml.safe_load(f)
+            except yaml.YAMLError as exc:
+                self._handle_bad_config(f"could not parse {self.config_file}: {exc}")
+                return _fresh_default_config()
+            if loaded is not None and not isinstance(loaded, dict):
+                self._handle_bad_config(
+                    f"{self.config_file} is not a valid configuration mapping "
+                    f"(top level is {type(loaded).__name__})"
+                )
+                return _fresh_default_config()
+            config_dict = loaded or deepcopy(vars(DEFAULT_CONFIG))
 
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
@@ -301,7 +363,8 @@ class ConfigManager:
             config (Dict[str, Any]): Configuration dictionary to write
         """
         if not self.config_file.exists():
-            self.config_dir.mkdir(parents=True, exist_ok=True)
+            # 0700 at creation for the same reason as _load_config above (item 17).
+            self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.config_file.touch()
 
         # Ensure version and metadata are included
@@ -326,6 +389,19 @@ class ConfigManager:
             Config: Current configuration settings
         """
         return self.config
+
+    def reload(self) -> None:
+        """Re-read the config from disk, replacing the in-memory copy.
+
+        Exists for the first-run setup flow: the TUI's ``/login`` writes hosting
+        and model to config.yml through its own manager, and the session factory
+        captured a DIFFERENT manager instance at launch whose in-memory config
+        still reads empty. Reloading that instance before the post-login session
+        rebuild is what lets the new hosting actually take effect \u2014 without it
+        the reload resolves the same empty config and drops straight back into
+        the setup state.
+        """
+        self.config = self._load_config()
 
     def update_config(self, updates: Dict[str, Any], write: bool = True) -> None:
         """Update configuration with new values.

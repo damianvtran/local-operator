@@ -18,6 +18,7 @@ async def run_tui(
     theme_name: str = "dark",
     provider_controller: Any | None = None,
     resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
+    on_config_changed: Callable[[], None] | None = None,
 ) -> int:
     """Run the full-screen TUI to completion; return a process exit code.
 
@@ -43,6 +44,7 @@ async def run_tui(
             theme_name=theme_name,
             provider_controller=provider_controller,
             resume_factory=resume_factory,
+            on_config_changed=on_config_changed,
         )
         try:
             await app.run_async()

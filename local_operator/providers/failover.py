@@ -400,6 +400,44 @@ def is_auth_error(error: BaseException) -> bool:
     return False
 
 
+def auth_recovery_hint(provider: str | None) -> str:
+    """The local remedies for an authentication failure, as one clause.
+
+    A provider's auth error shows only the provider's own words ("invalid
+    x-api-key"), which tells the user WHAT happened but not what THEY can do
+    about it from here. This is the sentence to append: rotate the stored key or
+    re-run the login. Named by provider when we know it (so the command is
+    copy-pasteable), generic otherwise. The ``/login`` form is the TUI's; the
+    shell forms work anywhere.
+    """
+    if provider:
+        return (
+            f"To fix: `/login {provider}` in the TUI, `local-operator login "
+            f"{provider}` from a shell, or `local-operator credential update "
+            f"<{provider.upper()}_API_KEY>` to replace the stored key."
+        )
+    return (
+        "To fix: re-run `/login <provider>` in the TUI, `local-operator login "
+        "<provider>` from a shell, or `local-operator credential update <KEY>`."
+    )
+
+
+def append_auth_recovery(rendered_error: str, provider: str | None) -> str:
+    """Append :func:`auth_recovery_hint` to an auth-classified rendered error.
+
+    Gated on the rendered form starting with the auth label, so a quota 403
+    (which reads "rate limit or quota exceeded" — a login cannot fix it) is left
+    alone. The rendered string is what the UI already holds, matching the
+    ``is_image_rejection`` string-form convention rather than requiring the
+    original exception at the display site.
+    """
+    if not rendered_error:
+        return rendered_error
+    if not rendered_error.lower().startswith(_KIND_LABELS["auth"]):
+        return rendered_error
+    return f"{rendered_error}\n{auth_recovery_hint(provider)}"
+
+
 def is_usage_limit_error(error: BaseException) -> bool:
     """402/429 or provider-reported quota/rate exhaustion."""
     if not isinstance(error, ProviderError):

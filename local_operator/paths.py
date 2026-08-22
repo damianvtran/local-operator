@@ -38,6 +38,20 @@ APP_DIRNAME = "local-operator"
 #: which hold other things too.
 LOG_DIRNAME = "logs"
 
+#: Environment variable that relocates the agent's working-directory home. Its
+#: own variable rather than sharing :data:`CONFIG_DIR_ENV`: the config dir holds
+#: credentials and transcripts (private, small), while the agent home is where
+#: the model reads and writes files during a task (a workspace, potentially
+#: large) \u2014 a user isolating one does not necessarily want the other moved.
+AGENT_HOME_ENV = "LOCAL_OPERATOR_HOME"
+
+#: Directory name under the home directory when no override is set. Spelled
+#: WITHOUT a leading dot on purpose: it is a workspace the user is meant to
+#: browse, not hidden state, and every existing install already has
+#: ``~/local-operator-home`` \u2014 this change is about WHEN it is created and WHERE
+#: the path is resolved, never the default location.
+AGENT_HOME_DIRNAME = "local-operator-home"
+
 
 def config_dir() -> Path:
     """The app's configuration directory: the override, else ``~/.local-operator``.
@@ -51,6 +65,57 @@ def config_dir() -> Path:
     if override:
         return Path(override)
     return Path.home() / DEFAULT_CONFIG_DIRNAME
+
+
+def agent_home_dir() -> Path:
+    """The agent's working-directory home: the override, else ``~/local-operator-home``.
+
+    Read from the environment on every call, for the same reason
+    :func:`config_dir` is (tests monkeypatch the variable after import; a module
+    constant would freeze the developer's real home into the test session).
+
+    This does NOT honour :data:`CONFIG_DIR_ENV`. Before this existed, ``main()``
+    hardcoded ``~/local-operator-home`` and created it unconditionally on every
+    invocation \u2014 ``config list`` on a fresh machine created an agent workspace
+    it never used \u2014 and it ignored any override entirely, so a test or isolated
+    run that relocated the config dir still wrote a workspace into the real home
+    directory. Callers create it lazily at the point of use (session/agent start,
+    the server app) rather than at import or dispatch.
+    """
+    override = os.environ.get(AGENT_HOME_ENV)
+    if override:
+        return Path(override)
+    return Path.home() / AGENT_HOME_DIRNAME
+
+
+def default_agent_cwd() -> str:
+    """The default working-directory string stored in an agent record.
+
+    Returns the portable ``~/local-operator-home`` when no override is set \u2014 an
+    agent record is exported and shared, so a literal home path in it would not
+    replicate on another machine \u2014 and the absolute override path when one IS
+    set, so the stored cwd and the directory :func:`agent_home_dir` actually
+    creates cannot diverge. That divergence is precisely the class of bug
+    :func:`config_dir`'s module docstring documents: one half honouring the
+    override while the other hardcodes home, invisible until the variable is set.
+    """
+    override = os.environ.get(AGENT_HOME_ENV)
+    if override:
+        return str(Path(override))
+    return f"~/{AGENT_HOME_DIRNAME}"
+
+
+def ensure_agent_home_dir() -> Path:
+    """Create and return :func:`agent_home_dir`, creating parents as needed.
+
+    Unlike :func:`ensure_log_dir` this DOES surface a creation failure: the
+    agent home is the working directory a task runs in, so a run that cannot
+    create it has nowhere to operate and should fail loudly rather than silently
+    fall back to the process cwd.
+    """
+    directory = agent_home_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def log_dir() -> Path:
