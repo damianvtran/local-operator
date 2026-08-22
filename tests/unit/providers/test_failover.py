@@ -368,7 +368,13 @@ class FakeAuth:
         return pool[0] if pool else None
 
     def rotate_sibling(
-        self, provider: str, session_id: str | None, error: Any, api_key: str | None = None
+        self,
+        provider: str,
+        session_id: str | None,
+        error: Any,
+        api_key: str | None = None,
+        *,
+        family: str = "",
     ) -> bool:
         self.rotations.append((provider, api_key))
         pool = self.keys.get(provider, [])
@@ -3094,7 +3100,13 @@ class TestTheLoopBackSweep:
                 return "env-key"
 
             def rotate_sibling(
-                self, provider: str, session_id: str | None, error: Any, api_key: str | None = None
+                self,
+                provider: str,
+                session_id: str | None,
+                error: Any,
+                api_key: str | None = None,
+                *,
+                family: str = "",
             ) -> bool:
                 return False
 
@@ -3143,7 +3155,13 @@ class TestTheLoopBackSweep:
                 return "env-key"
 
             def rotate_sibling(
-                self, provider: str, session_id: str | None, error: Any, api_key: str | None = None
+                self,
+                provider: str,
+                session_id: str | None,
+                error: Any,
+                api_key: str | None = None,
+                *,
+                family: str = "",
             ) -> bool:
                 return False
 

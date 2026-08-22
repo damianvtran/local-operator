@@ -2178,7 +2178,7 @@ async def test_family_scoped_blocks_leave_other_families_serving(tmp_path) -> No
     }
 
     async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
-        return reports[access_token]
+        return reports[access_token] if access_token is not None else None
 
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
@@ -2267,7 +2267,7 @@ async def test_reactive_stream_recovers_stale_account_blocks(tmp_path) -> None:
     stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
-        return reports[access_token]
+        return reports[access_token] if access_token is not None else None
 
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
