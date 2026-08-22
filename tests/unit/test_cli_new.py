@@ -694,6 +694,7 @@ def test_main_interactive_tty_uses_tui(
         theme_name: str = "dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         seen["theme"] = theme_name
         seen["session"] = await session_factory()
@@ -799,11 +800,17 @@ def test_yolo_parses_on_every_subcommand(parser: argparse.ArgumentParser, argv: 
 # --- CL-06: startup preflight ---------------------------------------------------
 
 
-def test_main_preflight_missing_hosting(
+def test_main_preflight_missing_hosting_headless(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """Interactive startup with no hosting configured prints the legacy
-    message shape and exits -1 BEFORE any turn (no session factory call)."""
+    """Non-tty startup with nothing configured prints the COMPLETE first-run
+    quickstart (hosting + model + key + commands) and exits 1 BEFORE any turn.
+
+    Item A1/U1: the fail-fast paths (non-tty, headless, exec) no longer die at
+    the first missing field with just "Hosting platform is not configured" —
+    they name everything missing at once so a scripted user fixes it in one
+    pass. The interactive TUI path takes the setup state instead (see
+    ``test_main_preflight_missing_hosting_tty_enters_setup``)."""
     called: dict[str, bool] = {"factory": False}
 
     async def fake_create_session(*args, **kwargs):
@@ -811,7 +818,8 @@ def test_main_preflight_missing_hosting(
         return MagicMock()
 
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    # Non-tty: no setup state is possible, so this stays fail-fast.
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
@@ -821,8 +829,59 @@ def test_main_preflight_missing_hosting(
     # stderr, matching its sibling _preflight_api_key: an error message belongs
     # on the diagnostic channel regardless of which front end asked for it.
     err = capsys.readouterr().err
-    assert "Hosting platform is not configured." in err
+    assert "not configured yet" in err
+    # Every remedy named at once, not one field at a time.
+    assert "login <provider>" in err
+    assert "config edit hosting" in err
+    assert "config edit model_name" in err
+    assert "credential update" in err
     assert called["factory"] is False
+
+
+def test_main_preflight_missing_hosting_tty_enters_setup(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tty + importable TUI + nothing configured -> the app OPENS (setup state)
+    instead of failing at preflight (item A1/U1 headline).
+
+    The session factory is still called: the TUI boots, the factory raises
+    HostingNotConfiguredError inside it, and the app's boot-failure handler
+    turns that into the guided setup state. What matters here is that main()
+    reached the TUI launch (return 0) rather than returning a preflight error."""
+    seen: dict[str, Any] = {}
+
+    async def fake_create_session(*args, **kwargs):
+        # The real factory would raise here; the app handles that. The point of
+        # this test is that main() got PAST preflight to the launch.
+        seen["factory_called"] = True
+        return object()
+
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+
+    fake_tui = types.ModuleType("local_operator.tui")
+
+    async def fake_run_tui(
+        session_factory,
+        theme_name: str = "dark",
+        provider_controller=None,
+        resume_factory=None,
+        on_config_changed=None,
+    ) -> int:
+        # Prove the setup-state plumbing reached the app: the reconciliation
+        # hook is wired so a first-run /login can take effect.
+        seen["on_config_changed"] = on_config_changed
+        return 0
+
+    setattr(fake_tui, "run_tui", fake_run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program"]):
+        assert main() == 0
+    assert seen.get("on_config_changed") is not None
 
 
 def test_main_interactive_missing_api_key_warns_and_starts(
@@ -853,6 +912,7 @@ def test_main_interactive_missing_api_key_warns_and_starts(
         theme_name="dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         await session_factory()
         return 0
@@ -941,6 +1001,7 @@ def test_main_preflight_env_key_passes(
         theme_name="dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         seen.setdefault("provider_controller", provider_controller)
         await session_factory()
@@ -977,6 +1038,7 @@ def test_tui_flag_forces_tui_on_non_tty(
         theme_name="dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         seen.setdefault("provider_controller", provider_controller)
         seen["ran"] = True

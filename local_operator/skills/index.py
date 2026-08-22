@@ -59,6 +59,40 @@ _TOKEN_STRIP = "\"'`()[]{}<>,;:"
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9_+.~\-]+\.[A-Za-z0-9]+$")
 
 
+#: Markers of an authentication failure in an embedding backend's exception.
+#: Matched against the exception's class name + text because the embedding
+#: backends raise their own types (httpx errors, provider-specific wrappers),
+#: and importing the provider stack to classify one degraded lookup would put
+#: that whole graph on the skill-index path. Deliberately narrow: only the
+#: unambiguous 401/invalid-key wordings, so a transient 5xx or a timeout still
+#: surfaces its warning to the user.
+_AUTH_FAILURE_MARKERS = (
+    "401",
+    "unauthorized",
+    "invalid api key",
+    "invalid api-key",
+    "invalid x-api-key",
+    "authentication",
+    "no api key",
+    "missing api key",
+)
+
+
+def _looks_like_auth_failure(exc: BaseException) -> bool:
+    """Best-effort: did ``exc`` come from a rejected/absent credential?
+
+    Used only to decide whether the "embedding backend failed" warning belongs
+    in the log rather than in front of the user (the credential problem is
+    already reported elsewhere). Being wrong is cheap in both directions: a
+    false positive hides one redundant warning, a false negative shows it.
+    """
+    haystack = f"{type(exc).__name__}: {exc}".lower()
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status in (401, 403):
+        return True
+    return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS)
+
+
 def _path_suffixes(path: str) -> Sequence[str]:
     """A path plus every component-suffix of it: ``a/b/c`` → ``a/b/c``,
     ``b/c``, ``c``.
@@ -279,6 +313,11 @@ class SkillIndex:
         self._backend_failed = False  # memoize primary-backend failure
         self.backend_failures = 0  # count of primary-backend failures seen
         self._local_fallback: LocalEmbedder | None = None  # one stable instance
+        #: Whether the most recent backend failure looked like an auth error
+        #: (401/invalid key). Used to route the "backend failed" warning to the
+        #: log instead of the user when the cause is the credential problem the
+        #: app already reports — see the fallback branch in :meth:`select`.
+        self._last_backend_auth_failure = False
 
     @property
     def warnings(self) -> list[str]:
@@ -461,10 +500,22 @@ class SkillIndex:
             if not self._backend_failed:
                 self._backend_failed = True
                 self.backend_failures += 1
-                self._warnings.append(
+                note = (
                     f"Embedding backend failed ({self.backend_failures}x); "
                     "falling back to the local embedder"
                 )
+                # When the cause is the SAME missing/invalid credential the app
+                # already warns about elsewhere (a 401 from the embedding
+                # provider), surfacing a second "embedding backend failed"
+                # warning is noise proportional to nothing — the user has one
+                # credential problem, not two — and it accuses a subsystem that
+                # is working exactly as designed (it degraded to the local
+                # embedder). Downgrade that specific case to the log file; every
+                # other backend failure still surfaces.
+                if self._last_backend_auth_failure:
+                    logger.info("%s (cause: provider authentication)", note)
+                else:
+                    self._warnings.append(note)
             if self._local_fallback is None:
                 self._local_fallback = LocalEmbedder()
             picked = await self._select_with_backend(self._local_fallback, query, k, threshold, cwd)
@@ -495,6 +546,13 @@ class SkillIndex:
             scores = self._scores(query_vec)
             scores = _hybrid_scores(query, self.skills, scores, cwd)
         except Exception as exc:  # noqa: BLE001 — degradation is the contract
+            # Remember whether THIS failure was an auth error, so the caller can
+            # decide the "backend failed" warning belongs in the log rather than
+            # in front of the user (see the fallback branch in select). Read
+            # best-effort — the embedding backends raise their own exception
+            # types, so classify from status/text markers without importing the
+            # provider stack onto this path.
+            self._last_backend_auth_failure = _looks_like_auth_failure(exc)
             logger.warning("Skill selection failed: %s", exc)
             return None
 

@@ -377,6 +377,19 @@ class ConfigManager:
         """
         return self.config
 
+    def reload(self) -> None:
+        """Re-read the config from disk, replacing the in-memory copy.
+
+        Exists for the first-run setup flow: the TUI's ``/login`` writes hosting
+        and model to config.yml through its own manager, and the session factory
+        captured a DIFFERENT manager instance at launch whose in-memory config
+        still reads empty. Reloading that instance before the post-login session
+        rebuild is what lets the new hosting actually take effect \u2014 without it
+        the reload resolves the same empty config and drops straight back into
+        the setup state.
+        """
+        self.config = self._load_config()
+
     def update_config(self, updates: Dict[str, Any], write: bool = True) -> None:
         """Update configuration with new values.
 

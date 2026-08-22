@@ -1453,10 +1453,22 @@ async def _run_headless_repl(
     stderr, Ctrl+C aborts the running turn (not the REPL), Ctrl+D/EOF exits.
     """
     import asyncio
+    import logging
 
     from rich.console import Console
 
     from local_operator.headless_print import PrintRenderer
+
+    # Raise the console threshold to WARNING for the REPL. configure_cli_logging
+    # pins the root logger at INFO, and the headless REPL — unlike the TUI,
+    # which wraps its whole run in file_logging() — prints straight to the
+    # terminal, so httpx's one-INFO-line-per-request and every other INFO record
+    # leaked into the transcript BEFORE the first prompt and between turns. The
+    # TUI's remedy (detach console handlers) is wrong here because the REPL's
+    # own output IS console output; lifting the level keeps its prints while
+    # dropping the library chatter. WARNING and above still surface — a genuine
+    # problem the user needs to see is not INFO.
+    logging.getLogger().setLevel(logging.WARNING)
 
     console = Console(stderr=True, highlight=False)
     session = await create_session(
@@ -1502,6 +1514,7 @@ def _preflight_hosting_model(
     args: argparse.Namespace,
     *,
     require_api_key: bool = True,
+    allow_setup_state: bool = False,
 ) -> int | None:
     """Startup preflight (CL-06): resolve hosting/model and verify that a
     credential source exists BEFORE any turn runs.
@@ -1529,25 +1542,89 @@ def _preflight_hosting_model(
     resolution errors stay fatal on every path: without a hosting there is no
     session to build and nothing for a login to fix.
 
-    Returns -1 (already printed) on failure, None to continue. All engine
+    ``allow_setup_state=True`` is the first-run onboarding gate (item A1/U1):
+    when NO hosting can be resolved at all AND we are on the interactive TUI
+    path (tty + TUI enabled), the app is allowed to open in a SETUP STATE
+    instead of dying at preflight. The welcome splash's ``/login`` affordance
+    and the ``/model`` / ``/provider`` surfaces are the guided setup — there is
+    no separate wizard. Every OTHER path (headless REPL, exec, non-tty) keeps
+    fail-fast, and does it with a COMPLETE quickstart that names everything
+    missing at once rather than one field at a time.
+
+    Returns 1 (already printed) on failure, None to continue. All engine
     imports stay lazy so this never weights down parser-only paths.
     """
-    try:
-        from local_operator.session_factory import resolve_hosting_model
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        resolve_hosting_model,
+    )
 
+    try:
         hosting, _model_name = resolve_hosting_model(current_agent, args, config_manager)
+    except HostingNotConfiguredError:
+        # No hosting resolved. On the interactive TUI path this is not an error:
+        # the app opens in a setup state so the user can `/login` from inside it.
+        if allow_setup_state:
+            return None
+        # Every other path keeps fail-fast, but with the WHOLE quickstart at
+        # once (item A1/U1) — the old message named only "Hosting platform is
+        # not configured" and the user fixed it one error at a time.
+        _print_first_run_quickstart(credential_manager)
+        return 1
     except ValueError as exc:
-        # stderr on principle, not because this path is currently reachable from
-        # `exec --json`: it is an ERROR message, and its sibling
-        # `_preflight_api_key` two functions down already writes there. Keeping
-        # the two consistent is what stops the next person wiring this into the
-        # exec route from reintroducing a stdout leak.
-        print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
+        # A model-resolution error (hosting set, no default known): fatal on
+        # every path, one line. stderr on principle, not because this path is
+        # currently reachable from `exec --json`: it is an ERROR message, and
+        # its sibling `_preflight_api_key` two functions down already writes
+        # there. Keeping the two consistent is what stops the next person wiring
+        # this into the exec route from reintroducing a stdout leak.
+        from local_operator.cli_style import ERROR, paint
+
+        print(paint(f"Error: {exc}", ERROR), file=sys.stderr)
         return 1
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
 
     return _preflight_api_key(hosting, credential_manager, require_key=require_api_key)
+
+
+def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
+    """One complete message naming hosting, model AND key at once (item A1/U1).
+
+    The fail-fast paths (headless REPL, exec, non-tty) reach this when nothing
+    is configured. The point of naming all three missing pieces together, with
+    the exact commands, is that a scripted or headless user fixes the whole
+    thing in one pass instead of rerunning into "hosting missing", then "model
+    missing", then "key missing" \u2014 the one-error-at-a-time treadmill the
+    interactive setup state exists to avoid and this message is the non-tty
+    equivalent of.
+    """
+    from local_operator.cli_style import ERROR, INFO, paint
+
+    print(
+        paint(
+            "Error: Local Operator is not configured yet \u2014 no hosting provider, "
+            "model, or credential is set.",
+            ERROR,
+        ),
+        file=sys.stderr,
+    )
+    print(
+        paint(
+            "Set it up with (pick a provider, e.g. openai / anthropic / deepseek):\n"
+            "  local-operator login <provider>          "
+            "# stores the key AND sets hosting + a default model\n"
+            "or configure the pieces individually:\n"
+            "  local-operator config edit hosting <provider>\n"
+            "  local-operator config edit model_name <model>\n"
+            "  local-operator credential update <PROVIDER_API_KEY>\n"
+            "or pass them per-run with the --hosting and --model flags.\n"
+            "On an interactive terminal, just run `local-operator` and log in "
+            "from the setup screen.",
+            INFO,
+        ),
+        file=sys.stderr,
+    )
 
 
 def _preflight_api_key(
@@ -2095,6 +2172,45 @@ def main() -> int:
         if auto_save_enabled:
             args.train = True
 
+        # Interactive path: full-screen TUI when stdout is a tty and not
+        # disabled; plain headless REPL otherwise. ``--tui`` (CL-13) forces
+        # the TUI even when stdout is not a tty — with a clear error when
+        # that is impossible.
+        #
+        # Decided BEFORE the preflight (it used to come after) because the
+        # preflight now needs the answer: only the TUI path may open in a
+        # first-run setup state instead of failing, so ``use_tui`` gates that.
+        force_tui = bool(getattr(args, "tui", False))
+        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
+        run_tui = None
+        if use_tui:
+            try:
+                from local_operator.tui import run_tui  # lazy: textual
+            except ImportError:
+                run_tui = None
+                if force_tui:
+                    # Forced but impossible: surface WHY, don't silently fall
+                    # back to the plain REPL (the user asked for the TUI).
+                    from local_operator.cli_style import ERROR, paint
+
+                    print(
+                        paint(
+                            "Error: the TUI is not available in this build/install "
+                            "(missing 'local_operator.tui'); remove --tui to use the "
+                            "plain REPL.",
+                            ERROR,
+                        ),
+                        file=sys.stderr,
+                    )
+                    return 1
+                use_tui = False
+
+        # Whether the app can open in a first-run setup state: only when the
+        # full-screen TUI is actually going to run, since the splash's `/login`
+        # affordance is the setup UI. The headless REPL and every non-tty path
+        # (piped stdout, `--no-tui`) keep fail-fast with the complete quickstart.
+        setup_state_ok = bool(use_tui and run_tui is not None)
+
         # Startup preflight (CL-06): hosting/model resolution fails fast with
         # the legacy message shape BEFORE any turn (the factory raises the
         # same errors mid-construction; surfacing them here keeps the user
@@ -2109,32 +2225,10 @@ def main() -> int:
             current_agent,
             args,
             require_api_key=False,
+            allow_setup_state=setup_state_ok,
         )
         if preflight_result is not None:
             return preflight_result
-
-        # Interactive path: full-screen TUI when stdout is a tty and not
-        # disabled; plain headless REPL otherwise. ``--tui`` (CL-13) forces
-        # the TUI even when stdout is not a tty — with a clear error when
-        # that is impossible.
-        force_tui = bool(getattr(args, "tui", False))
-        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
-        run_tui = None
-        if use_tui:
-            try:
-                from local_operator.tui import run_tui  # lazy: textual
-            except ImportError:
-                run_tui = None
-                if force_tui:
-                    # Forced but impossible: surface WHY, don't silently fall
-                    # back to the plain REPL (the user asked for the TUI).
-                    print(
-                        "\n\033[1;31mError: the TUI is not available in this "
-                        "build/install (missing 'local_operator.tui'); remove "
-                        "--tui to use the plain REPL.\033[0m"
-                    )
-                    return 1
-                use_tui = False
 
         # asyncio is imported HERE, not at module scope. It is the heaviest
         # single item on the CLI's import graph (34.4 ms, +6.5 MB RSS, +77
@@ -2175,7 +2269,16 @@ def main() -> int:
                 # disabling every provider slash command while the app still
                 # starts cleanly. functools.partial pins it by name so a future
                 # signature change cannot re-introduce that silent failure.
-                tui_entry = functools.partial(run_tui, provider_controller=tui_controller)
+                # ``on_config_changed`` re-reads config.yml into THIS manager
+                # after the app's first-run ``/login`` writes hosting/model to
+                # disk. The session factory closes over this exact instance, so
+                # without the reload the post-login rebuild would resolve the
+                # same empty config and bounce back into the setup state.
+                tui_entry = functools.partial(
+                    run_tui,
+                    provider_controller=tui_controller,
+                    on_config_changed=config_manager.reload,
+                )
 
                 # ``/resume <id>`` in the TUI needs a factory that boots an
                 # ARBITRARY session, not just the one the launch args named.

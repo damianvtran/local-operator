@@ -231,6 +231,19 @@ def resolve_agent(args: argparse.Namespace, agent_registry: AgentRegistry) -> Ag
     )
 
 
+class HostingNotConfiguredError(ValueError):
+    """Raised when no hosting provider is resolved at all.
+
+    A dedicated subclass (rather than a bare ``ValueError`` matched by message)
+    so two callers can treat this ONE condition as "first-run setup", not
+    "error": the CLI preflight lets the interactive TUI open in a setup state
+    instead of dying, and the TUI's boot-failure handler shows the guided
+    ``/login`` affordance rather than a red "session failed to start". It stays
+    a ``ValueError`` subclass so every existing ``except ValueError`` that
+    reported the legacy message shape keeps working unchanged.
+    """
+
+
 def _no_model_message(hosting: str) -> str:
     """Error text for a provider with no known default model.
 
@@ -264,7 +277,7 @@ def resolve_hosting_model(
         model_name or getattr(args, "model", None) or config_manager.get_config_value("model_name")
     )
     if not hosting:
-        raise ValueError("Hosting platform is not configured.")
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
     if not model_name:
         # A hosting with no model is not a dead end: every mainstream provider
         # has a reasonable default, so resolve to it rather than raising. Only
