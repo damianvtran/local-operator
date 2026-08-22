@@ -1159,9 +1159,16 @@ class SubagentView(Vertical):
         glyph_style = Style(color=theme_mod.semantic_color(token))
         # The role rides the breadcrumb but is the MOST disposable field: it is
         # identity sugar the label already half-carries, so it is the first
-        # thing to leave when the row tightens (the ``role_present`` loop is the
-        # INNERMOST below — a rung is tried WITH the role first and WITHOUT it
-        # second, so the role yields before any status field or the clock). The
+        # thing to leave when the row tightens. It is offered ONLY at the
+        # least-reduced rung — the full state word present and no tail field yet
+        # dropped (``keep_word and dropped == 0`` below) — so it yields before
+        # any status field, the clock, OR a shortened state word. Gating it on
+        # that rung rather than merely trying it innermost is load-bearing: the
+        # role chrome (``"scout · "``, 8 cells) is SHORTER than a long state
+        # word (``" completed"``, 10 cells), so an innermost keep-role offer
+        # would let a wordless-but-role-kept row win over a worded-but-roleless
+        # one at ~30 cells — the exact invariant this field is documented to
+        # hold, broken for ``completed``/``done`` where the word is long. The
         # default ``task`` role is never shown: every child is a task unless
         # told otherwise, so the word says nothing a reader did not assume.
         role_seg = self._agent_role if self._agent_role and self._agent_role != "task" else ""
@@ -1193,13 +1200,18 @@ class SubagentView(Vertical):
                 rungs = len(tail) if keep_word else len(tail) + 1
                 for dropped in range(rungs):
                     fields = tail[dropped:]
-                    # The role is the MOST disposable field on the row: at each
-                    # rung the layout is tried WITH it and then WITHOUT it, so
-                    # the role leaves before any tail field or the clock does
-                    # (a narrower width never loses a status field to keep the
-                    # role). Only offered when there is a non-default role to
-                    # show; otherwise the single ``False`` pass is the old row.
-                    for keep_role in (True, False) if role_seg else (False,):
+                    # The role is the MOST disposable field on the row, so it is
+                    # offered ONLY at the least-reduced rung: the full state word
+                    # still present (``keep_word``) and no tail field yet dropped
+                    # (``dropped == 0``). Every tighter rung tries the row
+                    # WITHOUT the role, so the role leaves before a shortened
+                    # state word, any dropped tail field, or the clock — the
+                    # invariant it is documented to hold. Merely trying it
+                    # innermost broke that for a long state word (see the
+                    # ``role_seg`` comment above). Only offered when there is a
+                    # non-default role to show.
+                    role_allowed = bool(role_seg) and keep_word and dropped == 0
+                    for keep_role in (True, False) if role_allowed else (False,):
                         role_chrome = cell_len(f"{role_seg} · ") if keep_role else 0
                         # The label gets whatever the fields do not want,
                         # floored at eight cells so it never vanishes entirely —
