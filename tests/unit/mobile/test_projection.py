@@ -22,6 +22,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
+    TurnEndEvent,
 )
 from local_operator.mobile.projection import (
     ProjectionFold,
@@ -151,6 +152,82 @@ def test_transcript_is_capped_from_the_front() -> None:
     # The OLDEST rows dropped: the tail is what a phone renders.
     assert fold.projection.transcript[-1].text == f"note {PROJECTION_TRANSCRIPT_LIMIT + 24}"
     assert fold.projection.transcript[0].text == "note 25"
+
+
+def test_mid_run_turn_end_does_not_settle_streaming() -> None:
+    """Regression: a multi-batch turn must stay "in progress" across the
+    per-model-turn boundaries inside it.
+
+    ``TurnEndEvent`` fires after every assistant turn that made tool calls and
+    the run will continue (harness.loop ~589), so a turn with several tool
+    batches emits several TurnEndEvents before its single AgentEndEvent. The
+    session keeps ``is_streaming`` True across them and the TUI working line
+    stays up; the phone must match. Folding TurnEndEvent as a streaming
+    terminal blanked the working line mid-run and (with the reconcile latch)
+    pinned it off. Only AgentEndEvent settles the turn.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+
+    # Batch 1: a tool runs, then a mid-run TurnEndEvent (more work to come).
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="step 1")
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")], is_error=False),
+        )
+    )
+    fold.fold_event(TurnEndEvent(message=Message.assistant()))
+
+    # Still streaming; the working line shows the model-wait, not blank.
+    assert fold.projection.streaming is True
+    assert fold.projection.activity == "thinking"
+
+    # Batch 2 continues normally, then the run's single terminal settles it.
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c2", tool_name="bash", args={}, intent="step 2")
+    )
+    assert fold.projection.streaming is True
+    assert fold.projection.activity == "step 2"
+    fold.fold_event(AgentEndEvent(generation=1))
+    assert fold.projection.streaming is False
+    assert fold.projection.activity == ""
+    assert fold.projection.stop_reason == "completed"
+
+
+def test_pinned_opener_never_costs_the_newest_row() -> None:
+    """Regression: once the transcript passed the cap WITH the opening user
+    message pinned at the head, the newest row stopped reaching the phone.
+
+    ``_cap_tail`` pins the first user message and fills the rest from the tail.
+    It used to make room by dropping ``tail[-1]`` — the row JUST appended — and
+    because the cap runs on every append, the transcript froze: past the cap no
+    new tool call or notice ever appeared (the field report's missing "last
+    several tool calls"). The pin must cost the OLDEST tail row, never the
+    newest, and the tail must keep advancing.
+    """
+    fold = make_fold()
+    fold.note_user_message("the opening ask — this names the whole conversation")
+    for i in range(PROJECTION_TRANSCRIPT_LIMIT + 40):
+        fold.fold_event(NoticeEvent(text=f"note {i}"))
+
+    transcript = fold.projection.transcript
+    assert len(transcript) == PROJECTION_TRANSCRIPT_LIMIT
+    # Opener stays pinned at the head so the phone always knows the topic.
+    assert transcript[0].kind == "user"
+    assert transcript[0].text.startswith("the opening ask")
+    # The single newest row is present — the whole point of the fix.
+    assert transcript[-1].text == f"note {PROJECTION_TRANSCRIPT_LIMIT + 39}"
+
+    # The tail keeps advancing on further appends (it used to be frozen).
+    fold.fold_event(NoticeEvent(text="the very latest"))
+    transcript = fold.projection.transcript
+    assert len(transcript) == PROJECTION_TRANSCRIPT_LIMIT
+    assert transcript[0].kind == "user"
+    assert transcript[-1].text == "the very latest"
 
 
 def test_todo_refresh_replaces_wholesale() -> None:

@@ -243,6 +243,15 @@ class ProjectionFold:
         self._subagent_started_at: dict[str, float] = {}
         # The working line's clock origin and the label's current source.
         self._activity_started_at: float | None = None
+        # Whether the fold has folded a turn-terminal event (agent_end /
+        # turn_end) that no later agent_start has superseded. This is what
+        # makes ``reconcile_streaming`` safe on the abort/error path: there the
+        # session emits AgentEndEvent INLINE while its ``is_streaming`` flag is
+        # still True (the flag clears several awaits later, in the turn's
+        # ``finally``), so a mobile command landing in that window must not be
+        # allowed to raise ``streaming`` back to True over the fold's correct
+        # False. Seeded False so a mid-turn attach can still seed streaming up.
+        self._streaming_ended = False
         # Approval/ask requests waiting on the user, FIFO. Owned sessions can
         # have several at once (a parallel tool batch); the phone renders the
         # front one and a "1 of N" badge. See push_pending/pop_pending.
@@ -330,8 +339,10 @@ class ProjectionFold:
         p = self.projection
         if isinstance(event, AgentStartEvent):
             p.streaming = True
+            self._streaming_ended = False
         elif isinstance(event, AgentEndEvent):
             p.streaming = False
+            self._streaming_ended = True
             p.queued_count = 0
             p.stop_reason = "aborted" if event.aborted else "completed"
             self._close_open_message()
@@ -342,7 +353,19 @@ class ProjectionFold:
                     )
                 )
         elif isinstance(event, TurnEndEvent):
-            p.streaming = False
+            # NOT a streaming terminal. TurnEndEvent fires after EVERY model
+            # turn within a run (harness.loop yields it whenever the assistant
+            # produced tool calls and the run will continue — loop.py ~589), so
+            # a multi-batch turn emits several before the run ends. The session
+            # keeps ``is_streaming`` True across them and clears it only after
+            # AgentEndEvent, and the TUI's working line stays up the same way,
+            # so the phone must too. Flipping streaming False here (and, worse,
+            # latching ``_streaming_ended``) blanked the working line mid-run
+            # and pinned it off. This branch previously set streaming False and
+            # was harmless ONLY because the removed per-event is_streaming
+            # re-read overwrote it every time; with the fold now authoritative
+            # it must leave streaming alone. AgentEndEvent is the sole terminal.
+            pass
         elif isinstance(event, MessageStartEvent):
             if isinstance(event.message, Message) and event.message.role == "assistant":
                 entry = TranscriptEntry(
@@ -547,10 +570,20 @@ class ProjectionFold:
             self._activity_started_at = time.monotonic()
             self._set_activity("thinking")
             return
-        if isinstance(event, (AgentEndEvent, TurnEndEvent)):
+        if isinstance(event, AgentEndEvent):
+            # The one true terminal: the run is over, clear the working line.
             p.activity = ""
             p.activity_started_s = 0.0
             self._activity_started_at = None
+            return
+        if isinstance(event, TurnEndEvent):
+            # A per-model-turn boundary, NOT the end of the run (loop.py ~589
+            # yields it after every assistant turn that made tool calls). The
+            # run is now waiting on the next model call, exactly like the gap
+            # after a tool finishes — show "thinking", restart the clock for the
+            # wait. Clearing it here blanked the working line mid-run; only
+            # AgentEndEvent settles the turn.
+            self._set_activity("thinking", restart_clock=True)
             return
         if not p.streaming:
             return
@@ -626,6 +659,30 @@ class ProjectionFold:
         self.projection.pending = self._pending_queue[0] if self._pending_queue else None
         self.projection.pending_count = len(self._pending_queue)
         self._bump()
+
+    def reconcile_streaming(self, is_streaming: bool) -> None:
+        """Align ``streaming`` with the session's own ``is_streaming`` flag at
+        the moments the fold cannot derive it from events alone: initial attach
+        (a phone subscribing mid-turn never witnessed the ``agent_start``) and
+        command boundaries (a prompt/abort/new/resume just changed turn state).
+
+        Once the fold has folded a turn-terminal event (``_streaming_ended``),
+        the fold is authoritative and reconcile does nothing: the session's
+        ``is_streaming`` is briefly, lyingly still True on the abort/error path
+        (it emits ``agent_end`` INLINE and clears the flag several awaits later,
+        in the turn's ``finally``), so honouring the flag in that window is the
+        exact bug this guard prevents — a command landing there would re-stick
+        the phone on "in progress" with no later event to correct it. Before any
+        terminal — a fresh attach that missed ``agent_start`` mid-turn, or a
+        turn whose end the fold has not observed — the flag is the only truth
+        there is, so reconcile trusts it in both directions. A later
+        ``agent_start`` clears the latch so the next turn reconciles normally.
+        """
+        if self._streaming_ended:
+            return
+        if self.projection.streaming != bool(is_streaming):
+            self.projection.streaming = bool(is_streaming)
+            self._bump()
 
     def set_state(
         self,
@@ -712,8 +769,16 @@ class ProjectionFold:
         tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
         first_user = next((e for e in entries if e.kind == "user"), None)
         if first_user is not None and first_user not in tail:
-            # One pinned row + LIMIT-1 tail rows keeps the same bounded size.
-            return [first_user, *tail[:-1]]
+            # Pin the opener and make room by dropping the OLDEST tail row
+            # (``tail[1:]``), never the newest (``tail[:-1]``). ``_cap_tail``
+            # runs on EVERY append, so dropping ``tail[-1]`` here discarded the
+            # row just appended — and did so on each subsequent append, which
+            # froze the transcript: past the cap, no new tool call or message
+            # ever reached the phone (the field report's "last several tool
+            # calls I can't see"). Dropping the oldest keeps the bound (one
+            # pinned + LIMIT-1 newest = LIMIT) while the newest row always
+            # survives. Older rows page back in on scroll via the history API.
+            return [first_user, *tail[1:]]
         return tail
 
     def _find(self, entry_id: str | None) -> TranscriptEntry | None:
