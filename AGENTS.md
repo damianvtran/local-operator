@@ -300,10 +300,11 @@ Every core tool ships its schema on **every** API request. The tools array
 rides in the same cache prefix as the system prompt (`tools/registry.py`
 builds it in a stable order precisely so that prefix stays cache-stable), so
 adding a core tool is a permanent per-call token tax on every session and every
-subagent, paid whether or not the tool is ever called. Measured today the
-default core surface is ~5.2k tokens across 18 tools — lean, and worth keeping
-that way. Before adding a tool, take the **highest (least-footprint) rung** that
-solves the problem:
+subagent, paid whether or not the tool is ever called. The realized core surface
+is on the order of a few thousand schema tokens — lean, and worth keeping that
+way (the exact figure moves as `createIf`-gated tools drop out of a session that
+cannot use them; `/context` reports the live number). Before adding a tool, take
+the **highest (least-footprint) rung** that solves the problem:
 
 1. **Extend an existing tool.** The capability is usually a variation of
    `bash`, `read`, `edit`, `grep`, or `eval`. A new parameter or mode on a tool
@@ -323,8 +324,10 @@ solves the problem:
    anything integration-specific.
 5. **A new core tool — last resort.** Only when the capability is fundamental,
    useful to nearly every session, and unreachable via the rungs above. The
-   existing core tools (`read`, `grep`, `eval`, `browser`) clear that bar; a
-   niche or setup-specific capability does not.
+   ungated core tools (`read`, `grep`, `eval`, `bash`) clear that bar; a niche
+   or setup-specific capability does not. (`browser` reads as core but is
+   actually rung 3 — `build_browser_tool` returns `None` without a browser
+   surface — which is the ladder working as intended.)
 
 **Gating answers reachability or opt-in, not host identity.** A `createIf`
 factory may ask "is the dependency configured or reachable?" — it must not
