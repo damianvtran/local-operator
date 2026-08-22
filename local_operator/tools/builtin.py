@@ -3739,8 +3739,10 @@ class TodoParams(BaseModel):
 
     op: Literal["init", "add", "done", "block", "drop", "view"] = Field(
         description=(
-            "init: replace the whole list; add: append newly discovered work "
-            "without rewriting the list; done: mark items finished; block: "
+            "init: replace the whole list, optionally grouped into named phases "
+            "(pass `phases`); add: append newly discovered work without "
+            "rewriting the list, optionally into a named `phase`; done: mark "
+            "items finished; block: "
             "mark items that cannot proceed until a user decides or an "
             "external service answers (requires 'reason'); drop: abandon "
             "items that are no longer needed; view: show the list."
@@ -3990,15 +3992,22 @@ def _todo_view_text(phases: list[TodoPhase]) -> str:
     the pre-phases flat output — so an existing caller (and every existing
     test) reads the exact receipt it always did. Any other shape (multiple
     phases, or one explicitly-named phase) prefixes each group with a
-    ``PhaseName (done/total)`` header, counting resolved items the same way
+    ``PhaseName · done/total`` header, counting resolved items the same way
     :func:`_todo_progress` does so the header and the panel agree.
+
+    The header spelling is the middot ``PhaseName · done/total`` — the SAME
+    grammar the dock panel's ``_phase_header_row`` paints (U5). The receipt used
+    to parenthesise (``Foundation (1/2)``) while the panel used the middot, so a
+    user cross-referencing the transcript against the band saw two formats for
+    one fact; the design (§5.2) makes the panel/receipt mirror load-bearing, so
+    both surfaces now spell a phase header one way.
     """
     if len(phases) == 1 and phases[0]["name"] == _IMPLICIT_PHASE:
         return "\n".join(_todo_rows(phases[0]["items"]))
     blocks: list[str] = []
     for phase in phases:
         items = phase["items"]
-        blocks.append(f"{phase['name']} ({_todo_progress(items)})")
+        blocks.append(f"{phase['name']} · {_todo_progress(items)}")
         blocks.extend(_todo_rows(items))
     return "\n".join(blocks)
 
@@ -4256,7 +4265,10 @@ def build_todo_tool() -> AgentTool:
     return AgentTool(
         name="todo",
         label="Todo",
-        description="Track a visible task list (init / add / done / block / drop / view).",
+        description=(
+            "Track a visible task list (init / add / done / block / drop / view), "
+            "optionally grouped into named phases."
+        ),
         parameters=TodoParams.model_json_schema(),
         # read tier exemption: todo mutates only session-local bookkeeping
         # (no files, no autonomous turns), so it stays auto-approved.
