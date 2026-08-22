@@ -393,6 +393,54 @@ def _history_page(record: SessionRecord, before: str | None, limit: int) -> tupl
     return page, has_more
 
 
+def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[bytes, str] | None:
+    """Decode the ``index``-th image block of message ``entry_id`` from the
+    session's on-disk transcript into raw bytes plus mime type.
+
+    Reads from disk (not the live fold) so it serves attachments from history
+    the projection tail dropped as well as recent ones, and reuses the
+    transcript's own attachment resolution — the same base64 the model saw.
+    Returns ``None`` for any miss (unknown message, out-of-range index, a
+    reference that no longer resolves) so the caller answers a clean 404.
+
+    Runs off the event loop (``asyncio.to_thread`` at the call site): building
+    the history rehydrates every message and is not loop-safe work.
+    """
+    import base64
+    import binascii
+
+    from local_operator.harness.types import ImageContent, Message
+    from local_operator.paths import config_dir
+    from local_operator.session.transcript import Transcript
+
+    directory = config_dir() / "sessions" / record.session_id
+    if not (directory / "transcript.jsonl").exists():
+        return None
+    try:
+        transcript = Transcript(directory)
+        history = transcript.build_llm_history()
+    except Exception:  # noqa: BLE001 — an odd transcript serves no image, not a 500
+        logger.exception("image fetch: history fold failed for %s", record.session_id)
+        return None
+    message = next((m for m in history if isinstance(m, Message) and m.id == entry_id), None)
+    if message is None or not isinstance(message.content, list):
+        return None
+    images = [b for b in message.content if isinstance(b, ImageContent)]
+    # ``index`` is the position among IMAGE blocks (what _image_refs emits),
+    # not among all content blocks — text blocks do not count.
+    if index < 0 or index >= len(images):
+        return None
+    data = images[index].data
+    if not data:
+        return None
+    try:
+        raw = base64.b64decode(data)
+    except (binascii.Error, ValueError):
+        logger.warning("image fetch: undecodable base64 for %s[%d]", entry_id, index)
+        return None
+    return raw, images[index].mime_type or "image/png"
+
+
 def _fan_out(entry: SessionEntry) -> None:
     """Push the current projection to every open SSE queue for this session.
     A slow phone's queue fills; repaints supersede, so evict the oldest and
@@ -789,6 +837,47 @@ def build_app(daemon: MobileDaemon):
             }
         )
 
+    async def api_session_image(request: Request) -> Response:
+        """One image attachment's bytes, fetched lazily by the transcript.
+
+        The projection carries only lightweight image REFERENCES (entry id +
+        block index + mime) so a per-token repaint stays small; the pixels are
+        served here on demand. The bytes come from the on-disk transcript
+        (which resolves the attachment store back to inline base64), so this
+        works for history the live fold long dropped as well as the tail.
+
+        Cacheable and immutable: the true content key is the ``entry`` id — a
+        globally-unique message uuid — plus the image-only ``i``. The ``pid``
+        in the path only routes to a live session; pids recycle, but a
+        recycled pid maps to a DIFFERENT session whose transcript does not
+        contain this message uuid, so it 404s rather than serving another
+        session's cached bytes. The uuid content key is what makes ``immutable``
+        safe despite the mutable pid in the URL.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        pid = int(request.path_params["pid"])
+        entry = daemon.table.entries.get(pid)
+        if entry is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        entry_id = request.query_params.get("entry", "")
+        try:
+            index = int(request.query_params.get("i", "0"))
+        except ValueError:
+            return JSONResponse({"error": "bad image index"}, status_code=400)
+        if not entry_id:
+            return JSONResponse({"error": "entry id is required"}, status_code=400)
+        found = await asyncio.to_thread(_image_bytes, entry.record, entry_id, index)
+        if found is None:
+            return JSONResponse({"error": "no such image"}, status_code=404)
+        data, mime_type = found
+        return Response(
+            content=data,
+            media_type=mime_type,
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
     async def api_command(request: Request) -> Response:
         """The one mutation endpoint: {op, ...} → control frame. Keeping
         mutations on one route mirrors the registrant's dispatch and keeps
@@ -830,14 +919,16 @@ def build_app(daemon: MobileDaemon):
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         cwd_raw = str(body.get("cwd") or Path.home())
-        # Resolve to a real directory under the owner's home: the picker only
-        # ever sends those, and the spawn runs with the daemon's environment,
-        # so the check is about fat-fingered/traversed input, not trust.
+        # Resolve to a real directory the picker is allowed to open: anywhere
+        # under the owner's home, OR the system temp dir. The spawn runs with
+        # the daemon's own environment (it is the owner's account either way),
+        # so the check guards against fat-fingered/traversed input, not trust
+        # — /tmp is a deliberate, common scratch root the phone offers as a
+        # starting directory, so it is on the allowlist beside home.
         cwd_path = Path(cwd_raw).expanduser().resolve()
-        home = Path.home().resolve()
-        if not cwd_path.is_dir() or not (cwd_path == home or home in cwd_path.parents):
+        if not cwd_path.is_dir() or not _spawn_dir_allowed(cwd_path):
             return JSONResponse(
-                {"error": f"not a directory under home: {cwd_raw}"}, status_code=400
+                {"error": f"not an allowed start directory: {cwd_raw}"}, status_code=400
             )
         cwd = str(cwd_path)
         provider = body.get("provider")
@@ -927,7 +1018,9 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         recent = await asyncio.to_thread(_recent_directories)
-        return JSONResponse({"home": str(Path.home()), "recent": recent})
+        # ``tmp`` is offered as an explicit scratch start dir beside home and
+        # the recents — the spawn gate admits it (see _spawn_dir_allowed).
+        return JSONResponse({"home": str(Path.home()), "recent": recent, "tmp": _tmp_dir()})
 
     async def api_past_sessions(request: Request) -> Response:
         """Resumable past sessions — the phone's "go back to a conversation"
@@ -965,6 +1058,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{pid:int}/events", api_session_events),
         Route("/api/sessions/{pid:int}/history", api_session_history),
+        Route("/api/sessions/{pid:int}/image", api_session_image),
         Route("/api/sessions/{pid:int}/command", api_command, methods=["POST"]),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
@@ -1050,6 +1144,27 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
         if len(out) >= limit:
             break
     return out
+
+
+def _tmp_dir() -> str:
+    """The system temp directory, resolved. Offered as a scratch start dir on
+    the phone's new-session form and admitted by the spawn gate. Resolved (not
+    the raw ``/tmp``) so it matches the gate's resolved comparison on hosts
+    where ``/tmp`` is a symlink (macOS: ``/private/tmp``)."""
+    import tempfile
+
+    return str(Path(tempfile.gettempdir()).resolve())
+
+
+def _spawn_dir_allowed(cwd_path: Path) -> bool:
+    """Whether a resolved directory may host a phone-started session: anywhere
+    under the owner's home, or the system temp dir (a common scratch root).
+    Both bounds are on RESOLVED paths so a symlinked ``/tmp`` still matches."""
+    home = Path.home().resolve()
+    if cwd_path == home or home in cwd_path.parents:
+        return True
+    tmp = Path(_tmp_dir())
+    return cwd_path == tmp or tmp in cwd_path.parents
 
 
 def _recent_directories(limit: int = 8) -> list[str]:

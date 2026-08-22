@@ -8,6 +8,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
     AgentStartEvent,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -25,9 +26,14 @@ from local_operator.harness.types import (
 from local_operator.mobile.projection import (
     ProjectionFold,
     _diff_counts,
+    _image_refs,
     _summarize_args,
 )
-from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT, SessionProjection
+from local_operator.mobile.types import (
+    PROJECTION_TRANSCRIPT_LIMIT,
+    PendingRequest,
+    SessionProjection,
+)
 
 
 def make_fold() -> ProjectionFold:
@@ -176,3 +182,101 @@ def test_projection_version_bumps_on_every_fold() -> None:
     v0 = fold.projection.version
     fold.fold_event(NoticeEvent(text="hi"))
     assert fold.projection.version > v0
+
+
+def test_pending_queue_shows_front_and_counts() -> None:
+    """A parallel tool batch opens several approvals at once. The fold must
+    show the FRONT one and report the total, and clearing one by id must
+    surface the next — not dismiss every sibling (the mobile hang report)."""
+    fold = make_fold()
+    a = PendingRequest(request_id="a", kind="approval", title="bash")
+    b = PendingRequest(request_id="b", kind="approval", title="write")
+    fold.push_pending(a)
+    fold.push_pending(b)
+    assert fold.projection.pending is a
+    assert fold.projection.pending_count == 2
+
+    # Answering the FRONT reveals the next, count decrements.
+    fold.pop_pending("a")
+    assert fold.projection.pending is b
+    assert fold.projection.pending_count == 1
+
+    # Answering an out-of-order id (the second card) is honoured too.
+    fold.pop_pending("b")
+    assert fold.projection.pending is None
+    assert fold.projection.pending_count == 0
+
+
+def test_pop_pending_out_of_order_keeps_the_other_card() -> None:
+    """Concurrent gates settle in whatever order the user answers, not the
+    order enqueued: popping the second must leave the first still showing."""
+    fold = make_fold()
+    fold.push_pending(PendingRequest(request_id="a", kind="approval", title="bash"))
+    fold.push_pending(PendingRequest(request_id="b", kind="ask", title="which?"))
+    fold.pop_pending("b")
+    assert fold.projection.pending is not None
+    assert fold.projection.pending.request_id == "a"
+    assert fold.projection.pending_count == 1
+
+
+def test_set_pending_still_replaces_for_the_tui_mirror() -> None:
+    """The TUI-mirror handle uses set_pending: the terminal serializes its own
+    approvals, so the phone mirrors exactly one card or none."""
+    fold = make_fold()
+    fold.push_pending(PendingRequest(request_id="a", kind="approval", title="bash"))
+    fold.set_pending(PendingRequest(request_id="z", kind="ask", title="q"))
+    assert fold.projection.pending_count == 1
+    assert fold.projection.pending is not None
+    assert fold.projection.pending.request_id == "z"
+    fold.set_pending(None)
+    assert fold.projection.pending is None
+    assert fold.projection.pending_count == 0
+
+
+def test_image_refs_are_index_and_mime_only() -> None:
+    """User-turn attachments project as lightweight references (image-only
+    index + mime), never bytes — the pixels are fetched lazily so a per-token
+    repaint stays small. A text caption does not shift the index."""
+    message = Message.user(
+        "look at these",
+        [
+            ImageContent(data="AAAA", mime_type="image/png"),
+            ImageContent(data="BBBB", mime_type="image/jpeg"),
+        ],
+    )
+    refs = _image_refs(message)
+    assert refs == [
+        {"index": 0, "mime_type": "image/png"},
+        {"index": 1, "mime_type": "image/jpeg"},
+    ]
+    # No base64 leaks into the reference.
+    assert all("data" not in r for r in refs)
+
+
+def test_history_fold_carries_image_refs_on_user_rows() -> None:
+    fold = make_fold()
+    history: list[AgentMessage] = [
+        Message.user("with a shot", [ImageContent(data="AAAA", mime_type="image/png")]),
+    ]
+    fold.fold_history(history)
+    user_rows = [e for e in fold.projection.transcript if e.kind == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0].images == [{"index": 0, "mime_type": "image/png"}]
+
+
+def test_absorb_user_event_upgrades_echoed_row_with_image_refs() -> None:
+    """A phone-sent prompt is echoed WITHOUT refs (the handle has no persisted
+    id yet); the real MessageStartEvent then carries the attachments, and the
+    fold must upgrade the echoed row in place so the sender sees thumbnails."""
+    fold = make_fold()
+    fold.note_user_message("with a shot")  # optimistic echo, no images
+    echoed = fold.projection.transcript[-1]
+    assert echoed.images == []
+
+    message = Message.user("with a shot", [ImageContent(data="AAAA", mime_type="image/png")])
+    added = fold.absorb_user_event(message)
+    assert added is False  # de-duped, not a second row
+    assert len([e for e in fold.projection.transcript if e.kind == "user"]) == 1
+    upgraded = fold.projection.transcript[-1]
+    assert upgraded.id == message.id
+    assert upgraded.images == [{"index": 0, "mime_type": "image/png"}]

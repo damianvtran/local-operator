@@ -122,7 +122,21 @@ export function SessionScreen({ pid }: { pid: number }) {
 		>
 			<Header projection={projection} />
 
-			<Transcript pid={pid} entries={projection.transcript} />
+			{projection.transcript.length === 0 && !projection.streaming ? (
+				/* A just-started session has no messages yet. An empty scroll
+				   area reads as "did it break?"; this placeholder says the
+				   session is ready and what to do next. Hidden the moment a
+				   turn begins streaming (the transcript fills from the user
+				   row up). */
+				<div className="flex flex-1 flex-col items-center justify-center gap-1 px-8 text-center">
+					<p className="text-body-sm text-ink-muted">no messages yet</p>
+					<p className="text-meta text-ink-dim">
+						send a message below to get started
+					</p>
+				</div>
+			) : (
+				<Transcript pid={pid} entries={projection.transcript} />
+			)}
 
 			{/* The aggregate working line — pinned at the foot of the transcript
 			    like the TUI's WorkingBlock, above the panels and composer. */}
@@ -141,7 +155,11 @@ export function SessionScreen({ pid }: { pid: number }) {
 			) : null}
 
 			{projection.pending ? (
-				<PendingCard pid={pid} pending={projection.pending} />
+				<PendingCard
+					pid={pid}
+					pending={projection.pending}
+					count={projection.pending_count}
+				/>
 			) : null}
 
 			{projection.degraded && !projection.ended ? (
