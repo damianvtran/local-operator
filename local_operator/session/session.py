@@ -1657,6 +1657,7 @@ class Session:
                 withdraw = getattr(self._stream_fn, "withdraw_fallback", None)
                 if callable(withdraw):
                     withdraw()
+                self._journal_effort_if_selection_in_force(previous, model)
                 return
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
@@ -1682,6 +1683,7 @@ class Session:
                 refreshed = self._spec_for_route(*self._active_route)
                 if refreshed is not None:
                     self._active_fallback = refreshed
+            self._journal_effort_if_selection_in_force(previous, model)
             return
         # A genuine model change is a SELECTION, and selections outlive the
         # process: journal it so `--resume` comes back on this model instead
@@ -1703,6 +1705,39 @@ class Session:
         notify = getattr(self._stream_fn, "on_model_changed", None)
         if callable(notify):
             notify(model)
+
+    def _journal_effort_if_selection_in_force(self, previous: ModelSpec, model: ModelSpec) -> None:
+        """Re-journal the selection when a knob change moves the effort on a
+        model the user SWITCHED to, so the restored effort tracks it.
+
+        The ``selected_model`` row carries an effort field, and a switch
+        followed by a SEPARATE ``/effort`` change would otherwise leave that
+        field frozen at the switch's level: the ``/effort`` call takes
+        ``set_model``'s same-pair early return and never reaches the journal
+        write, so a resume would come back on the switched model at its
+        DEFAULT effort — silently dropping the level the user chose and, on a
+        reasoning model, quietly changing cost (review round 1, F1).
+
+        Bounded twice, and each bound is load-bearing:
+
+        - **Only an actual effort move.** A sampling-only override
+          (temperature / top_p, the server's ``ChatRequest.options`` path)
+          rides ``set_model`` on the same pair too, and the journal stores no
+          sampling — so re-journalling on those would append identical rows for
+          a change the row cannot even express.
+        - **Only a non-boot selection.** The boot model deliberately persists
+          no effort (the ``/effort`` non-goal): ``_restore_selected_model``
+          skips a row whose selector equals the boot selector, so a boot-model
+          effort change has nothing to restore onto and journalling one would
+          both be inert and break the non-goal. A selection the user switched
+          to already has a row whose effort must stay truthful.
+        """
+        if previous.reasoning_effort == model.reasoning_effort:
+            return
+        if f"{model.provider}/{model.model_id}" == self._boot_selector:
+            return
+        self._selected_model_dirty = True
+        self._spawn_selected_model_write()
 
     def _drop_fallback_pin(self, primary: ModelSpec, reason: str) -> None:
         """Withdraw the pinned fallback: clear display state, persist, announce.

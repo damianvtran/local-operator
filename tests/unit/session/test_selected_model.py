@@ -75,7 +75,14 @@ def _selection_entries(session: Session) -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 async def test_a_switch_is_journalled_with_the_boot_selector(tmp_path):
-    """``set_model`` records the selection, the effort, and what it booted on."""
+    """``set_model`` records the selection, the effort, and what it booted on.
+
+    Deliberately WITHOUT ``explicit=True``: journalling keys on the model pair
+    actually changing, not on the ``explicit`` flag (which only governs
+    fallback-pin withdrawal). A host that swaps the model without the flag —
+    the FastAPI server applying a model override, say — still made a selection
+    that must survive a resume.
+    """
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
 
@@ -110,7 +117,7 @@ async def test_resume_comes_back_on_the_switched_model(tmp_path):
 
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
-    session.set_model(SWITCHED)
+    session.set_model(SWITCHED, explicit=True)
     await session.dispose()  # what ctrl+c does
 
     resumed_stream = NotifyingStream()
@@ -138,7 +145,7 @@ async def test_a_switch_made_moments_before_quitting_still_lands(tmp_path):
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
 
-    session.set_model(SWITCHED)
+    session.set_model(SWITCHED, explicit=True)
     await session.dispose()  # no await between the switch and the teardown
 
     resumed = _session(tmp_path, NotifyingStream())
@@ -152,7 +159,7 @@ async def test_switching_back_leaves_the_resume_on_the_boot_model(tmp_path):
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
 
-    session.set_model(SWITCHED)
+    session.set_model(SWITCHED, explicit=True)
     session.set_model(MODEL)
     await session.dispose()
 
@@ -176,7 +183,7 @@ async def test_a_changed_boot_selection_outranks_the_journalled_switch(tmp_path)
     """
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
-    session.set_model(SWITCHED)
+    session.set_model(SWITCHED, explicit=True)
     await session.dispose()
 
     rebooted_stream = NotifyingStream()
@@ -223,13 +230,95 @@ async def test_the_switched_effort_rides_the_restore(tmp_path):
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
 
-    session.set_model(SWITCHED.model_copy(update={"reasoning_effort": "high"}))
+    session.set_model(SWITCHED.model_copy(update={"reasoning_effort": "high"}), explicit=True)
     await session.dispose()
 
     resumed = _session(tmp_path, NotifyingStream())
     assert resumed.model_label == "anthropic/claude-opus-5"
     assert resumed.model.reasoning_effort == "high"
     await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_effort_change_after_a_switch_updates_the_restored_effort(tmp_path):
+    """Switch, THEN a separate `/effort`, and the resume honours the level.
+
+    The F1 case from review round 1: a `/effort` change takes `set_model`'s
+    same-pair early return, so without re-journalling the selection row's
+    effort field stays frozen at the switch's level and the resume comes back
+    on the switched model at its DEFAULT effort — silently dropping the level
+    the user chose and, on a reasoning model, quietly changing cost.
+
+    Distinct from `test_the_switched_effort_rides_the_restore`, where the
+    effort rides the switch itself in ONE call; here the two are separate
+    actions, which is the path that regressed.
+    """
+    stream = NotifyingStream()
+    session = _session(tmp_path, stream)
+
+    session.set_model(SWITCHED, explicit=True)
+    # Let the SWITCH's journal write LAND before the effort change. This is
+    # what makes the two genuinely separate actions rather than one coalesced
+    # write: without the await the deferred switch-write would snapshot the
+    # post-/effort spec at flush time and the row would be truthful by
+    # accident — the mutant that disables the re-journal would still pass.
+    # With the switch's row already on disk carrying `effort: None`, only the
+    # re-journal keeps the restored level correct.
+    await wait_for(lambda: len(_selection_entries(session)) == 1)
+    assert _selection_entries(session)[0]["effort"] is None  # the frozen row
+
+    # A separate /effort change on the switched model (same pair, so it takes
+    # set_model's early return and never reaches the journal write itself).
+    session.set_model(session.model.model_copy(update={"reasoning_effort": "low"}))
+    await session.dispose()
+
+    resumed = _session(tmp_path, NotifyingStream())
+    assert resumed.model_label == "anthropic/claude-opus-5"
+    assert resumed.model.reasoning_effort == "low"
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_effort_change_on_the_boot_model_still_does_not_journal(tmp_path):
+    """The `/effort` re-journal is scoped to a non-boot SELECTION.
+
+    A boot-model effort change has no selection row to keep truthful (the boot
+    model deliberately persists none — the `/effort` non-goal), so it must not
+    manufacture one. Guards the re-journal added for F1 against widening the
+    non-goal it was careful to respect.
+    """
+    stream = NotifyingStream()
+    session = _session(tmp_path, stream)
+
+    session.set_model(MODEL.model_copy(update={"reasoning_effort": "high"}))
+    await session.dispose()
+
+    assert _selection_entries(session) == []
+    resumed = _session(tmp_path, NotifyingStream())
+    assert resumed.model_label == "test/m"
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_sampling_only_change_after_a_switch_does_not_rejournal(tmp_path):
+    """A temperature/top_p override on a switched model appends no new row.
+
+    Sampling rides `set_model` on the same pair (the server's
+    `ChatRequest.options` path), and the selection row stores no sampling, so
+    re-journalling on it would append an identical row for a change the row
+    cannot express. Only an actual effort MOVE re-journals.
+    """
+    stream = NotifyingStream()
+    session = _session(tmp_path, stream)
+
+    session.set_model(SWITCHED, explicit=True)
+    await wait_for(lambda: len(_selection_entries(session)) == 1)
+    session.set_model(session.model.model_copy(update={"temperature": 0.9}))
+    await session.dispose()
+
+    # Still exactly one row: the switch's. No sampling-driven duplicate.
+    assert len(_selection_entries(session)) == 1
+    await session.dispose()
 
 
 @pytest.mark.asyncio
@@ -289,7 +378,7 @@ async def test_a_resume_does_not_regrow_the_journal(tmp_path):
     """
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
-    session.set_model(SWITCHED)
+    session.set_model(SWITCHED, explicit=True)
     await session.dispose()
 
     for _ in range(3):
@@ -310,7 +399,7 @@ async def test_a_bare_stream_fn_still_restores(tmp_path):
     switched model.
     """
     session = _session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
-    session.set_model(SWITCHED)
+    session.set_model(SWITCHED, explicit=True)
     await session.dispose()
 
     resumed = _session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
