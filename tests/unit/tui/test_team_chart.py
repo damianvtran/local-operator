@@ -318,6 +318,45 @@ async def test_wide_org_scrolls_the_body_not_the_screen() -> None:
 
 
 @pytest.mark.asyncio
+async def test_end_jumps_to_the_right_edge_on_a_wide_chart() -> None:
+    """U10 — `End` reaches the far-right column even with no vertical travel.
+
+    On a wide flat team the chart overflows only the X axis (max_scroll_y == 0).
+    Textual's `scroll_end` passes x=0 there (its "end" is bottom-LEFT), so it was
+    a no-op — the fix pins max_scroll_x/max_scroll_y explicitly. `Home` returns
+    to the origin, `End` reaches the right edge, both in one press.
+    """
+
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(
+            name="wide",
+            manager="boss",
+            members=[TeamMember(role=f"m{i}") for i in range(12)],
+        )
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._open_org_chart_view("wide")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        # Wide-only overflow: the X axis has travel, the Y axis does not.
+        assert view._body.max_scroll_x > 0
+        assert view._body.max_scroll_y == 0
+        # End jumps to the far-right column (the axis that overflows).
+        await pilot.press("end")
+        await pilot.pause()
+        assert view._body.scroll_offset.x == view._body.max_scroll_x
+        # Home returns to the origin.
+        await pilot.press("home")
+        await pilot.pause()
+        assert view._body.scroll_offset.x == 0
+
+
+@pytest.mark.asyncio
 async def test_zoom_keys_change_the_tier() -> None:
     session = FakeSession()
     session.team_registry = _nested_registry()

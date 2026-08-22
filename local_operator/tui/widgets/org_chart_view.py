@@ -303,6 +303,11 @@ class OrgChartView(Vertical):
         # the resting layout is unchanged.
         self._legend.display = self._legend_open
         if self._legend_open:
+            # TWO rows (D7): the glyph vocabulary is 70 cells and the (declared)
+            # gloss is 56 — on one line they total 129 and the gloss, the very
+            # thing U6 added to explain the tag, was the part ellipsis-clipped at
+            # ≤~128 cols. Splitting them keeps each row well under a standard
+            # 100-col terminal, so nothing essential is ever truncated.
             legend = Text(no_wrap=True, overflow="ellipsis")
             legend.append("◆ manager", style=Style(color=theme_mod.semantic_color("accent")))
             for glyph, meaning in (
@@ -317,10 +322,10 @@ class OrgChartView(Vertical):
                     Style(color=theme_mod.semantic_color("warning")) if meaning == "marker" else dim
                 )
                 legend.append(glyph, style=style)
-            # (declared) gloss (U6): name what the tag means in-mode rather than
-            # relying on the guide.
+            # (declared) gloss (U6) on its OWN row so it always reads in full.
+            legend.append("\n", style=dim)
             legend.append(
-                "   (declared) = shown org, not yet an executable delegation",
+                "(declared) = shown org, not yet an executable delegation",
                 style=dim,
             )
             self._legend.update(legend)
@@ -519,16 +524,27 @@ class OrgChartView(Vertical):
         self._body.scroll_page_right()
 
     def action_scroll_home(self) -> None:
-        # Jump to the top-LEFT corner (both axes), so a wide-scrolled reader
-        # returns to the root box in one key rather than paging back.
-        self._body.scroll_home()
+        # Jump to the top-LEFT corner, so a wide-scrolled reader returns to the
+        # root box in one key. Explicit x=0,y=0 rather than ``scroll_home``:
+        # Textual's ``scroll_home`` only resets the Y axis unless ``x`` is
+        # passed, so on a wide-scrolled chart it would leave the reader off to
+        # the right. ``scroll_to`` pins BOTH axes to the origin.
+        self._body.scroll_to(x=0, y=0, animate=False)
 
     def action_scroll_end(self) -> None:
-        # Jump to the bottom-RIGHT corner (both axes). On a chart with no
-        # vertical travel this is the only keyboard jump to the right edge —
-        # the axis that overflows (U4). ``scroll_end`` moves both x and y to
-        # their maxima, so it clamps to the far-right column.
-        self._body.scroll_end()
+        # Jump to the bottom-RIGHT corner — the wide axis is the one that
+        # overflows (U4), so this is the keyboard jump to the right edge even
+        # when there is no vertical travel. Explicit maxima via ``scroll_to``,
+        # NOT ``scroll_end``: on this Textual (8.2.8) ``scroll_end`` passes x=0
+        # (its "end" is the bottom-LEFT), so on a wide-only chart it was a
+        # no-op — never the right edge. Pinning ``max_scroll_x``/``max_scroll_y``
+        # reaches the true far corner; the container clamps each to its own
+        # travel, so an axis with no overflow simply stays at 0.
+        self._body.scroll_to(
+            x=self._body.max_scroll_x,
+            y=self._body.max_scroll_y,
+            animate=False,
+        )
 
     # -- leaving ------------------------------------------------------------
     def action_leave(self) -> None:
