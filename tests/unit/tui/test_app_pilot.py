@@ -433,8 +433,13 @@ async def test_boot_typing_sends_prompt() -> None:
         await pilot.pause()
         await pilot.press("h", "i")
         await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
+        # Poll until the prompt is actually recorded rather than betting two
+        # frames is enough: under parallel CPU load the submit worker had not
+        # yet reached the session when a fixed tick count expired.
+        for _ in range(200):
+            await pilot.pause()
+            if session.prompts:
+                break
         assert session.prompts == ["hi"]
         assert session.preflight_calls == 1
         # A user block was appended for the submitted prompt (the boot hint
@@ -475,7 +480,7 @@ async def test_boot_renders_non_blocking_quota_warning() -> None:
     app = OperatorApp(lambda: _factory(session))
 
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(8):
+        for _ in range(200):
             await pilot.pause()
             if app._splash_notice:
                 break
@@ -759,7 +764,7 @@ async def test_shell_mode_submit_runs_the_command_not_a_prompt() -> None:
         await pilot.press("enter")
         # The worker has to actually spawn /bin/sh; a couple of pauses is
         # not a bound, so wait for the card to settle.
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -802,7 +807,7 @@ async def test_a_recalled_bang_line_still_runs_as_a_command() -> None:
         for key in "echo first":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -812,7 +817,7 @@ async def test_a_recalled_bang_line_still_runs_as_a_command() -> None:
         assert editor.shell_mode is False
         assert editor.text == "! echo first"
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if len(session.shell_records) >= 2:
                 break
@@ -862,7 +867,7 @@ async def test_esc_aborts_a_running_shell_command() -> None:
         # Wait until the card is on screen and still running — the whole
         # point of this test is the in-flight state, not the settled one.
         card = None
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             cards = [
                 block
@@ -876,13 +881,18 @@ async def test_esc_aborts_a_running_shell_command() -> None:
         assert card is not None
         assert card._state == "running"
         await pilot.press("escape")
-        await pilot.pause()
+        # Read the interrupted frame WITHOUT yielding first: the abort marks
+        # the card and keeps ownership synchronously on the key press, so the
+        # assertions must observe that on-press state before the event loop
+        # hands control to the shell worker. A `pause()` here raced under
+        # parallel load — the aborted worker reaped `sleep 30` and cleared
+        # `_shell_card` to None before the ownership assertion read it.
         assert card._state == "interrupted"
         # The card stays owned until execute_bash has reaped the process and
         # persisted its interrupted result. Clearing it on the key press made
         # the receipt disappear on resume.
         assert app._shell_card is card
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if app._shell_card is None:
                 break
@@ -909,7 +919,7 @@ async def test_a_failing_command_marks_the_card_failed_and_persists_it_so() -> N
         for key in "exit 3":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -936,7 +946,7 @@ async def test_a_signal_killed_command_marks_the_card_failed() -> None:
         for key in "kill -9 $$":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -963,7 +973,7 @@ async def test_a_bang_card_settles_open() -> None:
         for key in "echo open-me":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -1044,7 +1054,7 @@ async def test_a_bang_card_says_who_ran_it() -> None:
         for key in "echo attribution":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -1124,7 +1134,7 @@ async def test_a_failing_bang_card_settles_open_too() -> None:
         for key in "exit 3":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -1190,8 +1200,15 @@ async def test_a_bang_call_with_no_recorded_result_stays_shut() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        # Poll until the boot worker has rendered the resumed history rather
+        # than betting one frame is enough: under parallel CPU load the
+        # transcript was still empty when a single tick expired.
+        cards: list[ToolCard] = []
+        for _ in range(200):
+            await pilot.pause()
+            cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+            if cards:
+                break
         assert len(cards) == 1
         assert cards[0]._state == "interrupted"
         assert cards[0].expanded is False
@@ -1211,7 +1228,7 @@ async def test_a_user_collapse_after_settle_is_final() -> None:
         for key in "echo hi":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -1240,7 +1257,7 @@ async def test_a_refused_second_command_comes_back_in_shell_mode() -> None:
         for key in "sleep 30":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if app._shell_card is not None:
                 break
@@ -1257,7 +1274,7 @@ async def test_a_refused_second_command_comes_back_in_shell_mode() -> None:
         assert editor.placeholder == SHELL_PLACEHOLDER
         await pilot.press("escape")  # leave the mode
         await pilot.press("escape")  # abort the running command
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if session.shell_records:
                 break
@@ -1293,7 +1310,7 @@ async def test_reload_aborts_and_settles_shell_before_disposing_its_session() ->
         for key in "sleep 30":
             await pilot.press("space" if key == " " else key)
         await pilot.press("enter")
-        for _ in range(40):
+        for _ in range(200):
             await pilot.pause()
             if app._shell_card is not None:
                 break
