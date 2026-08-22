@@ -1468,7 +1468,10 @@ class OperatorApp(App[None]):
         with self._transcript:
             yield WelcomeView(
                 lambda: session_welcome_info(
-                    self._session, self._providers, notice=self._splash_notice
+                    self._session,
+                    self._providers,
+                    notice=self._splash_notice,
+                    setup=self._setup_state,
                 )
             )
         # The dock band: subagent task list + todo list, sitting between the
@@ -2296,9 +2299,14 @@ class OperatorApp(App[None]):
         # A notice, not a red error: the splash paints this in the warning voice
         # beside its `/login` hint, which is exactly the affordance the user
         # needs. Toast headline included so it is noticed on a busy first frame.
+        # Action-first word order: on a narrow terminal the splash line is
+        # truncated from the right, so the command the user must run has to come
+        # BEFORE the diagnosis or it is what drops (D2). The band and toast
+        # already carry "no provider configured", so leading with the remedy
+        # spends the scarce columns on the one thing they do not.
         self._announce_on_splash(
-            "welcome — no provider configured yet. Run /login <provider> "
-            "(e.g. /login openai) to set one up, or /provider to see the list.",
+            "Run /login <provider> to get started (e.g. /login openai) "
+            "— no provider configured yet, or /provider to see the list.",
             "warning",
         )
         if self._status is not None:
@@ -12322,6 +12330,13 @@ def _splash_toast_headline(text: str) -> str:
         target = body[index + len(marker) :].strip()
         if target:
             return f"Fell back to {target}"
+    # The first-run notice leads with the REMEDY (D2), but the toast's job is
+    # the glance — the state, not the command. A blind 35-cell cut of that
+    # sentence lands mid-word ("…configured ye…") and repeats the greeting the
+    # splash already owns (D5), so the setup notice gets its own clean headline
+    # naming the condition rather than a truncated slice of the action line.
+    if "no provider configured" in body.lower():
+        return "No provider configured"
     # One clause, no wrap: the toast sits over the lockup, and a second
     # row is what buried the mark. 36 cells is comfortably inside the
     # right-hand gutter of a 80-col boot frame.

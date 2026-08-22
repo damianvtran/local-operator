@@ -48,6 +48,7 @@ from local_operator.tui.widgets.welcome import (
     TIP_GLYPH,
     TIP_MIN_WIDTH,
     TIP_ROTATE_INTERVAL_S,
+    TIP_SETUP,
     TIPS,
     WORDMARK,
     WORDMARK_SPACED,
@@ -1320,7 +1321,10 @@ def test_no_width_the_row_is_drawn_at_ever_truncates_a_tip() -> None:
 def test_the_threshold_is_the_width_the_pool_actually_needs() -> None:
     """The constant is DERIVED, so rewording a tip cannot leave it stale — which
     is how it came to admit a row 24 cells narrower than its longest entry."""
-    assert TIP_MIN_WIDTH == max(cell_len(f"{TIP_GLYPH} {tip}") for tip in TIPS)
+    # The setup-state opening tip (TIP_SETUP) is drawn at the same row, so the
+    # threshold must clear the WIDEST of the pool AND that tip, or the setup
+    # notice would truncate at a width the constant swore was safe.
+    assert TIP_MIN_WIDTH == max(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP))
     # One cell under it there is no row at all, rather than a fragment of one.
     assert not _tip_rows(_lines(_info(), TIP_MIN_WIDTH - 1, 99))
 
