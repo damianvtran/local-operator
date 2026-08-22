@@ -522,29 +522,56 @@ class AuthStore:
         ).fetchone()
         return bool(row and row[0] > self._now_ms())
 
-    def is_blocked_for(self, credential_id: int, provider: str, family: str = "") -> bool:
-        """Whether ``credential_id`` is out of rotation for ``family``.
+    def is_blocked_for_model(self, credential_id: int, provider: str, model_id: str) -> bool:
+        """Whether ``credential_id`` is out of rotation for ``model_id``.
 
-        An account-wide block stops every model, so it always counts. A
-        model-family block (``model:<family>``, written when a scoped quota
-        cap — Anthropic's ``7 day (Fable)`` — was the only binding window)
-        stops just that family: requests for other families must still see
-        the account, because the shared 5-hour / 7-day windows still gate
-        them. ``family == ""`` is the account-wide question itself.
+        The read side of a scoped quota block mirrors the rule the usage
+        layer gates caps by: a tier row applies to a model when its slug
+        appears in the model id (``fable`` in ``claude-fable-5``, ``grok-4``
+        in ``grok-4.6``). A block is therefore visible to exactly the models
+        whose cap wrote it, on ANY provider, without the two sides having to
+        agree on a family parser — the write stores the usage tier slug, the
+        read asks "does that slug gate this model". Account-wide blocks stop
+        everything as before; a model no scoped slug matches still sees the
+        account (the under-block direction, which heals on the next probe).
         """
         if self.is_blocked(credential_id, provider):
             return True
-        if not family:
+        lowered = (model_id or "").lower()
+        if not lowered:
             return False
         credential = self.get_credential(credential_id)
         provider = self._storage_id(provider)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
-        row = self._conn.execute(
-            "SELECT blocked_until_ms FROM auth_credential_blocks"
-            " WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
-            (credential_id, provider_key, f"model:{family}"),
-        ).fetchone()
-        return bool(row and row[0] > self._now_ms())
+        rows = self._conn.execute(
+            "SELECT block_scope, blocked_until_ms FROM auth_credential_blocks"
+            " WHERE credential_id = ? AND provider_key = ? AND block_scope != ''",
+            (credential_id, provider_key),
+        ).fetchall()
+        now = self._now_ms()
+        return any(until > now and scope.removeprefix("model:") in lowered for scope, until in rows)
+
+    def clear_blocks_for_model(self, credential_id: int, provider: str, model_id: str) -> None:
+        """Drop the account-wide block and every scoped block gating ``model_id``.
+
+        The recovery-probe counterpart of :meth:`is_blocked_for_model`: a
+        fresh verdict that proves the model serviceable supersedes exactly
+        the blocks that could have hidden it, and leaves other families'
+        scoped blocks standing (a probe that proves opus serviceable says
+        nothing about a Fable weekly that is still spent).
+        """
+        credential = self.get_credential(credential_id)
+        provider = self._storage_id(provider)
+        provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
+        lowered = (model_id or "").lower()
+        self._conn.execute(
+            "DELETE FROM auth_credential_blocks"
+            " WHERE credential_id = ? AND provider_key = ?"
+            " AND (block_scope = '' OR (? != '' AND block_scope != ''"
+            " AND instr(?, substr(block_scope, 7)) > 0))",
+            (credential_id, provider_key, lowered, lowered),
+        )
+        self._conn.commit()
 
     def clear_blocks(self, credential_id: int) -> None:
         self._conn.execute(
@@ -879,16 +906,16 @@ class AuthStore:
         source: str | None,
         *,
         ignore_demotions: bool = False,
-        family: str = "",
+        model_id: str = "",
     ) -> list[StoredCredential]:
-        # ``family`` scopes the block filter: an account blocked only for one
+        # ``model_id`` scopes the block filter: an account blocked only for a
         # model family (a spent scoped weekly cap) still serves every other
-        # family, so a resolve that names a different one must see the row.
+        # family, so a resolve that names a different model must see the row.
         rows = [
             r
             for r in self.list_credentials(provider)
             if r.credential_type == credential_type
-            and not self.is_blocked_for(r.id, provider, family)
+            and not self.is_blocked_for_model(r.id, provider, model_id)
         ]
         if source is not None:
             rows = [r for r in rows if r.data.get("source") == source]
@@ -939,21 +966,22 @@ class AuthStore:
         *,
         force_refresh: bool = False,
         read_only: bool = False,
-        family: str = "",
+        model_id: str = "",
     ) -> str | None:
         """Resolve the API key for ``provider`` via the 7-step cascade.
 
         ``read_only`` makes the resolve decide nothing about routing — see
-        :meth:`_resolve`. ``family`` names the model family the request will
-        run, so model-family-scoped quota blocks (see :meth:`is_blocked_for`)
-        only exclude the accounts that cannot serve THAT family.
+        :meth:`_resolve`. ``model_id`` names the model the request will run,
+        so model-family-scoped quota blocks (see
+        :meth:`is_blocked_for_model`) only exclude the accounts that cannot
+        serve THAT model.
         """
         key, _row = await self._resolve(
             provider,
             session_id,
             force_refresh=force_refresh,
             read_only=read_only,
-            family=family,
+            model_id=model_id,
         )
         return key
 
@@ -964,7 +992,7 @@ class AuthStore:
         *,
         force_refresh: bool = False,
         read_only: bool = False,
-        family: str = "",
+        model_id: str = "",
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -986,7 +1014,7 @@ class AuthStore:
             session_id,
             force_refresh=force_refresh,
             read_only=read_only,
-            family=family,
+            model_id=model_id,
         )
         if key is None:
             return None
@@ -1089,7 +1117,7 @@ class AuthStore:
         force_refresh: bool = False,
         read_only: bool = False,
         ignore_demotions: bool = False,
-        family: str = "",
+        model_id: str = "",
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
 
@@ -1133,7 +1161,7 @@ class AuthStore:
             "oauth",
             source=None,
             ignore_demotions=ignore_demotions,
-            family=family,
+            model_id=model_id,
         )
         for row in self._selection_order(oauth_rows, provider, session_id, read_only=read_only):
             try:
@@ -1160,7 +1188,7 @@ class AuthStore:
             "api_key",
             source="login",
             ignore_demotions=ignore_demotions,
-            family=family,
+            model_id=model_id,
         )
         for row in self._selection_order(login_rows, provider, session_id, read_only=read_only):
             key = row.data.get("key")
@@ -1186,7 +1214,7 @@ class AuthStore:
                 "api_key",
                 source=None,
                 ignore_demotions=ignore_demotions,
-                family=family,
+                model_id=model_id,
             )
             if row.data.get("source") != "login"
         ]
@@ -1225,7 +1253,7 @@ class AuthStore:
                 force_refresh=force_refresh,
                 read_only=read_only,
                 ignore_demotions=True,
-                family=family,
+                model_id=model_id,
             )
 
         return None, None
@@ -1269,7 +1297,7 @@ class AuthStore:
         api_key: str | None = None,
         block_ms: int = DEFAULT_BLOCK_MS,
         *,
-        family: str = "",
+        model_id: str = "",
     ) -> bool:
         """a/b/c tier-1 step (c): drop the failing credential, keep a sibling.
 
@@ -1329,7 +1357,11 @@ class AuthStore:
                 # over-block (account-wide on a family verdict) is the side
                 # that strands spendable quota behind "all credentials
                 # unusable", so it is never written from a family-named
-                # rotation.
+                # rotation. The family comes from the model the request ran,
+                # via the same parser the usage layer's tier rows key on.
+                from local_operator.model.registry import model_family
+
+                family = model_family(model_id) if model_id else ""
                 scope = f"model:{family}" if (usage_limited and family) else ""
                 self.block_credential(
                     failing.id,

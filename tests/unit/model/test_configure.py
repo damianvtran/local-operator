@@ -904,13 +904,13 @@ async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_p
         # 5h/7d windows still serve other families, so an opus resolve must
         # still see the row (the defect this guards: "all credentials
         # unusable" on a pool whose only spent window was Fable's).
-        assert store.is_blocked_for(first.id, "anthropic", "fable")
+        assert store.is_blocked_for_model(first.id, "anthropic", "claude-fable-5")
         assert not store.is_blocked(first.id, "anthropic")
-        assert not store.is_blocked_for(first.id, "anthropic", "opus")
+        assert not store.is_blocked_for_model(first.id, "anthropic", "claude-opus-4-8")
         assert not store.is_blocked(second.id, "anthropic")
         selected = await store.get_oauth_access("anthropic", session)
         assert selected is not None and selected.credential_id == second.id
-        opus = await store.get_oauth_access("anthropic", session, family="opus")
+        opus = await store.get_oauth_access("anthropic", session, model_id="claude-opus-4-8")
         assert opus is not None  # the family-blocked account still serves opus
         assert stream._route_state.active is None
         assert any("trying another anthropic account" in notice for notice in notices)
@@ -2188,8 +2188,8 @@ async def test_family_scoped_blocks_leave_other_families_serving(tmp_path) -> No
         # The fable verdict on gominerva is family-scoped; the shared-window
         # verdicts on the other three are account-wide.
         assert not store.is_blocked(gominerva.id, "anthropic")
-        assert store.is_blocked_for(gominerva.id, "anthropic", "fable")
-        assert not store.is_blocked_for(gominerva.id, "anthropic", "opus")
+        assert store.is_blocked_for_model(gominerva.id, "anthropic", "claude-fable-5")
+        assert not store.is_blocked_for_model(gominerva.id, "anthropic", "claude-opus-4-8")
         assert store.is_blocked(radienthq.id, "anthropic")
         assert store.is_blocked(pergamon.id, "anthropic")
         assert store.is_blocked(gmail.id, "anthropic")
@@ -2202,7 +2202,9 @@ async def test_family_scoped_blocks_leave_other_families_serving(tmp_path) -> No
             stream.on_model_changed(opus_spec)
             stream.begin_message()
             await stream.preflight_usage(opus_spec)
-        selected = await store.get_oauth_access("anthropic", "session-a", family="opus")
+        selected = await store.get_oauth_access(
+            "anthropic", "session-a", model_id="claude-opus-4-8"
+        )
         assert selected is not None and selected.credential_id == gominerva.id
         assert stream._route_state.active is None
     finally:

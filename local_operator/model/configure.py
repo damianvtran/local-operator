@@ -42,7 +42,6 @@ from local_operator.model.registry import (
     anthropic_default_model_info,
     anthropic_family_model_info,
     get_model_info,
-    model_family,
     unknown_model_info,
 )
 from local_operator.paths import config_dir
@@ -2070,10 +2069,9 @@ class SessionStreamFn:
         self._usage_checked_at = now
 
         retry = RetrySettings.from_settings(self._settings)
-        # The family the routed model draws on: quota verdicts and credential
-        # blocks are scoped to it, so a spent family cap never takes the
-        # account out of rotation for models of another family.
-        family = model_family(model.model_id)
+        # Credential blocks are scoped to the model family that spent them,
+        # so a spent family cap never takes the account out of rotation for
+        # models of another family; the reads below are model-scoped.
         if (
             self._route_state.active is not None
             and not self._route_state.primary_retry_due()
@@ -2099,7 +2097,7 @@ class SessionStreamFn:
         while True:
             try:
                 access = await self._auth_store.get_oauth_access(
-                    model.provider, self._session_id, family=family
+                    model.provider, self._session_id, model_id=model.model_id
                 )
             except Exception:
                 return
@@ -2107,7 +2105,8 @@ class SessionStreamFn:
                 storage = self._storage_provider(model.provider)
                 rows = self._auth_store.list_credentials(storage)
                 if rows and all(
-                    self._auth_store.is_blocked_for(row.id, storage, family) for row in rows
+                    self._auth_store.is_blocked_for_model(row.id, storage, model.model_id)
+                    for row in rows
                 ):
                     # Every account is under a block, but "blocked" is only a
                     # verdict from an earlier probe — quota resets while the
@@ -2201,7 +2200,9 @@ class SessionStreamFn:
                     if candidate.id != access.credential_id
                     and candidate.id not in attempted_ids
                     and (row is None or candidate.credential_type == row.credential_type)
-                    and not self._auth_store.is_blocked_for(candidate.id, storage, family)
+                    and not self._auth_store.is_blocked_for_model(
+                        candidate.id, storage, model.model_id
+                    )
                 ]
                 if not siblings and health.state == "depleted":
                     # No UNBLOCKED sibling can take this model, but blocked
@@ -2221,7 +2222,9 @@ class SessionStreamFn:
                         if candidate.id != access.credential_id
                         and candidate.id not in attempted_ids
                         and (row is None or candidate.credential_type == row.credential_type)
-                        and self._auth_store.is_blocked_for(candidate.id, storage, family)
+                        and self._auth_store.is_blocked_for_model(
+                            candidate.id, storage, model.model_id
+                        )
                     ]
                     recovered = await self._recover_blocked_accounts(
                         model, storage, blocked_rows, retry, attempted_ids
@@ -2354,7 +2357,6 @@ class SessionStreamFn:
         """
         from local_operator.providers.failover import parse_selector
 
-        family = model_family(model.model_id)
         threshold = min(100.0, max(0.0, float(retry.usage_reserve_percent))) / 100.0
         # ``None`` means no shared window carried a number — indeterminate, not
         # headroom, so the tier-cap guard stays off and the cautious rotate /
@@ -2374,7 +2376,7 @@ class SessionStreamFn:
             if candidate.id != access.credential_id
             and candidate.id not in attempted_ids
             and (row is None or candidate.credential_type == row.credential_type)
-            and not self._auth_store.is_blocked_for(candidate.id, storage, family)
+            and not self._auth_store.is_blocked_for_model(candidate.id, storage, model.model_id)
         ]
         fallback = await self._first_available_fallback(
             model,
@@ -2436,7 +2438,7 @@ class SessionStreamFn:
                 if candidate.id != access.credential_id
                 and candidate.id not in attempted_ids
                 and (row is None or candidate.credential_type == row.credential_type)
-                and self._auth_store.is_blocked_for(candidate.id, storage, family)
+                and self._auth_store.is_blocked_for_model(candidate.id, storage, model.model_id)
             ]
             recovered = await self._recover_blocked_accounts(
                 model, storage, blocked_rows, retry, attempted_ids
@@ -2649,15 +2651,12 @@ class SessionStreamFn:
             # or block-again-and-fall-back). A depleted verdict is returned,
             # not swallowed — the policy decides its fate, and the caller's
             # fallback notice must name the quota, not the credential pool.
-            # A definite verdict supersedes the blocks that could hide this
-            # model: the account-wide backoff and THIS family's scoped block.
-            # Blocks for OTHER families stay standing — a probe that proves
-            # opus serviceable says nothing about a fable weekly that is
-            # still spent.
-            family = model_family(model.model_id)
-            self._auth_store.clear_block(row.id, storage)
-            if family:
-                self._auth_store.clear_block(row.id, storage, block_scope=f"model:{family}")
+            # A definite verdict supersedes exactly the blocks that could
+            # hide this model: the account-wide backoff and every scoped
+            # block whose family gates it. Blocks for OTHER families stay
+            # standing — a probe that proves opus serviceable says nothing
+            # about a fable weekly that is still spent.
+            self._auth_store.clear_blocks_for_model(row.id, storage, model.model_id)
             self._auth_store.pin_session_credential(model.provider, self._session_id, row.id)
             shared_remaining, tier_binding = shared_tier_saturation(
                 report,

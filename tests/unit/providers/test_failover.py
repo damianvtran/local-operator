@@ -374,7 +374,7 @@ class FakeAuth:
         error: Any,
         api_key: str | None = None,
         *,
-        family: str = "",
+        model_id: str = "",
     ) -> bool:
         self.rotations.append((provider, api_key))
         pool = self.keys.get(provider, [])
@@ -2883,8 +2883,8 @@ class TestRotationPermutations:
         # (a family the opus verdict says nothing about) still sees the row.
         # The preflight upgrades to an account-wide block when a shared
         # window turns out to be the binding one.
-        assert store.is_blocked_for(rows["acct-a"].id, "anthropic", "opus")
-        assert not store.is_blocked_for(rows["acct-a"].id, "anthropic", "fable")
+        assert store.is_blocked_for_model(rows["acct-a"].id, "anthropic", "claude-opus-5")
+        assert not store.is_blocked_for_model(rows["acct-a"].id, "anthropic", "claude-fable-5")
         assert not store.is_blocked(rows["acct-a"].id, "anthropic")
         assert not store.is_blocked(rows["acct-b"].id, "anthropic")
 
@@ -3106,7 +3106,7 @@ class TestTheLoopBackSweep:
                 error: Any,
                 api_key: str | None = None,
                 *,
-                family: str = "",
+                model_id: str = "",
             ) -> bool:
                 return False
 
@@ -3161,7 +3161,7 @@ class TestTheLoopBackSweep:
                 error: Any,
                 api_key: str | None = None,
                 *,
-                family: str = "",
+                model_id: str = "",
             ) -> bool:
                 return False
 

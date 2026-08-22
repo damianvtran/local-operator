@@ -36,7 +36,6 @@ from local_operator.harness.types import (
     StreamEvent,
 )
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort
-from local_operator.model.registry import model_family
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
@@ -1290,6 +1289,7 @@ class FailoverAuthStore(Protocol):
         *,
         force_refresh: bool = False,
         read_only: bool = False,
+        model_id: str = "",
     ) -> str | None: ...  # pragma: no cover
 
     def rotate_sibling(
@@ -1299,7 +1299,7 @@ class FailoverAuthStore(Protocol):
         error: BaseException,
         api_key: str | None = None,
         *,
-        family: str = "",
+        model_id: str = "",
     ) -> bool: ...  # pragma: no cover
 
 
@@ -1333,6 +1333,7 @@ class OAuthAccessSource(Protocol):
         *,
         force_refresh: bool = False,
         read_only: bool = False,
+        model_id: str = "",
     ) -> "OAuthAccess | None": ...  # pragma: no cover
 
 
@@ -1625,7 +1626,7 @@ async def stream_with_failover(
                     state,
                     error,
                     read_only=request.isolated,
-                    family=model_family(spec.model_id),
+                    model_id=spec.model_id,
                 )
                 token = access.access_token if access is not None else None
                 if token != current_token:
@@ -1958,7 +1959,7 @@ def _rotate_sibling(
     session_id: str | None,
     error: BaseException,
     api_key: str | None,
-    family: str,
+    model_id: str,
 ) -> None:
     """Step (c) of the a/b/c rotation, with the family dimension attached.
 
@@ -1971,7 +1972,7 @@ def _rotate_sibling(
     two-argument behaviour.
     """
     try:
-        auth.rotate_sibling(provider, session_id, error, api_key=api_key, family=family)
+        auth.rotate_sibling(provider, session_id, error, api_key=api_key, model_id=model_id)
     except TypeError:
         auth.rotate_sibling(provider, session_id, error, api_key=api_key)
 
@@ -2001,7 +2002,6 @@ async def _recover_quota_blocked(
 
     if not isinstance(auth, CredentialLister):
         return None
-    family = model_family(model_id)
     try:
         rows = [
             row
@@ -2011,7 +2011,7 @@ async def _recover_quota_blocked(
     except Exception:
         return None
     for row in rows:
-        if not _is_blocked_for(auth, row.id, provider, family):
+        if not _is_blocked_for_model(auth, row.id, provider, model_id):
             continue  # the cascade already sees this row; not our gap
         fresh = getattr(auth, "ensure_oauth_fresh", None)
         if not callable(fresh):
@@ -2045,9 +2045,7 @@ async def _recover_quota_blocked(
         health = usage_health(report, model_id)
         if health.state not in ("healthy", "reserve"):
             continue  # genuinely spent for this family: the block stands
-        if family:
-            _clear_block(auth, row.id, provider, f"model:{family}")
-        _clear_block(auth, row.id, provider, "")
+        _clear_blocks_for_model(auth, row.id, provider, model_id)
         logger.info(
             "quota recovery: credential %d for %s serves %s again (%s)",
             row.id,
@@ -2075,26 +2073,22 @@ def _provider_definition(provider: str) -> Any:
     return get_provider_definition(provider)
 
 
-def _is_blocked_for(
-    auth: FailoverAuthStore, credential_id: int, provider: str, family: str
+def _is_blocked_for_model(
+    auth: FailoverAuthStore, credential_id: int, provider: str, model_id: str
 ) -> bool:
-    probe = getattr(auth, "is_blocked_for", None)
+    probe = getattr(auth, "is_blocked_for_model", None)
     if callable(probe):
-        return bool(probe(credential_id, provider, family))
+        return bool(probe(credential_id, provider, model_id))
     return bool(getattr(auth, "is_blocked", lambda *_a: False)(credential_id, provider))
 
 
-def _clear_block(auth: FailoverAuthStore, credential_id: int, provider: str, scope: str) -> None:
-    clear = getattr(auth, "clear_block", None)
+def _clear_blocks_for_model(
+    auth: FailoverAuthStore, credential_id: int, provider: str, model_id: str
+) -> None:
+    clear = getattr(auth, "clear_blocks_for_model", None)
     if not callable(clear):
         return
-    try:
-        if scope:
-            clear(credential_id, provider, block_scope=scope)
-        else:
-            clear(credential_id, provider)
-    except TypeError:
-        clear(credential_id, provider)
+    clear(credential_id, provider, model_id)
 
 
 async def _resolve_access_for_provider(
@@ -2105,7 +2099,7 @@ async def _resolve_access_for_provider(
     error: BaseException | None,
     *,
     read_only: bool = False,
-    family: str = "",
+    model_id: str = "",
 ) -> "OAuthAccess | None":
     """Bridge AuthStore into the a/b/c resolver shape, returning the
     :class:`~local_operator.providers.auth_store.OAuthAccess` record (or
@@ -2133,23 +2127,23 @@ async def _resolve_access_for_provider(
             flags["read_only"] = True
         return flags
 
-    def _family_flags(force_refresh: bool) -> dict[str, Any]:
-        """``family`` rides only when named: stores (and test doubles) that
-        predate model-scoped quota blocks declare the bare signature."""
+    def _model_flags(force_refresh: bool) -> dict[str, Any]:
+        """``model_id`` rides only when named: stores (and test doubles)
+        that predate model-scoped quota blocks declare the bare signature."""
         flags: dict[str, Any] = _flags(force_refresh)
-        if family:
-            flags["family"] = family
+        if model_id:
+            flags["model_id"] = model_id
         return flags
 
     async def _access(*, force_refresh: bool = False) -> "OAuthAccess | None":
         if oauth_store is None:
             return None
         return await oauth_store.get_oauth_access(
-            provider, session_id, **_family_flags(force_refresh)
+            provider, session_id, **_model_flags(force_refresh)
         )
 
     async def _key(*, force_refresh: bool = False) -> str | None:
-        return await auth.get_api_key(provider, session_id, **_family_flags(force_refresh))
+        return await auth.get_api_key(provider, session_id, **_model_flags(force_refresh))
 
     async def resolver(ctx: ApiKeyResolveContext) -> str | None:
         try:
@@ -2158,7 +2152,7 @@ async def _resolve_access_for_provider(
                 if record is None:
                     return await _key()
             elif ctx.last_chance:
-                _rotate_sibling(auth, provider, session_id, ctx.error, ctx.previous_key, family)
+                _rotate_sibling(auth, provider, session_id, ctx.error, ctx.previous_key, model_id)
                 record = await _access()
                 if record is None:
                     return await _key()
