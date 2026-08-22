@@ -44,6 +44,7 @@ class RoutedStream(ScriptedStream):
         self.notice_handler: Any = None
         self.restored: list[tuple[str, str | None, str]] = []
         self.models_changed: list[ModelSpec] = []
+        self.withdrawals: int = 0
 
     def set_route_handler(self, handler) -> None:
         self.route_handler = handler
@@ -56,6 +57,9 @@ class RoutedStream(ScriptedStream):
 
     def on_model_changed(self, model: ModelSpec) -> None:
         self.models_changed.append(model)
+
+    def withdraw_fallback(self) -> None:
+        self.withdrawals += 1
 
 
 def _session(tmp_path, stream, **kwargs) -> Session:
@@ -277,6 +281,78 @@ async def test_set_model_clears_the_pin_and_announces_the_selection(tmp_path):
             isinstance(event, ModelChangeEvent) and not event.is_fallback for event in events
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_reselecting_the_same_model_withdraws_the_fallback_pin(tmp_path):
+    """The reported stuck-fallback symptom, closed.
+
+    A fallback pin rescues the SELECTED model without changing it, so "switching
+    back" to the recovered model re-selects the model the session is ALREADY
+    selected on. The selector never changes, so the stream fn's selector-driven
+    route clear never fires — and the same-model branch of ``set_model`` used to
+    treat the re-selection as a knob adjustment, leaving the pin in force. The
+    user's only workaround was switching away and back.
+
+    An explicit re-selection must withdraw the pin: the session's display state,
+    the persisted route entry, and the stream fn's own route state.
+    """
+    stream = RoutedStream()
+    session = _session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+
+    await stream.route_handler(FallbackTarget("zai/glm-5.3", None), "provider failure")
+    assert session.effective_model_label == "zai/glm-5.3"
+
+    # Re-select the SAME model the fallback displaced — explicitly, as /model does.
+    session.set_model(session.model, explicit=True)
+
+    assert session.active_fallback is None
+    assert session.effective_model_label == session.model_label
+    assert stream.withdrawals == 1  # the stream fn's route state was told to clear
+    await wait_for(lambda: len(_route_entries(session)) == 2)
+    entries = _route_entries(session)
+    assert entries[1]["active"] is None
+    assert entries[1]["primary"] == session.model_label
+    await wait_for(
+        lambda: any(
+            isinstance(event, ModelChangeEvent)
+            and not event.is_fallback
+            and event.reason == "model reselected"
+            for event in events
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_knob_change_while_fallback_pinned_does_not_withdraw(tmp_path):
+    """``/effort`` is not a model choice: it must NOT withdraw a pinned fallback.
+
+    The same-model branch of ``set_model`` serves both an explicit re-selection
+    and a knob adjustment; only the former withdraws. An ``/effort`` change
+    while a fallback serves re-derives the display spec (the pinned test above
+    pins that) but leaves the route exactly where it was.
+    """
+    stream = RoutedStream()
+    session = _session(
+        tmp_path,
+        stream,
+        model=ModelSpec(
+            provider="test",
+            model_id="m",
+            context_window=100_000,
+            reasoning_efforts=("low", "medium", "high"),
+            reasoning_effort="low",
+        ),
+    )
+    await stream.route_handler(FallbackTarget("openai/gpt-5.2", None), "provider failure")
+
+    session.set_model(session.model.model_copy(update={"reasoning_effort": "high"}))
+
+    assert session.active_fallback is not None  # the pin survives a knob change
+    assert session.effective_model_label == "openai/gpt-5.2"
+    assert stream.withdrawals == 0
 
 
 @pytest.mark.asyncio

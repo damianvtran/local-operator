@@ -1553,7 +1553,7 @@ class Session:
         )
         return result
 
-    def set_model(self, model: ModelSpec) -> None:
+    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
         """Swap the model spec, in force from the very next provider call.
 
         Not "from the next turn": the running turn picks it up too. A turn is a
@@ -1580,6 +1580,15 @@ class Session:
         it was never computed for. That hook must be SYNCHRONOUS: this method is
         sync and would discard a returned coroutine, which is the right contract
         for what is only a cache re-fit.
+
+        ``explicit`` marks a deliberate model CHOICE — the ``/model`` command and
+        the phone's model switch — as opposed to an internal knob adjustment
+        (``/effort``, per-request sampling overrides) that rewrites the spec
+        without choosing a model. The distinction only matters while a provider
+        fallback is pinned: an explicit choice withdraws the pin even when it
+        re-selects the very model the fallback displaced, because that is the
+        user reclaiming it. A knob change never withdraws — the user is adjusting
+        the model that is serving them, fallback or not.
         """
         previous = self._model
         self._model = model
@@ -1590,6 +1599,20 @@ class Session:
             # render uses, instead of waiting for the next render to say it.
             self._announce_text_only_omission_once()
         if (previous.provider, previous.model_id) == (model.provider, model.model_id):
+            if explicit and self._active_fallback is not None:
+                # An explicit re-selection of the model a fallback displaced: the
+                # user is reclaiming it, so the pin's premise is withdrawn even
+                # though the selector did not move. The stream fn's route clear is
+                # selector-driven (preflight resets on a NEW selector), and a
+                # same-model re-selection never changes the selector — so that
+                # lazy clear would never fire and the session would stay glued to
+                # the fallback until the user switched away and back. Tell the
+                # stream fn directly.
+                self._drop_fallback_pin(model, "model reselected")
+                withdraw = getattr(self._stream_fn, "withdraw_fallback", None)
+                if callable(withdraw):
+                    withdraw()
+                return
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
             # alone. `/effort` and the server's option overrides take this path
@@ -1623,24 +1646,36 @@ class Session:
         # exists to prevent. Persisted (with the new primary) so a resume does
         # not restore a pin the user already switched away from.
         if self._active_fallback is not None:
-            self._active_fallback = None
-            self._active_route = None
-            self._spawn_background(self._persist_active_route(model))
-            self._spawn_background(
-                self._emit(
-                    ModelChangeEvent(
-                        provider=model.provider,
-                        model_id=model.model_id,
-                        effort=model.reasoning_effort,
-                        reason="model switched",
-                        is_fallback=False,
-                        context_window=int(model.context_window),
-                    )
-                )
-            )
+            self._drop_fallback_pin(model, "model switched")
         notify = getattr(self._stream_fn, "on_model_changed", None)
         if callable(notify):
             notify(model)
+
+    def _drop_fallback_pin(self, primary: ModelSpec, reason: str) -> None:
+        """Withdraw the pinned fallback: clear display state, persist, announce.
+
+        Shared by the two withdrawal edges — a switch to a DIFFERENT model and an
+        explicit re-selection of the SAME model — because both are "the user
+        chose a model, so the rescue route stops speaking for them". Persisted
+        with the new primary so a resume does not restore a pin the user already
+        withdrew; the ``ModelChangeEvent`` repaints any host display still
+        naming the fallback.
+        """
+        self._active_fallback = None
+        self._active_route = None
+        self._spawn_background(self._persist_active_route(primary))
+        self._spawn_background(
+            self._emit(
+                ModelChangeEvent(
+                    provider=primary.provider,
+                    model_id=primary.model_id,
+                    effort=primary.reasoning_effort,
+                    reason=reason,
+                    is_fallback=False,
+                    context_window=int(primary.context_window),
+                )
+            )
+        )
 
     @property
     def goal(self) -> str:

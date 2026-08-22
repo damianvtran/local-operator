@@ -2178,13 +2178,29 @@ def test_hub_peek_and_list_are_read_tier_while_control_stays_write():
 
 def test_a_child_hub_reply_with_parent_shaped_args_still_reaches_the_parent():
     """Children mirror the parent tool shape they see (``op``/``to``); the
-    child surface must drop those keys and deliver the message anyway."""
+    child surface must drop those keys and deliver the message anyway.
+
+    ``model_validate`` is the construction the child tool actually performs
+    (``HubChildParams(**args)``), and it is what runs the ``mode="before"``
+    validator that strips the parent-shaped keys. Passing them as keyword
+    arguments to the constructor would be a type error the validator never
+    sees, so the dict form is the one under test.
+    """
     comms, _jobs, _child, parent = wire()
-    parent.received = []
 
     from local_operator.tools.builtin import HubChildParams
 
-    params = HubChildParams(  # type: ignore[call-arg]
-        op="send", to=["parent"], message="review posted"
+    params = HubChildParams.model_validate(
+        {"op": "send", "to": ["parent"], "message": "review posted"}
     )
     assert params.message == "review posted"
+
+    # The dropped keys must not stop delivery: the reply lands as an aside on
+    # the parent, which is what the child's ``hub`` call resolves to.
+    outcome = comms.reply_to_parent("job-1", params.message)
+    assert outcome == "delivered to the parent (it will read this at its next step)"
+    [aside] = parent.asides
+    message = aside()
+    assert isinstance(message, CustomMessage)
+    assert message.custom_type == HUB_MESSAGE_TYPE
+    assert "review posted" in message.details["text"]

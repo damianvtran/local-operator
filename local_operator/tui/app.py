@@ -7217,7 +7217,10 @@ class OperatorApp(App[None]):
         old_label = session.model_label
         # The chosen effort rides along when the new model accepts it: a user
         # who dropped to `low` for cost did not mean "until I switch models".
-        session.set_model(self._spec_with_chosen_effort(spec))
+        # ``explicit``: this is a deliberate model choice, so a pinned fallback
+        # route is withdrawn even when the choice re-selects the model the
+        # fallback displaced — see ``Session.set_model``.
+        session.set_model(self._spec_with_chosen_effort(spec), explicit=True)
         # A text-only model renders the history WITHOUT its images (see
         # ``Session._render_history``), so the estimate painted for the vision
         # model overstates what the new one actually carries. Re-measure so

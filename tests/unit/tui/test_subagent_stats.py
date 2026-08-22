@@ -627,8 +627,21 @@ def test_no_width_paints_a_childs_model_with_nothing_saying_whose_it_is() -> Non
 
 # -- the two ends wired together ---------------------------------------------
 @pytest.mark.asyncio
-async def test_opening_and_leaving_a_page_repoints_and_restores_the_live_band() -> None:
-    """End to end through the app: open the page, read the band, leave."""
+async def test_opening_and_leaving_a_page_repoints_and_restores_the_live_band(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end through the app: open the page, read the band, leave.
+
+    The app's 1 Hz subagent poll re-derives the band from the LIVE session
+    ledger — the running agent count plus the harvested child cost. Under a
+    slow CI runner that tick can land between the manual ``update`` below and
+    the final assertion, overwriting the hand-set ``$1.20`` with the polled
+    ``$1.50`` and turning a deterministic repaint check into a race (the
+    flake this pin used to be). This test drives every band edge explicitly —
+    open, refresh, close — so the poll is pure interference: push its interval
+    past the test's lifetime and let the explicit calls be the only writers.
+    """
+    monkeypatch.setattr("local_operator.tui.app.JOB_POLL_INTERVAL_S", 3600.0)
     job = Job(
         model_label=CHILD_MODEL,
         progress="auditing merged MRs",
