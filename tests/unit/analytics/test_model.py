@@ -164,6 +164,48 @@ def test_total_tokens_includes_cache_on_cache_exclusive_provider():
     assert agg.total_tokens == 102_000  # context + output, not input + output
 
 
+def test_cost_usd_from_micro():
+    agg = UsageAggregate(calls=2, cost_micro=8_340_000, cost_known_calls=2)
+    assert agg.cost_usd == 8.34
+    assert agg.cost_is_known is True
+    assert agg.cost_is_partial is False
+
+
+def test_cost_partial_when_some_calls_unpriced():
+    # 10 calls, only 7 priceable -> the dollar figure is a lower bound.
+    agg = UsageAggregate(calls=10, cost_micro=1_500_000, cost_known_calls=7)
+    assert agg.cost_is_partial is True
+    assert agg.cost_is_known is True
+
+
+def test_cost_unknown_when_nothing_priced():
+    # A local-model-only run: no call had a price.
+    agg = UsageAggregate(calls=5, cost_micro=0, cost_known_calls=0)
+    assert agg.cost_is_known is False
+    assert agg.cost_is_partial is True  # 0 < 5
+    assert agg.cost_usd == 0.0
+
+
+def test_callsnapshot_carries_cost():
+    snap = CallSnapshot(
+        ts_ms=1,
+        session_id="s",
+        provider="anthropic",
+        model_id="m",
+        input_tokens=1,
+        output_tokens=1,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        reasoning_tokens=0,
+        context_tokens=2,
+        component_chars={},
+        cost_micro=12345,
+        cost_known=True,
+    )
+    assert snap.cost_micro == 12345
+    assert snap.cost_known is True
+
+
 def test_aggregate_cache_rate_none_without_context():
     agg = UsageAggregate(calls=1, context_tokens=0, cache_read_tokens=0)
     assert agg.cache_hit_rate is None

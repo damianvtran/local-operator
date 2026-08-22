@@ -14,6 +14,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.analytics_panel import (
     AnalyticsScreen,
     build_report,
+    format_cost,
     format_percent,
     format_tokens,
     proportion_bar,
@@ -31,6 +32,8 @@ def _agg() -> UsageAggregate:
         cache_write_tokens=80_000,
         reasoning_tokens=40_000,
         context_tokens=3_500_000,
+        cost_micro=4_200_000,
+        cost_known_calls=100,
     )
     agg.components = {k: 0 for k in COMPONENT_KEYS}
     agg.components["conversation"] = 1_800_000
@@ -43,6 +46,8 @@ def _agg() -> UsageAggregate:
         output_tokens=120_000,
         context_tokens=3_500_000,
         cache_read_tokens=3_000_000,
+        cost_micro=4_200_000,
+        cost_known_calls=100,
     )
     agg.by_provider = {"anthropic": sub}
     agg.by_session = {"abc123": sub}
@@ -64,6 +69,80 @@ def test_format_tokens_scales():
 def test_format_percent():
     assert format_percent(0.734) == "73%"
     assert format_percent(None) == "—"
+
+
+def test_format_cost_states():
+    def agg(cost_micro, known, calls):
+        return UsageAggregate(calls=calls, cost_micro=cost_micro, cost_known_calls=known)
+
+    # Complete, whole-dollar.
+    assert format_cost(agg(8_340_000, 10, 10)) == "$8.34"
+    # Partial (some calls unpriced) -> lower-bound marker.
+    assert format_cost(agg(8_340_000, 7, 10)) == "$8.34+"
+    # Nothing priced -> $—, never $0.00.
+    assert format_cost(agg(0, 0, 5)) == "$—"
+    # Sub-cent keeps precision so a real spend is not rounded to zero.
+    assert format_cost(agg(4_200, 3, 3)) == "$0.0042"
+    # Large sum abbreviates.
+    assert format_cost(agg(1_200_000_000, 5, 5)) == "$1.2k"
+
+
+def test_report_shows_cost():
+    text = _text(_agg())
+    assert "Est. cost" in text
+    assert "$4.20" in text  # 4_200_000 micro-USD
+    assert "list price" in text  # the estimate caveat
+    # cost column appears in the per-provider and per-session tables
+    assert text.count("$4.20") >= 3  # totals + provider + session
+
+
+def test_report_marks_unpriced_and_partial():
+    agg = _agg()
+    # Add an unpriced local provider and a partially-priced session.
+    unpriced = UsageAggregate(calls=5, context_tokens=100, cost_micro=0, cost_known_calls=0)
+    agg.by_provider["ollama"] = unpriced
+    text = "\n".join(line.plain for line in build_report(agg, 120))
+    assert "$—" in text  # the unpriced provider row
+
+
+def test_cost_marker_legend_shown_only_when_marks_present():
+    # D1: a legend explains + and $— — but only when one is actually on screen.
+    partial = _agg()
+    partial.by_provider["ollama"] = UsageAggregate(
+        calls=5, context_tokens=100, cost_micro=0, cost_known_calls=0
+    )
+    text_with_marks = "\n".join(line.plain for line in build_report(partial, 120))
+    assert "lower bound" in text_with_marks
+    assert "no published price" in text_with_marks
+
+    # A fully-priced run (no + or $—) draws no legend.
+    clean = _agg()  # all cost_known_calls == calls, no unpriced provider
+    text_clean = "\n".join(line.plain for line in build_report(clean, 120))
+    assert "lower bound" not in text_clean
+
+
+def test_tables_share_a_name_column():
+    # D2: BY PROVIDER and BY SESSION align — the tokens column starts at the
+    # same offset in both, because they share one name_col.
+    agg = _agg()
+    lines = [line.plain for line in build_report(agg, 120)]
+    text = "\n".join(lines)
+    prov = next(li for li in text.splitlines() if "anthropic" in li)
+    sess = next(li for li in text.splitlines() if "my session" in li)
+    assert prov.index(" tokens") == sess.index(" tokens")
+
+
+def test_narrow_table_drops_cache_keeps_cost():
+    agg = _agg()
+    narrow = "\n".join(line.plain for line in build_report(agg, 58))
+    wide = "\n".join(line.plain for line in build_report(agg, 120))
+    # Cost survives at every width; cache is shed only when narrow.
+    assert "$4.20" in narrow
+    assert "cache" in wide
+    # The BY PROVIDER row in the narrow render carries no cache column.
+    provider_line = next(line for line in narrow.splitlines() if "anthropic" in line)
+    assert "cache" not in provider_line
+    assert "$4.20" in provider_line
 
 
 def test_proportion_bar_fills():
