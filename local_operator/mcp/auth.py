@@ -1641,6 +1641,183 @@ def wire_oauth_auth(
     }
 
 
+def _make_refresh_coordinating_provider(
+    kwargs: dict[str, Any],
+    *,
+    server_url: str,
+    storage: "McpTokenStorage",
+    endpoints: DiscoveredOAuthEndpoints | None,
+) -> Any:
+    """An ``OAuthClientProvider`` whose in-flow refresh is race-free across processes.
+
+    Why this subclass exists: the SDK loads the stored tokens ONCE in
+    ``_initialize`` and never re-reads storage afterwards, and its in-flow
+    refresh (``async_auth_flow`` -> ``_refresh_token``) spends whatever refresh
+    token that first read put in memory, under NO cross-process lock. That is
+    fine for a token that expires and is refreshed once. It is destructive for a
+    provider that ROTATES its refresh token on every use (Notion: an 8-hour
+    access token plus a rotating refresh token) the moment more than one
+    local-operator process is alive: this harness runs one process per cmux
+    workspace, so several long-lived sessions cross the same 8-hour boundary
+    still holding the same in-memory refresh token from when they booted. They
+    each POST it; the authorization server rotates; the first wins and every
+    other session's brand-new token is already dead. The SDK then
+    ``clear_tokens()`` and the next request opens a FULL browser grant — the
+    "Notion logged out again" the user sees, several times a day.
+
+    :func:`ensure_mcp_oauth_fresh` already closes this race for the STARTUP
+    refresh with a cross-process file lock and a re-read under it; its own
+    docstring notes that the SDK's in-flow refresh is the remaining unlocked
+    path. This subclass extends the same guard to that path: before the SDK
+    would refresh, it re-reads the persisted token under
+    :func:`_oauth_refresh_lock` and, if a sibling process already rotated it,
+    ADOPTS the fresh token into the context and skips the refresh entirely.
+    Only when the store still holds an expired token does exactly one process
+    perform the exchange — against the discovered endpoint, so a provider whose
+    token endpoint is not ``<server_base>/token`` (Datadog) refreshes rather
+    than 404-ing into a browser grant.
+
+    Degradation is honest: with no discovered ``endpoints`` (metadata discovery
+    failed at startup) the re-read/adopt step still runs — which alone removes
+    the common case, where a sibling already refreshed — and only the
+    self-performed exchange falls back to the SDK's own unlocked refresh, i.e.
+    exactly the pre-fix behaviour for that one provider.
+    """
+    from mcp.client.auth import OAuthClientProvider
+
+    class _RefreshCoordinatingOAuthProvider(OAuthClientProvider):
+        # Bound on the re-read/refresh interception: a stuck lock acquisition or
+        # a hung endpoint must not park an authenticated request forever. The
+        # file lock is only ever held for one token POST (REFRESH_HTTP_TIMEOUT_S)
+        # plus the SQLite read, so a peer that legitimately holds it clears well
+        # inside this bound; overrunning it means a leaked lock, and degrading to
+        # the SDK's own refresh is strictly better than blocking the request.
+        _refresh_coord_server_url = server_url
+        _refresh_coord_storage = storage
+        _refresh_coord_endpoints = endpoints
+
+        async def _coordinate_inflight_refresh(self) -> None:
+            """Re-sync from the store (and refresh once, race-free) if the SDK is
+            about to refresh. No-op unless the loaded token is invalid AND
+            refreshable — exactly the SDK's own in-flow refresh trigger, so this
+            never adds a round trip to a request that would have gone through
+            unauthenticated-refresh-free."""
+            ctx = self.context
+            # Gate on the SAME predicate the SDK's async_auth_flow uses so we
+            # intercept precisely when it would refresh, and never otherwise.
+            if ctx.is_token_valid() or not ctx.can_refresh_token():
+                return
+            try:
+                async with _oauth_refresh_lock(self._refresh_coord_server_url):
+                    # Re-read under the lock: a sibling process may have rotated
+                    # the token while we waited. Adopting its result is what
+                    # turns a double-spend into a no-op.
+                    stored = await ctx.storage.get_tokens()
+                    if stored is not None and stored.access_token:
+                        ctx.current_tokens = stored
+                        ctx.token_expiry_time = self._refresh_coord_storage.stored_token_expiry()
+                    if ctx.is_token_valid():
+                        return  # a peer already refreshed; do not spend again
+                    endpoints = self._refresh_coord_endpoints
+                    if endpoints is None:
+                        # No discovered endpoint: leave the stale token in place
+                        # and let the SDK's own (unlocked) in-flow refresh run —
+                        # the pre-fix path for this one provider. The re-read
+                        # above already handled the common racing case.
+                        return
+                    refreshed = await _refresh_oauth_token_locked(
+                        self._refresh_coord_server_url,
+                        self._refresh_coord_storage,
+                        endpoints,
+                    )
+                    if refreshed:
+                        new_tokens = await ctx.storage.get_tokens()
+                        if new_tokens is not None:
+                            ctx.current_tokens = new_tokens
+                            ctx.token_expiry_time = (
+                                self._refresh_coord_storage.stored_token_expiry()
+                            )
+            except Exception:  # noqa: BLE001 — coordination is best-effort
+                # A failed re-read/refresh must never break the request: fall
+                # through to the SDK's own auth flow, which will refresh (or, if
+                # that fails, surface the non-interactive McpAuthRequiredError).
+                logger.debug(
+                    "MCP in-flight refresh coordination failed for %s",
+                    self._refresh_coord_server_url,
+                    exc_info=True,
+                )
+
+        async def async_auth_flow(self, request):  # type: ignore[override]
+            # Ensure tokens+client_info are loaded (so is_token_valid /
+            # can_refresh_token below are meaningful), then coordinate the
+            # refresh, then hand off to the SDK's flow. The SDK re-checks
+            # is_token_valid under its own lock and will skip its refresh branch
+            # because we have already made the token valid. context.lock is NOT
+            # held across the coordination (it is not reentrant and the SDK
+            # re-acquires it), matching how the SDK itself only holds it inside
+            # the flow.
+            async with self.context.lock:
+                if not self._initialized:
+                    await self._initialize()
+            await self._coordinate_inflight_refresh()
+            # Delegate to the SDK flow by hand, forwarding the RESPONSE the
+            # caller sends back into each yield: httpx drives an auth flow with
+            # ``gen.asend(response)``, and a plain ``async for ...: yield`` would
+            # swallow those sent values (the sub-generator would see ``None`` for
+            # every ``response = yield`` and crash on ``response.status_code``).
+            # Manual pumping is the only correct way to delegate a receiving
+            # async generator — there is no ``yield from`` for them.
+            #
+            # The whole pump is wrapped so the inner generator is ALWAYS closed
+            # and any exception/cancellation is delivered INTO it, never dropped
+            # on the floor. This matters because the SDK's ``async_auth_flow``
+            # holds ``context.lock`` across its entire body: httpx re-raises a
+            # transport error mid-flow (``_send_handling_auth`` does
+            # ``raise exc`` after ``response.aclose()``), and if we let that
+            # unwind past us without closing ``inner``, the SDK generator is
+            # suspended forever at its ``yield`` still holding the lock — every
+            # later request to this server then deadlocks on ``context.lock``.
+            # ``athrow`` runs the SDK's own ``finally`` (which releases the lock
+            # via the ``async with`` exit); ``aclose`` covers the GeneratorExit
+            # path when httpx closes the OUTER flow (its ``finally:
+            # await auth_flow.aclose()``).
+            inner = super().async_auth_flow(request)
+            try:
+                try:
+                    outgoing = await inner.__anext__()
+                except StopAsyncIteration:
+                    return
+                while True:
+                    try:
+                        response = yield outgoing
+                    except GeneratorExit:
+                        # The outer flow is being closed (httpx's finally, or a
+                        # cancellation): close the inner one so the SDK unwinds
+                        # its lock, then let the close propagate.
+                        raise
+                    except BaseException as exc:  # noqa: BLE001
+                        # An exception thrown INTO us (httpx ``athrow`` on a
+                        # transport fault): deliver it into the SDK generator so
+                        # its ``finally`` runs and the lock is released, then
+                        # relay whatever it yields or re-raises.
+                        try:
+                            outgoing = await inner.athrow(exc)
+                        except StopAsyncIteration:
+                            return
+                        continue
+                    try:
+                        outgoing = await inner.asend(response)
+                    except StopAsyncIteration:
+                        return
+            finally:
+                # Unconditional: a normal return, a raise, or a GeneratorExit all
+                # pass through here, so the SDK generator (and its held lock) is
+                # never left suspended. Idempotent if already exhausted/closed.
+                await inner.aclose()
+
+    return _RefreshCoordinatingOAuthProvider(**kwargs)
+
+
 def build_oauth_provider(
     server_url: str,
     cfg: MCPServerConfig,
@@ -1671,8 +1848,6 @@ def build_oauth_provider(
     SDK's ``<server_base>/token`` guess (which 404s for providers like Datadog
     whose token endpoint lives on a different host).
     """
-    from mcp.client.auth import OAuthClientProvider
-
     # The flow is created HERE (not inside wire_oauth_auth) so it can be
     # attached to the provider: an abandoned grant arrives at the connect as
     # a raw CancelledError (see ``LoopbackAuthFlow.callback_handler``), and
@@ -1683,13 +1858,19 @@ def build_oauth_provider(
         _resolve_redirect_uri(cfg), server_url=server_url, interactive=interactive
     )
     kwargs = wire_oauth_auth(server_url, cfg, store=store, interactive=interactive, flow=flow)
-    provider = OAuthClientProvider(**kwargs)
+    storage = kwargs["storage"]
+    # A refresh-coordinating provider (not the bare SDK one): its in-flow
+    # refresh re-reads the store under the cross-process lock so several
+    # long-lived sessions cannot double-spend a rotating refresh token
+    # mid-session — see :func:`_make_refresh_coordinating_provider`.
+    provider = _make_refresh_coordinating_provider(
+        kwargs, server_url=server_url, storage=storage, endpoints=endpoints
+    )
     provider._loopback_flow = flow  # type: ignore[attr-defined]
     if endpoints is not None:
         provider.context.oauth_metadata = endpoints.oauth_metadata
         provider.context.protected_resource_metadata = endpoints.protected_resource_metadata
         provider.context.auth_server_url = endpoints.auth_server_url
-    storage = kwargs["storage"]
     try:
         expiry = storage.stored_token_expiry()
     except Exception:  # noqa: BLE001 — a metadata read must not block a connect
