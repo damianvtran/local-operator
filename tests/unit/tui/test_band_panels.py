@@ -220,6 +220,12 @@ class _Job:
         self.error_text: str | None = None
         self.settled_at: float | None = None
         self.trajectory: list[dict[str, Any]] | None = None
+        # Mirrors ``AsyncJob.agent_role``/``effort``: the child's role and
+        # effort tier, recorded at launch. Defaulted to the real model's
+        # not-recorded conventions — a plain fixture is a ``task`` with no tier
+        # — so a test that does not think about them gets the common case.
+        self.agent_role: str | None = "task"
+        self.effort: str | None = None
 
 
 @pytest.fixture(autouse=True)

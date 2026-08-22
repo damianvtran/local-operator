@@ -717,6 +717,13 @@ _ROSTER_ROW_FIELDS = frozenset(
         "context_window",
         "usage",
         "restored",
+        # Small bounded strings, stamped at registration: a restored row must
+        # still say what kind of child it was ("task"/"scout") and at what
+        # effort tier, or the resumed panel/page/band would blank both facts on
+        # every child a previous process launched — the exact regression the
+        # rest of this allowlist exists to prevent for the model/usage fields.
+        "agent_role",
+        "effort",
     }
 )
 
@@ -3327,6 +3334,10 @@ class Session:
             jobs_manager=self.jobs,
             model_spec=model_spec,
             agent=agent,
+            # Recorded on the job for the title/band to name the tier. The spec
+            # above already carries the resolved MODEL; this carries the LEVEL,
+            # which the spec cannot reconstruct (see ``run_subagent``).
+            effort=effort,
         )
 
     def _resolve_subagent_model(self, agent: str, effort: str | None) -> ModelSpec | None:

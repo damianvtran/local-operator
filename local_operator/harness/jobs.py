@@ -185,6 +185,20 @@ class AsyncJob(BaseModel):
     # missing task because a reader must be able to tell "this session started
     # it" from "a previous session did" without consulting the task table.
     restored: bool = False
+    # The subagent ROLE this job runs ("task", "scout", ...) and the effort
+    # TIER it was launched with ("lo"/"med"/"hi"), stamped at REGISTRATION
+    # beside ``prompt`` — a queued job that never starts must still be able to
+    # say what kind of child it is and at what effort, so neither can wait for
+    # the runner. Both default ``None`` on the same convention as the fields
+    # above: a reader must be able to tell "not recorded" (a job type with no
+    # role/tier) from a recorded value. ``effort`` is recorded independently of
+    # ``model_label`` on purpose: the model is resolved from the tier upstream
+    # (``Session._resolve_subagent_model``) and a child on a DIFFERENT model
+    # than the parent still ran at a known tier — which is exactly the case the
+    # status band needs so it can name the level beside a model whose own
+    # ladder it cannot see.
+    agent_role: str | None = None
+    effort: str | None = None
 
 
 class AsyncJobManager:
