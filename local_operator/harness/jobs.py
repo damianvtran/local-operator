@@ -52,7 +52,16 @@ OUTPUT_TAIL_CHARS = 64_000
 #: the bare word ``cancelled`` beside a duration that was spent waiting.
 CANCELLED_BEFORE_START = "cancelled before it started"
 
-JobStatus = Literal["running", "completed", "failed", "cancelled"]
+#: ``interrupted`` is a RESTORE-only status: it names a ``task`` row that was
+#: ``running`` when the process exited, rehydrated from the persisted roster on
+#: the next resume. It never arises from a live transition — a job the manager
+#: itself settles becomes completed/failed/cancelled — so every LIVE reader
+#: (capacity math, retention sweep, delivery) treats it as terminal. It exists
+#: only so a resumed session can SHOW the child that was cut off mid-run and,
+#: when its transcript survived on disk, offer to resume it (see
+#: ``SubagentComms.roster``/``resume``), instead of the row vanishing with the
+#: process.
+JobStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"]
 JobType = Literal["bash", "task"]
 
 # run(job_id, signal, report_progress) -> awaitable text result
@@ -166,6 +175,16 @@ class AsyncJob(BaseModel):
     # keyboard, which no try/except can catch. It cannot change under a
     # running child, so once is right. ``0`` = not recorded.
     context_window: int = 0
+    # Set on a row rehydrated from the persisted roster at resume (see
+    # ``AsyncJobManager.restore``). A restored row is a HISTORICAL record, not a
+    # live job: it has no asyncio task, no abort signal, and no runner, so it
+    # can never be cancelled, delivered, or promoted. The retention sweep skips
+    # it (it has no ``settled_at`` clock to age against and the resumed session
+    # must keep showing it), and capacity math already ignores it because its
+    # status is terminal. Kept as an explicit flag rather than inferred from a
+    # missing task because a reader must be able to tell "this session started
+    # it" from "a previous session did" without consulting the task table.
+    restored: bool = False
 
 
 class AsyncJobManager:
@@ -184,10 +203,20 @@ class AsyncJobManager:
         on_job_complete: (
             Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None] | None
         ) = None,
+        on_roster_change: Callable[[], None] | None = None,
     ) -> None:
         self._max_running = max_running
         self._retention_ms = retention_ms
         self._on_job_complete = on_job_complete
+        # Fired (best-effort, synchronously) whenever the SET of ``task`` rows
+        # or one of their statuses changes, so the session can re-snapshot the
+        # roster to disk without the manager knowing what a transcript is. Kept
+        # as a bare callback rather than a persist coroutine because the manager
+        # runs it on the hot path of every registration and settle: it signals
+        # "something changed", and the owner decides how (and how cheaply) to
+        # persist. A raising callback must never break job bookkeeping, so the
+        # single call site guards it.
+        self._on_roster_change = on_roster_change
         self._jobs: dict[str, AsyncJob] = {}
         self._signals: dict[str, AbortSignal] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -228,6 +257,60 @@ class AsyncJobManager:
             1 for job in self._jobs.values() if job.status == "running" and not job.queued
         )
         return running >= self._max_running
+
+    def _notify_roster_change(self) -> None:
+        """Signal the owner that the task roster moved (add / settle / status).
+
+        Best-effort: a persistence hook that raises must not corrupt the job
+        table or leave a settle half-applied, so the exception is swallowed
+        with a warning. Always called AFTER the mutation it reports, never
+        before, so a listener that re-reads the roster sees the new state.
+        """
+        if self._on_roster_change is None:
+            return
+        try:
+            self._on_roster_change()
+        except Exception:  # noqa: BLE001 - a bad listener must not break jobs
+            logger.warning("roster-change listener raised", exc_info=True)
+
+    def restore(self, rows: list["AsyncJob"]) -> None:
+        """Rehydrate task rows from a persisted roster at resume.
+
+        The manager's ``_jobs`` table lives only in memory, so a resumed
+        session opens with an empty subagent panel even though the children ran
+        and their transcripts survive on disk. This re-seeds the table from the
+        snapshot the session persisted (see ``Session._persist_subagent_roster``)
+        so the panel, the ``jobs`` tool, and ``hub op='list'`` show the children
+        the previous process launched.
+
+        A row that was ``running`` when the process died is downgraded to
+        ``interrupted`` here: its asyncio task is gone, so it is not live, and
+        presenting it as ``running`` would spin a status the manager can never
+        settle. Every restored row is flagged ``restored`` and carries no task,
+        signal, or runner — it is a historical record. Rows are NOT re-run;
+        resuming one is an explicit ``hub op='resume'`` that starts a fresh job
+        against the old transcript.
+
+        Idempotent-ish: a row whose id is already present (a live job of this
+        session) is left untouched, so a mis-timed double restore cannot
+        clobber a running child.
+        """
+        changed = False
+        for row in rows:
+            if row.id in self._jobs:
+                continue
+            if row.status == "running":
+                # No task backs it any more; a live-looking row would spin a
+                # spinner forever and invite a cancel that finds nothing.
+                row.status = "interrupted"
+            row.restored = True
+            # A restored row owns no runtime handles; drop any the snapshot
+            # carried so nothing downstream tries to await or cancel a task
+            # that does not exist.
+            self._jobs[row.id] = row
+            changed = True
+        if changed:
+            self._notify_roster_change()
 
     # -- registration -------------------------------------------------------
 
@@ -289,6 +372,10 @@ class AsyncJobManager:
             # Parked behind a caller-managed gate; holds no execution slot and
             # keeps its runner for start_queued().
             self._queued_runners[job_id] = run
+        # A new row is a roster change the owner may want to persist (task rows
+        # only carry a resumable transcript, but the listener filters that).
+        if type == "task":
+            self._notify_roster_change()
         return job_id
 
     def start_queued(self, job_id: str) -> bool:
@@ -412,6 +499,8 @@ class AsyncJobManager:
                 logger.warning("job %s pre-start cleanup raised", job_id, exc_info=True)
         self._settle(job)
         self._sweep_due()
+        if job.type == "task":
+            self._notify_roster_change()
         return True
 
     # -- lifecycle ----------------------------------------------------------
@@ -525,6 +614,8 @@ class AsyncJobManager:
             self._settle(job)
             self._tasks.pop(job.id, None)
             self._sweep_due()
+            if job.type == "task":
+                self._notify_roster_change()
             return
         except Exception as exc:
             job.status = "failed"
@@ -532,6 +623,12 @@ class AsyncJobManager:
             logger.warning("background job %s failed", job.id, exc_info=True)
         self._settle(job)
         self._tasks.pop(job.id, None)
+        # After the settle stamp, before delivery: a listener re-reading the
+        # roster now sees the terminal status, and persisting here (rather than
+        # only after delivery) means a crash between settle and delivery still
+        # leaves the outcome on disk for the next resume.
+        if job.type == "task":
+            self._notify_roster_change()
         try:
             await self._deliver(job)
         except Exception:
@@ -632,7 +729,15 @@ class AsyncJobManager:
         for job_id in [
             job_id
             for job_id, job in self._jobs.items()
-            if job.status != "running" and job.settled_at is not None and job.settled_at < cutoff
+            # ``restored`` rows are exempt: they carry the PREVIOUS session's
+            # settle stamp, which is almost always already past the retention
+            # window, so an unguarded sweep would evict every rehydrated child
+            # on the first pass after resume — the exact rows this feature
+            # exists to keep visible. They leave only when the session ends.
+            if not job.restored
+            and job.status != "running"
+            and job.settled_at is not None
+            and job.settled_at < cutoff
         ]:
             del self._jobs[job_id]
             self._signals.pop(job_id, None)

@@ -55,6 +55,11 @@ GLYPH_FAILED = "✗"
 #: WAITING mark rather than a settled one: it has not run, so ✓ would lie.
 GLYPH_CANCELLED = "⊘"
 GLYPH_QUEUED = "⏳"
+#: A child that was RUNNING when a previous process exited, rehydrated from the
+#: persisted roster on resume (see ``AsyncJobManager`` status ``interrupted``).
+#: Its own mark — neither ✓ (it did not finish) nor ✗ (it did not fail): the
+#: run was cut off, and if its transcript survived it can be resumed.
+GLYPH_INTERRUPTED = "⇥"
 
 #: Rows the panel spends on chrome rather than on jobs: the ``Subagents``
 #: caption. Named because :meth:`SubagentPanel.predicted_rows` adds it to the
@@ -119,6 +124,12 @@ def status_glyph(
         return GLYPH_FAILED, "failed", "danger"
     if status == "cancelled":
         return GLYPH_CANCELLED, "cancelled", "dim"
+    if status == "interrupted":
+        # Rehydrated from a previous process's roster; the run was cut off, not
+        # finished or failed. Muted rather than danger — nothing went wrong, the
+        # process simply ended — and its own word so a reader can tell it apart
+        # from a clean cancel and know it may be resumable.
+        return GLYPH_INTERRUPTED, "interrupted", "muted"
     return GLYPH_DONE, status or "completed", "dim"
 
 
@@ -330,6 +341,13 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
             # itself. Cancelled-while-PARKED does not reach here empty — the
             # manager stamps ``CANCELLED_BEFORE_START`` on it, which is the
             # more specific sentence and wins on its own.
+            activity = status_glyph(status)[1]
+        elif not activity and status == "interrupted":
+            # A restored ``interrupted`` row carries no ``result_text`` (its run
+            # never settled), so like the cancelled-mid-run case it would rest
+            # on a 1-cell glyph alone. Spell the word so the row says WHY it is
+            # not a clean outcome — the process ended under it — and reads the
+            # same as the page it opens.
             activity = status_glyph(status)[1]
     if current and not running:
         # The page IS this row's detail, three rows above it. Repeating a
