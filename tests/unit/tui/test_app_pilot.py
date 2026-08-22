@@ -150,6 +150,9 @@ class FakeSession:
         #: The tail ``attach_agent_profile`` last stamped, read by the TUI's
         #: A2 empty-instructions notice path. Mirrors the real ``agent_brief``.
         self.agent_brief: str = ""
+        #: How many times ``clear_agent_profile`` was called, so a `/agent
+        #: clear` test can assert the detach reached the session.
+        self.cleared_agents: int = 0
 
     @property
     def session_id(self) -> str:
@@ -219,6 +222,12 @@ class FakeSession:
             self.attached_agents.append(profile.name)
             return profile.name
         return None
+
+    def clear_agent_profile(self) -> None:
+        # Mirror the real detach: blank the tail and record the call so a
+        # `/agent clear` test can assert both the effect and that it happened.
+        self.agent_brief = ""
+        self.cleared_agents += 1
 
     @property
     def variables(self) -> Any:

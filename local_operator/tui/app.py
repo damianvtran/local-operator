@@ -2940,6 +2940,9 @@ class OperatorApp(App[None]):
                 out.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
         out.append(Text())
         out.append(Text("Send: /agent <name> <message>", style=body))
+        # The detach verb belongs in the listing so a user who attached a
+        # profile can find their way back to base instructions without guessing.
+        out.append(Text("Detach: /agent clear", style=body))
         return RichBlock(Group(*out))
 
     def _cmd_agent(self, arg: str, notice: NoticeFn) -> None:
@@ -2973,6 +2976,19 @@ class OperatorApp(App[None]):
         name, _, request = arg.partition(" ")
         name = name.strip()
         request = request.strip()
+        # ``clear``/``none`` are the DETACH verb, not a name to look up — the
+        # mirror of ``/goal`` with no text clearing the objective. A real agent
+        # literally named "clear" is a non-concern: profile names are curated,
+        # not user-typed en masse, so reserving two words costs nothing and the
+        # alternative (a name silently un-clearable) is worse. Only the bare
+        # verb detaches; ``/agent clear <anything>`` is a mistyped attach and
+        # falls through to normal resolution, which reports the unknown name.
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "clear_agent_profile", None)
+            if callable(detach):
+                detach()
+            notice("no agent profile active; this session uses its base instructions.")
+            return
         attach = getattr(session, "attach_agent_profile", None)
         if not callable(attach):
             self._system_notice(

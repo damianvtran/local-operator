@@ -414,6 +414,47 @@ async def test_agent_rejects_unknown_and_private_names() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_clear_detaches_the_active_profile() -> None:
+    """U1: `/agent clear` detaches the active profile and reports the session is
+    back on its base instructions. `clear` is the detach verb, not a name to
+    look up, so nothing is "attached" by it."""
+    session = FakeSession()
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/agent auditor")
+        assert session.agent_brief, "profile should be attached first"
+        await _submit(pilot, app, "/agent clear")
+        cleared_brief = session.agent_brief
+        cleared_count = session.cleared_agents
+        notices = _notice_texts(app)
+    assert cleared_brief == "", "clear must blank the agent brief"
+    assert cleared_count == 1, "clear must reach the session detach"
+    # `clear` was the verb, not an attach — attached_agents stays as it was.
+    assert session.attached_agents == ["auditor"]
+    assert any("base instructions" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_agent_none_is_an_alias_for_clear() -> None:
+    """`/agent none` detaches too, so a user reaching for either word lands on
+    base instructions rather than an 'unknown agent' warning."""
+    session = FakeSession()
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/agent auditor")
+        await _submit(pilot, app, "/agent none")
+        notices = _notice_texts(app)
+    assert session.agent_brief == ""
+    assert session.cleared_agents == 1
+    assert not any("no agent named" in n for n in notices), notices
+    assert any("base instructions" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
 async def test_agent_with_no_instructions_says_nothing_was_applied() -> None:
     """A2: a role/specialist that resolves but carries no instructions must
     NOT claim to be active — the notice states nothing was applied, and with a
