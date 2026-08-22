@@ -2859,6 +2859,17 @@ class SessionStreamFn:
                 context_tokens = (
                     usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
                 )
+            # Cost is NOT priced here (review C1). The snapshot carries the
+            # provider, model id, and every token count, which is everything
+            # ``cost_for_usage`` needs — so the pricing (including the
+            # ``resolve_model_info`` lookup, which can block for seconds on a
+            # COLD memo: a TTL rollover, an lru_cache eviction, or a subagent on
+            # a registry-unknown model override) runs on the recorder's
+            # background thread, next to the SQLite write, and never on the event
+            # loop this turn is unwinding on. The same hazard ``subagent_panel``
+            # deliberately takes off-thread. It is still the SAME
+            # ``cost_for_usage`` the status band uses, so the analytics dollar
+            # total cannot disagree with the live band.
             record_call(
                 CallSnapshot(
                     ts_ms=int(_time.time() * 1000),

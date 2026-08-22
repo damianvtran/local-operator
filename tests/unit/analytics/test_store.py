@@ -28,6 +28,8 @@ def _snap(
     chars=None,
     ok=True,
     ts_ms=None,
+    cost_micro=1000,
+    cost_known=True,
 ):
     return CallSnapshot(
         ts_ms=ts_ms if ts_ms is not None else int(time.time() * 1000),
@@ -42,6 +44,11 @@ def _snap(
         context_tokens=context,
         component_chars=chars or {"conversation": 500, "system_prompt": 420},
         ok=ok,
+        cost_micro=cost_micro,
+        cost_known=cost_known,
+        # Pre-priced so the store records these exact figures rather than
+        # re-pricing the fixture's fake model (which has no price table entry).
+        priced=True,
     )
 
 
@@ -97,6 +104,104 @@ def test_by_provider_and_by_session(tmp_path):
     assert agg.by_provider["openai"].input_tokens == 50
     assert set(agg.by_session) == {"s1", "s2"}
     assert agg.by_session["s2"].calls == 2
+    store.close()
+
+
+def test_cost_roundtrip_and_grouping(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch(
+        [
+            _snap(session_id="s1", provider="anthropic", cost_micro=6_000_000, cost_known=True),
+            _snap(session_id="s1", provider="openai", cost_micro=1_000_000, cost_known=True),
+            # A local model with no price: recorded, but cost_known=False.
+            _snap(session_id="s2", provider="ollama", cost_micro=0, cost_known=False),
+        ]
+    )
+    agg = store.aggregate()
+    assert agg.cost_micro == 7_000_000
+    assert agg.cost_usd == 7.0
+    assert agg.cost_known_calls == 2
+    assert agg.cost_is_partial is True  # the ollama call had no price
+    assert agg.by_provider["anthropic"].cost_usd == 6.0
+    assert agg.by_provider["openai"].cost_usd == 1.0
+    assert agg.by_provider["ollama"].cost_is_known is False
+    store.close()
+
+
+def test_migration_adds_cost_columns_to_old_db(tmp_path):
+    # A database written by the token-only release has no cost_* columns.
+    # Opening it with the current store must ALTER them in and read old rows as
+    # cost 0 / unknown, never raise on a missing column.
+    import sqlite3
+
+    from local_operator.analytics.store import _COMPONENT_COLUMNS
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER, {_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, context_tokens) VALUES (1, 's', 'anthropic', 'm', 1, 100, 20, 120)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    agg = store.aggregate()
+    assert agg.calls == 1
+    assert agg.cost_micro == 0
+    assert agg.cost_known_calls == 0
+    assert agg.cost_is_known is False  # old row reads as unpriced, not $0
+    # A new priced call can be recorded into the migrated DB.
+    assert store.record_batch([_snap(cost_micro=500, cost_known=True)]) == 1
+    assert store.aggregate().cost_micro == 500
+    store.close()
+
+
+def test_recording_degrades_when_cost_columns_absent(tmp_path):
+    # C2: if the cost columns cannot be added (simulated by forcing _has_cost
+    # False against a table that lacks them), recording must NOT fail every
+    # write — it drops cost and keeps token analytics; the report shows $—.
+    import sqlite3
+
+    from local_operator.analytics.store import _COMPONENT_COLUMNS
+
+    db = tmp_path / "nocost.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER, {_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    store._connect()  # runs the migration, which will add the columns
+    # Force the degraded path: pretend the migration failed.
+    store._has_cost = False
+    assert store.record_batch([_snap(input_tokens=100, cost_micro=999, cost_known=True)]) == 1
+    agg = store.aggregate()
+    assert agg.calls == 1
+    assert agg.input_tokens == 100  # token analytics survive
+    assert agg.cost_micro == 0  # cost degraded to $— rather than failing
+    assert agg.cost_is_known is False
     store.close()
 
 
