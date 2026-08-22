@@ -56,6 +56,21 @@ from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 
 
+def _set_editor_line(editor, text: str) -> None:
+    """Set the buffer AND park the caret at the end, as typing it would.
+
+    ``editor.text = x`` leaves the caret at ``(0, 0)``; a user who typed ``x``
+    has it at the end, and the slash pickers are caret-anchored (inline
+    detection: which slash token is live depends on where the caret is). A test
+    that sets the text without moving the caret asserts about a state the UI
+    never produces — the caret sitting before the slash, where no command is
+    being edited. This is the faithful shortcut for "the user typed this line".
+    """
+    editor.text = text
+    editor.move_cursor(editor._end_of_buffer())
+    editor._sync_picker()
+
+
 class _FakeJobs:
     """The slice of ``AsyncJobManager`` the app reads: ``list()`` of rows.
 
@@ -1438,7 +1453,7 @@ async def test_login_list_reports_all_three_credential_states() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/login "
+        _set_editor_line(app.query_one(Editor), "/login ")
         await pilot.pause()
         assert _provider_rows(app) == [
             ("openrouter", "logged in"),
@@ -1455,7 +1470,7 @@ async def test_a_search_alias_reaches_the_provider_it_names() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/login grok"
+        _set_editor_line(app.query_one(Editor), "/login grok")
         await pilot.pause()
         assert [name for name, _ in _provider_rows(app)] == ["xai-oauth"]
 
@@ -1474,7 +1489,7 @@ async def test_logout_rows_name_the_credential_they_will_remove() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/logout "
+        _set_editor_line(app.query_one(Editor), "/logout ")
         await pilot.pause()
         assert _provider_rows(app) == [("openrouter", "remove api key")]
 
@@ -1501,7 +1516,7 @@ async def test_logout_with_nothing_stored_says_so_where_the_list_would_have_been
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/logout "
+        _set_editor_line(app.query_one(Editor), "/logout ")
         await pilot.pause()
         picker = app.query_one(Editor).picker
         assert not picker.is_open(), "a sentence is not a suggestion"
@@ -1540,9 +1555,9 @@ async def test_re_entering_an_empty_argument_state_leaves_the_transcript_alone()
         await pilot.pause()
         transcript = app.query_one(TranscriptView)
         for _ in range(10):
-            editor.text = "/logout"
+            _set_editor_line(editor, "/logout")
             await pilot.pause()
-            editor.text = "/logout "
+            _set_editor_line(editor, "/logout ")
             await pilot.pause()
             await pilot.pause()
             assert transcript.blocks() == []
@@ -1567,7 +1582,7 @@ async def test_an_unreadable_credential_store_says_that_instead() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/logout "
+        _set_editor_line(app.query_one(Editor), "/logout ")
         await pilot.pause()
         rendered = app.query_one(Editor).picker.render_text(80).plain
         assert "unreadable" in rendered
@@ -1589,7 +1604,7 @@ async def test_choosing_a_row_runs_the_existing_logout_path() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/logout "
+        _set_editor_line(app.query_one(Editor), "/logout ")
         await pilot.pause()
         assert len(app.query_one(Editor).picker.suggestions()) == 1, "premise: one match"
         await pilot.press("enter")
@@ -1610,7 +1625,7 @@ async def test_choosing_a_row_runs_the_existing_login_path() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/login deepseek"
+        _set_editor_line(app.query_one(Editor), "/login deepseek")
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
@@ -1634,7 +1649,7 @@ async def test_login_still_lists_every_provider_when_the_store_cannot_be_read() 
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/login "
+        _set_editor_line(app.query_one(Editor), "/login ")
         await pilot.pause()
         assert app.is_running, "a locked credential store must not take the app down"
         assert _provider_rows(app) == [
@@ -1654,7 +1669,7 @@ async def test_logout_says_the_store_is_unreadable_rather_than_claiming_it_is_em
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/logout "
+        _set_editor_line(app.query_one(Editor), "/logout ")
         await pilot.pause()
         assert app.is_running
         assert _provider_rows(app) == []
@@ -1677,11 +1692,11 @@ async def test_logout_offers_one_row_per_credential_not_per_provider() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/logout "
+        _set_editor_line(app.query_one(Editor), "/logout ")
         await pilot.pause()
         assert _provider_rows(app) == [("openai", "remove oauth")]
 
-        app.query_one(Editor).text = "/login "
+        _set_editor_line(app.query_one(Editor), "/login ")
         await pilot.pause()
         assert [name for name, _ in _provider_rows(app)] == ["openai", "openai-device"]
 
@@ -1702,7 +1717,7 @@ async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> No
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/login "
+        _set_editor_line(app.query_one(Editor), "/login ")
         await pilot.pause()
         described = {
             name: choice.description for name, choice in app.query_one(Editor).picker.suggestions()
@@ -1736,7 +1751,7 @@ async def test_a_provider_query_the_user_typed_over_is_not_answered() -> None:
         app.query_one(Editor).focus()
         await pilot.pause()
         editor = app.query_one(Editor)
-        editor.text = "/logout "
+        _set_editor_line(editor, "/logout ")
         editor.text = "how do I write a parser?"
         await pilot.pause()
         await pilot.pause()
@@ -1841,7 +1856,7 @@ def test_completion_matches_alias() -> None:
     """TUI-014: the collapsed exit/quit command still completes via alias —
     the alias wins the ranking slot, so the inserted word is the alias."""
     editor = Editor(commands=[SlashCommand("exit", "Quit", aliases=("quit",))])
-    editor.text = "/q"
+    _set_editor_line(editor, "/q")
     assert editor.picker.highlighted_name() == "quit"
     editor.picker.choose(0)  # the mouse path: select row 0 and complete
     assert editor.text == "/quit "
@@ -2513,7 +2528,7 @@ async def test_provider_and_the_login_list_report_credentials_in_the_same_words(
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        app.query_one(Editor).text = "/provider"
+        _set_editor_line(app.query_one(Editor), "/provider")
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
@@ -2522,7 +2537,7 @@ async def test_provider_and_the_login_list_report_credentials_in_the_same_words(
             for line in _transcript_text(app).split("\n")
             if "deepseek" in line or "xai-oauth" in line
         ]
-        app.query_one(Editor).text = "/login "
+        _set_editor_line(app.query_one(Editor), "/login ")
         await pilot.pause()
         states = dict(_provider_rows(app))
 
@@ -3244,13 +3259,13 @@ async def test_mcp_argument_list_offers_subcommands_then_servers() -> None:
             "local_operator.mcp.config.load_all_mcp_configs",
             return_value=(configs, {}),
         ):
-            editor.load_text("/mcp ")
+            _set_editor_line(editor, "/mcp ")
             for _ in range(6):
                 await pilot.pause()
             verb_rows = [name for name, _ in editor.picker.suggestions()]
             assert verb_rows == ["login", "logout", "reauth"], verb_rows
 
-            editor.load_text("/mcp login ")
+            _set_editor_line(editor, "/mcp login ")
             for _ in range(6):
                 await pilot.pause()
             server_rows = [name for name, _ in editor.picker.suggestions()]
@@ -3259,7 +3274,7 @@ async def test_mcp_argument_list_offers_subcommands_then_servers() -> None:
             # Narrowing still matches against the WHOLE argument: `login lin`
             # must keep offering the compound row, or the row the user is
             # looking at would vanish the moment they filtered to it.
-            editor.load_text("/mcp login lin")
+            _set_editor_line(editor, "/mcp login lin")
             for _ in range(6):
                 await pilot.pause()
             assert [name for name, _ in editor.picker.suggestions()] == ["login linear"]
@@ -3298,7 +3313,7 @@ async def test_mcp_logout_list_offers_only_servers_holding_a_credential() -> Non
                 return_value={"https://mcp.linear.app/mcp"},
             ),
         ):
-            editor.load_text("/mcp logout ")
+            _set_editor_line(editor, "/mcp logout ")
             for _ in range(6):
                 await pilot.pause()
             assert [name for name, _ in editor.picker.suggestions()] == ["logout linear"]
@@ -3763,7 +3778,7 @@ async def test_a_hidden_model_is_still_reachable_by_typing_its_selector() -> Non
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
-        editor.text = "/model anthropic/claude-opus-5"
+        _set_editor_line(editor, "/model anthropic/claude-opus-5")
         await pilot.pause()
         assert editor.model_picker.suggestions() == [], "premise: the row is hidden"
         await pilot.press("enter")
@@ -3835,7 +3850,7 @@ async def test_chatgpt_oauth_offers_the_live_gpt_5_family() -> None:
         await pilot.pause()
         picker = await _open_model_picker(app, pilot)
         editor = app.query_one(Editor)
-        editor.text = "/model gpt-5.6"
+        _set_editor_line(editor, "/model gpt-5.6")
         await pilot.pause()
         offered = {row.model_id for row in picker.suggestions()}
         chrome = picker.render_text(90).plain
@@ -4414,7 +4429,7 @@ async def test_an_entered_rejected_model_command_keeps_the_boot_composition() ->
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         editor = app.query_one(Editor)
-        editor.text = "/model missing-slash"
+        _set_editor_line(editor, "/model missing-slash")
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()

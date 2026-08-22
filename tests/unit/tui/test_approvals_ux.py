@@ -70,8 +70,16 @@ async def _type(pilot, app: OperatorApp, text: str) -> None:
     mutation through ``edit()``/``load_text()`` into the same ``_sync_picker``,
     so the list state is identical and the test does not spend a second on
     keystrokes. The tests that are ABOUT keystrokes press real keys.
+
+    The caret is parked at the end and the pickers re-derived, because the
+    ``text`` setter syncs with the caret still at the origin and the slash
+    detection is caret-anchored (inline detection) — a text-set that left the
+    caret before the slash would sit in no command at all.
     """
-    app.query_one(Editor).text = text
+    editor = app.query_one(Editor)
+    editor.text = text
+    editor.move_cursor(editor._end_of_buffer())
+    editor._sync_picker()
     await pilot.pause()
     await pilot.pause()
 

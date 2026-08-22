@@ -179,44 +179,211 @@ class _RowStyles(NamedTuple):
 
 
 class SlashContext(NamedTuple):
-    """Where the command word starts, and the word typed so far.
+    """Where the active command word sits, and the word typed so far.
 
-    ``start`` indexes the ``/`` itself so a completion can rebuild the buffer
-    without discarding whatever whitespace the user typed in front of it.
+    ``start`` indexes the ``/`` itself and ``end`` the first cell past the word,
+    so a completion can rebuild JUST that span and leave the rest of the draft
+    untouched. Before inline detection the word always ran to the end of the
+    buffer, so a completion could splice from ``start`` to the end; now the word
+    can have a message typed after it (``fix this /team``, or ``/team\\nfix
+    this``), and only ``[start, end)`` is the command — everything outside it is
+    the user's prose and must survive the completion verbatim.
     """
 
     start: int
     query: str
+    end: int
 
 
-def slash_context(text: str) -> SlashContext | None:
-    """The command word being typed, or ``None`` when the picker must hide.
+#: A slash opens a command only at a WORD BOUNDARY: the buffer start, or right
+#: after whitespace. This is what keeps ``src/foo`` and ``and/or`` from opening
+#: the picker — the ``/`` there is glued to a preceding non-space character, so
+#: it is punctuation inside a word, not the start of a command. The rule is the
+#: same one a shell or an editor command palette uses to tell a path apart from
+#: a command, and it is the ONE thing that makes inline detection safe to run on
+#: every keystroke of ordinary prose.
+def _is_boundary(line: str, index: int) -> bool:
+    """Whether ``line[index]`` (a ``/``) begins a fresh token."""
+    return index == 0 or line[index - 1].isspace()
 
-    The picker is for choosing a command, so it shows only while the command
-    WORD is still open: ``/`` first on the first non-blank line, and no
-    whitespace yet terminating the token. Once the user types
-    ``/model `` they have chosen ``model`` and are typing its argument — a
-    list of commands there is stale advice covering the transcript.
+
+def _line_of_cursor(text: str, cursor: int | None) -> tuple[str, int, int]:
+    """The line the cursor sits on, as ``(line, line_start_offset, column)``.
+
+    ``cursor`` is a whole-buffer offset; ``None`` means "the end of the buffer",
+    which is where a user typing at the end of their draft is. Clamped into
+    range so a stale caret (a resync racing a delete) cannot index out of the
+    text. Offsets are measured the same way ``Editor._offset_at`` does, so a
+    caret computed there indexes correctly here. Lines are split on ``\\n`` and
+    a trailing ``\\r`` from a CRLF buffer is stripped below, so every consumer of
+    the returned line agrees on the word regardless of the paste's line endings.
     """
-    lines = text.split("\n")
-    first = next((index for index, line in enumerate(lines) if line.strip()), None)
-    if first is None:
-        return None
-    if len(lines) > first + 1:
-        # A newline after the word terminates it exactly like a space does.
-        return None
-    line = lines[first]
-    stripped = line.lstrip()
-    if not stripped.startswith("/"):
-        return None
-    if any(char.isspace() for char in stripped):
-        return None
-    start = sum(len(other) + 1 for other in lines[:first]) + (len(line) - len(stripped))
-    return SlashContext(start, stripped[1:])
+    if cursor is None or cursor > len(text):
+        cursor = len(text)
+    if cursor < 0:
+        cursor = 0
+    line_start = text.rfind("\n", 0, cursor) + 1  # 0 when no newline precedes
+    line_end = text.find("\n", cursor)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    # A CRLF buffer — which a draft/held-prompt restore can carry in, since
+    # ``load_text`` does not normalise — leaves a trailing ``\r`` on every line
+    # split on ``\n``. ``slash_context`` tolerated it (``\r`` is whitespace, so
+    # it terminated the word), but ``slash_word``/``slash_argument_context`` use
+    # ``.partition(" ")``, which does NOT treat ``\r`` as a separator: the word
+    # came back as ``"team\r"`` (matching no command) and argument values
+    # carried the ``\r`` into dispatch. Stripping it here fixes every consumer at
+    # once, because they all read the line through this one helper. The column is
+    # unaffected: the ``\r`` sits at the END of the line, past any caret the
+    # parsers care about (review round 1, minor-1).
+    if line.endswith("\r"):
+        line = line[:-1]
+    return line, line_start, cursor - line_start
 
 
-def slash_argument(text: str, commands: tuple[str, ...]) -> str | None:
-    """The ARGUMENT being typed after one of ``commands``, else ``None``.
+def _boundary_slashes(line: str) -> list[int]:
+    """Indices of every boundary ``/`` on ``line`` (buffer start / after space)."""
+    return [i for i, ch in enumerate(line) if ch == "/" and _is_boundary(line, i)]
+
+
+def _active_slash(line: str, column: int, commands: frozenset[str] = frozenset()) -> int | None:
+    """Index within ``line`` of the boundary ``/`` the cursor is editing.
+
+    Normally the active token is the LAST boundary ``/`` at or before the cursor:
+    a user typing ``a /foo /ba|`` (caret at ``|``) is editing ``/ba``, not
+    ``/foo``. Returns ``None`` when the cursor is not inside any boundary slash
+    token — before every slash on the line, or on a ``/`` glued to a word.
+
+    ``commands`` closes the "already inside a command" case: once the line holds
+    a RECOGNISED command that has been TERMINATED by a space (``/team security
+    …``), that command owns the rest of its line as its argument, so a second
+    ``/team`` typed INSIDE the request ("improve the /team command") is plain
+    argument text — not a new command to highlight or re-open the picker for.
+    The earliest such command on the line wins and claims everything after it;
+    only when no earlier recognised command has claimed the caret's position does
+    the last-slash-before-caret rule apply. Empty ``commands`` (the pure-parser
+    default) disables claiming and keeps the simple behaviour.
+    """
+    slashes = _boundary_slashes(line)
+    candidate: int | None = None
+    for index in slashes:
+        word, sep, _ = line[index + 1 :].partition(" ")
+        if sep and commands and word.lower() in commands:
+            # A recognised, terminated command. Its argument runs to the end of
+            # the line, so if the caret is anywhere past this slash it is inside
+            # THIS command — return it and stop, ignoring every later slash.
+            if column > index:
+                return index
+            # Caret is before this command entirely; nothing earlier can claim.
+            return candidate
+        if index <= column:
+            candidate = index
+    return candidate
+
+
+def slash_context(
+    text: str, cursor: int | None = None, commands: frozenset[str] = frozenset()
+) -> SlashContext | None:
+    """The command word being typed at the cursor, or ``None`` to hide the list.
+
+    Inline and caret-aware, unlike the original first-line-only rule: the picker
+    shows whenever the caret is inside a boundary-slash token whose word is not
+    yet terminated by whitespace, WHEREVER that token is in the draft. This is
+    what lets a user who has typed a message remember to route it — appending
+    ``/team`` at the caret, or dropping it on its own line — and still get the
+    menu. ``src/foo`` never triggers because its ``/`` is not at a boundary.
+
+    Command-WORD phase only: the instant a space terminates the word the user is
+    typing an ARGUMENT (``/model gpt``), which :func:`slash_argument` owns — a
+    command list there is stale advice. ``cursor`` defaults to the end of the
+    buffer, the common "typing at the end" case.
+
+    ``commands`` is the recognised command vocabulary; passing it makes a slash
+    typed INSIDE an already-engaged command's argument (``/team a /team b``) read
+    as plain text rather than a nested command (see :func:`_active_slash`).
+    """
+    line, line_start, column = _line_of_cursor(text, cursor)
+    slash = _active_slash(line, column, commands)
+    if slash is None:
+        return None
+    # The word runs from the slash to the first whitespace after it. A space
+    # BETWEEN the slash and the caret means the word is already terminated and
+    # the caret is out in argument (or message) territory — not the command.
+    word_end = slash + 1
+    while word_end < len(line) and not line[word_end].isspace():
+        word_end += 1
+    if column > word_end:
+        return None
+    return SlashContext(
+        line_start + slash,
+        line[slash + 1 : word_end],
+        line_start + word_end,
+    )
+
+
+def slash_token_span(
+    text: str, cursor: int | None = None, commands: frozenset[str] = frozenset()
+) -> tuple[int, int] | None:
+    """The ``[start, end)`` offsets of the whole slash TOKEN at the caret.
+
+    ``start`` is the ``/`` and ``end`` is the end of its line — the command word
+    plus its inline argument, which by the inline contract runs to the line end.
+    Returns ``None`` when the caret is not on a boundary-slash token. This is the
+    span a RUN splices out of an inline draft, exposed so the editor never has to
+    reach for the module-private tokenizer. ``commands`` is the recognised
+    vocabulary, so a nested slash inside an engaged command's argument is ignored.
+    """
+    line, line_start, column = _line_of_cursor(text, cursor)
+    slash = _active_slash(line, column, commands)
+    if slash is None:
+        return None
+    return line_start + slash, line_start + len(line)
+
+
+def slash_word(
+    text: str, cursor: int | None = None, commands: frozenset[str] = frozenset()
+) -> str | None:
+    """The lower-cased command word of the slash token AT THE CARET, or ``None``.
+
+    The word regardless of PHASE — whether it is still being typed or already
+    terminated by a space — so a caller that needs to know "which command is the
+    caret on" (the editor deciding which argument list to fill) gets one answer
+    whether the buffer reads ``/team`` or ``/team ops``. :func:`slash_context`
+    and :func:`slash_argument` answer the narrower phase-specific questions.
+    ``commands`` is the recognised vocabulary for the nested-slash rule.
+    """
+    line, _, column = _line_of_cursor(text, cursor)
+    slash = _active_slash(line, column, commands)
+    if slash is None:
+        return None
+    return line[slash + 1 :].partition(" ")[0].lower()
+
+
+class SlashArgument(NamedTuple):
+    """The argument being typed, and the spans it occupies in the buffer.
+
+    ``start`` and ``end`` are whole-buffer offsets bracketing the argument text,
+    so a completion can replace JUST the argument and leave a trailing inline
+    message intact — the argument-phase twin of :class:`SlashContext`.
+    ``token_start`` indexes the ``/`` that opens the whole construct, so a RUN
+    can splice the entire ``/cmd arg`` out of an inline draft (not just its
+    argument). ``value`` is the argument text (possibly ``""``).
+    """
+
+    value: str
+    start: int
+    end: int
+    token_start: int
+
+
+def slash_argument_context(
+    text: str,
+    commands: tuple[str, ...],
+    cursor: int | None = None,
+    known: frozenset[str] = frozenset(),
+) -> SlashArgument | None:
+    """The ARGUMENT being typed after one of ``commands``, with its span.
 
     The mirror image of :func:`slash_context`: that one is live while the command
     word is still open, this one takes over the instant the word is terminated by
@@ -225,24 +392,53 @@ def slash_argument(text: str, commands: tuple[str, ...]) -> str | None:
     offers models, and the handover happens on the space the user was going to
     type anyway.
 
-    Returns the argument text, which may be ``""`` (the command word is complete
-    but nothing has been typed after it — the state that should show the whole
-    catalogue). ``None`` means this is not one of ``commands``.
+    Caret-aware and inline like :func:`slash_context`: the argument is the text
+    from the word-terminating space to the END OF THE LINE the command is on.
+    End-of-line, not end-of-buffer, is what makes a command droppable on its own
+    line above a multi-line draft — the line below is the message, not the
+    argument. On the command's own line the argument runs to the line end, so a
+    trailing message on the SAME line (``/team ops ship it``) is read as part of
+    the argument; putting the command last, or on its own line, is how a user
+    keeps the two apart (documented as the inline contract).
 
-    Single-line only, matching ``slash_context``: a newline means the user is
-    composing a message, not picking from a list.
+    ``None`` when the caret is not in the argument phase of one of ``commands``.
+    ``known`` is the FULL recognised vocabulary (a superset of ``commands``) used
+    only for the nested-slash rule: a slash inside an engaged command's argument
+    is not a new token. It defaults to ``commands`` when omitted.
     """
-    lines = text.split("\n")
-    first = next((index for index, line in enumerate(lines) if line.strip()), None)
-    if first is None or len(lines) > first + 1:
+    line, line_start, column = _line_of_cursor(text, cursor)
+    slash = _active_slash(line, column, known or frozenset(commands))
+    if slash is None:
         return None
-    stripped = lines[first].lstrip()
-    if not stripped.startswith("/"):
-        return None
-    word, sep, argument = stripped[1:].partition(" ")
+    word, sep, argument = line[slash + 1 :].partition(" ")
     if not sep or word.lower() not in commands:
         return None
-    return argument
+    # The caret must be in the ARGUMENT, i.e. past the terminating space; while
+    # it is still on the word itself that is command-word phase, which
+    # ``slash_context`` owns. ``slash + 1 + len(word)`` is the space's column.
+    space_column = slash + 1 + len(word)
+    if column <= space_column:
+        return None
+    arg_start = line_start + space_column + 1
+    return SlashArgument(argument, arg_start, line_start + len(line), line_start + slash)
+
+
+def slash_argument(
+    text: str,
+    commands: tuple[str, ...],
+    cursor: int | None = None,
+    known: frozenset[str] = frozenset(),
+) -> str | None:
+    """The argument text being typed after one of ``commands``, else ``None``.
+
+    A thin projection of :func:`slash_argument_context` onto just the text, for
+    the many callers that only rank against the argument and never need to
+    rewrite the span. Returns ``""`` when the command word is complete but
+    nothing has been typed after it (the whole-catalogue state). ``known`` is the
+    full vocabulary for the nested-slash rule.
+    """
+    context = slash_argument_context(text, commands, cursor, known)
+    return None if context is None else context.value
 
 
 #: Below this many typed characters the fuzzy tail is suppressed. A one- or
@@ -355,6 +551,7 @@ class CommandPicker(Static):
         #: row-0 state must not reach the observer (see ``set_choices``).
         self._suppress_report = False
         self._commands: list[SlashCommand] = []
+        self._command_names: frozenset[str] = frozenset()
         self._choices: list[ArgumentChoice] = []
         self._mode = PickerMode.COMMAND
         self._matches: list[_Suggestion] = []
@@ -379,6 +576,13 @@ class CommandPicker(Static):
     def set_commands(self, commands: list[SlashCommand]) -> None:
         """Replace the offered command registry."""
         self._commands = list(commands)
+        # Full recognised vocabulary (primaries AND aliases), lower-cased, for the
+        # nested-slash rule: a slash typed inside an engaged command's argument is
+        # plain text, and the tokenizer needs the vocabulary to know a command has
+        # claimed the rest of the line. Cached so it is not rebuilt per keystroke.
+        self._command_names = frozenset(
+            name.lower() for command in commands for name in command.names
+        )
 
     def set_choices(self, choices: list[ArgumentChoice], highlight: str | None = None) -> None:
         """Replace the values offered for the current command's ARGUMENT.
@@ -510,9 +714,14 @@ class CommandPicker(Static):
         end = min(total, self._window_start + self._row_budget())
         return self._window_start, end, total
 
-    def sync(self, text: str) -> None:
-        """Re-derive the COMMAND suggestions from the editor's current ``text``."""
-        context = slash_context(text)
+    def sync(self, text: str, cursor: int | None = None) -> None:
+        """Re-derive the COMMAND suggestions from the editor's current ``text``.
+
+        ``cursor`` is a whole-buffer offset locating the active slash token, so
+        an inline ``/team`` typed in the middle of a draft opens the list; the
+        editor passes its caret offset. ``None`` means the end of the buffer.
+        """
+        context = slash_context(text, cursor, self._command_names)
         if context is None:
             # Left slash context entirely: forget the dismissal, so the next
             # `/` opens a fresh picker.
