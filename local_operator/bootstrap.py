@@ -89,12 +89,14 @@ def resolve_hosting_model(
 
         model_name = default_model_for(hosting)
         if not model_name:
-            raise ValueError(
-                f"Model name is not configured for hosting '{hosting}', and no "
-                "default is known for it. Set one with `local-operator config "
-                "edit model_name <model>` or the --model flag (e.g. gpt-4o, "
-                "claude-3-5-sonnet-latest, deepseek-chat)."
-            )
+            # Reuse the resolver's own message rather than inlining a copy: the
+            # two are the SAME error (no default model for this hosting) and a
+            # second literal here drifts from it the first time either is
+            # reworded. Imported lazily to keep this off the session_factory
+            # stack until the rare no-default path is actually hit.
+            from local_operator.session_factory import _no_model_message
+
+            raise ValueError(_no_model_message(hosting))
     return hosting, model_name
 
 

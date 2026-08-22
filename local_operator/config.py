@@ -265,8 +265,14 @@ class ConfigManager:
         """
         from local_operator.cli_style import ERROR, WARNING, paint
 
-        print(paint(f"Error: {detail}", ERROR), file=sys.stderr)
-        backup = self.config_file.with_suffix(self.config_file.suffix + ".bad")
+        print(paint(f"Error: {detail}", ERROR, stream=sys.stderr), file=sys.stderr)
+        # Timestamp the backup so a SECOND bad edit does not clobber the first:
+        # a plain `.bad` suffix means two broken saves in a row silently lose
+        # the earlier recoverable copy, defeating the point of keeping it. The
+        # timestamp is second-resolution, which is finer than a human can make
+        # two edits, so collisions do not happen in practice.
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = self.config_file.with_suffix(self.config_file.suffix + f".bad.{stamp}")
         try:
             self.config_file.replace(backup)
             print(
@@ -274,12 +280,13 @@ class ConfigManager:
                     f"Moved the invalid file to {backup} and starting with defaults. "
                     "Run `local-operator config create` to write a fresh one.",
                     WARNING,
+                    stream=sys.stderr,
                 ),
                 file=sys.stderr,
             )
         except OSError:
             print(
-                paint("Starting with default configuration.", WARNING),
+                paint("Starting with default configuration.", WARNING, stream=sys.stderr),
                 file=sys.stderr,
             )
 

@@ -636,6 +636,7 @@ def credential_update_command(args: argparse.Namespace) -> int:
             paint(
                 f"Warning: '{args.key}' is not a known provider key.{hint} " "Storing it anyway.",
                 WARNING,
+                stream=sys.stderr,
             ),
             file=sys.stderr,
         )
@@ -652,7 +653,7 @@ def credential_update_command(args: argparse.Namespace) -> int:
         # Empty input or a closed stdin. Strip any control sequences from the
         # message before printing \u2014 the presenter owns the colour, and a nested
         # escape from deeper in the stack would otherwise repaint the line.
-        print(paint(strip_control_sequences(str(exc)), ERROR), file=sys.stderr)
+        print(paint(strip_control_sequences(str(exc)), ERROR, stream=sys.stderr), file=sys.stderr)
         return 1
     return 0
 
@@ -686,6 +687,7 @@ def config_open_command() -> int:
             paint(
                 "Error: Configuration file does not exist.  Create one with `config create`.",
                 ERROR,
+                stream=sys.stderr,
             ),
             file=sys.stderr,
         )
@@ -725,7 +727,7 @@ def config_open_command() -> int:
             gui_error = e
 
     print(
-        paint(f"Error opening configuration file: {gui_error}", ERROR),
+        paint(f"Error opening configuration file: {gui_error}", ERROR, stream=sys.stderr),
         file=sys.stderr,
     )
     print(
@@ -756,7 +758,9 @@ def config_edit_command(args: argparse.Namespace) -> int:
         close = difflib.get_close_matches(args.key, sorted(valid_keys), n=1)
         hint = f" Did you mean '{close[0]}'?" if close else ""
         print(
-            paint(f"Error: unknown configuration key: '{args.key}'.{hint}", ERROR),
+            paint(
+                f"Error: unknown configuration key: '{args.key}'.{hint}", ERROR, stream=sys.stderr
+            ),
             file=sys.stderr,
         )
         print(
@@ -798,7 +802,9 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # 1, not -1: a shell sees -1 as 255, which collides with the
         # xargs/ssh "command not found" sentinel and contradicts the
         # documented 0/non-zero exec contract (item A13).
-        print(paint(f"Error updating configuration: {e}", ERROR), file=sys.stderr)
+        print(
+            paint(f"Error updating configuration: {e}", ERROR, stream=sys.stderr), file=sys.stderr
+        )
         return 1
 
 
@@ -1587,7 +1593,7 @@ def _preflight_hosting_model(
         # this into the exec route from reintroducing a stdout leak.
         from local_operator.cli_style import ERROR, paint
 
-        print(paint(f"Error: {exc}", ERROR), file=sys.stderr)
+        print(paint(f"Error: {exc}", ERROR, stream=sys.stderr), file=sys.stderr)
         return 1
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
@@ -1613,6 +1619,7 @@ def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
             "Error: Local Operator is not configured yet \u2014 no hosting provider, "
             "model, or credential is set.",
             ERROR,
+            stream=sys.stderr,
         ),
         file=sys.stderr,
     )
@@ -1629,6 +1636,7 @@ def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
             "On an interactive terminal, just run `local-operator` and log in "
             "from the setup screen.",
             INFO,
+            stream=sys.stderr,
         ),
         file=sys.stderr,
     )
@@ -1712,6 +1720,7 @@ def _preflight_api_key(
                 f"'{hosting}'. Starting anyway — run `/login {canonical}` in the "
                 f"TUI, `local-operator login {canonical}` from a shell{env_hint}.",
                 WARNING,
+                stream=sys.stderr,
             ),
             file=sys.stderr,
         )
@@ -1726,6 +1735,7 @@ def _preflight_api_key(
             f"is not configured. Set it via `local-operator login {canonical}`"
             f"{credential_hint}, or the environment.",
             ERROR,
+            stream=sys.stderr,
         ),
         file=sys.stderr,
     )
@@ -2205,6 +2215,7 @@ def main() -> int:
                             "(missing 'local_operator.tui'); remove --tui to use the "
                             "plain REPL.",
                             ERROR,
+                            stream=sys.stderr,
                         ),
                         file=sys.stderr,
                     )

@@ -317,7 +317,10 @@ def test_config_manager_malformed_yaml_backs_up_and_defaults(temp_config_dir, ca
     manager = ConfigManager(temp_config_dir)
     # Degraded to defaults rather than crashing.
     assert manager.get_config_value("hosting") == ""
-    assert (temp_config_dir / "config.yml.bad").exists()
+    # Backup name is `config.yml.bad.<timestamp>` so a second bad edit cannot
+    # clobber the first (round-1 CR-MINOR-3), hence the glob rather than an
+    # exact-name check.
+    assert list(temp_config_dir.glob("config.yml.bad.*"))
     err = capsys.readouterr().err
     assert "could not parse" in err
 
@@ -329,7 +332,7 @@ def test_config_manager_non_mapping_top_level_backs_up(temp_config_dir, capsys):
     config_file.write_text("- just\n- a\n- list\n")
     manager = ConfigManager(temp_config_dir)
     assert manager.get_config_value("hosting") == ""
-    assert (temp_config_dir / "config.yml.bad").exists()
+    assert list(temp_config_dir.glob("config.yml.bad.*"))
     err = capsys.readouterr().err
     assert "not a valid configuration mapping" in err
 
