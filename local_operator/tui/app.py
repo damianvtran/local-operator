@@ -3027,14 +3027,21 @@ class OperatorApp(App[None]):
                 )
             return
         if not request:
-            notice(f"agent {resolved} is active. Send a request with /agent {resolved} <message>.")
+            # U3/U4: state the actual EFFECT (the profile governs this session's
+            # later turns, not merely "is active"), and borrow /team's "ready"
+            # idiom so the two surfaces read as siblings. Plain wording, no
+            # em dashes. /agent clear detaches it again.
+            notice(
+                f"agent {resolved} is ready and now governs this session's replies. "
+                f"Send a request with /agent {resolved} <message>, or /agent clear to detach."
+            )
             return
         # `_submit_prompt` writes the user row (the message is what the newly
         # attached profile is told) and starts the turn — same non-echo
         # reasoning as `_cmd_team`: the message text is the transcript
         # subject, and a second row restating `/agent name …` would be the
         # duplication the echo policy exists to prevent.
-        notice(f"agent {resolved} is active.")
+        notice(f"agent {resolved} now governs this session's replies.")
         self._submit_prompt(request)
 
     # -- MCP status ---------------------------------------------------------

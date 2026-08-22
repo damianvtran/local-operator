@@ -374,7 +374,10 @@ async def test_agent_name_alone_attaches_without_a_turn() -> None:
     assert session.attached_agents == ["auditor"]
     assert session.prompts == []
     assert rows == [], rows
-    assert any("agent auditor is active" in n for n in notices), notices
+    # U3/U4: the notice states the profile now governs the session and points
+    # at the detach verb, rather than the thinner "is active".
+    assert any("auditor is ready and now governs" in n for n in notices), notices
+    assert any("/agent clear" in n for n in notices), notices
 
 
 @pytest.mark.asyncio
@@ -475,7 +478,8 @@ async def test_agent_with_no_instructions_says_nothing_was_applied() -> None:
     ), bare_notices
     # With a message: still sent, but the notice does not claim a persona.
     assert session.prompts == ["do the thing"]
-    assert not any("hollow-role is active" in n for n in notices), notices
+    assert not any("hollow-role now governs" in n for n in notices), notices
+    assert not any("hollow-role is ready" in n for n in notices), notices
 
 
 @pytest.mark.asyncio
