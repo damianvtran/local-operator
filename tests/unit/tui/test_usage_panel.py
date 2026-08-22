@@ -604,6 +604,136 @@ async def test_the_wheel_is_stopped_so_the_transcript_behind_stays_put() -> None
     assert down.stopped and up.stopped
 
 
+# -- the draggable scrollbar -------------------------------------------------
+# The test host loads no CSS, so the panel's gutter is zero (padding lives only
+# in the real stylesheet) and content coordinates equal widget coordinates —
+# `get_content_offset_capture` subtracts a zero gutter. The bar therefore lands
+# at content column ``_body_content_width()`` and content rows counted from the
+# title at row 0, which is exactly what the widget's own hit-test derives.
+def _mouse(cls, x: int, y: int):
+    """A synthesized Textual mouse event at widget coordinates ``(x, y)``."""
+    return cls(
+        widget=None,
+        x=x,
+        y=y,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+    )
+
+
+def _bar_column(panel: UsagePanel) -> int:
+    """The reserved gutter column the scrollbar paints into."""
+    return panel._body_content_width()
+
+
+def _bar_glyphs(panel: UsagePanel) -> str:
+    """The rightmost cell of every composed row — the scrollbar column's glyphs.
+
+    Read off the composed strings rather than the paint so the assertion is
+    about what a reader sees in that column, track and thumb together.
+    """
+    from local_operator.tui.widgets.usage_panel import SCROLLBAR_THUMB, SCROLLBAR_TRACK
+
+    column = _bar_column(panel)
+    glyphs = ""
+    for row in panel.render_lines_for_test():
+        if len(row) > column and row[column] in (SCROLLBAR_TRACK, SCROLLBAR_THUMB):
+            glyphs += row[column]
+    return glyphs
+
+
+@pytest.mark.asyncio
+async def test_the_scrollbar_is_absent_until_the_body_actually_scrolls() -> None:
+    """A bar on a report that fits is the same lie a "1 of 1" position is: it
+    offers a drag that does nothing. The gutter is still reserved (numbers must
+    not reflow — see the reflow test), but no track or thumb is drawn."""
+    from local_operator.tui.widgets.usage_panel import SCROLLBAR_THUMB, SCROLLBAR_TRACK
+
+    async with _panel_app() as panel:
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        assert _bar_glyphs(panel) == ""  # not scrollable → no bar
+        panel.show_reports(_many_reports())
+        glyphs = _bar_glyphs(panel)
+    assert SCROLLBAR_THUMB in glyphs  # a proportional thumb
+    assert SCROLLBAR_TRACK in glyphs  # over a longer track
+
+
+@pytest.mark.asyncio
+async def test_dragging_the_thumb_moves_the_offset_with_the_pointer() -> None:
+    """A grab on the thumb then a drag down the track increases the offset
+    monotonically and reaches the very bottom at the track's foot — the whole
+    point of a draggable bar. Release ends the drag without moving the offset."""
+    from textual import events
+
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        budget = panel._body_budget()
+        total = len(panel._body().lines)
+        first_row, count = panel._body_region(budget)
+        thumb_top, _ = panel._scrollbar_thumb(total, budget)
+        column = _bar_column(panel)
+
+        panel.on_mouse_down(_mouse(events.MouseDown, column, first_row + thumb_top))
+        assert panel._dragging
+
+        offsets = []
+        for y in range(first_row, first_row + count):
+            panel.on_mouse_move(_mouse(events.MouseMove, column, y))
+            offsets.append(panel.view_offset)
+
+        panel.on_mouse_up(_mouse(events.MouseUp, column, first_row + count - 1))
+
+    assert offsets == sorted(offsets)  # monotonic non-decreasing with pointer y
+    assert offsets[0] == 0 and offsets[-1] == panel._max_offset()  # top → bottom
+    assert not panel._dragging  # released
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_track_below_the_thumb_scrolls_down() -> None:
+    """A click on the bare track past the thumb jumps toward that position, the
+    page-style affordance every scrollbar offers alongside the drag."""
+    from textual import events
+
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        assert panel.view_offset == 0
+        budget = panel._body_budget()
+        total = len(panel._body().lines)
+        first_row, count = panel._body_region(budget)
+        thumb_top, thumb_len = panel._scrollbar_thumb(total, budget)
+        column = _bar_column(panel)
+        # A row on the track below the thumb, still inside the viewport.
+        target = min(count - 1, thumb_top + thumb_len + 2)
+        panel.on_mouse_down(_mouse(events.MouseDown, column, first_row + target))
+        moved = panel.view_offset
+        panel.on_mouse_up(_mouse(events.MouseUp, column, first_row + target))
+    assert moved > 0
+
+
+@pytest.mark.asyncio
+async def test_the_scrollbar_gutter_never_reflows_the_number_columns() -> None:
+    """Requirement 1: the report's right-aligned numbers land at the same
+    column whether the bar is present (scrolled) or absent (fits), because the
+    gutter is reserved in both states rather than stolen from the numbers when
+    the bar appears."""
+
+    def meter(rows: list[str]) -> str:
+        # The meter row (leading ●), not the header, whose binding summary also
+        # prints a percent — the meter is the row with the right-aligned column.
+        return next(row for row in rows if row.startswith("●") and "10%" in row)
+
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        scrolled = meter(panel.render_lines_for_test())
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 10.0, shared=True))])
+        fits = meter(panel.render_lines_for_test())
+    assert scrolled.index("10%") == fits.index("10%"), (scrolled, fits)
+
+
 # -- the card ON the screen (the real app, so the fill is in the frame) -------
 def _painted_span(app: OperatorApp, row: int, fill: str) -> tuple[int, int, int]:
     """``(cells left of the card, cells right of it, its painted width)``.
