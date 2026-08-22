@@ -93,13 +93,17 @@ pip install local-operator     # pipx install local-operator on Linux (PEP 668)
 The install provides both `local-operator` and its short alias `lop` — the
 rest of this page uses `lop`.
 
-Sign in to a provider (or skip this — the app tells you what's missing on
-first run):
+Sign in to a provider (or skip this — on an interactive terminal `lop` opens
+in a setup state and walks you through `/login`; a headless or piped run prints
+the exact commands to configure hosting, model, and a key):
 
 ```bash
 lop login           # lists login-capable providers
 lop login anthropic # OAuth sign-in in your browser
 ```
+
+`lop login <provider>` also sets it as your default hosting (and picks a
+default model) when none is configured yet, so the very next `lop` just works.
 
 Then start it:
 
