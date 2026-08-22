@@ -243,12 +243,63 @@ async def test_todos_survive_a_resume(tmp_path):
 
     resumed = _session(tmp_path, IdleStream())
     await resumed.async_init()
-    items = TODO_STORE.get(resumed.session_id) or []
+    # The store is PHASED now (phased-todos change): a flat ``init`` restores as
+    # one implicit "Todos" phase, so flatten across phases before checking the
+    # items survived. Persistence round-trips the phase structure, not a bare
+    # item list — a resume that flattened would lose a multi-phase plan.
+    phases = TODO_STORE.get(resumed.session_id) or []
+    items = [item for phase in phases for item in phase["items"]]
     by_text = {i["text"]: i for i in items}
     assert by_text["alpha"]["status"] == "done"
     assert by_text["beta"]["status"] == "blocked"
     assert by_text["beta"].get("reason") == "waiting on X"
     assert by_text["gamma"]["status"] == "pending"
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_phased_todos_survive_a_resume_with_phase_identity(tmp_path):
+    """A MULTI-PHASE plan round-trips through a resume with its phase names and
+    per-phase membership intact.
+
+    The persistence path (``todo_snapshot``/``restore_todos``) landed on main
+    for a FLAT store; the phased-todos change made the store phased, so this
+    pins the integration: a resume must rebuild the phase structure, not
+    collapse it into one anonymous list. Without the phase-aware snapshot a
+    two-phase plan would come back as a single implicit phase and the panel's
+    headers, per-phase progress, and the guardrail's phase-aware fingerprint
+    would all differ from what they were before the restart.
+    """
+    TODO_STORE.pop((tmp_path / "sess").name, None)
+    parent = _session(tmp_path, IdleStream())
+    await parent.async_init()
+    sid = parent.session_id
+
+    ctx = parent._build_tool_context()
+    await _todo(
+        ctx,
+        "p1",
+        {
+            "op": "init",
+            "phases": [
+                {"phase": "Foundation", "items": ["scaffold", "wire config"]},
+                {"phase": "Verification", "items": ["run gate"]},
+            ],
+        },
+    )
+    await _todo(ctx, "p2", {"op": "done", "phase": "Foundation"})
+    await parent.prompt("anything")
+    await parent.dispose()
+    TODO_STORE.pop(sid, None)
+
+    resumed = _session(tmp_path, IdleStream())
+    await resumed.async_init()
+    phases = TODO_STORE.get(resumed.session_id) or []
+    assert [p["name"] for p in phases] == ["Foundation", "Verification"]
+    foundation = {i["text"]: i["status"] for i in phases[0]["items"]}
+    assert foundation == {"scaffold": "done", "wire config": "done"}
+    verification = {i["text"]: i["status"] for i in phases[1]["items"]}
+    assert verification == {"run gate": "pending"}
     await resumed.dispose()
 
 

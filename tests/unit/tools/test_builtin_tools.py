@@ -1099,7 +1099,11 @@ async def test_todo_block_requires_a_reason(tools, context) -> None:
     # Blocked is NOT open for the guardrail — that is what makes it an honest
     # stop rather than a way to end a turn on unfinished work.
     assert builtin.open_todos("unit-test") == []
-    assert builtin.TODO_STORE["unit-test"][0]["reason"] == "needs the user's call on the domain"
+    # A flat init lives in the single implicit "Todos" phase; walk into it.
+    assert (
+        builtin.TODO_STORE["unit-test"][0]["items"][0]["reason"]
+        == "needs the user's call on the domain"
+    )
 
 
 @pytest.mark.asyncio
@@ -1109,7 +1113,7 @@ async def test_todo_drop_abandons_without_claiming_completion(tools, context) ->
     dropped = await _call(tools, "todo", {"op": "drop", "items": ["b"]}, context)
 
     assert dropped.is_error is False
-    assert builtin.TODO_STORE["unit-test"][1]["status"] == "dropped"
+    assert builtin.TODO_STORE["unit-test"][0]["items"][1]["status"] == "dropped"
     assert [item["text"] for item in builtin.open_todos("unit-test")] == ["a"]
 
 
@@ -1158,9 +1162,255 @@ async def test_todo_fingerprint_tracks_the_whole_list(tools, context) -> None:
 
     await _call(tools, "todo", {"op": "drop", "items": ["a"]}, context)
 
-    assert before == (("a", "done"), ("b", "pending"))
-    assert builtin.todo_fingerprint("unit-test") == (("a", "dropped"), ("b", "pending"))
+    # The fingerprint is now a 3-tuple carrying phase identity (design §5.2); a
+    # flat init reports the implicit "Todos" phase name for every item.
+    assert before == (("Todos", "a", "done"), ("Todos", "b", "pending"))
+    assert builtin.todo_fingerprint("unit-test") == (
+        ("Todos", "a", "dropped"),
+        ("Todos", "b", "pending"),
+    )
     assert builtin.todo_fingerprint("no-such-session") == ()
+
+
+# --- phased todos -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_todo_phased_init_builds_phases(tools, context) -> None:
+    """A phased ``init`` writes one group per phase, its texts becoming the same
+    pending item dicts every other op already handles."""
+    result = await _call(
+        tools,
+        "todo",
+        {
+            "op": "init",
+            "phases": [
+                {"phase": "Foundation", "items": ["scaffold", "wire config"]},
+                {"phase": "Verification", "items": ["run gate"]},
+            ],
+        },
+        context,
+    )
+
+    assert result.is_error is False and "3 item(s) across 2 phase(s)" in result.text
+    store = builtin.TODO_STORE["unit-test"]
+    assert [phase["name"] for phase in store] == ["Foundation", "Verification"]
+    assert [item["text"] for item in store[0]["items"]] == ["scaffold", "wire config"]
+
+
+@pytest.mark.asyncio
+async def test_todo_flat_init_is_one_implicit_phase(tools, context) -> None:
+    """The back-compat lever: a flat init lives in one implicit \"Todos\" phase,
+    so an existing caller sees the identical list."""
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b"]}, context)
+
+    store = builtin.TODO_STORE["unit-test"]
+    assert len(store) == 1
+    assert store[0]["name"] == "Todos"
+    assert [item["text"] for item in store[0]["items"]] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_todo_init_rejects_both_phases_and_items(tools, context) -> None:
+    """``phases`` and flat ``items`` are two spellings of one list; accepting
+    both is ambiguous about which wins, so it must fail loud."""
+    result = await _call(
+        tools,
+        "todo",
+        {"op": "init", "phases": [{"phase": "A", "items": ["x"]}], "items": ["y"]},
+        context,
+    )
+
+    assert result.is_error is True and "not both" in result.text
+
+
+@pytest.mark.asyncio
+async def test_todo_add_into_new_and_existing_and_implicit_phase(tools, context) -> None:
+    """``add`` appends into the named phase, lazily creating it; with no phase
+    it targets the implicit \"Todos\"; dedupe is WITHIN the target phase."""
+    await _call(tools, "todo", {"op": "init", "items": ["a"]}, context)
+
+    into_new = await _call(tools, "todo", {"op": "add", "items": ["x"], "phase": "Extra"}, context)
+    into_existing = await _call(
+        tools, "todo", {"op": "add", "items": ["y"], "phase": "Extra"}, context
+    )
+    into_implicit = await _call(tools, "todo", {"op": "add", "items": ["b"]}, context)
+
+    assert into_new.is_error is False and "1 item(s)" in into_new.text
+    assert into_existing.is_error is False
+    assert into_implicit.is_error is False
+    store = builtin.TODO_STORE["unit-test"]
+    assert [phase["name"] for phase in store] == ["Todos", "Extra"]
+    assert [item["text"] for item in store[0]["items"]] == ["a", "b"]
+    assert [item["text"] for item in store[1]["items"]] == ["x", "y"]
+
+
+@pytest.mark.asyncio
+async def test_todo_add_dedupe_is_per_phase(tools, context) -> None:
+    """The same text pending in another phase is a different task; dedupe must
+    not collapse across phases and silently drop it."""
+    await _call(
+        tools,
+        "todo",
+        {"op": "init", "phases": [{"phase": "A", "items": ["shared"]}]},
+        context,
+    )
+
+    added = await _call(tools, "todo", {"op": "add", "items": ["shared"], "phase": "B"}, context)
+
+    assert added.is_error is False and "1 item(s)" in added.text
+    assert [item["text"] for item in builtin.open_todos("unit-test")] == ["shared", "shared"]
+
+
+@pytest.mark.asyncio
+async def test_todo_done_by_phase_resolves_every_open_item_idempotently(tools, context) -> None:
+    """A phase target resolves every currently-open item in it at once, and a
+    re-issue on a settled phase resolves nothing and reports it cleanly."""
+    await _call(
+        tools,
+        "todo",
+        {
+            "op": "init",
+            "phases": [
+                {"phase": "Foundation", "items": ["scaffold", "wire config"]},
+                {"phase": "Verification", "items": ["run gate"]},
+            ],
+        },
+        context,
+    )
+
+    first = await _call(tools, "todo", {"op": "done", "phase": "Foundation"}, context)
+    again = await _call(tools, "todo", {"op": "done", "phase": "Foundation"}, context)
+
+    assert first.is_error is False and "scaffold" in first.text and "wire config" in first.text
+    assert again.is_error is False and "No open items in phase 'Foundation'" in again.text
+    # Only Foundation was resolved; Verification is untouched and still open.
+    assert [item["text"] for item in builtin.open_todos("unit-test")] == ["run gate"]
+
+
+@pytest.mark.asyncio
+async def test_todo_block_and_drop_by_phase(tools, context) -> None:
+    """``block``/``drop`` accept a phase target too; block still requires a
+    reason, and drop leaves no open work behind in the phase."""
+    await _call(
+        tools,
+        "todo",
+        {"op": "init", "phases": [{"phase": "P", "items": ["a", "b"]}]},
+        context,
+    )
+
+    bare_block = await _call(tools, "todo", {"op": "block", "phase": "P"}, context)
+    blocked = await _call(
+        tools, "todo", {"op": "block", "phase": "P", "reason": "waiting on legal"}, context
+    )
+
+    assert bare_block.is_error is True and "reason" in bare_block.text
+    assert blocked.is_error is False
+    # Blocked is not open; the guardrail sees an honest stop.
+    assert builtin.open_todos("unit-test") == []
+    assert all(item["status"] == "blocked" for item in builtin.TODO_STORE["unit-test"][0]["items"])
+
+
+@pytest.mark.asyncio
+async def test_todo_done_by_phase_unknown_phase_is_error(tools, context) -> None:
+    await _call(tools, "todo", {"op": "init", "items": ["a"]}, context)
+    result = await _call(tools, "todo", {"op": "done", "phase": "Ghost"}, context)
+    assert result.is_error is True and "Ghost" in result.text
+
+
+@pytest.mark.asyncio
+async def test_todo_done_by_items_searches_across_phases(tools, context) -> None:
+    """A text form must find its item wherever it lives, so the model need not
+    know which phase holds it; the first-not-in-target idempotency survives."""
+    await _call(
+        tools,
+        "todo",
+        {
+            "op": "init",
+            "phases": [
+                {"phase": "A", "items": ["one"]},
+                {"phase": "B", "items": ["two"]},
+            ],
+        },
+        context,
+    )
+
+    done = await _call(tools, "todo", {"op": "done", "items": ["two"]}, context)
+    # Idempotent re-issue: closing an already-closed text is not an error.
+    again = await _call(tools, "todo", {"op": "done", "items": ["two"]}, context)
+
+    assert done.is_error is False and "two" in done.text
+    assert again.is_error is False
+    assert [item["text"] for item in builtin.open_todos("unit-test")] == ["one"]
+
+
+@pytest.mark.asyncio
+async def test_todo_view_groups_by_phase_with_progress(tools, context) -> None:
+    """``view`` echoes phase headers with per-phase (done/total) so the receipt
+    mirrors the dock panel."""
+    await _call(
+        tools,
+        "todo",
+        {
+            "op": "init",
+            "phases": [
+                {"phase": "Foundation", "items": ["scaffold", "wire config"]},
+                {"phase": "Verification", "items": ["run gate"]},
+            ],
+        },
+        context,
+    )
+    await _call(tools, "todo", {"op": "done", "items": ["scaffold"]}, context)
+
+    view = await _call(tools, "todo", {"op": "view"}, context)
+
+    # Header spelling mirrors the dock panel's ``PhaseName · done/total`` exactly
+    # (U5) — one grammar across both surfaces.
+    assert view.text.splitlines() == [
+        "Foundation · 1/2",
+        "- [x] scaffold",
+        "- [ ] wire config",
+        "Verification · 0/1",
+        "- [ ] run gate",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_todo_view_single_implicit_phase_is_headerless(tools, context) -> None:
+    """The single implicit \"Todos\" phase renders HEADERLESS, byte-identical to
+    the pre-phases flat output."""
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b"]}, context)
+
+    view = await _call(tools, "todo", {"op": "view"}, context)
+
+    assert view.text.splitlines() == ["- [ ] a", "- [ ] b"]
+
+
+def test_todo_as_phases_coerces_legacy_flat_list() -> None:
+    """The one coercion every reader uses: a legacy flat list becomes one
+    implicit \"Todos\" phase; an already-phased list passes through."""
+    flat = [{"text": "a", "status": "pending"}]
+    coerced = builtin._as_phases(flat)
+    assert coerced == [{"name": "Todos", "items": [{"text": "a", "status": "pending"}]}]
+
+    phased = [{"name": "P", "items": [{"text": "b", "status": "pending"}]}]
+    assert builtin._as_phases(phased) is phased
+
+
+def test_todo_fingerprint_moves_on_phase_rename_and_item_move() -> None:
+    """A 3-tuple fingerprint sees phase-level movement a 2-tuple was blind to."""
+    builtin.TODO_STORE["unit-test"] = [
+        {"name": "A", "items": [{"text": "x", "status": "pending"}]},
+    ]
+    before = builtin.todo_fingerprint("unit-test")
+
+    # A phase rename is movement.
+    builtin.TODO_STORE["unit-test"][0]["name"] = "B"
+    renamed = builtin.todo_fingerprint("unit-test")
+
+    assert before == (("A", "x", "pending"),)
+    assert renamed == (("B", "x", "pending"),)
+    assert before != renamed
 
 
 # ---------------------------------------------------------------------------

@@ -3673,15 +3673,31 @@ def build_grep_tool() -> AgentTool:
 # todo
 # ---------------------------------------------------------------------------
 
+#: The persisted shape. An owner maps to a list of PHASES, each phase a
+#: ``{"name", "items"}`` dict whose ``items`` are the SAME item dicts the tool
+#: has always used (``{"text", "status"[, "reason"]}``). Keeping the item dict
+#: unchanged is the back-compat lever: ``_match_todos``, ``_todo_rows``,
+#: ``_TODO_MARKS`` and the panel's row builder all still operate on one item
+#: dict once a phase's ``items`` list is in hand. A flat ``init`` becomes ONE
+#: implicit phase named ``"Todos"`` (rendered headerless, so an existing
+#: caller sees the identical panel it saw before phases existed).
+TodoItem = dict[str, str]  # {"text", "status"[, "reason"]} — UNCHANGED
+TodoPhase = dict[str, Any]  # {"name": str, "items": list[TodoItem]}
+
+#: The sentinel name of the implicit phase a flat ``init`` (or a bare ``add``)
+#: writes into. The panel special-cases exactly this single-phase case to stay
+#: headerless, so the constant is the one place that spelling lives.
+_IMPLICIT_PHASE = "Todos"
+
 #: In-memory todo lists keyed by NON-EMPTY session id. The host may attach a
 #: durable store to the ToolContext (``todos`` dict) — we prefer that so
 #: transcripts can replay todo state — but a bare context still works via
 #: this table (keyed by the context object's id when no session id exists).
-TODO_STORE: dict[str, list[dict[str, str]]] = {}
+TODO_STORE: dict[str, list[TodoPhase]] = {}
 #: Fallback store for contexts without a session id, so their lists never
 #: collide under the shared "" key. Keyed by the context object's id rendered
 #: as a string, so every todo store in this module has one key type.
-_CONTEXT_TODO_STORE: dict[str, list[dict[str, str]]] = {}
+_CONTEXT_TODO_STORE: dict[str, list[TodoPhase]] = {}
 
 #: The custom-message type the session's continuation guardrail injects at the
 #: yield boundary (``Session._todo_continuation``). It lives beside the store
@@ -3702,13 +3718,31 @@ _TODO_RESOLVED = ("done", "dropped")
 _TODO_MARKS = {"pending": " ", "done": "x", "blocked": "~", "dropped": "-"}
 
 
+class InitPhase(BaseModel):
+    # A single named group in a phased ``init`` payload. Extra keys fail loud
+    # like every other tool param model, so a mis-shaped phase is a validation
+    # error the model sees immediately rather than a silently-dropped field.
+    model_config = ConfigDict(extra="forbid")
+
+    phase: str = Field(
+        description=(
+            "phase name — a short noun phrase, e.g. 'Foundation', 'Auth', "
+            "'Verification'. No '1.'/'Phase 1:' prefixes; the panel numbers "
+            "phases itself."
+        )
+    )
+    items: list[str] = Field(description="task texts for this phase, in order")
+
+
 class TodoParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     op: Literal["init", "add", "done", "block", "drop", "view"] = Field(
         description=(
-            "init: replace the whole list; add: append newly discovered work "
-            "without rewriting the list; done: mark items finished; block: "
+            "init: replace the whole list, optionally grouped into named phases "
+            "(pass `phases`); add: append newly discovered work without "
+            "rewriting the list, optionally into a named `phase`; done: mark "
+            "items finished; block: "
             "mark items that cannot proceed until a user decides or an "
             "external service answers (requires 'reason'); drop: abandon "
             "items that are no longer needed; view: show the list."
@@ -3722,6 +3756,29 @@ class TodoParams(BaseModel):
             "exactly; several items may be resolved in one call."
         ),
     )
+    # NEW — phased init payload. Mutually exclusive with a flat ``items`` on
+    # 'init': the two express the same list two ways, so accepting both would
+    # be ambiguous about which wins.
+    phases: list[InitPhase] = Field(
+        default_factory=list,
+        description=(
+            "Phased task list for 'init': each entry groups task texts under a "
+            "named phase. Use this OR 'items' (flat), not both. Phases render "
+            "as headers with their items indented beneath."
+        ),
+    )
+    # NEW — phase target for add/done/drop/block. For 'add' it names the phase
+    # to append into (lazily created if new); for done/drop/block WITHOUT
+    # 'items' it resolves every open item in that phase at once.
+    phase: str = Field(
+        default="",
+        description=(
+            "Phase to address. For 'add', append into this phase (lazily "
+            "created if new). For 'done'/'drop'/'block' with no 'items', "
+            "resolve EVERY open item in this phase. Omit to target the whole "
+            "list (add \u2192 implicit 'Todos' phase)."
+        ),
+    )
     reason: str = Field(
         default="",
         description=(
@@ -3733,9 +3790,38 @@ class TodoParams(BaseModel):
 
 
 #: Every todo store — host-attached or module-level — maps one owner key to
-#: that owner's list of ``{"text": ..., "status": ...}`` items. A ``blocked``
-#: item carries one extra key, ``reason``.
-TodoStore = dict[str, list[dict[str, str]]]
+#: that owner's list of PHASES (``{"name", "items"}``); each phase's ``items``
+#: are ``{"text", "status"[, "reason"]}`` item dicts. A flat ``init`` still
+#: works: it becomes one implicit ``"Todos"`` phase (see :func:`_as_phases`).
+TodoStore = dict[str, list[TodoPhase]]
+
+
+def _as_phases(raw: list[Any]) -> list[TodoPhase]:
+    """Coerce a stored owner-list to phases — the ONE shape every reader walks.
+
+    A legacy flat list (item dicts at the top level) becomes one implicit
+    ``"Todos"`` phase; an already-phased list passes through untouched. This is
+    defensive rather than required: the store is process-global and in-memory
+    (nothing serialises it), and within one process only the post-upgrade tool
+    writes it — so the only way a reader meets a legacy flat list is a
+    hand-attached ``ToolContext.todos`` holding old data, which must not crash
+    a reader. Detects phased by the presence of ``"items"`` on the first
+    element, since an item dict never carries that key.
+    """
+    if raw and isinstance(raw[0], dict) and "items" in raw[0]:
+        return raw  # already phased
+    return [{"name": _IMPLICIT_PHASE, "items": list(raw)}]  # legacy flat
+
+
+def _all_items(phases: list[TodoPhase]) -> list[TodoItem]:
+    """Every item across phases in phase-then-item order — the flat view the
+    match/progress/fingerprint helpers walk.
+
+    Items are shared BY REFERENCE with their phase, so mutating one here (e.g.
+    ``item["status"] = "done"``) updates its phase in place, which is what lets
+    ``done``/``drop``/``block`` search across phases without re-indexing.
+    """
+    return [item for phase in phases for item in phase["items"]]
 
 
 def _todo_store_and_key(context: ToolContext | None) -> tuple[TodoStore, str]:
@@ -3768,15 +3854,25 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
     have to feed the guardrail itself. Copies because the ops mutate their item
     dicts in place, and a caller holding the originals would read a list that
     changed under it.
+
+    Pending items are flattened across ALL phases (phase-then-item order): the
+    guardrail asks "is there open work?", and a phase boundary does not change
+    the answer. The returned dicts are plain item dicts (no phase key), so
+    ``_todo_reminder_text`` needs no change.
     """
-    items = TODO_STORE.get(session_id)
-    if not items:
+    raw = TODO_STORE.get(session_id)
+    if not raw:
         return []
-    return [dict(item) for item in items if item.get("status") == "pending"]
+    return [
+        dict(item)
+        for phase in _as_phases(raw)
+        for item in phase["items"]
+        if item.get("status") == "pending"
+    ]
 
 
-def todo_snapshot(session_id: str) -> list[dict[str, str]]:
-    """A deep copy of the FULL todo list for ``session_id`` (``[]`` when none).
+def todo_snapshot(session_id: str) -> list[dict[str, Any]]:
+    """A deep copy of the FULL PHASED todo list for ``session_id`` (``[]`` none).
 
     The durable form the session persists to its transcript so a resume can
     rebuild the list (see ``Session._persist_todo_snapshot``). Unlike
@@ -3784,17 +3880,28 @@ def todo_snapshot(session_id: str) -> list[dict[str, str]]:
     and every field (including a blocked item's ``reason``), because the panel
     and the progress counter render the whole list, not just the open subset.
 
+    Returns the PHASED shape (``[{"name", "items":[{...}]}]``): the store is
+    phased (phased-todos change), so persistence must round-trip phases or a
+    resume would flatten a multi-phase plan into one anonymous list. The copy is
+    DEEP through the phase's ``items`` — a shallow ``dict(phase)`` would alias
+    the nested item dicts the tool mutates in place, and a caller holding the
+    snapshot would then see ``done`` flip under it. Runs ``_as_phases`` so a
+    legacy flat slot still snapshots as one implicit phase.
+
     Reads the same SESSION-ID branch of the store as :func:`open_todos`; the
     caveat there about a host-attached ``ToolContext.todos`` store applies here
-    identically. Copies so a caller holding the result never mutates the store.
+    identically.
     """
-    items = TODO_STORE.get(session_id)
-    if not items:
+    raw = TODO_STORE.get(session_id)
+    if not raw:
         return []
-    return [dict(item) for item in items]
+    return [
+        {"name": phase["name"], "items": [dict(item) for item in phase["items"]]}
+        for phase in _as_phases(raw)
+    ]
 
 
-def restore_todos(session_id: str, items: list[dict[str, str]]) -> None:
+def restore_todos(session_id: str, phases: list[dict[str, Any]]) -> None:
     """Seed ``session_id``'s todo list from a persisted snapshot at resume.
 
     The inverse of :func:`todo_snapshot`. Writes straight into the same
@@ -3803,31 +3910,56 @@ def restore_todos(session_id: str, items: list[dict[str, str]]) -> None:
     continuation guardrail's fingerprint (:func:`todo_fingerprint`) matches what
     it was before the restart.
 
+    Accepts the PHASED snapshot and normalises it through :func:`_as_phases`, so
+    a snapshot written by the pre-phases build (a flat item list) still restores
+    as one implicit phase rather than corrupting the store. The deep copy
+    mirrors :func:`todo_snapshot`: each phase gets a fresh ``items`` list of
+    copied item dicts so the store never aliases the caller's structure.
+
     A no-op when there is nothing to restore or the id is empty, and it REFUSES
     to overwrite a list the current session already has: restore runs once at
     construction, before any turn, so a populated slot means a live list that
-    must win over a stale snapshot. Each item is copied so the store never
-    aliases the caller's list.
+    must win over a stale snapshot.
     """
-    if not session_id or not items:
+    if not session_id or not phases:
         return
     if TODO_STORE.get(session_id):
         return
-    TODO_STORE[session_id] = [dict(item) for item in items]
+    TODO_STORE[session_id] = [
+        {"name": phase["name"], "items": [dict(item) for item in phase["items"]]}
+        for phase in _as_phases(phases)
+    ]
 
 
-def todo_fingerprint(session_id: str) -> tuple[tuple[str, str], ...]:
-    """``(text, status)`` for EVERY item of ``session_id``'s list, in order.
+def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
+    """``(phase_name, text, status)`` for EVERY item, phase-then-item order.
 
     What the guardrail's no-progress latch compares between two yields. The
     FULL list, not the pending subsequence: an item moving from ``done`` to
     ``dropped`` changes only the settled part of the list, and a latch blind to
-    that would call a list that did move unchanged. Store knowledge stays in
-    this module — :func:`open_todos`'s note about a host-attached
-    ``ToolContext.todos`` store applies here identically.
+    that would call a list that did move unchanged. The phase name rides in the
+    tuple because with phases a rename or an item moving between phases is also
+    movement the model made — a 2-tuple would be blind to it and read a list
+    that changed as stuck.
+
+    CROSS-FILE COUPLING (design §5.3): the arity of this tuple is mirrored by
+    ``session.py:_stamped_todo_fingerprint``, which filters the stamped copy to
+    the SAME length. If one grows without the other, the stamped side becomes
+    empty and every reminder expires on every render — the latch errs safe
+    (keeps nudging) so 'does it nudge' still passes while 'does it stop
+    nudging' silently breaks. Change both together.
+
+    Store knowledge stays in this module — :func:`open_todos`'s note about a
+    host-attached ``ToolContext.todos`` store applies here identically.
     """
-    items = TODO_STORE.get(session_id) or ()
-    return tuple((str(item.get("text", "")), str(item.get("status", "pending"))) for item in items)
+    raw = TODO_STORE.get(session_id)
+    if not raw:
+        return ()
+    return tuple(
+        (str(phase["name"]), str(item.get("text", "")), str(item.get("status", "pending")))
+        for phase in _as_phases(raw)
+        for item in phase["items"]
+    )
 
 
 def _todo_progress(current: list[dict[str, str]]) -> str:
@@ -3851,6 +3983,47 @@ def _todo_rows(items: list[dict[str, str]]) -> list[str]:
             row += f" — blocked: {reason}" if reason else " — blocked"
         rows.append(row)
     return rows
+
+
+def _todo_view_text(phases: list[TodoPhase]) -> str:
+    """The ``view`` receipt, grouped by phase so it mirrors the dock panel.
+
+    A single implicit ``"Todos"`` phase renders HEADERLESS — byte-identical to
+    the pre-phases flat output — so an existing caller (and every existing
+    test) reads the exact receipt it always did. Any other shape (multiple
+    phases, or one explicitly-named phase) prefixes each group with a
+    ``PhaseName · done/total`` header, counting resolved items the same way
+    :func:`_todo_progress` does so the header and the panel agree.
+
+    The header spelling is the middot ``PhaseName · done/total`` — the SAME
+    grammar the dock panel's ``_phase_header_row`` paints (U5). The receipt used
+    to parenthesise (``Foundation (1/2)``) while the panel used the middot, so a
+    user cross-referencing the transcript against the band saw two formats for
+    one fact; the design (§5.2) makes the panel/receipt mirror load-bearing, so
+    both surfaces now spell a phase header one way.
+    """
+    if len(phases) == 1 and phases[0]["name"] == _IMPLICIT_PHASE:
+        return "\n".join(_todo_rows(phases[0]["items"]))
+    blocks: list[str] = []
+    for phase in phases:
+        items = phase["items"]
+        blocks.append(f"{phase['name']} · {_todo_progress(items)}")
+        blocks.extend(_todo_rows(items))
+    return "\n".join(blocks)
+
+
+def _find_or_create_phase(phases: list[TodoPhase], name: str) -> TodoPhase:
+    """The phase named ``name``, created empty and appended if it does not yet
+    exist — the lazy-create ``add`` relies on so a new phase name is not an
+    error but a new group. Match is by exact name, the same identity the
+    fingerprint and panel use.
+    """
+    for phase in phases:
+        if phase["name"] == name:
+            return phase
+    phase = {"name": name, "items": []}
+    phases.append(phase)
+    return phase
 
 
 def _match_todos(
@@ -3922,35 +4095,77 @@ async def execute_todo(
     store, key = _todo_store_and_key(context)
 
     if params.op == "init":
+        # ``phases`` and flat ``items`` are two spellings of the same list, so
+        # accepting both is ambiguous about which wins — reject it loudly.
+        if params.phases and params.items:
+            return _error(
+                tool_call_id,
+                "todo",
+                "'init' takes `phases` OR `items`, not both.",
+            )
+        if params.phases:
+            # Each declared phase becomes a group; its texts become pending
+            # item dicts of the same shape every other op already handles.
+            total = sum(len(phase.items) for phase in params.phases)
+            if not total:
+                return _error(tool_call_id, "todo", "'init' requires at least one item")
+            store[key] = [
+                {
+                    "name": phase.phase,
+                    "items": [{"text": text, "status": "pending"} for text in phase.items],
+                }
+                for phase in params.phases
+            ]
+            return _text(
+                tool_call_id,
+                "todo",
+                f"Todo list initialized with {total} item(s) across "
+                f"{len(params.phases)} phase(s).",
+            )
         if not params.items:
             return _error(tool_call_id, "todo", "'init' requires a non-empty items list")
-        store[key] = [{"text": item, "status": "pending"} for item in params.items]
+        # Flat init → one implicit headerless phase, so an existing caller sees
+        # the identical list it always did (design §3.2, the back-compat lever).
+        store[key] = [
+            {
+                "name": _IMPLICIT_PHASE,
+                "items": [{"text": item, "status": "pending"} for item in params.items],
+            }
+        ]
         return _text(
             tool_call_id,
             "todo",
             f"Todo list initialized with {len(params.items)} item(s).",
         )
 
-    current = store.get(key, [])
+    phases = _as_phases(store.get(key, []))
+    # The flat view across all phases; items are shared BY REFERENCE with their
+    # phase, so mutating one here updates the phase in place (design §4.2).
+    current = _all_items(phases)
 
     if params.op == "add":
         if not params.items:
             return _error(tool_call_id, "todo", "'add' requires a non-empty items list")
-        # Skip texts already tracked as pending: a retried call (or a model
-        # restating the requirement it just recorded) must not double the list,
-        # which would leave a phantom item the guardrail keeps nudging on
-        # forever. The running set also collapses duplicates WITHIN one call.
-        open_texts = {item["text"] for item in current if item.get("status") == "pending"}
+        # Append into the named phase (default the implicit ``"Todos"``),
+        # lazily creating it so a fresh phase name is a new group rather than an
+        # error. Dedupe-by-open-text is applied WITHIN the target phase only:
+        # the same text living pending in another phase is a legitimately
+        # different task, and collapsing across phases would silently drop it.
+        target_phase = _find_or_create_phase(phases, params.phase or _IMPLICIT_PHASE)
+        open_texts = {
+            item["text"] for item in target_phase["items"] if item.get("status") == "pending"
+        }
         added: list[str] = []
         for text in params.items:
             if text in open_texts:
                 continue
             open_texts.add(text)
             added.append(text)
-        current = [*current, *({"text": text, "status": "pending"} for text in added)]
+        target_phase["items"].extend({"text": text, "status": "pending"} for text in added)
         # Reassign: ``store.get(key, [])`` hands back a fresh list when this
         # owner has no list yet, so an `add` before any `init` must bind it.
-        store[key] = current
+        store[key] = phases
+        current = _all_items(phases)
         if not added:
             return _text(
                 tool_call_id,
@@ -3965,8 +4180,6 @@ async def execute_todo(
         )
 
     if params.op in ("done", "block", "drop"):
-        if not params.items:
-            return _error(tool_call_id, "todo", f"'{params.op}' requires items with the item text")
         reason = params.reason.strip()
         if params.op == "block" and not reason:
             return _error(
@@ -3977,6 +4190,49 @@ async def execute_todo(
                 "or use 'drop' if it is no longer needed.",
             )
         target = {"done": "done", "block": "blocked", "drop": "dropped"}[params.op]
+        verb = {"done": "Marked done", "block": "Blocked", "drop": "Dropped"}[params.op]
+
+        if not params.items:
+            # Phase-target form: resolve EVERY currently-open item in the named
+            # phase at once. Idempotent by construction — a fully-resolved phase
+            # selects nothing and reports it cleanly rather than erroring.
+            if not params.phase:
+                return _error(
+                    tool_call_id,
+                    "todo",
+                    f"'{params.op}' requires either items with the item text or a "
+                    f"'phase' to resolve every open item in.",
+                )
+            named = next((p for p in phases if p["name"] == params.phase), None)
+            if named is None:
+                return _error(
+                    tool_call_id,
+                    "todo",
+                    f"No phase named {params.phase!r}.",
+                )
+            matched = [
+                item for item in named["items"] if item.get("status") in ("pending", "blocked")
+            ]
+            for item in matched:
+                item["status"] = target
+                if target == "blocked":
+                    item["reason"] = reason
+                else:
+                    item.pop("reason", None)
+            if not matched:
+                return _text(
+                    tool_call_id,
+                    "todo",
+                    f"No open items in phase {params.phase!r} "
+                    f"({_todo_progress(current)} resolved).",
+                )
+            text = f"{verb}: {', '.join(item['text'] for item in matched)}"
+            if target == "blocked":
+                text += f" — reason: {reason}"
+            return _text(tool_call_id, "todo", f"{text} ({_todo_progress(current)} resolved).")
+
+        # Text form: search across ALL phases (the flat ``current`` view), so a
+        # model echoing a text need not know which phase holds it.
         matched, missing = _match_todos(current, params.items, target=target)
         for item in matched:
             item["status"] = target
@@ -3988,7 +4244,6 @@ async def execute_todo(
                 item.pop("reason", None)
         if missing:
             return _todo_miss_error(tool_call_id, params.op, matched, missing, current)
-        verb = {"done": "Marked done", "block": "Blocked", "drop": "Dropped"}[params.op]
         text = f"{verb}: {', '.join(item['text'] for item in matched)}"
         if target == "blocked":
             text += f" — reason: {reason}"
@@ -4003,14 +4258,17 @@ async def execute_todo(
             useless=True,
             details={"useless": True},
         )
-    return _text(tool_call_id, "todo", "\n".join(_todo_rows(current)))
+    return _text(tool_call_id, "todo", _todo_view_text(phases))
 
 
 def build_todo_tool() -> AgentTool:
     return AgentTool(
         name="todo",
         label="Todo",
-        description="Track a visible task list (init / add / done / block / drop / view).",
+        description=(
+            "Track a visible task list (init / add / done / block / drop / view), "
+            "optionally grouped into named phases."
+        ),
         parameters=TodoParams.model_json_schema(),
         # read tier exemption: todo mutates only session-local bookkeeping
         # (no files, no autonomous turns), so it stays auto-approved.

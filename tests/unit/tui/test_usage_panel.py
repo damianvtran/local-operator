@@ -740,8 +740,20 @@ async def test_open_usage_reflows_when_the_bottom_band_grows(monkeypatch) -> Non
     re-measure an already-open tall card after todos appear."""
     from local_operator.tui.widgets import todo_panel as todo_panel_module
 
+    # ``todo_items`` now returns PHASES (``{"name", "items"}``), not a flat item
+    # list — the panel was made phase-aware. This test only needs the band to
+    # grow when todos appear, so the stub wraps its items in one implicit phase,
+    # matching what a flat ``init`` produces (design §3.2). Returning bare item
+    # dicts here would parse as zero-item phases and the band would never grow,
+    # which is the shape mismatch that surfaced as ``assert 13 < 13``.
     todos: list[dict[str, str]] = []
-    monkeypatch.setattr(todo_panel_module, "todo_items", lambda _session_id: list(todos))
+    monkeypatch.setattr(
+        todo_panel_module,
+        "todo_items",
+        lambda _session_id: (
+            [{"name": todo_panel_module._IMPLICIT_PHASE, "items": list(todos)}] if todos else []
+        ),
+    )
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
