@@ -167,11 +167,25 @@ def test_resolve_precedence_config_fallback() -> None:
 
 
 def test_resolve_missing_values_raise_legacy_messages() -> None:
+    from local_operator.session_factory import HostingNotConfiguredError
+
     config = cast("ConfigManager", FakeConfigManager({}))
-    with pytest.raises(ValueError, match="Hosting platform is not configured."):
+    # No hosting at all still raises the legacy message shape, now as the
+    # dedicated HostingNotConfiguredError subclass so the first-run setup-state
+    # gate can classify it (item 1). It is still a ValueError.
+    with pytest.raises(HostingNotConfiguredError, match="Hosting platform is not configured."):
         resolve_hosting_model(None, _args(), config)
-    with pytest.raises(ValueError, match="Model name is not configured."):
-        resolve_hosting_model(None, _args(hosting="openai"), config)
+    # A hosting with a KNOWN default model no longer errors on the missing
+    # model — it resolves to that default (item 3).
+    assert resolve_hosting_model(None, _args(hosting="openai"), config) == ("openai", "gpt-4o")
+
+
+def test_resolve_unknown_hosting_no_default_still_raises_for_model() -> None:
+    """A provider with NO known default still errors on a missing model, now
+    naming current models to choose from (item 3)."""
+    config = cast("ConfigManager", FakeConfigManager({}))
+    with pytest.raises(ValueError, match="no default is known"):
+        resolve_hosting_model(None, _args(hosting="some-custom-host"), config)
 
 
 # --- Compaction coercion (CL-01) --------------------------------------------------

@@ -443,6 +443,34 @@ async def test_boot_typing_sends_prompt() -> None:
         assert len(transcript.blocks()) == 1
 
 
+@pytest.mark.asyncio
+async def test_first_run_setup_state_when_hosting_unconfigured() -> None:
+    """A boot that fails with HostingNotConfiguredError enters the guided setup
+    state (splash notice + 'setup' band), NOT a red 'session failed' (item 1)."""
+    from local_operator.session_factory import HostingNotConfiguredError
+
+    async def _no_hosting_factory():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    app = OperatorApp(_no_hosting_factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        for _ in range(6):
+            await pilot.pause()
+        await asyncio.sleep(0.2)
+        await pilot.pause()
+        # The setup flag is set and the band says "setup", not a model or error.
+        assert app._setup_state is True
+        assert app._status is not None
+        assert app._status._model_label == "setup"
+        # The splash carries the guided /login notice, not a failure.
+        assert app._splash_notice is not None
+        assert "/login" in app._splash_notice
+        assert "no provider configured" in app._splash_notice
+        # The splash was NOT retired: it is still the empty-state block.
+        assert app._welcome_visible is True
+
+
 def test_splash_toast_headline_names_the_fallback_target() -> None:
     """The toast is a glance; the splash row keeps the reason."""
     assert (
