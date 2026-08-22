@@ -398,14 +398,21 @@ def test_an_empty_result_says_so_rather_than_rendering_nothing() -> None:
         ("/model", None),  # the command WORD is still open — that is the other picker
         ("/mo", None),
         ("/help ", None),
-        ("hello /model x", None),  # not a command line at all
-        ("/model x\nmore", None),  # a newline means a message, not a pick
+        # INLINE: a `/model` typed after a message is a real argument now — the
+        # caret defaults to the buffer end, which is inside the selector.
+        ("hello /model x", "x"),
+        # A newline after the argument leaves the caret on the MESSAGE line, so
+        # the argument list is not live there.
+        ("/model x\nmore", None),
     ],
 )
 def test_slash_argument_hands_over_on_the_terminating_space(text: str, expected) -> None:
     """The handover is what lets one buffer drive two lists without either widget
     knowing about the other: `slash_context` is live while the word is open, this
-    takes over the instant a space terminates it."""
+    takes over the instant a space terminates it.
+
+    Inline and caret-aware now: an argument typed mid-draft counts, and the caret
+    (defaulting to the buffer end) decides which line's command is live."""
     assert slash_argument(text, MODEL_COMMANDS) == expected
 
 

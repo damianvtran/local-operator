@@ -34,6 +34,7 @@ from local_operator.tui.widgets.editor import (
     ArgumentQueryOpened,
     Editor,
     EditorSubmitted,
+    InlineCommandRequested,
 )
 from tests.unit.tui.conftest import TCSS_PATH
 
@@ -103,6 +104,27 @@ class PickerHarnessApp(App[None]):
         super().__init__()
         self.submissions: list[str] = []
         self.provider_queries: list[str] = []
+        #: Inline slash commands the editor spliced out of a draft (the
+        #: ``InlineCommandRequested`` path), captured to prove a mid-text run
+        #: dispatches without submitting the surviving draft.
+        self.inline_commands: list[str] = []
+
+    def set_editor_text(self, text: str) -> None:
+        """Set the buffer AND park the caret at the end, as typing would.
+
+        ``editor.text = x`` leaves the caret at ``(0, 0)``; a user who typed
+        ``x`` has it at the end. Slash detection is caret-anchored — which slash
+        token is active depends on where the caret is — so a test that sets the
+        text without moving the caret is asserting about a state the UI never
+        produces. This is the faithful shortcut for "the user typed this".
+        """
+        self.editor.text = text
+        self.editor.move_cursor(self.editor._end_of_buffer())
+        # The ``text`` setter re-syncs the picker with the caret still at the
+        # origin (Textual moves it after load), so the sync above saw no active
+        # token. Re-sync now that the caret sits where a typist left it — this
+        # is the resync a real keystroke does on every press.
+        self.editor._sync_picker()
 
     def get_css_variables(self) -> dict[str, str]:
         variables = super().get_css_variables()
@@ -120,6 +142,9 @@ class PickerHarnessApp(App[None]):
 
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         self.submissions.append(message.text)
+
+    def on_inline_command_requested(self, message: InlineCommandRequested) -> None:
+        self.inline_commands.append(message.command_text)
 
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         # Stands in for the app's controller-backed answer. The harness keeps the
@@ -147,19 +172,25 @@ class PickerHarnessApp(App[None]):
     "text, expected",
     [
         # Bare slash opens the full menu.
-        ("/", (0, "")),
+        ("/", (0, "", 1)),
         # A word being typed.
-        ("/mo", (0, "mo")),
+        ("/mo", (0, "mo", 3)),
         # Leading whitespace is fine: the first NON-BLANK line counts, and
         # the completion must not discard that whitespace (start=2).
-        ("  /mo", (2, "mo")),
-        ("\n\n  /x", (4, "x")),
+        ("  /mo", (2, "mo", 5)),
+        ("\n\n  /x", (4, "x", 6)),
+        # INLINE: a command typed after a message, at a word boundary, opens the
+        # list too — the whole point of the feature. ``start`` indexes the slash,
+        # ``end`` the cell past the word, so a completion rebuilds only that span.
+        ("fix this /mo", (9, "mo", 12)),
+        # INLINE on a later line — a command dropped under a multi-line draft.
+        ("line one\n/te", (9, "te", 12)),
     ],
 )
-def test_trigger_cases(text: str, expected: tuple[int, str]) -> None:
+def test_trigger_cases(text: str, expected: tuple[int, str, int]) -> None:
     context = slash_context(text)
     assert context is not None
-    assert (context.start, context.query) == expected
+    assert (context.start, context.query, context.end) == expected
 
 
 @pytest.mark.parametrize(
@@ -167,15 +198,77 @@ def test_trigger_cases(text: str, expected: tuple[int, str]) -> None:
     [
         "",  # nothing typed
         "hello",  # not a slash
-        "hello /mo",  # text before the slash on the first non-blank line
         "/model ",  # whitespace terminates the command word
         "/model gpt",  # an argument means the command is already chosen
-        "/mo\nrest",  # a newline terminates the word exactly like a space
+        "/mo\nrest",  # the caret defaults to the buffer end, on the second line
         "/mo\n",
+        "src/foo",  # a glued slash is punctuation inside a word, not a command
+        "and/or",
     ],
 )
 def test_non_trigger_cases(text: str) -> None:
     assert slash_context(text) is None
+
+
+@pytest.mark.parametrize(
+    "text, cursor, expected",
+    [
+        # Caret still on the first line's command word: the picker shows for the
+        # command even though a message follows on the next line.
+        ("/te\nfix this", 3, (0, "te", 3)),
+        # Caret between two inline slash tokens picks the one it is editing.
+        ("a /foo /ba", 10, (7, "ba", 10)),
+        ("a /foo /ba", 6, (2, "foo", 6)),
+    ],
+)
+def test_caret_anchored_trigger_cases(
+    text: str, cursor: int, expected: tuple[int, str, int]
+) -> None:
+    context = slash_context(text, cursor)
+    assert context is not None
+    assert (context.start, context.query, context.end) == expected
+
+
+@pytest.mark.parametrize(
+    "text, cursor",
+    [
+        # Caret out on the message line: the command word above is terminated.
+        ("/te\nfix this", 8),
+        # Caret before every slash on the line: nothing is being edited yet.
+        ("a /foo", 1),
+    ],
+)
+def test_caret_anchored_non_trigger_cases(text: str, cursor: int) -> None:
+    assert slash_context(text, cursor) is None
+
+
+def test_a_nested_slash_inside_an_engaged_command_is_plain_text() -> None:
+    """Once a recognised command owns the line (``/team a …``), a second slash
+    inside its argument is plain text — the command claims to the line end, so
+    the nested ``/team`` never becomes an active token to highlight or run."""
+    known = frozenset({"team", "teams", "goal"})
+    text = "/team alpha improve the /team command"
+    # Caret right after the nested "/team" (index 29).
+    assert slash_context(text, 29, known) is None
+    # Without the vocabulary the pure parser cannot know a command claimed the
+    # line, so the nested slash is the active token — which is exactly why the
+    # editor threads its command set in.
+    assert slash_context(text, 29) is not None
+    # The first command word is still recognised at its own position.
+    ctx = slash_context(text, 5, known)
+    assert ctx is not None and ctx.query == "team"
+
+
+def test_a_crlf_buffer_does_not_leak_a_carriage_return_into_the_word() -> None:
+    """A draft restored with CRLF line endings must still parse: the trailing
+    ``\\r`` on a non-final line is stripped so the word matches the command set
+    and an argument value never carries the control character (round 1, minor-1)."""
+    from local_operator.tui.widgets.command_picker import slash_argument, slash_word
+
+    # Caret at the end of "/team" on the first CRLF line (index 5).
+    assert slash_word("/team\r\nfix", 5, frozenset({"team"})) == "team"
+    # And the argument value on a CRLF line carries no trailing "\r".
+    assert slash_argument("/team ops\r\nmsg", ("team",), 9) == "ops"
 
 
 def test_bare_slash_suggests_the_full_registry_in_order() -> None:
@@ -378,14 +471,22 @@ async def test_completed_word_closes_the_picker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_text_before_the_slash_keeps_it_hidden() -> None:
+async def test_text_before_the_slash_now_opens_it_inline() -> None:
+    """The reported gesture: text typed, then a command remembered mid-draft.
+
+    This USED to assert the picker stayed hidden — the old rule was "the slash
+    must be the first character of the first non-blank line". Inline detection is
+    exactly the reversal of that rule: a boundary slash anywhere in the draft
+    opens the list.
+    """
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
         await pilot.press("h", "i", "space", "slash", "m", "o")
         await pilot.pause()
-        assert not app.editor.picker.is_open()
+        assert app.editor.picker.is_open()
+        assert app.editor.text == "hi /mo"
 
 
 @pytest.mark.asyncio
@@ -400,6 +501,165 @@ async def test_escape_dismisses_without_touching_the_text() -> None:
         await pilot.pause()
         assert not app.editor.picker.is_open()
         assert app.editor.text == "/mo"  # the typed text survives
+
+
+@pytest.mark.asyncio
+async def test_inline_command_opens_the_picker_mid_draft() -> None:
+    """The reported gesture: a message typed, then a command remembered."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        for char in "fix this ":
+            await pilot.press("space" if char == " " else char)
+        await pilot.press("slash", "t", "e")
+        await pilot.pause()
+        assert app.editor.picker.is_open(), "an inline /te must open the list"
+        assert app.editor.text == "fix this /te"
+
+
+@pytest.mark.asyncio
+async def test_a_glued_slash_never_opens_the_picker() -> None:
+    """``src/foo`` is a path; its slash is not at a word boundary."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        for char in "src":
+            await pilot.press(char)
+        await pilot.press("slash", "f", "o", "o")
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+
+
+@pytest.mark.asyncio
+async def test_inline_command_runs_and_is_spliced_out_keeping_the_draft() -> None:
+    """The whole reported gesture end to end: type a message, append a command,
+    run it — the command leaves the buffer, the message stays, and the command is
+    dispatched through the inline path (not submitted as a prompt)."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        for char in "fix the bug ":
+            await pilot.press("space" if char == " " else char)
+        await pilot.press("slash", "u", "s", "a", "g", "e")
+        await pilot.pause()
+        assert app.editor.picker.highlighted_name() == "usage"
+        await pilot.press("enter")
+        await pilot.pause()
+        # The command ran through the inline path, not the submit path.
+        assert app.inline_commands == ["/usage"]
+        assert app.submissions == []
+        # The token is gone and the message survives, with the trailing space the
+        # inline gesture added removed too.
+        assert app.editor.text == "fix the bug"
+        assert app.editor.picker.is_open() is False
+
+
+@pytest.mark.asyncio
+async def test_inline_command_on_its_own_line_keeps_the_message_below() -> None:
+    """A command dropped on its OWN line above a multi-line draft runs and is
+    spliced out, leaving the message. This is the unambiguous way to route a
+    draft whose message should stay when the command comes first — the command's
+    argument runs to its line end, so nothing on the next line is absorbed."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "u", "s", "a", "g", "e")
+        # A hard newline, then the message on the line below.
+        await pilot.press("shift+enter")
+        for char in "and then this":
+            await pilot.press("space" if char == " " else char)
+        # Run the command on line one: move the caret back onto its word.
+        app.editor.move_cursor(app.editor._location_at_offset(6))
+        app.editor._sync_picker()
+        await pilot.pause()
+        assert app.editor.picker.is_open()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.inline_commands == ["/usage"]
+        assert app.editor.text == "and then this"
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_command_reassembles_to_the_front_staged_not_run() -> None:
+    """A PROMPT command (``/goal``) engaged inline moves to the front with the
+    draft as its argument and is STAGED — never auto-run, so the draft is never
+    consumed as a name (the D1 data-loss the naive end-of-line argument caused)."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        for char in "land the oauth fix ":
+            await pilot.press("space" if char == " " else char)
+        for char in "/goal":
+            await pilot.press("slash" if char == "/" else char)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        # Reassembled to the front, staged. Nothing ran or submitted.
+        assert app.editor.text == "/goal land the oauth fix"
+        assert app.inline_commands == []
+        assert app.submissions == []
+
+
+@pytest.mark.asyncio
+async def test_a_whole_buffer_command_still_submits_not_inline() -> None:
+    """A command that IS the whole draft goes through the ordinary submit path —
+    inline splicing is only for a command sharing the buffer with a message."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "u", "s", "a", "g", "e")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/usage "]
+        assert app.inline_commands == []
+
+
+@pytest.mark.asyncio
+async def test_type_through_dismiss_leaves_the_text_when_the_word_stops_matching() -> None:
+    """Typing PAST a command word that no longer matches anything closes the list
+    but keeps every character — the draft is never touched by a dismissal."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # `/zzz` matches no command, so the list closes; the text is still there.
+        await pilot.press("slash", "z", "z", "z")
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+        assert app.editor.text == "/zzz"
+        # Terminating the word with a space also dismisses and keeps the text —
+        # the user typed on past the command into a message.
+        await pilot.press("space", "h", "i")
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+        assert app.editor.text == "/zzz hi"
+
+
+@pytest.mark.asyncio
+async def test_esc_dismiss_leaves_an_inline_command_in_the_text() -> None:
+    """Esc on the picker leaves the text exactly as typed, even inline and even
+    when it matches — the same 'not now' the start-of-line list already honours."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        for char in "ship it ":
+            await pilot.press("space" if char == " " else char)
+        await pilot.press("slash", "u", "s")
+        await pilot.pause()
+        assert app.editor.picker.is_open()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+        assert app.editor.text == "ship it /us"
+        assert app.inline_commands == []
+        assert app.submissions == []
 
 
 def test_esc_stays_dismissed_for_the_same_word_until_it_changes() -> None:
@@ -982,12 +1242,12 @@ async def test_switching_between_login_and_logout_reasks_for_the_rows() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login "
+        app.set_editor_text("/login ")
         await pilot.pause()
         assert [name for name, _ in app.editor.picker.suggestions()] == [
             c.name for c in PROVIDER_CHOICES
         ]
-        app.editor.text = "/logout "
+        app.set_editor_text("/logout ")
         await pilot.pause()
         assert app.provider_queries == ["login", "logout"]
         assert [name for name, _ in app.editor.picker.suggestions()] == ["anthropic", "alibaba"]
@@ -999,7 +1259,7 @@ async def test_tab_completes_the_provider_id_without_running_it() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login clau"
+        app.set_editor_text("/login clau")
         await pilot.pause()
         await pilot.press("tab")
         await pilot.pause()
@@ -1016,7 +1276,7 @@ async def test_enter_runs_an_unambiguous_provider() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/logout anthropic"
+        app.set_editor_text("/logout anthropic")
         await pilot.pause()
         assert len(app.editor.picker.suggestions()) == 1, "premise: one match"
         await pilot.press("enter")
@@ -1034,7 +1294,7 @@ async def test_an_ambiguous_enter_never_logs_anyone_out() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/logout a"
+        app.set_editor_text("/logout a")
         await pilot.pause()
         assert len(app.editor.picker.suggestions()) > 1, "premise: /logout a is ambiguous"
 
@@ -1056,7 +1316,7 @@ async def test_arrowing_onto_a_provider_lets_enter_run_it() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/logout a"
+        app.set_editor_text("/logout a")
         await pilot.pause()
         await pilot.press("down")
         await pilot.pause()
@@ -1072,7 +1332,7 @@ async def test_arrows_move_the_provider_highlight() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login "
+        app.set_editor_text("/login ")
         await pilot.pause()
         picker = app.editor.picker
         assert picker.selected_index == 0
@@ -1091,7 +1351,7 @@ async def test_escape_closes_the_provider_list_and_leaves_the_text() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login clau"
+        app.set_editor_text("/login clau")
         await pilot.pause()
         assert app.editor.picker.is_open()
         await pilot.press("escape")
@@ -1109,7 +1369,7 @@ async def test_clicking_a_login_row_runs_it() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login "
+        app.set_editor_text("/login ")
         await pilot.pause()
         await pilot.click(CommandPicker, offset=(4, 1))
         await pilot.pause()
@@ -1130,7 +1390,7 @@ async def test_clicking_a_logout_row_fills_the_field_and_waits_for_enter() -> No
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/logout "
+        app.set_editor_text("/logout ")
         await pilot.pause()
         await pilot.click(CommandPicker, offset=(4, 1))
         await pilot.pause()
@@ -1278,7 +1538,7 @@ async def test_a_single_fuzzy_survivor_never_removes_a_credential(query: str, ro
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = f"/logout {query}"
+        app.set_editor_text(f"/logout {query}")
         await pilot.pause()
         assert [name for name, _ in app.editor.picker.suggestions()] == [row], "premise: one match"
 
@@ -1300,7 +1560,7 @@ async def test_a_single_fuzzy_survivor_still_runs_on_a_login_list() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login aib"
+        app.set_editor_text("/login aib")
         await pilot.pause()
         assert [name for name, _ in app.editor.picker.suggestions()] == ["alibaba"]
         await pilot.press("enter")
@@ -1323,7 +1583,7 @@ async def test_arrowing_onto_a_logout_row_still_runs_it_on_one_enter() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/logout "
+        app.set_editor_text("/logout ")
         await pilot.pause()
         await pilot.press("down")
         await pilot.pause()
@@ -1349,7 +1609,7 @@ async def test_escape_lands_in_the_tick_before_the_rows_arrive() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/logout "
+        app.set_editor_text("/logout ")
         picker = app.editor.picker
         assert not picker.is_open(), "premise: the rows have not arrived yet"
         assert picker.is_pending()
@@ -1385,7 +1645,7 @@ async def test_an_argument_list_is_budgeted_from_the_rows_available(
     async with app.run_test(size=(100, height)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login "
+        app.set_editor_text("/login ")
         await pilot.pause()
         # AFTER the buffer opened the list: the harness answers the opening
         # message with its own four rows, so a set made before would be replaced.
@@ -1406,7 +1666,7 @@ async def test_the_command_list_keeps_its_own_smaller_budget() -> None:
     async with app.run_test(size=(100, 28)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/"
+        app.set_editor_text("/")
         await pilot.pause()
         start, end, total = app.editor.picker.visible_window()
         assert (start, end) == (0, MAX_VISIBLE_ROWS)
@@ -1425,7 +1685,7 @@ async def test_the_names_align_with_the_text_the_editor_is_completing() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login "
+        app.set_editor_text("/login ")
         await pilot.pause()
         await pilot.pause()
         lines = [
@@ -1531,7 +1791,7 @@ async def test_enter_on_a_team_row_fills_the_name_and_a_space_without_submitting
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team frontend-guild"
+        app.set_editor_text("/team frontend-guild")
         await pilot.pause()
         assert app.editor.picker.highlighted_name() == "frontend-guild"
         await pilot.press("enter")
@@ -1549,7 +1809,7 @@ async def test_tab_on_a_team_row_fills_name_and_space() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team front"
+        app.set_editor_text("/team front")
         await pilot.pause()
         await pilot.press("tab")
         await pilot.pause()
@@ -1565,7 +1825,7 @@ async def test_click_on_a_team_row_fills_name_and_space_without_submitting() -> 
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team "
+        app.set_editor_text("/team ")
         await pilot.pause()
         await pilot.click(CommandPicker, offset=(4, 0))
         await pilot.pause()
@@ -1582,7 +1842,7 @@ async def test_arrowing_onto_a_team_row_still_does_not_submit() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team "
+        app.set_editor_text("/team ")
         await pilot.pause()
         await pilot.press("down")  # arrow onto row 1 — an explicit move
         await pilot.pause()
@@ -1602,7 +1862,7 @@ async def test_blank_enter_after_a_completed_team_name_submits_attach_only() -> 
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team frontend-guild "
+        app.set_editor_text("/team frontend-guild ")
         await pilot.pause()
         assert not app.editor.picker.is_open()
         await pilot.press("enter")
@@ -1618,7 +1878,7 @@ async def test_typing_a_message_then_enter_sends_the_whole_line() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team frontend-guild fix the flaky test"
+        app.set_editor_text("/team frontend-guild fix the flaky test")
         await pilot.pause()
         assert not app.editor.picker.is_open()
         await pilot.press("enter")
@@ -1633,7 +1893,7 @@ async def test_agent_row_behaves_like_team() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/agent audit"
+        app.set_editor_text("/agent audit")
         await pilot.pause()
         assert app.editor.picker.highlighted_name() == "auditor"
         await pilot.press("enter")
@@ -1650,7 +1910,7 @@ async def test_enum_tail_login_row_still_runs_on_enter() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login anthropic"
+        app.set_editor_text("/login anthropic")
         await pilot.pause()
         assert len(app.editor.picker.suggestions()) == 1
         await pilot.press("enter")
@@ -1673,7 +1933,7 @@ async def test_autofill_shows_the_switch_or_send_hint() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team frontend-guild"
+        app.set_editor_text("/team frontend-guild")
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
@@ -1691,7 +1951,7 @@ async def test_the_hint_is_withdrawn_once_a_message_is_typed() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team frontend-guild "
+        app.set_editor_text("/team frontend-guild ")
         app.editor.move_cursor(app.editor._end_of_buffer())  # as the autofill leaves it
         await pilot.pause()
         assert app.editor.picker._notice == Editor.NAME_SWITCH_HINT
@@ -1709,7 +1969,7 @@ async def test_a_bare_name_list_shows_no_hint() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team "
+        app.set_editor_text("/team ")
         await pilot.pause()
         assert app.editor.picker.is_open()  # rows are showing
         assert app.editor.picker._notice == ""
@@ -1723,7 +1983,7 @@ async def test_enum_tail_completion_shows_no_switch_hint() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/login anthropic "
+        app.set_editor_text("/login anthropic ")
         await pilot.pause()
         assert app.editor.picker._notice == ""
 
@@ -1759,13 +2019,16 @@ async def test_app_owned_notice_survives_a_same_command_keystroke(
         # command-word change (the harness does not model the empty-list case,
         # so we set it directly — the regression is purely in the editor's
         # per-keystroke resync, not in how the notice first arrives).
-        app.editor.text = f"/{command} "
+        app.set_editor_text(f"/{command} ")
         await pilot.pause()
         app.editor.picker.set_notice(notice)
         await pilot.pause()
         assert app.editor.picker._notice == notice, "premise: the notice is shown"
         # Type a query character on the SAME command — this re-runs _sync_picker.
-        app.editor.text = f"/{command} x"
+        # A real same-command keystroke (the caret is already parked at the end
+        # of `/<command> `), which is the per-keystroke resync the CR4 fix is
+        # about — not a whole-buffer reset.
+        await pilot.press("x")
         await pilot.pause()
         assert (
             app.editor.picker._notice == notice
@@ -1862,8 +2125,13 @@ async def test_recognized_team_name_gets_the_argument_style() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        # Open the list so the app pushes the name snapshot, then type a message.
+        # The highlighter is caret-independent (it parses the first content
+        # line), so this sets the text directly and pushes the name snapshot the
+        # highlight reads — mirroring the app's "list opens, then names arrive"
+        # without depending on where the caret lands.
         app.editor.text = "/team frontend-guild fix it"
+        await pilot.pause()
+        app.editor.set_name_choices(frozenset({"frontend-guild"}))
         await pilot.pause()
         cells = _slash_ink(app.editor)
         signal = theme_mod.semantic_color("signal").lower()

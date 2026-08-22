@@ -47,7 +47,13 @@ async def _boot(pilot, app: OperatorApp) -> None:
 
 
 async def _type(pilot, app: OperatorApp, text: str) -> None:
-    app.query_one(Editor).text = text
+    # Set the line AND park the caret at the end, as typing it would: the slash
+    # pickers are caret-anchored (inline detection), so a text-set that leaves
+    # the caret at the origin sits before the slash where no command is live.
+    editor = app.query_one(Editor)
+    editor.text = text
+    editor.move_cursor(editor._end_of_buffer())
+    editor._sync_picker()
     await pilot.pause()
     await pilot.pause()
 
@@ -272,6 +278,8 @@ async def test_preview_defers_offscreen_reink_to_the_settle(config_dir: Path) ->
         # is the assertion that actually binds — the offscreen block can only
         # carry that ink if the full sweep ran.
         editor.text = "/theme monokai"
+        editor.move_cursor(editor._end_of_buffer())
+        editor._sync_picker()
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()

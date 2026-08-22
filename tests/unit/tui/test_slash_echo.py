@@ -87,6 +87,50 @@ ECHO_POLICY = {
 }
 
 
+#: Which commands CONSUME the rest of the composer as a prompt when engaged
+#: inline (``SlashCommand.consumes_prompt``). True for the free-text commands
+#: whose argument becomes a message the model is given — engaging one mid-draft
+#: reassembles it to the FRONT with the draft as its argument rather than
+#: splicing-and-running, so a plausible mid-sentence gesture cannot silently eat
+#: the user's text. Pinned entry-by-entry for the same reason ``ECHO_POLICY`` is:
+#: a new command must state whether its argument is a prompt.
+PROMPT_POLICY = {
+    "help": False,
+    "exit": False,
+    "clear": False,
+    "new": False,
+    "reload": False,
+    "resume": False,
+    "rename": False,
+    "model": False,
+    "effort": False,
+    "theme": False,
+    "provider": False,
+    "search": False,
+    "accounts": False,
+    "usage": False,
+    # A view selector, not a prompt: `/analytics [view]` names which screen to
+    # open, so it splices-and-runs inline like `/usage` rather than reassembling.
+    "analytics": False,
+    # Free text the model is given (the objective / a loop instruction / a side
+    # question), so an inline engage reassembles to the front.
+    "goal": True,
+    "loop": True,
+    "btw": True,
+    "compact": False,
+    "context": False,
+    "approvals": False,
+    "skills": False,
+    "mcp": False,
+    "login": False,
+    "logout": False,
+    "credential": False,
+    # The request after the name is a prompt the manager / persona is given.
+    "team": True,
+    "agent": True,
+}
+
+
 def _user_rows(app: OperatorApp) -> list[str]:
     return [
         block.text()
@@ -161,6 +205,9 @@ def test_every_registered_command_states_an_echo_policy() -> None:
     """A new command must land in the table above, with a reason beside its
     registry entry. Without this, the field's default silently decides."""
     assert {command.name: command.echo for command in SLASH_COMMANDS} == ECHO_POLICY
+    # The same forcing function for the inline-prompt choice: a new command must
+    # state whether its argument is a prompt consumed on an inline engage.
+    assert {c.name: c.consumes_prompt for c in SLASH_COMMANDS} == PROMPT_POLICY
 
 
 def test_no_two_registry_entries_claim_the_same_word() -> None:
@@ -293,6 +340,154 @@ async def test_team_request_attaches_and_sends() -> None:
     assert rows == ["ship the dashboard"], rows
     # U2: the band names the active roster after the attach.
     assert "feature-release" in band, band
+
+
+@pytest.mark.asyncio
+async def test_inline_team_reassembles_to_the_front_and_then_sends_under_the_manager() -> None:
+    """The end-to-end mid-trajectory gesture the user asked to confirm.
+
+    A user types a message, remembers to route it to a team, appends ``/team``
+    and picks the team from the autofill. ``/team`` is a PROMPT command (its
+    request is free text the manager is given), so it does NOT auto-run and eat
+    the draft as a name — it REASSEMBLES to the front as ``/team <name> <the
+    draft>``, STAGED. The user reads the assembled line and presses Enter, which
+    attaches the team and sends the message as the request — under the manager,
+    because the roster rides the session's volatile prompt tail (see
+    ``session_factory``'s per-turn provider).
+    """
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(
+        TeamEditFields(
+            name="feature-release",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        # Type the message, then the inline command at the caret.
+        for char in "ship the dashboard ":
+            await pilot.press("space" if char == " " else char)
+        for char in "/team":
+            await pilot.press("slash" if char == "/" else char)
+        await pilot.pause()
+        # Word complete: Enter opens the team list rather than running (the name
+        # is picked from the autofill, not guessed from the draft).
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.picker.is_open(), "the team argument list must open"
+        # Pick the team by name.
+        for char in "feature-release":
+            await pilot.press(char)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        # Reassembled to the front, STAGED — nothing attached or sent yet, and
+        # the draft is preserved verbatim as the request.
+        assert editor.text == "/team feature-release ship the dashboard", editor.text
+        assert session.attached_teams == [], "reassembly must not attach yet"
+        assert session.prompts == [], "reassembly must not send yet"
+        # The user reviews the assembled line and submits it.
+        if editor.picker.is_open():
+            await pilot.press("escape")
+            await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert session.attached_teams, "the team attaches on the staged submit"
+        assert session.attached_teams[0].name == "feature-release"
+        assert session.prompts == ["ship the dashboard"], session.prompts
+
+
+@pytest.mark.asyncio
+async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app() -> None:
+    """D5 regression (design review round 3), asserted against the REAL app.
+
+    Picking a team name at the START of the buffer fills ``/team <name> `` and
+    parks the caret, and the picker shows the switch/send hint. The hint is set
+    by the editor and cleared by the app's ``on_argument_query_opened`` — so a
+    stray extra picker resync (which nulls ``_argument_command`` and re-fires the
+    query) wipes it. The bespoke harness's ``on_argument_query_opened`` does not
+    clear the notice, so this is only observable against ``OperatorApp``: exactly
+    the "green tests aren't the rendered frame" gap the round-3 review named.
+    """
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(
+        TeamEditFields(name="security", manager="manager", members=[TeamMember(role="coder")])
+    )
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        # Start-of-line /team, open the list, then fill the single team with Tab.
+        for char in "/team ":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert editor.picker.is_open(), "the team list must open"
+        await pilot.press("tab")
+        await pilot.pause()
+        await pilot.pause()
+        # Name filled, caret parked, and the switch/send hint survives the app's
+        # own argument-query handling — the D5 fix.
+        assert editor.text == "/team security ", editor.text
+        assert (
+            "switch" in editor.picker._notice and "send" in editor.picker._notice
+        ), editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_a_second_inline_command_of_the_same_kind_is_plain_argument_text() -> None:
+    """Once a prompt command is engaged at the front, a second occurrence of the
+    same command inside its argument is plain text — no picker, no re-engagement.
+
+    Reported: composing ``/team a improve the /team command`` must treat the
+    second ``/team`` as part of the request, not a nested command to highlight or
+    run.
+    """
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(
+        TeamEditFields(name="alpha", manager="manager", members=[TeamMember(role="coder")])
+    )
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/team alpha improve the ":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        # Now type a nested "/team" inside the request.
+        for char in "/team":
+            await pilot.press("slash" if char == "/" else char)
+        for char in " command":
+            await pilot.press("space" if char == " " else char)
+        await pilot.pause()
+        # The picker must be closed: the caret is inside the first /team's
+        # argument, and the nested /team is plain text.
+        assert not editor.picker.is_open(), "a nested /team must not open the picker"
+        assert editor.text == "/team alpha improve the /team command"
+        # Submitting sends the whole request verbatim to the manager.
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert session.attached_teams and session.attached_teams[0].name == "alpha"
+        assert session.prompts == ["improve the /team command"], session.prompts
 
 
 def _agent_registry(tmp: str):

@@ -93,7 +93,10 @@ from local_operator.tui.widgets.command_picker import (
     CommandPicker,
     PickerMode,
     slash_argument,
+    slash_argument_context,
     slash_context,
+    slash_token_span,
+    slash_word,
 )
 from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 
@@ -452,6 +455,28 @@ class EditorQuit(Message):
         super().__init__()
 
 
+class InlineCommandRequested(Message):
+    """Posted when an INLINE slash command is run out of the middle of a draft.
+
+    A command typed at the start of the buffer runs through the ordinary submit
+    path (``EditorSubmitted`` with a slash-shaped ``text``): the whole buffer IS
+    the command, so submitting and clearing is exactly right. An INLINE command
+    is different — the user typed a message and then remembered to route it, so
+    the ``/command`` token is spliced OUT of the draft and the rest of the
+    message is left in the composer untouched. This message carries just the
+    command text (``/team ops``) for the app to dispatch, while the editor keeps
+    ownership of the surviving draft.
+
+    Split from ``EditorSubmitted`` deliberately: a submit clears the buffer and
+    records history, neither of which an inline run wants — the draft is still
+    unsent, and the command is not a prompt the user would page back to.
+    """
+
+    def __init__(self, command_text: str) -> None:
+        super().__init__()
+        self.command_text = command_text
+
+
 class ModelQueryOpened(Message):
     """Posted when the buffer enters ``/model …`` and the model list appears.
 
@@ -646,13 +671,19 @@ class Editor(TextArea):
         self._argument_commands: tuple[str, ...] = ()
         self._required_argument_commands: tuple[str, ...] = ()
         # Every registered command word (primaries AND aliases), lower-cased,
-        # for the highlighter's "is this leading /word a real command?" oracle.
-        # Derived from the registry in :meth:`set_commands` — the render pass
-        # must not import the app (which owns ``slash_command_for``): editor.py
-        # is imported BY app.py, so the dependency only goes one way. The same
-        # name-in-``names`` membership ``slash_command_for`` uses is reproduced
-        # here so the highlight cannot claim a command the dispatch would reject.
+        # for the highlighter's "is this leading /word a real command?" oracle,
+        # AND for the inline tokenizer's nested-slash rule (a slash inside an
+        # engaged command's argument is plain text). Derived from the registry in
+        # :meth:`set_commands` — the render pass must not import the app (which
+        # owns ``slash_command_for``): editor.py is imported BY app.py, so the
+        # dependency only goes one way. The same name-in-``names`` membership
+        # ``slash_command_for`` uses is reproduced here so the highlight cannot
+        # claim a command the dispatch would reject.
         self._command_names: frozenset[str] = frozenset()
+        # Commands whose argument is a prompt (goal/loop/team/agent/btw). Same
+        # derive-from-registry reason as the tuples above; read during the
+        # inline run to decide reassemble-to-front vs splice-and-run.
+        self._prompt_commands: tuple[str, ...] = ()
         # The team/agent NAMES the open argument list is offering, pushed by the
         # app in ``on_argument_query_opened`` (see :meth:`set_name_choices`).
         # A frozenset so the render pass tests membership in O(1): the render
@@ -673,6 +704,11 @@ class Editor(TextArea):
         self._slash_runs_cache: (
             tuple[tuple[object, ...], tuple[int, list[tuple[int, int, str]]] | None] | None
         ) = None
+        # Guards the picker resync inside ``load_text`` so ``_set_text_and_caret``
+        # can move the caret first and sync ONCE at the final position (D5). Set
+        # BEFORE ``super().__init__`` because TextArea's constructor loads the
+        # initial document through ``load_text`` → ``_sync_picker``.
+        self._suspend_picker_sync = False
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
@@ -975,8 +1011,20 @@ class Editor(TextArea):
             if command.arguments is ArgumentMode.REQUIRED
             for name in command.names
         )
-        # Lower-cased so the highlighter's membership test matches the
-        # case-insensitive way ``slash_command_for`` resolves a typed word.
+        # Commands whose argument is a PROMPT (goal/loop/team/agent/btw). Engaging
+        # one inline reassembles it to the FRONT of the composer with the draft as
+        # its argument, rather than splicing-and-running — see
+        # :meth:`_reassemble_prompt_command`. Derived from the registry (aliases
+        # included) so the set cannot drift from the flag it reads.
+        self._prompt_commands = tuple(
+            name for command in commands if command.consumes_prompt for name in command.names
+        )
+        # Lower-cased vocabulary (primaries AND aliases), shared by the
+        # highlighter's "is this a real command?" oracle and the inline
+        # tokenizer's nested-slash rule (a slash inside an engaged command's
+        # argument is plain text). Matches the case-insensitive way
+        # ``slash_command_for`` resolves a typed word, so the highlight cannot
+        # claim a command the dispatch would reject.
         self._command_names = frozenset(
             name.lower() for command in commands for name in command.names
         )
@@ -1115,8 +1163,12 @@ class Editor(TextArea):
         buffer is what decides which picker is open, so anything that opens one has
         to go through the buffer or be undone by the next resync.
         """
-        self.text = "/model "
-        self.move_cursor(self._end_of_buffer())
+        # Through the shared helper so the picker is re-derived with the caret at
+        # the end (in the argument slot), not at the origin the ``text`` setter
+        # leaves it at. Caret-anchored detection means a sync at the origin would
+        # read ``/model `` as the command WORD and never post ``ModelQueryOpened``,
+        # so the list would stay empty until the next keystroke.
+        self._set_text_and_caret("/model ", len("/model "))
         self._history_index = None
 
     # -- key interception ---------------------------------------------------
@@ -1258,8 +1310,14 @@ class Editor(TextArea):
                         # the transcript, cleared the buffer, and made the app put
                         # the query back to reopen a list the keystroke had already
                         # opened. One keystroke, one outcome.
+                        #
+                        # Runs through the shared run path so an inline command is
+                        # spliced out and its draft kept, exactly like the
+                        # argument phase — `_apply_command` moved the caret to the
+                        # end of the completed word, so the run path re-parses at
+                        # that caret and finds this token.
                         if key == "enter" and not self.opens_a_list(name):
-                            self._submit()
+                            self._run_command_from_buffer()
                     elif key == "tab":
                         # Tab never sends, so it can safely take the highlighted
                         # row: that is the whole point of a completion key.
@@ -2468,7 +2526,99 @@ class Editor(TextArea):
         self._copy_gesture = False
         self._copied_selection = None
         super().load_text(text)
+        # Suppressed by :meth:`_set_text_and_caret`, which moves the caret AFTER
+        # this returns and then syncs ONCE at the final position. Without the
+        # guard this sync runs with the caret still at the origin: for a
+        # completion that leaves an argument (``/team security ``) it sees no
+        # active command there, NULLS ``_argument_command``, and the later
+        # caret-anchored sync then re-posts ``ArgumentQueryOpened`` — whose app
+        # handler calls ``set_notice("")`` and erases the U1/U2 parked-caret hint
+        # the editor set for /team·/agent (design review round 3, D5). One sync at
+        # the right place is both correct and cheaper.
+        if not self._suspend_picker_sync:
+            self._sync_picker()
+
+    def _caret_offset(self) -> int:
+        """The caret as a whole-buffer offset, for the slash parsers.
+
+        Inline detection keys on WHERE the caret is: which slash token the user
+        is editing depends on it, so every parse the picker runs is anchored
+        here rather than at the end of the buffer. Reuses the same
+        ``_offset_at`` the attachment chips measure with, so a CRLF buffer a
+        paste carried in is counted the same way in both places.
+        """
+        row, column = self.selection.end
+        return self._offset_at(row, column)
+
+    def _set_text_and_caret(self, text: str, caret_offset: int) -> None:
+        """Replace the buffer and park the caret, then re-derive the pickers.
+
+        The ``text`` setter re-syncs the picker BEFORE the caret has moved (it
+        runs inside ``load_text``, and ``move_cursor`` comes after), so with
+        caret-anchored detection that sync reads the OLD caret position — for a
+        completion, the origin, which names the wrong token or none. Every
+        completion therefore has to re-sync once the caret is where the
+        completion put it; funnelling that through one helper is what keeps the
+        rule from being forgotten at one of the several completion sites.
+
+        The setter's own sync is SUPPRESSED (not merely repeated): a stray
+        origin-anchored sync does not just waste work, it nulls
+        ``_argument_command`` and makes the final sync look like a fresh argument
+        opening, which re-fires ``ArgumentQueryOpened`` and wipes an editor-set
+        notice (D5). So exactly one sync runs, at the final caret.
+        """
+        self._suspend_picker_sync = True
+        try:
+            self.text = text
+            self.move_cursor(self._location_at_offset(caret_offset))
+        finally:
+            self._suspend_picker_sync = False
         self._sync_picker()
+
+    def _location_at_offset(self, offset: int) -> tuple[int, int]:
+        """A whole-buffer ``offset`` as a ``(row, column)`` document location.
+
+        The inverse of :meth:`_offset_at`, so a completion that computed WHERE to
+        put the caret as an offset (the splice point of an inline command) can
+        hand it back to ``move_cursor``. Walks lines counting the document's own
+        separator, matching ``_offset_at`` exactly, so the two agree on a CRLF
+        buffer a paste carried in. Clamped so a stale offset lands at the buffer
+        end rather than raising.
+        """
+        separator = len(self.document.newline)
+        remaining = max(0, offset)
+        for row in range(self.document.line_count):
+            length = len(self.document.get_line(row))
+            if remaining <= length:
+                return row, remaining
+            remaining -= length + separator
+        return self._end_of_buffer()
+
+    def _splice_command(self, token_start: int, token_end: int) -> None:
+        """Remove the ``[token_start, token_end)`` command token from the draft.
+
+        The heart of "a command run mid-text is removed from the text where it
+        was entered": the user typed a message and then a ``/command`` to route
+        it, so once the command runs the token has done its job and must not be
+        left sitting in the prose that is about to be sent. One adjoining
+        whitespace character is removed with it — the space or newline the user
+        typed to set the command apart from the message — so ``fix this /team``
+        becomes ``fix this`` rather than ``fix this ``, ``/team fix this``
+        becomes ``fix this`` rather than `` fix this``, and a command on its OWN
+        line above a draft collapses that line away instead of leaving a blank
+        one. The PRECEDING separator is preferred (that is the one the inline
+        gesture adds — a space before an appended command, a newline above a
+        message); the following one is taken only when the token opened the
+        buffer.
+        """
+        text = self.text
+        start, end = token_start, token_end
+        if start > 0 and text[start - 1] in " \t\n":
+            start -= 1
+        elif end < len(text) and text[end] in " \t\n":
+            end += 1
+        self.text = f"{text[:start]}{text[end:]}"
+        self.move_cursor(self._location_at_offset(start))
 
     def _sync_picker(self) -> None:
         """Re-derive EVERY list from the buffer.
@@ -2480,8 +2630,15 @@ class Editor(TextArea):
         have to cooperate on. The command picker serves both the word and a
         provider argument, so the branch below is which LIST it derives, not which
         widget is visible.
+
+        Every parse is anchored at the CARET (:meth:`_caret_offset`): inline
+        detection means "which slash token is active" is a question about where
+        the caret sits, not just what the buffer contains.
         """
-        list_argument = slash_argument(self.text, self._argument_commands)
+        cursor = self._caret_offset()
+        list_argument = slash_argument(
+            self.text, self._argument_commands, cursor, self._command_names
+        )
         if list_argument is None:
             self._argument_command = None
             self._argument_subcommand = None
@@ -2489,7 +2646,7 @@ class Editor(TextArea):
             # a highlight can never outlive the list that filled it (e.g. the
             # command word was deleted back to `/tea`).
             self._name_choices = frozenset()
-            self._picker.sync(self.text)
+            self._picker.sync(self.text, cursor)
         else:
             command = self._command_word()
             if command != self._argument_command:
@@ -2546,7 +2703,7 @@ class Editor(TextArea):
             # always sets the notice to "", so the hint owns the channel cleanly.
             if self._is_name_argument_command(self._argument_command):
                 self._picker.set_notice(self._name_switch_hint(list_argument) or "")
-        argument = slash_argument(self.text, self.MODEL_COMMANDS)
+        argument = slash_argument(self.text, self.MODEL_COMMANDS, cursor, self._command_names)
         if argument is None:
             if self._model_picker.is_open():
                 self._model_picker.close()
@@ -2571,34 +2728,69 @@ class Editor(TextArea):
         self.post_message(ArgumentHighlightChanged(command or "", name if command else None))
 
     def _command_word(self) -> str | None:
-        """The lower-cased command word on the buffer's first non-blank line."""
-        line = next((line for line in self.text.split("\n") if line.strip()), "")
-        stripped = line.lstrip()
-        if not stripped.startswith("/"):
-            return None
-        return stripped[1:].partition(" ")[0].lower()
+        """The lower-cased command word of the slash token AT THE CARET.
+
+        Caret-anchored to match every other parse: with inline detection the
+        active command is wherever the caret is, so reading the first non-blank
+        line would name the wrong token for ``fix this /model`` or a command
+        dropped on a later line. Both the word phase and the argument phase
+        resolve through :func:`slash_argument`'s companion by sharing the same
+        line/slash split.
+        """
+        return slash_word(self.text, self._caret_offset(), self._command_names)
 
     def _complete_model(self, row: ModelRow) -> None:
-        """Put ``row``'s selector in the buffer without acting on it.
+        """Put ``row``'s selector in the ``/model`` argument without acting on it.
 
         No trailing space, unlike a command completion: the selector IS the whole
         argument, and a trailing space would terminate it and close the list — so
         Tab would appear to both fill the field and give up on it.
+
+        Splices only the argument span so an inline ``/model`` keeps any trailing
+        message; falls back to rewriting the whole buffer when the parse cannot
+        locate the argument (the caret raced a delete), which is the pre-inline
+        behaviour and still correct for the common start-of-buffer case.
         """
-        self.text = f"/model {row.selector}"
-        self.move_cursor(self._end_of_buffer())
+        context = slash_argument_context(
+            self.text, self.MODEL_COMMANDS, self._caret_offset(), self._command_names
+        )
+        if context is None:
+            self.text = f"/model {row.selector}"
+            self.move_cursor(self._end_of_buffer())
+            return
+        text = self.text
+        self._set_text_and_caret(
+            f"{text[: context.start]}{row.selector}{text[context.end :]}",
+            context.start + len(row.selector),
+        )
 
     def _apply_model(self, row: ModelRow) -> None:
-        """Hand a chosen row to the app and clear the buffer.
+        """Hand a chosen row to the app and clear (or splice) the buffer.
 
-        The buffer is cleared HERE rather than by the handler because the command
+        The buffer is emptied HERE rather than by the handler because the command
         never reaches the submit path: choosing from the list is the whole
         interaction, so leaving `/model anthropic/claude-opus-5` behind would
         invite a second Enter that ran the switch again.
+
+        Inline, only the ``/model <selector>`` token is spliced out and the rest
+        of the draft is kept — the same rule every other inline command follows,
+        so choosing a model to switch to mid-draft does not throw the message
+        away. Whole-buffer (the ordinary case) still clears completely.
         """
         self._model_picker.close()
         handler = self._on_model_chosen
-        self.clear_content()
+        context = slash_argument_context(
+            self.text, self.MODEL_COMMANDS, self._caret_offset(), self._command_names
+        )
+        surviving = (
+            (self.text[: context.token_start] + self.text[context.end :]).strip()
+            if context is not None
+            else ""
+        )
+        if context is not None and surviving:
+            self._splice_command(context.token_start, context.end)
+        else:
+            self.clear_content()
         if handler is not None:
             handler(row)
 
@@ -2658,9 +2850,10 @@ class Editor(TextArea):
         case each protects (`/lo` reaching `loop`, `/logout an` reaching a stored
         credential) cannot drift apart.
         """
+        cursor = self._caret_offset()
         if self._picker.mode is PickerMode.ARGUMENT:
-            return slash_argument(self.text, self._argument_commands)
-        context = slash_context(self.text)
+            return slash_argument(self.text, self._argument_commands, cursor, self._command_names)
+        context = slash_context(self.text, cursor, self._command_names)
         return None if context is None else context.query
 
     def _apply_command(self, name: str) -> None:
@@ -2698,13 +2891,19 @@ class Editor(TextArea):
                 return
             self._run_argument(name)
             return
-        context = slash_context(self.text)
+        context = slash_context(self.text, self._caret_offset(), self._command_names)
         if context is None:
             return
-        # Everything from the slash onward IS the command word (that is what
-        # makes it a command word), so the prefix is all that must survive.
-        self.text = f"{self.text[: context.start]}/{name} "
-        self.move_cursor(self._end_of_buffer())
+        # Replace ONLY the command token ``[start, end)`` with ``/name ``. The
+        # word used to run to the end of the buffer, so a completion could splice
+        # to the end; inline detection means a message may follow the token
+        # (``fix this /te|`` or ``/te| ship it``), and that suffix is the user's
+        # prose — it must survive verbatim. The trailing space is load-bearing:
+        # it terminates the word (closing the command list) and, for a
+        # list-taking command, opens the argument list.
+        text = self.text
+        completed = f"{text[: context.start]}/{name} {text[context.end :]}"
+        self._set_text_and_caret(completed, context.start + len(name) + 2)
 
     def _resolve_argument(self, name: str, key: str, unambiguous: bool) -> None:
         """Tab/Enter on an argument row: complete it, or run it.
@@ -2735,24 +2934,140 @@ class Editor(TextArea):
         space terminates the argument, so the matcher would stop matching and Tab
         would appear to fill the field and abandon it in one keystroke.
         """
-        argument = slash_argument(self.text, self._argument_commands)
-        if argument is None:
+        context = slash_argument_context(
+            self.text, self._argument_commands, self._caret_offset(), self._command_names
+        )
+        if context is None:
             return
-        # The argument is by construction the TAIL of the buffer (everything after
-        # the command word's space, on the only non-blank line), so trimming its
-        # length off the end leaves exactly `…/logout ` to append onto.
-        self.text = f"{self.text[: len(self.text) - len(argument)]}{name}"
-        self.move_cursor(self._end_of_buffer())
+        # Replace the argument SPAN ``[start, end)`` rather than the buffer tail:
+        # inline detection means the command may not be the last thing in the
+        # draft, so trimming the argument's length off the end would corrupt a
+        # trailing message. ``end`` is the end of the command's line, which is
+        # the whole argument by construction.
+        text = self.text
+        self._set_text_and_caret(
+            f"{text[: context.start]}{name}{text[context.end :]}", context.start + len(name)
+        )
 
     def _run_argument(self, name: str) -> None:
-        """Complete ``name`` and submit, so the command's own handler runs it.
+        """Complete ``name`` and run, so the command's own handler runs it.
 
-        Submitting the finished text rather than calling a callback keeps ONE
+        Dispatching the finished text rather than calling a callback keeps ONE
         implementation of what `/login anthropic` means: the app's slash dispatch.
         A second path would be a second place for the login flow to drift.
         """
         self._complete_argument(name)
-        self._submit()
+        self._run_command_from_buffer()
+
+    def _run_command_from_buffer(self) -> None:
+        """Run the slash command the caret is on — inline-splice or whole-buffer.
+
+        The ONE run path both the word phase and the argument phase funnel into,
+        so "how a command runs" is decided in one place regardless of which list
+        chose it. Two shapes, told apart by whether ANY of the draft survives
+        once the command token is removed:
+
+        * whole-buffer — the command is all the user typed (``/usage``,
+          ``/logout anthropic``). Goes through :meth:`_submit`, which clears the
+          buffer and records history, exactly as a start-of-line command always
+          has. The app dispatches the slash-shaped ``EditorSubmitted.text``.
+
+        * inline — the user typed a message and then a command to route it
+          (``fix this /team ops``). The token is spliced OUT (see
+          :meth:`_splice_command`), the surviving message is LEFT in the
+          composer, and the command is dispatched through
+          :class:`InlineCommandRequested`. No clear, no history entry: the draft
+          is still unsent, and the command was not a prompt to page back to.
+
+        The command's argument, by the inline contract, is everything from the
+        word to the END OF ITS LINE (see :func:`slash_argument_context`), so a
+        message kept apart from the command sits before the slash or on another
+        line.
+        """
+        span = slash_token_span(self.text, self._caret_offset(), self._command_names)
+        if span is None:
+            # No command token at the caret — nothing to extract. Fall back to a
+            # plain submit so a stray call still does the least surprising thing.
+            self._submit()
+            return
+        token_start, token_end = span
+        command_text = self.text[token_start:token_end].strip()
+        remainder = self.text[:token_start] + self.text[token_end:]
+        if not remainder.strip():
+            # Whole-buffer command: the command IS the draft. Ordinary submit.
+            self._submit()
+            return
+        # Inline. A PROMPT command (goal/loop/team/agent/btw) reassembles to the
+        # front with the draft as its argument and STAGES — never auto-runs —
+        # because its argument is free text the user is still writing, and
+        # treating the trailing draft as a name/request would silently consume it
+        # (the D1 data-loss). A non-prompt command (a selector or a listing, like
+        # `/usage`) splices out and runs, keeping the surrounding draft.
+        word, _, typed_argument = command_text[1:].partition(" ")
+        word = word.lower()
+        if word in self._prompt_commands:
+            # A prompt command with an ARGUMENT LIST (``/team``/``/agent``) and no
+            # name chosen yet does not reassemble on the word alone — the name is
+            # picked from the autofill first. `_apply_command` already completed
+            # the word to ``/team `` and opened that list; leaving it open is the
+            # whole interaction. Reassembly happens when the NAME row is chosen
+            # (see :meth:`_resolve_argument`). A prompt command with no list
+            # (``/goal``/``/loop``/``/btw``) reassembles now: the draft is its
+            # argument directly.
+            if word in self._argument_commands and not typed_argument.strip():
+                return
+            self._reassemble_prompt_command(token_start, token_end)
+            return
+        self._picker.close()
+        self._splice_command(token_start, token_end)
+        self.post_message(InlineCommandRequested(command_text))
+
+    def _reassemble_prompt_command(self, token_start: int, token_end: int) -> None:
+        """Move an inline PROMPT command to the front, draft as its argument.
+
+        The safe resolution of "a message typed, then a command to route it" for
+        commands whose argument is FREE TEXT (``/goal``, ``/loop``, ``/team``,
+        ``/agent``, ``/btw``). Rather than guess which trailing words are a name
+        and which are the message — the guess that silently ate a user's request
+        when ``/team`` treated ``and then ship it`` as a team name (D1) — the
+        composer is rewritten to ``/<command> <the rest of the draft>`` and left
+        STAGED: nothing is submitted, the caret lands at the end, and the command
+        word paints as recognised (the resync below). The user reads the
+        assembled line and presses Enter when it is right.
+
+        These commands are "start of the composer" commands by nature; this is
+        the affordance that lets them be reached by typing anywhere and then
+        assembled, without losing a keystroke of the draft.
+        """
+        text = self.text
+        # ``command`` is the whole token — ``/goal`` when no argument was typed,
+        # or ``/team ops`` when the user hand-typed one before engaging. In the
+        # intended flow (word engaged, name picked from the autofill) there is no
+        # typed argument, so ``command`` is just ``/<word>`` and the draft becomes
+        # its argument cleanly. If a user DID hand-type an argument and then
+        # engage inline, the draft is appended AFTER it (``/team ops`` + ``review
+        # this`` -> ``/team ops review this``): the two read in the opposite order
+        # to how they were typed, but the result still parses (name ``ops``,
+        # request ``review this``) and is STAGED not run, so the user sees and can
+        # fix it before sending — deliberately preferred over guessing which
+        # typed words to reorder (review round 2, minor-1).
+        command = text[token_start:token_end].strip()
+        # The rest of the draft, with the command token and one adjoining
+        # separator removed, is what becomes the command's argument. Reuse the
+        # same separator rule the splice uses so ``msg /goal`` and ``/goal\nmsg``
+        # both collapse to just ``msg``.
+        start, end = token_start, token_end
+        if start > 0 and text[start - 1] in " \t\n":
+            start -= 1
+        elif end < len(text) and text[end] in " \t\n":
+            end += 1
+        rest = (text[:start] + text[end:]).strip()
+        assembled = f"{command} {rest}" if rest else f"{command} "
+        # Staged, not submitted: the user reviews the assembled prompt and sends
+        # it themselves. ``_set_text_and_caret`` re-derives the pickers so the
+        # command word at the front is recognised and, for a list-taking command
+        # with no argument yet, its argument list opens.
+        self._set_text_and_caret(assembled, len(assembled))
 
     def _complete_name_argument(self, name: str) -> None:
         """Fill a team/agent NAME and a trailing space, WITHOUT submitting.
@@ -2769,17 +3084,42 @@ class Editor(TextArea):
         for a NAME+message command "the name is chosen" is not "run it", it is
         "ready for the message" — see :attr:`NAME_ARGUMENT_COMMANDS`.
 
-        Setting ``self.text`` funnels through ``load_text`` → ``_sync_picker``,
-        which re-derives the picker as an argument list with no matches, so the
-        list closes on the same keystroke that completed the name.
+        Setting the buffer funnels through ``_set_text_and_caret`` →
+        ``_sync_picker``, which re-derives the picker as an argument list with no
+        matches, so the list closes on the same keystroke that completed the name.
+
+        INLINE (a draft typed before the command) reassembles instead: the whole
+        ``/<cmd> <name>`` construct moves to the FRONT with the surviving draft as
+        its message, so ``review this /team`` + picking ``frontend-guild`` becomes
+        ``/team frontend-guild review this`` staged — the same safe reassembly
+        every prompt command uses, never consuming the draft as a name.
         """
-        argument = slash_argument(self.text, self._argument_commands)
-        if argument is None:
+        context = slash_argument_context(
+            self.text, self._argument_commands, self._caret_offset(), self._command_names
+        )
+        if context is None:
             return
-        # The argument is by construction the tail of the buffer, so trimming its
-        # length off the end leaves exactly `…/team ` to append the name+space.
-        self.text = f"{self.text[: len(self.text) - len(argument)]}{name} "
-        self.move_cursor(self._end_of_buffer())
+        # Fill the name+space into the argument SPAN (not the buffer tail), so a
+        # trailing inline message would survive. ``context.end`` is the end of the
+        # command's line, the whole argument by construction.
+        text = self.text
+        filled = f"{text[: context.start]}{name} {text[context.end :]}"
+        caret = context.start + len(name) + 1
+        # If a draft survives outside the command token, this is an INLINE engage:
+        # reassemble to the front rather than leaving the command mid-draft. The
+        # name is already filled, so the token now reads ``/team <name>``; the
+        # reassembly moves it to the front with the rest of the draft appended.
+        outside = (text[: context.token_start] + text[context.end :]).strip()
+        if outside:
+            # Recompute the token span on the FILLED text (the name changed its
+            # length) and reassemble from there.
+            self.text = filled
+            self.move_cursor(self._location_at_offset(caret))
+            span = slash_token_span(self.text, caret, self._command_names)
+            if span is not None:
+                self._reassemble_prompt_command(*span)
+            return
+        self._set_text_and_caret(filled, caret)
 
     def _extend_to_common_prefix(self) -> None:
         """Grow the typed word to the matches' longest common prefix, no further.
@@ -2790,7 +3130,7 @@ class Editor(TextArea):
         already the common prefix — the honest outcome, since there is no
         keystroke-free way to tell the candidates apart at that point.
         """
-        context = slash_context(self.text)
+        context = slash_context(self.text, self._caret_offset(), self._command_names)
         if context is None:
             return
         names = [name for name, _ in self._picker.suggestions()]
@@ -2807,9 +3147,14 @@ class Editor(TextArea):
                 return
         if len(shared) <= len(context.query):
             return
-        self.text = f"{self.text[: context.start]}/{shared}"
-        self.move_cursor(self._end_of_buffer())
-        self._sync_picker()
+        # Grow only the word SPAN ``[start, end)``; a trailing inline message
+        # survives untouched, and the caret lands at the new end of the word so
+        # the user keeps narrowing where they were typing.
+        text = self.text
+        self._set_text_and_caret(
+            f"{text[: context.start]}/{shared}{text[context.end :]}",
+            context.start + len(shared) + 1,
+        )
 
     # -- history ------------------------------------------------------------
     def _caret_row(self) -> int:

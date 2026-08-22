@@ -105,6 +105,23 @@ class SlashCommand:
     #: that changes nothing. Free typing is unaffected in every mode — the list
     #: ranks what is typed, it never filters what may be submitted.
     arguments: ArgumentMode = field(default=ArgumentMode.NONE, kw_only=True)
+    #: Whether this command's argument is FREE-TEXT that becomes a prompt the
+    #: model is given — the goal text, a loop instruction, a team/agent request,
+    #: an aside question. These are the "start of the composer" commands: their
+    #: whole point is to prefix a message, so engaging one INLINE (mid-draft)
+    #: does not splice-and-run — it REASSEMBLES the command to the front of the
+    #: composer with the rest of the draft as its argument, staged for the user
+    #: to review and submit. That is what makes "type the message, then remember
+    #: to route it" safe: nothing the user typed is ever consumed as a name or
+    #: silently dropped (the D1 data-loss the naive end-of-line argument caused).
+    #:
+    #: Keyword-only, defaulting to FALSE for the same reason ``echo`` and
+    #: ``arguments`` do: a command that has not opted in keeps the simple
+    #: splice-and-run inline behaviour (``/usage``, ``/model``), which is right
+    #: for every command whose argument is a SELECTOR rather than a message.
+    #: ``SLASH_COMMANDS`` is pinned entry-by-entry in ``test_slash_echo.py`` so a
+    #: new command must state this choice.
+    consumes_prompt: bool = field(default=False, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:

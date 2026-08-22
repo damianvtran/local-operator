@@ -420,6 +420,8 @@ async def test_cycling_is_inert_while_a_completion_list_is_open() -> None:
         await _boot(pilot, app)
         editor = app.query_one(Editor)
         editor.text = "/eff"
+        editor.move_cursor(editor._end_of_buffer())
+        editor._sync_picker()
         await pilot.pause()
         assert editor._picker.is_open()
         await pilot.press("shift+tab")

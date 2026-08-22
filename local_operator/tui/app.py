@@ -145,6 +145,7 @@ from local_operator.tui.widgets.editor import (
     EditorCopyStale,
     EditorQuit,
     EditorSubmitted,
+    InlineCommandRequested,
     InterruptRequested,
     ModelQueryOpened,
     RefreshArgumentChoices,
@@ -441,7 +442,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # than being paraphrased into a system notice. `_cmd_goal` writes that row
     # itself, only on the branch that actually stored something — the flag is
     # the permission, not the trigger.
-    SlashCommand("goal", "Show, set, or clear the session goal", echo=True),
+    SlashCommand("goal", "Show, set, or clear the session goal", echo=True, consumes_prompt=True),
     # Not an exception: LOOP_PROMPT is app-authored, not the user's words, and
     # `_loop_worker` already labels every iteration it starts (`· loop 1/3`), so
     # no agent output here is left unattributed. `echo=False` suppresses the
@@ -450,7 +451,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # session's user MessageStartEvent is consumed silently rather than
     # painted — two different receipts for two different events (the typed
     # command, and the prompt the turn later announces).
-    SlashCommand("loop", "Iterate autonomously toward the goal"),
+    SlashCommand("loop", "Iterate autonomously toward the goal", consumes_prompt=True),
     # NOT an exception, and the reason IS the feature. The question does reach
     # the model, but only for one off-the-record request that never joins the
     # conversation (`SessionProtocol.complete_aside`) — so a user row in the
@@ -458,7 +459,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # still be sitting there after Esc claimed to have thrown the exchange
     # away. The card is the receipt; `^f` inside it is how an exchange gets a
     # row, as a real turn rather than an echo.
-    SlashCommand("btw", "Ask a side question off the record (esc closes it)"),
+    SlashCommand("btw", "Ask a side question off the record (esc closes it)", consumes_prompt=True),
     # NOT an echo, and the receipt is the reason. The pass narrates itself
     # through the same `compacting context…` / `context compacted · 128.4k →
     # 21.9k tokens` notices the automatic one emits, and a refusal says why it
@@ -514,6 +515,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "List teams, or send a request to a team's manager",
         aliases=("teams",),
         arguments=ArgumentMode.OPTIONAL,
+        # The request AFTER the team name is a prompt the manager is given, so an
+        # inline `/team` reassembles to the front (name from the autofill, the
+        # draft as the request) rather than eating the draft as the name.
+        consumes_prompt=True,
     ),
     # Same echo reasoning as `/team`, which this command mirrors surface for
     # surface: bare `/agent` is a listing (the listing is the receipt), a
@@ -529,6 +534,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "List agents, or speak to this session as one",
         aliases=("agents",),
         arguments=ArgumentMode.OPTIONAL,
+        # The message AFTER the agent name is a prompt the persona is given, so
+        # an inline `/agent` reassembles to the front like `/team`.
+        consumes_prompt=True,
     ),
 ]
 
@@ -3961,6 +3969,37 @@ class OperatorApp(App[None]):
             self._run_slash_command(text)
             return
         self._submit_prompt(text, images, message.attachments)
+
+    def on_inline_command_requested(self, message: InlineCommandRequested) -> None:
+        """Run a slash command spliced out of the MIDDLE of a draft.
+
+        The editor has already removed the ``/command`` token from the buffer and
+        kept the surrounding message; all that remains is to DISPATCH the command,
+        which is the same synchronous slash handling a start-of-line command gets
+        — minus the prompt submission, because there is no prompt here: the draft
+        the user is still composing stays in the composer.
+
+        The aside owns the composer while it is up, and an inline command can only
+        be produced by the main composer (the aside's own key path never reaches
+        the slash picker), so no aside guard is needed here — but the session-gate
+        and unknown-command reporting inside ``_run_slash_command`` still apply
+        exactly as they do for a typed command.
+
+        Attaching a team or agent this way is the whole point of the mid-draft
+        gesture: ``/team ops`` stamps the roster onto this session's volatile
+        prompt tail, so the message the user then sends with Enter runs under the
+        team manager. See ``_cmd_team`` / ``_cmd_agent`` and
+        ``session_factory``'s per-turn prompt provider, which re-reads that tail.
+        """
+        command_text = message.command_text.strip()
+        if not command_text.startswith("/"):
+            return
+        if self._aside_is_open():
+            # Defensive only — see the docstring. Route to the aside rather than
+            # silently dispatching a command the user cannot see they issued.
+            self._ask_aside(command_text)
+            return
+        self._run_slash_command(command_text)
 
     def on_editor_quit(self, message: EditorQuit) -> None:
         self.exit()
@@ -10744,7 +10783,12 @@ class OperatorApp(App[None]):
         from local_operator.mcp.auth import mcp_logged_out_servers, oauth_server_names
         from local_operator.tui.widgets.command_picker import slash_argument
 
-        argument = slash_argument(editor.text, editor._argument_commands)
+        argument = slash_argument(
+            editor.text,
+            editor._argument_commands,
+            editor._caret_offset(),
+            editor._command_names,
+        )
         if argument is None:
             return []
         sub, _space, _rest = argument.partition(" ")
