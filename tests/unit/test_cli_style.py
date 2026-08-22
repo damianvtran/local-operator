@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from typing import IO, cast
 
 from local_operator import cli_style
 
@@ -55,10 +56,10 @@ class _EncStream:
 
 
 def test_can_encode_detects_ascii_only_stream():
-    ascii_stream = _EncStream("ascii")
+    ascii_stream = cast(IO[str], _EncStream("ascii"))
     assert cli_style.can_encode("plain", ascii_stream) is True
     assert cli_style.can_encode("box ─╭", ascii_stream) is False
 
 
 def test_can_encode_treats_unknown_encoding_as_capable():
-    assert cli_style.can_encode("box ─╭", _EncStream("")) is True
+    assert cli_style.can_encode("box ─╭", cast(IO[str], _EncStream(""))) is True
