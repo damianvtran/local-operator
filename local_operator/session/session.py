@@ -568,8 +568,20 @@ def _is_persistable_message(message: AgentMessage) -> bool:
     which is exactly where both of those live: after a pass the context is
     ``[marker, *kept]``, so the very next boundary would otherwise persist the
     marker.
+
+    A TRANSIENT model-switch record (a per-request failover fallback) is a
+    special case: it belongs in the live context so the running model knows it
+    is on a fallback, but it must NOT be persisted. A transient fallback that
+    outlives the process is stale by definition — a resumed session boots on its
+    selected model, so replaying "you are now on fallback B (temporary)" with no
+    matching recovery would contradict the authoritative ``Model:`` line
+    (review R1).
     """
     if isinstance(message, CustomMessage):
+        if message.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE and bool(
+            message.details.get("transient")
+        ):
+            return False
         return message.custom_type in _PERSISTABLE_CUSTOM_TYPES
     return True
 
@@ -1913,13 +1925,15 @@ class Session:
         # Make the deliberate switch visible to the MODEL, not just the host's
         # band. A same-pair knob change never reaches here (it took an early
         # return above), so this fires once per genuine switch. Background
-        # because ``set_model`` is sync and runs on the UI loop; the record
-        # lands before the next turn reads context.
+        # because ``set_model`` is sync and runs on the UI loop; the env-block
+        # ``Model:`` line keeps identity correct even if this notice slips a
+        # turn (see journal_model_switch). No ``reason``: the head already reads
+        # "now running as X (was Y)", so a "Reason: model switched" line would
+        # only repeat it. ``reason`` is reserved for failover causes (R3).
         self._spawn_background(
             self.journal_model_switch(
                 f"{model.provider}/{model.model_id}",
                 f"{previous.provider}/{previous.model_id}",
-                reason="model switched",
                 transient=False,
             )
         )
@@ -3559,13 +3573,22 @@ class Session:
         failed over to a different model) keeps reasoning as though it were the
         previous model: it can misreport which model it is, assume the wrong
         context window, or name the wrong model in a byline. This appends a
-        ``session_model_switch`` message to the live context so the very next
-        turn sees the change, and persists it so a resumed session replays it.
+        ``session_model_switch`` message to the live context so the next turn
+        sees the change. A non-transient (deliberate, or return-to-primary)
+        record is also persisted so a resumed session replays it; a TRANSIENT
+        fallback record is live-only, because a fallback that outlives the
+        process is stale on resume (see ``_is_persistable_message``, review R1).
 
         Deduplicated against the last switch record so the two edges that can
         both fire for one change (``set_model`` and a route-settled event) do
         not double-announce: a repeat naming the same ``new_label`` with the
         same ``transient`` flag is dropped.
+
+        Called on the loop, but not synchronously ordered against the next turn:
+        ``set_model`` spawns this in the background. The env-block ``Model:``
+        line already carries the live identity, so the worst case is that the
+        "you just switched" NOTICE lands one turn late, never that the model's
+        identity is wrong (review R2).
         """
         from local_operator.incidents import format_model_switch_message
 
@@ -3588,7 +3611,10 @@ class Session:
             },
         )
         try:
-            await self._transcript.append_message(message)
+            # Persist only when the record should survive a resume; a transient
+            # fallback is live-context-only (see _is_persistable_message).
+            if _is_persistable_message(message):
+                await self._transcript.append_message(message)
             self._context.messages.append(message)
         except OSError:
             logger.warning("could not journal model switch", exc_info=True)

@@ -45,6 +45,7 @@ from local_operator.session.session import (
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     Session,
     _callable_accepts_one_positional,
+    _is_persistable_message,
     _paired_prefix,
 )
 from local_operator.session.transcript import Transcript
@@ -1175,6 +1176,35 @@ async def test_failover_route_settled_journals_a_transient_switch(tmp_path):
     assert "You are now running as zai/glm-5.3" in text
     assert "temporary fallback" in text
     assert switches[-1].details["transient"] is True
+
+    # R1: a transient fallback record is live-context-only — it must NOT be
+    # persisted, or a resume would replay a stale fallback the session is no
+    # longer on.
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert SESSION_MODEL_SWITCH_MESSAGE_TYPE not in dumped
+    assert not _is_persistable_message(switches[-1])
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_switch_is_persisted_for_resume(tmp_path):
+    """R1 boundary: a non-transient switch (a deliberate /model change) IS
+    persisted, so a resumed session replays which model it ended up on."""
+    session = make_session(tmp_path, ScriptedStream([]))
+    await session.journal_model_switch("zai/glm-5.3", "test/m", transient=False)
+    switches = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    ]
+    assert len(switches) == 1
+    assert _is_persistable_message(switches[-1])
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert SESSION_MODEL_SWITCH_MESSAGE_TYPE in dumped
     await session.dispose()
 
 
