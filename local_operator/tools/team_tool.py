@@ -74,7 +74,10 @@ class TeamParams(BaseModel):
         default=None,
         description=(
             "create/update: roster slots as 'role' or 'role:count'. "
-            "The same role can sit on many teams; counts spawn copies."
+            "The same role can sit on many teams; counts spawn copies. "
+            "Prefix a slot with 'team:' to nest ANOTHER team as a sub-org — "
+            "'team:pod' or 'team:pod:2' (name 'pod', two copies). A nested "
+            "team carries its own briefs; the slot only points at it by name."
         ),
     )
     instructions: str | None = Field(

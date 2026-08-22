@@ -1083,6 +1083,14 @@ class Editor(TextArea):
         name, sep, tail = list_argument.partition(" ")
         if not name or not sep or tail.strip():
             return None
+        # `/team chart ` is NOT a completed name — `chart` is the reserved
+        # subcommand, and the space leads into the second-slot team list that
+        # feeds the chart, not into a switch/send choice. The attach-or-send
+        # semantics this hint names do not apply, so it must not show. (A team
+        # literally named `chart` is talked to with `/team =chart …`, whose
+        # leading `=` makes the first token not equal `chart`.)
+        if self._argument_command in ("team", "teams") and name.lower() == "chart":
+            return None
         return self.NAME_SWITCH_HINT
 
     def set_name_choices(self, names: frozenset[str]) -> None:
@@ -2663,17 +2671,55 @@ class Editor(TextArea):
                 # against team names.
                 self._name_choices = frozenset()
                 self.post_message(ArgumentQueryOpened(command or ""))
-            elif command == "mcp":
-                # `/mcp` is two-level: verbs in the first argument slot,
-                # servers in the second. ArgumentQueryOpened fires on the
-                # command WORD, so without this the verb rows would stay up
-                # after `login` was completed and the server slot would have
-                # nothing to offer. Tracked rather than refreshed per
-                # keystroke: the row set only changes when the verb does.
-                subcommand = list_argument.partition(" ")[0].lower() if list_argument else ""
-                if subcommand != self._argument_subcommand:
-                    self._argument_subcommand = subcommand
-                    self.post_message(RefreshArgumentChoices(command))
+            elif command in ("mcp", "team", "teams"):
+                # `/mcp` and `/team` are two-level: `/mcp` reserves verbs in the
+                # first argument slot and offers servers in the second; `/team`
+                # reserves the `chart` subcommand in the first slot and, once
+                # `chart ` is present, re-offers TEAM NAMES in the second (the
+                # [name] the chart wants). ArgumentQueryOpened fires on the
+                # command WORD, so without this the first-slot rows would stay
+                # up after the subcommand was completed and the second slot
+                # would have nothing to offer. Tracked rather than refreshed per
+                # keystroke: the row set only changes when the sub-slot does.
+                first_tok, sep, _tail = (list_argument or "").partition(" ")
+                if command == "mcp":
+                    # `/mcp` is per-verb: every verb has a distinct server list,
+                    # so the tracking key is the verb token and any change posts
+                    # a refresh (verbs while it is bare, servers once a verb is
+                    # chosen — the builder reads the space itself).
+                    subcommand = first_tok.lower() if list_argument else ""
+                    if subcommand != self._argument_subcommand:
+                        self._argument_subcommand = subcommand
+                        self.post_message(RefreshArgumentChoices(command))
+                else:
+                    # `/team` has exactly ONE thing that changes its choice set:
+                    # crossing into or out of the `chart ` SECOND slot (first
+                    # token is the reserved `chart` word AND a space follows —
+                    # first-slot team names ⇄ second-slot chart targets). Track
+                    # that boolean, not the raw first token: a team-NAME first
+                    # token (`/team security `) is the talk path whose choice set
+                    # never changes, so it must NOT post a refresh. The refresh
+                    # handler clears the notice, which would wipe the switch/send
+                    # parked-caret hint the block below sets — the exact D5
+                    # regression #250 guards
+                    # (`test_completing_a_team_name_keeps_the_parked_hint`). And
+                    # tracking the boolean (not the token) is what makes the
+                    # second slot refill at all: `chart`→`chart ` leaves the
+                    # token unchanged but flips the boundary, so a token-keyed
+                    # tracker would never fire on the space that opens slot two.
+                    chart_second_slot = "chart" if (first_tok.lower() == "chart" and sep) else ""
+                    # Normalize the prior state: both ``None`` (never tracked)
+                    # and ``""`` (first slot) mean "not in the chart second
+                    # slot", so entering ``/team `` for the first time is NOT a
+                    # boundary crossing and must not post a refresh — otherwise
+                    # the very first sync would clear the switch/send notice
+                    # before it is set (D5). Only a real cross into or out of
+                    # ``chart `` fires.
+                    was_chart_slot = self._argument_subcommand == "chart"
+                    is_chart_slot = chart_second_slot == "chart"
+                    self._argument_subcommand = chart_second_slot
+                    if was_chart_slot != is_chart_slot:
+                        self.post_message(RefreshArgumentChoices(command))
             self._picker.sync_argument(list_argument)
             # U1/U2 discoverability hint. The moment a NAME+message name is
             # autofilled (or hand-typed) to `/<cmd> <name> ` with an empty tail,

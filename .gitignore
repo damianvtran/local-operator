@@ -24,3 +24,10 @@ snapshot_report.html
 # committed lockfile is a second source of truth that nothing reads and no job
 # validates. It landed by accident in a TUI commit.
 uv.lock
+
+# Throwaway validation aids: the tidy-tree prototype and the captured org-chart
+# screenshot matrix live here so the reviewer/designer can look at them, but
+# they are not shipped code — committing them would put the prototype (which is
+# deliberately not type-clean) under the pyright/black gate and re-bill the
+# SVGs as repo weight. The shipped code is the promoted `org_layout.py`.
+scratch/

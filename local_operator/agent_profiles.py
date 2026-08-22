@@ -58,7 +58,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.agents import AgentData, AgentRegistry
@@ -419,6 +419,89 @@ def resolve_profile(
         if agent is not None and is_role(agent):
             return profile_from_agent(registry, agent)
     return load_seed(key)
+
+
+def resolve_profile_or_specialist(
+    name: str | None,
+    *,
+    registry: Any = None,
+) -> tuple[str | None, "AgentProfile | None", str, str]:
+    """Resolve a NAME to an attachable persona, priority order fixed HERE.
+
+    The SINGLE source of truth for how a name becomes a persona, shared by
+    ``/agent`` attach, a team's manager resolution, AND the org-chart resolver
+    (:func:`local_operator.org_chart.resolve_org`). Three callers, one order,
+    so they can never disagree about which of a role, a specialist, and a
+    packaged seed wins — the A1 bug and its team twin were exactly that
+    disagreement, and a classifier reimplemented beside this one is how it
+    would come back.
+
+    Order, strongest first:
+
+    1. the operator's own registered ROLE — ``resolve_profile`` returns a
+       profile with a non-``None`` ``agent_id`` only for a real registry role
+       (never a packaged seed), so an ``agent_id`` here is the operator's own
+       role and outranks everything below;
+    2. the operator's own SPECIALIST — checked BEFORE the seed fallthrough,
+       which is the whole fix: ``resolve_profile`` honours only role rows and
+       otherwise returns the SEED, so a specialist named after a seed word
+       would otherwise be shadowed by that seed;
+    3. a packaged SEED resolved by ``resolve_profile`` (``agent_id`` is
+       ``None``), so ``reviewer`` and friends still resolve on a fresh machine
+       with no registry row of that name.
+
+    Returns ``(kind, profile, specialist_prompt, display_name)`` where ``kind``
+    is ``"role"``/``"seed"`` (``profile`` set, ``specialist_prompt`` empty),
+    ``"specialist"`` (``profile`` ``None``, ``specialist_prompt`` set), or
+    ``None`` (nothing attachable by that name — ``profile`` ``None`` and both
+    strings empty). Ordinary conversational/autosave rows are not attachable:
+    only an explicit ``is_specialist`` marker or a role tag qualifies, so a
+    private chat agent's prompt is never pulled in by a coincidental name.
+
+    ``registry`` is typed ``Any`` for the same reason as ``resolve_profile``:
+    it is reached through ``getattr`` off a session, whose host may attach any
+    object answering the two methods used here, and every access is guarded.
+    """
+
+    key = (name or "").strip()
+    if not key:
+        return (None, None, "", "")
+    profile = resolve_profile(key, registry=registry)
+    if profile is not None and profile.agent_id is not None:
+        return ("role", profile, "", profile.name)
+    if registry is not None:
+        try:
+            specialist = registry.get_agent_by_name(key)
+            if specialist is not None and is_specialist(specialist):
+                prompt = (registry.get_agent_system_prompt(specialist.id) or "").strip()
+                return ("specialist", None, prompt, str(specialist.name))
+        except Exception:  # noqa: BLE001 - registry problems mean "not found"
+            pass
+    if profile is not None:
+        return ("seed", profile, "", profile.name)
+    return (None, None, "", "")
+
+
+def classify_name(
+    name: str | None, *, registry: Any = None
+) -> Literal["role", "specialist", "seed", "unresolved"]:
+    """The KIND half of :func:`resolve_profile_or_specialist`, for the org chart.
+
+    Returns ``"role"`` / ``"specialist"`` / ``"seed"`` / ``"unresolved"`` for a
+    member name. The org-chart resolver only needs to tag WHAT a leaf is, not
+    to attach its instructions, so it calls this thin wrapper rather than
+    carrying the whole persona tuple — but the wrapper delegates to the ONE
+    resolver above so the chart's tag can never drift from what an attach would
+    actually pick. ``None`` from the resolver (nothing attachable) reads as
+    ``"unresolved"`` here: a name that matches nothing renders as a dim ghost.
+    """
+
+    kind, _profile, _prompt, _display = resolve_profile_or_specialist(name, registry=registry)
+    # The resolver's ``kind`` is one of exactly these four labels or ``None``
+    # (nothing attachable) — the latter reads as "unresolved" for the chart.
+    if kind in ("role", "specialist", "seed"):
+        return kind  # type: ignore[return-value]
+    return "unresolved"
 
 
 def install_seed(
