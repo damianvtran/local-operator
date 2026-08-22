@@ -222,6 +222,15 @@ class Usage(BaseModel):
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     context_tokens: int | None = None  # provider-reported full context size if given
+    # The reasoning/thinking slice of ``output_tokens`` when the provider
+    # breaks it out (OpenAI ``output_tokens_details.reasoning_tokens``). Kept
+    # as a SUBSET of ``output_tokens`` — never added on top — so callers that
+    # only read ``output_tokens`` stay correct, and the analytics recorder can
+    # split output into thinking vs generation (``output_tokens`` minus this).
+    # Anthropic bills thinking inside ``output_tokens`` without a separate
+    # count, so this stays 0 there and the whole output reads as generation,
+    # which is the honest thing to report when the wire does not separate it.
+    reasoning_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:

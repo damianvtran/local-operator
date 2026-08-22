@@ -2129,6 +2129,18 @@ class Session:
         if (stored, self._conversation_name.user_set) != before:
             self._conversation_name_dirty = True
             self._spawn_conversation_name_write()
+            # Mirror the human name into the analytics ledger so the
+            # ``/analytics /usage`` per-session table shows a title rather than
+            # a 12-hex id. Best-effort and off the hot path (the recorder runs
+            # the upsert on its own thread); a failure here must never cost the
+            # rename, which is why it is guarded and never awaited.
+            if stored:
+                try:
+                    from local_operator.analytics import get_recorder
+
+                    get_recorder().note_session_name(self.session_id, stored)
+                except Exception:  # noqa: BLE001 — analytics is best-effort
+                    logger.debug("analytics: note_session_name failed", exc_info=True)
         return stored
 
     def _spawn_conversation_name_write(self) -> None:

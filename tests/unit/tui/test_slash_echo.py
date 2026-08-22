@@ -59,6 +59,9 @@ ECHO_POLICY = {
     "search": False,
     "accounts": False,
     "usage": False,
+    # The screen it opens IS the receipt (same rule as `/usage`); the argument
+    # names a view, never words the model is told.
+    "analytics": False,
     "goal": True,
     "loop": False,
     # The aside's whole promise is that the exchange leaves no trace in the

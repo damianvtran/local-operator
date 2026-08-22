@@ -1154,6 +1154,7 @@ class OpenAICompatClient:
                 if isinstance(chunk.get("usage"), Mapping):
                     raw = chunk["usage"]
                     details = raw.get("prompt_tokens_details") or {}
+                    completion_details = raw.get("completion_tokens_details") or {}
                     usage = Usage(
                         input_tokens=int(raw.get("prompt_tokens", 0)),
                         output_tokens=int(raw.get("completion_tokens", 0)),
@@ -1163,6 +1164,15 @@ class OpenAICompatClient:
                         cache_write_tokens=int(
                             details.get("cache_write_tokens", 0)
                             if isinstance(details, Mapping)
+                            else 0
+                        ),
+                        # The thinking slice of the completion, when the wire
+                        # separates it. A SUBSET of ``completion_tokens`` (see
+                        # ``Usage.reasoning_tokens``), so analytics can split
+                        # output into thinking vs generation.
+                        reasoning_tokens=int(
+                            completion_details.get("reasoning_tokens", 0)
+                            if isinstance(completion_details, Mapping)
                             else 0
                         ),
                         # Prompt tokens ARE the context the provider just read:
@@ -1323,12 +1333,21 @@ class OpenAICompatClient:
                     raw = response_obj.get("usage") or {}
                     if raw:
                         details = raw.get("input_tokens_details") or {}
+                        output_details = raw.get("output_tokens_details") or {}
                         usage = Usage(
                             input_tokens=int(raw.get("input_tokens", 0)),
                             output_tokens=int(raw.get("output_tokens", 0)),
                             cache_read_tokens=int(
                                 details.get("cached_tokens", 0)
                                 if isinstance(details, Mapping)
+                                else 0
+                            ),
+                            # Responses breaks reasoning out under
+                            # ``output_tokens_details``. A SUBSET of
+                            # ``output_tokens`` (see ``Usage.reasoning_tokens``).
+                            reasoning_tokens=int(
+                                output_details.get("reasoning_tokens", 0)
+                                if isinstance(output_details, Mapping)
                                 else 0
                             ),
                             context_tokens=int(raw.get("input_tokens", 0)) or None,

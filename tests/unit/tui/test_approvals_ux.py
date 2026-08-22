@@ -503,6 +503,10 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # OPTIONAL like `/team`, which `/agent` mirrors: bare `/agent` lists
         # the roles/specialists, and the space opens the name argument list.
         "agent": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/effort`: bare `/analytics` opens the default (usage)
+        # view, and the space offers the analytics-view list (today just
+        # `usage`); the screen it opens IS the receipt, so it never echoes.
+        "analytics": ArgumentMode.OPTIONAL,
     }
     # `/provider` was the third candidate and is deliberately not here: it takes
     # no argument at all — `_cmd_providers` ignores what follows it — so a list

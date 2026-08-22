@@ -34,6 +34,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ModelSpec,
     StreamEvent,
+    Usage,
 )
 from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.effort import default_effort, supported_efforts
@@ -2701,13 +2702,16 @@ class SessionStreamFn:
             # * the session's prompt cache key, which identifies a request
             #   PREFIX. The naming call's prefix is a different system block, so
             #   sharing the key buys no hit and dirties the turn's cache entry.
-            async for event in stream_with_failover(
+            async for event in self._record_stream(
                 request,
-                self._auth_store,
-                self._settings,
-                self._client_for,
-                signal=signal,
-                session_id=self._session_id,
+                stream_with_failover(
+                    request,
+                    self._auth_store,
+                    self._settings,
+                    self._client_for,
+                    signal=signal,
+                    session_id=self._session_id,
+                ),
             ):
                 yield event
             return
@@ -2767,16 +2771,112 @@ class SessionStreamFn:
             request = request.model_copy(update={"prompt_cache_key": self._session_id})
 
         await self.preflight_usage(request.model)
-        async for event in stream_with_failover(
+        async for event in self._record_stream(
             request,
-            self._auth_store,
-            self._settings,
-            self._client_for,
-            signal=signal,
-            session_id=self._session_id,
-            route_state=self._route_state,
+            stream_with_failover(
+                request,
+                self._auth_store,
+                self._settings,
+                self._client_for,
+                signal=signal,
+                session_id=self._session_id,
+                route_state=self._route_state,
+            ),
         ):
             yield event
+
+    async def _record_stream(
+        self, request: ChatRequest, stream: AsyncIterator[StreamEvent]
+    ) -> AsyncIterator[StreamEvent]:
+        """Forward a provider stream unchanged, then record its usage analytics.
+
+        Why the recording lives HERE, wrapping the one place every provider
+        call already funnels through: this method sees both the ``ChatRequest``
+        (system blocks, tools, messages — the component breakdown) and the
+        final ``Usage`` (authoritative provider counts), for turns, tool loops,
+        compaction summaries, auto-naming, and every subagent, with no per-call
+        wiring anywhere else. A universal view falls out of one wrapper.
+
+        Latency contract: recording happens ONLY after the stream is fully
+        consumed (``async for`` completes), so it adds nothing to the response
+        the caller is awaiting. The single piece of event-loop work — reading
+        the request's component character lengths — is done up front into a
+        scalar snapshot because the transcript mutates the messages after the
+        call returns; tokenising, apportioning, and the SQLite write all happen
+        on the recorder's background thread. Everything is wrapped so a failure
+        in analytics can never break a turn.
+        """
+        # Snapshot char lengths BEFORE streaming: cheap (string length reads,
+        # sub-millisecond even on a very large context) and safe to hand a
+        # background thread, unlike the live message objects.
+        try:
+            from local_operator.analytics import snapshot_component_chars
+
+            component_chars = snapshot_component_chars(request)
+        except Exception:  # noqa: BLE001 — analytics must never break a turn
+            component_chars = None
+
+        final_usage: Usage | None = None
+        ok = True
+        try:
+            async for event in stream:
+                usage = getattr(event, "usage", None)
+                if usage is not None:
+                    final_usage = usage
+                stop_reason = getattr(event, "stop_reason", None)
+                if stop_reason in ("error", "aborted") or getattr(event, "error", None):
+                    ok = False
+                yield event
+        finally:
+            # In a ``finally`` so an aborted/failed stream (which still cost
+            # input tokens) is recorded too — best-effort and never raising.
+            if component_chars is not None and final_usage is not None:
+                self._record_usage(request, component_chars, final_usage, ok)
+
+    def _record_usage(
+        self,
+        request: ChatRequest,
+        component_chars: dict[str, int],
+        usage: Usage,
+        ok: bool,
+    ) -> None:
+        """Enqueue one call sample. Off the hot path; never raises."""
+        try:
+            import time as _time
+
+            from local_operator.analytics import CallSnapshot, record_call
+
+            context_tokens = usage.context_tokens
+            if not context_tokens:
+                # Providers that omit an explicit context size: reconstruct the
+                # full input the same way the wire clients normalise
+                # ``context_tokens`` (clients.py) — input plus BOTH cache
+                # halves — so the component split has the right denominator and
+                # the headline total is not short by the cache-write volume on
+                # a cache-writing provider (review A2). Cache-inclusive
+                # providers report ``context_tokens`` directly, so this fallback
+                # only fires when nothing was reported at all.
+                context_tokens = (
+                    usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+                )
+            record_call(
+                CallSnapshot(
+                    ts_ms=int(_time.time() * 1000),
+                    session_id=self._session_id or "",
+                    provider=request.model.provider,
+                    model_id=request.model.model_id,
+                    input_tokens=int(usage.input_tokens),
+                    output_tokens=int(usage.output_tokens),
+                    cache_read_tokens=int(usage.cache_read_tokens),
+                    cache_write_tokens=int(usage.cache_write_tokens),
+                    reasoning_tokens=int(getattr(usage, "reasoning_tokens", 0)),
+                    context_tokens=int(context_tokens or 0),
+                    component_chars=component_chars,
+                    ok=ok,
+                )
+            )
+        except Exception:  # noqa: BLE001 — recording is best-effort
+            logger.debug("analytics: usage record failed", exc_info=True)
 
     async def close(self) -> None:
         await self._http.aclose()
