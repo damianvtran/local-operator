@@ -1508,6 +1508,47 @@ def test_request_sampling_overrides_reach_the_wire_when_supported(wire: str, top
     assert body[top_p_key] == 0.15
 
 
+def test_anthropic_omits_sampling_when_adaptive_thinking_is_on() -> None:
+    """Thinking and the sampling pair are mutually exclusive on Anthropic's wire.
+
+    ``claude-opus-4-8`` accepts ``temperature`` on its own — it is NOT in
+    ``_NO_SAMPLING_PARAMS`` — but it carries an effort ladder, and the ladder is
+    what switches ``thinking: {"type": "adaptive"}`` on. Anthropic answers that
+    combination with HTTP 400 ``` `temperature` may only be set to 1 when
+    thinking is enabled or in adaptive mode ``` (observed live 2026-08-21),
+    which killed every turn on the 4.5–4.9 generation. Generation 5+ never hit
+    it only because the sampling rule already dropped the pair.
+
+    The guard is keyed on the SAME gate that writes ``thinking`` — not on a
+    second model-name list — so any future model that gains an effort ladder is
+    automatically safe whichever way the gate resolves.
+    """
+    spec = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-4-8",
+        reasoning=True,
+        reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        temperature=0.2,
+        top_p=0.9,
+    )
+    body = AnthropicClient()._build_body(ChatRequest(model=spec, messages=[Message.user("hi")]))
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "high"}
+    # ABSENT, not null: the 400 is about the key appearing at all.
+    assert "temperature" not in body
+    assert "top_p" not in body
+
+    # And the flip side: clearing the effort level turns thinking off, which
+    # makes the sampling pair legal again — it must come back, because losing
+    # a real setting silently would be the worse bug.
+    plain = spec.model_copy(update={"reasoning_effort": None})
+    body = AnthropicClient()._build_body(ChatRequest(model=plain, messages=[Message.user("hi")]))
+    assert "thinking" not in body
+    assert body["temperature"] == 0.2
+    assert body["top_p"] == 0.9
+
+
 def test_anthropic_oauth_prepends_the_claude_code_identity() -> None:
     """A subscription credential MUST carry the Claude Code identity block first.
 
