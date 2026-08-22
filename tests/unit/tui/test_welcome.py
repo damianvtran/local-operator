@@ -812,11 +812,17 @@ async def test_model_label_polls_in_after_boot() -> None:
     app = _make_app(FakeSession())
     async with app.run_test(size=(80, 26)) as pilot:
         await pilot.pause()
-        # The timer's first tick (250 ms) is the thing under test: wait it out
-        # rather than force the poll, so a broken timer fails this test.
-        await asyncio.sleep(0.6)
-        await pilot.pause()
         welcome = _welcome(app)
+        # The timer's first tick (250 ms) is the thing under test: wait it out
+        # rather than force the poll, so a broken timer still fails this test.
+        # Polling the poll interval until the label lands returns as soon as the
+        # timer has actually ticked instead of betting a flat 0.6 s covers it;
+        # a timer that never fires leaves the label unset and fails below.
+        for _ in range(24):
+            await asyncio.sleep(WelcomeView.POLL_INTERVAL_S)
+            await pilot.pause()
+            if welcome._timer is None:
+                break
         assert welcome._info.model_label == "openrouter/deepseek/deepseek-chat"
         assert welcome._timer is None  # retired once the label arrived
 
@@ -833,11 +839,16 @@ async def _settled_welcome(pilot: Any) -> WelcomeView:
     The poll timer retiring IS the settled edge.
     """
     welcome = pilot.app.query_one(WelcomeView)
-    for _ in range(24):
+    for _ in range(200):
         await pilot.pause()
         if welcome._timer is None:
             break
-        await asyncio.sleep(WelcomeView.POLL_INTERVAL_S)
+        # The label lands on the session worker (an event, not the wall clock),
+        # so once the loop has run the source already holds it; forcing the poll
+        # retires the timer as soon as the fact exists instead of sleeping out a
+        # real 0.25 s tick per boot. The timer's own liveness is pinned by
+        # `test_model_label_polls_in_after_boot`, so this helper need not.
+        welcome._poll()
     await pilot.pause()
     return welcome
 

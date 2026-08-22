@@ -115,22 +115,22 @@ async def test_the_working_line_stays_at_the_foot_as_the_turn_grows() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _is_last(app)
 
         app.post_message(_started("c0", "read", path="src/foo.py"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _is_last(app)
 
         app.post_message(AssistantDelta("thinking out loud"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _is_last(app)
 
         app.post_message(_ended("c0", "read"))
         app.post_message(CompactionStarted("size"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _is_last(app)
         # And the blocks it stepped over are still in the order they arrived —
         # a pin that reordered the transcript would be a worse bug than the one
@@ -149,22 +149,22 @@ async def test_it_reports_the_running_tool_and_settles_back_to_the_model() -> No
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
-        await pilot.pause(0.1)
+        await pilot.pause()
         # The GAP before anything has been dictated: a model call is in flight
         # and that is all the app honestly knows.
         assert _activity(app) == DEFAULT_ACTIVITY
 
         app.post_message(_started("c0", "read", path="src/foo.py"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "running read"
         assert any(
             "running read" in strip.text for strip in app.screen._compositor.render_strips()
         ), "the label reaches the frame, not just the widget"
 
         app.post_message(_ended("c0", "read"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == DEFAULT_ACTIVITY
 
 
@@ -180,7 +180,7 @@ async def test_the_model_s_intent_is_what_the_line_says() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(
             ToolStarted(
@@ -192,7 +192,7 @@ async def test_the_model_s_intent_is_what_the_line_says() -> None:
                 )
             )
         )
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "running the spacing suite"
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert len([row for row in painted if "running the spacing suite" in row]) == 1
@@ -206,10 +206,10 @@ async def test_without_an_intent_the_line_falls_back_to_the_tool_name() -> None:
     not restate the arguments the card is showing."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "read", path="src/foo.py"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "running read"
 
 
@@ -224,7 +224,7 @@ async def test_a_parallel_batch_is_reported_as_a_plain_count() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(
             ToolStarted(
@@ -238,16 +238,16 @@ async def test_a_parallel_batch_is_reported_as_a_plain_count() -> None:
         )
         app.post_message(_started("c1", "read", path="b.py"))
         app.post_message(_started("c2", "grep", pattern="needs_gap"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         # No intent, no `+N`: three calls are three calls.
         assert _activity(app) == "running 3 tools"
 
         app.post_message(_ended("c1", "read"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "running 2 tools"
 
         app.post_message(_ended("c0", "read"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         # Down to one, and that one gave no intent, so the fallback shows.
         assert _activity(app) == "running grep"
 
@@ -264,23 +264,23 @@ async def test_the_clock_survives_a_label_change_within_one_phase() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "read", path="a.py"))
         app.post_message(_started("c1", "read", path="b.py"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         line = _working(app)
         assert line is not None
         started = line._phase_started
 
         app.post_message(_ended("c1", "read"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "running read"  # the label moved
         assert line._phase_started == started  # the clock did not
 
         # A real phase change DOES reset it: that is the case the reset is for.
         app.post_message(_ended("c0", "read"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == DEFAULT_ACTIVITY
         assert line._phase_started > started
 
@@ -325,10 +325,10 @@ async def test_the_line_holds_one_row_whatever_the_clock_says() -> None:
         # is never mounted again.
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=(width, 20)) as pilot:
-            await pilot.pause(0.25)
+            await pilot.pause()
             app.post_message(TurnStarted())
             app.post_message(_started("c0", "read", path="a.py"))
-            await pilot.pause(0.1)
+            await pilot.pause()
             line = _working(app)
             assert line is not None, width
             line.set_activity("running a tool with a long model-supplied label " * 3)
@@ -375,16 +375,16 @@ async def test_a_dictated_call_is_reported_before_it_runs() -> None:
     """The longest silence in a turn is a large call streaming its arguments."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c0", tool_name="write")))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "composing a call"
 
         # Adoption: the execution replaces the announcement rather than adding
         # to it, so the line must not read "composing 2 tools".
         app.post_message(_started("c0", "write", path="out.txt"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "running write"
 
 
@@ -393,20 +393,20 @@ async def test_a_prose_turn_reports_prose_then_the_next_model_call() -> None:
     """A turn with no tools at all must still say something true."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(AssistantMessageStart())
-        await pilot.pause(0.1)
+        await pilot.pause()
         # A message OPENING is not text arriving — nothing is mounted yet and
         # the model call is still the honest description.
         assert _activity(app) == DEFAULT_ACTIVITY
 
         app.post_message(AssistantDelta("here is the plan"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "responding"
 
         app.post_message(AssistantMessageEnd("here is the plan"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == DEFAULT_ACTIVITY
 
 
@@ -415,15 +415,15 @@ async def test_a_new_model_call_takes_the_line_back_from_the_last_tool() -> None
     """The gap the line exists for: a batch settles, then the model is quiet."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "read", path="a.py"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "running read"
 
         app.post_message(TurnBoundaryEnd())
         app.post_message(TurnBoundaryStart())
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == DEFAULT_ACTIVITY
 
 
@@ -432,10 +432,10 @@ async def test_a_slow_whole_turn_state_says_what_it_is() -> None:
     """Compaction has no card of its own and runs for a long time."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(CompactionStarted("size"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _activity(app) == "compacting context"
 
 
@@ -444,15 +444,15 @@ async def test_the_line_is_lifted_when_the_turn_ends() -> None:
     """No settled frame, no summary row: it is transient and it goes."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "read", path="a.py"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None
 
         app.post_message(_ended("c0", "read"))
         app.post_message(TurnEnded(aborted=False, error=None))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is None
         assert not any("thinking" in strip.text for strip in app.screen._compositor.render_strips())
 
@@ -466,15 +466,15 @@ async def test_the_line_does_not_survive_an_aborted_turn() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "bash", command="sleep 600"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None
 
         app.post_message(TurnBoundaryEnd())  # reconciles the orphaned card
         app.post_message(TurnEnded(aborted=True, error=None))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is None
 
 
@@ -483,11 +483,11 @@ async def test_a_failed_turn_lifts_the_line_too() -> None:
     """The error notice takes the foot of the transcript, not a dead spinner."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
-        await pilot.pause(0.1)
+        await pilot.pause()
         app.post_message(TurnEnded(aborted=False, error="provider refused the request"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is None
         blocks = app.query_one(TranscriptView).blocks()
         assert isinstance(blocks[-1], NoticeBlock)
@@ -502,14 +502,14 @@ async def test_clearing_mid_turn_brings_the_line_back() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "bash", command="sleep 600"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None
 
         app.action_clear_transcript()
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None, "a live turn still has to say it is live"
         assert _is_last(app)
         # The cards went with the transcript, so the line falls back to the
@@ -517,7 +517,7 @@ async def test_clearing_mid_turn_brings_the_line_back() -> None:
         assert _activity(app) == DEFAULT_ACTIVITY
 
         app.post_message(TurnEnded(aborted=True, error=None))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is None
 
 
@@ -526,9 +526,9 @@ async def test_clearing_outside_a_turn_leaves_no_line_behind() -> None:
     """The re-mount is conditional on a turn being live, not on /clear."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.action_clear_transcript()
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is None
 
 
@@ -542,15 +542,15 @@ async def test_reloading_mid_turn_lifts_the_line_off_the_dead_turn() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "bash", command="sleep 600"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None
 
         app._session_factory = lambda: _factory(FakeSession())  # type: ignore[assignment]
         await app._reload_session()
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert _working(app) is None, "the line outlived the turn it describes"
         assert app._working_block is None
@@ -570,19 +570,19 @@ async def test_reloading_mid_turn_leaves_the_next_turn_able_to_say_it_is_working
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "bash", command="sleep 600"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None
 
         app._session_factory = lambda: _factory(FakeSession())  # type: ignore[assignment]
         await app._reload_session()
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is None
 
         app.post_message(TurnStarted())
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None, "the replacement session got no working line"
         assert _is_last(app)
         # What it SAYS is still derived from the preserved ledger — the dead
@@ -603,10 +603,10 @@ async def test_a_session_switch_mid_turn_lifts_the_line_too() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await pilot.pause()
         app.post_message(TurnStarted())
         app.post_message(_started("c0", "bash", command="sleep 600"))
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None
 
         app._session_factory = lambda: _factory(FakeSession())  # type: ignore[assignment]
@@ -614,12 +614,12 @@ async def test_a_session_switch_mid_turn_lifts_the_line_too() -> None:
         # spelling; the ledger is now always rebuilt from the new session's
         # own history, so the plain call is the switch.
         await app._reload_session()
-        await pilot.pause(0.1)
+        await pilot.pause()
 
         assert _working(app) is None, "a line was mounted into the new transcript"
         assert app._working_block is None, "the reference survived the transcript"
 
         app.post_message(TurnStarted())
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert _working(app) is not None, "the resumed session got no working line"
         assert _is_last(app)
