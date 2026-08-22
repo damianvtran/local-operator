@@ -344,9 +344,27 @@ class Transcript:
             # ``Session._offloaded`` is where the loop-responsiveness win
             # actually comes from (1360 ms -> 56 ms); this write is a few
             # hundred microseconds and is not worth a correctness hazard.
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(entry.to_json() + "\n")
-                handle.flush()
+            #
+            # Self-healing against a vanished directory: another process's
+            # startup sweep (or a user tidying by hand) can remove a session
+            # directory while it still looks empty — the gap between Session
+            # construction and the first turn is as long as the user takes to
+            # type their first message, and the retention sweep's ``live_dir``
+            # only protects the sweeping process's OWN session. Dying on
+            # FileNotFoundError here costs the whole session for a directory
+            # one mkdir restores; ``self._entries`` still holds every prior
+            # entry, so the recreated file is rebuilt complete rather than
+            # starting truncated.
+            try:
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(entry.to_json() + "\n")
+                    handle.flush()
+            except FileNotFoundError:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                with self.path.open("w", encoding="utf-8") as handle:
+                    for row in self._entries:
+                        handle.write(row.to_json() + "\n")
+                    handle.flush()
         return entry
 
     # -- replay -------------------------------------------------------------

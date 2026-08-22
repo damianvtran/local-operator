@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,26 @@ MAX_AGE_DAYS_KEY = "session_retention_max_age_days"
 DEFAULT_MAX_SESSIONS = 0
 DEFAULT_MAX_BYTES = 0
 DEFAULT_MAX_AGE_DAYS = 0
+
+#: How old an EMPTY session directory must be before the reaper may take it.
+#:
+#: A session directory is empty from the moment ``_prepare`` creates it until
+#: the first turn is appended to ``transcript.jsonl`` — and that window is as
+#: long as the user takes to type their first message. ``live_dir`` only
+#: protects the sweeping process's OWN session; on an install running many
+#: concurrent sessions, a sibling process starting up in that window saw a
+#: fresh empty directory, judged it abandoned, and rmtree'd a session another
+#: process was about to write into. Its first append then died on
+#: ``FileNotFoundError: .../transcript.jsonl`` — observed in production on an
+#: install with ~12 concurrent sessions, where new sessions started minutes
+#: apart reliably raced each other.
+#:
+#: One hour is deliberately generous: an empty directory costs nothing while
+#: it waits, and a directory abandoned by a crashed run is still reclaimed by
+#: any startup an hour later. The transcript's self-healing append (see
+#: ``Transcript._append``) backstops the pathological case of a session left
+#: idle past the grace window before its first message.
+EMPTY_DIR_GRACE_SECONDS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -123,6 +144,12 @@ def sweep_sessions(
     the user the whole session, and the benefit (bounded disk) is
     recoverable by hand at any time.
 
+    An empty directory younger than :data:`EMPTY_DIR_GRACE_SECONDS` is also
+    skipped, whoever owns it: a fresh empty directory is indistinguishable
+    from a sibling process's session that has not received its first message
+    yet, and reaping one killed exactly such a session on a real install.
+    ``now`` exists so tests can move the clock instead of the filesystem.
+
     Idempotent and safe to call on every startup: a missing ``sessions_dir``
     is a no-op rather than an error — the first run of a fresh install has
     not created it yet, and a startup path that raises there would be a
@@ -135,6 +162,7 @@ def sweep_sessions(
     evicted = 0
     errors = 0
     bytes_remaining = 0
+    moment = time.time() if now is None else now
     live_resolved = live_dir.resolve() if live_dir is not None else None
     try:
         children = [child for child in sessions_dir.iterdir() if child.is_dir()]
@@ -156,7 +184,19 @@ def sweep_sessions(
         if size > 0:
             bytes_remaining += size
             continue
-        # Literally empty: no files at all, not even a marker. Deleting
+        try:
+            age = moment - child.stat().st_mtime
+        except OSError:
+            # Removed by another process between the size walk and the stat.
+            continue
+        if age < EMPTY_DIR_GRACE_SECONDS:
+            # Empty but fresh: this is what a sibling's just-created session
+            # looks like before its first turn lands. ``live_dir`` cannot
+            # protect it (it only names OUR session), so age is the only
+            # signal that separates "abandoned" from "about to be written".
+            continue
+        # Literally empty AND past the grace window: no files at all, not
+        # even a marker, and nothing has claimed it for an hour. Deleting
         # it loses nothing, and it was never a real session.
         try:
             shutil.rmtree(child)

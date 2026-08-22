@@ -16,6 +16,7 @@ from local_operator.session.retention import (
     DEFAULT_MAX_AGE_DAYS,
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_SESSIONS,
+    EMPTY_DIR_GRACE_SECONDS,
     sweep_from_config,
     sweep_sessions,
 )
@@ -30,6 +31,22 @@ def _session(root, name: str, *, size: int = 1024, age_days: float = 0.0):
     when = time.time() - age_days * 86400
     for path in (directory / "transcript.jsonl", directory):
         os.utime(path, (when, when))
+    return directory
+
+
+def _hollow(root, name: str, *, age_seconds: float = EMPTY_DIR_GRACE_SECONDS + 60.0):
+    """An EMPTY session directory old enough for the reaper to take it.
+
+    Aged past the grace window by default because that is what "abandoned"
+    means now: a fresh empty directory is indistinguishable from a sibling
+    process's session awaiting its first message, and must survive.
+    """
+    import os
+
+    directory = root / name
+    directory.mkdir(parents=True)
+    when = time.time() - age_seconds
+    os.utime(directory, (when, when))
     return directory
 
 
@@ -66,10 +83,8 @@ def test_live_dir_is_never_reaped_even_when_empty(tmp_path):
     It is empty by construction; ``live_dir`` is the belt that keeps the
     sweep from rmtree'ing it in the same call that created it."""
     sessions = tmp_path / "sessions"
-    live = sessions / "live"
-    live.mkdir(parents=True)
-    other = sessions / "other"
-    other.mkdir(parents=True)
+    live = _hollow(sessions, "live")
+    other = _hollow(sessions, "other")
 
     result = sweep_sessions(sessions, live_dir=live)
 
@@ -83,7 +98,7 @@ def test_empty_directories_are_reaped(tmp_path):
     turn; 23 of 147 directories on a real install were exactly this. A
     directory that contains nothing holds nothing to lose."""
     sessions = tmp_path / "sessions"
-    (sessions / "hollow").mkdir(parents=True)
+    _hollow(sessions, "hollow")
     _session(sessions, "real")
 
     result = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
@@ -102,8 +117,7 @@ def test_a_marker_alone_protects_the_directory(tmp_path):
     from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
     sessions = tmp_path / "sessions"
-    hollow = sessions / "hollow"
-    hollow.mkdir(parents=True)
+    hollow = _hollow(sessions, "hollow")
     mark_session_origin(hollow, ORIGIN_SUBAGENT, label="review")
 
     result = sweep_sessions(sessions)
@@ -127,7 +141,7 @@ def test_any_content_at_all_protects_the_directory(tmp_path):
 
 def test_sweep_is_idempotent(tmp_path):
     sessions = tmp_path / "sessions"
-    (sessions / "hollow").mkdir(parents=True)
+    _hollow(sessions, "hollow")
     _session(sessions, "real")
 
     first = sweep_sessions(sessions)
@@ -147,7 +161,7 @@ def test_sibling_stores_under_the_config_dir_are_untouched(tmp_path):
     this module's business.
     """
     sessions = tmp_path / "sessions"
-    (sessions / "hollow").mkdir(parents=True)
+    _hollow(sessions, "hollow")
     _session(sessions, "real")
     spill = tmp_path / "spill"
     spill.mkdir()
@@ -237,7 +251,7 @@ def test_undeletable_empty_directory_is_reported_not_raised(tmp_path, monkeypatc
     """Reclaiming disk must never be the reason a session fails to start."""
     sessions = tmp_path / "sessions"
     for i in range(3):
-        (sessions / f"hollow{i}").mkdir(parents=True)
+        _hollow(sessions, f"hollow{i}")
     _session(sessions, "real")
 
     def boom(_path):
@@ -249,6 +263,42 @@ def test_undeletable_empty_directory_is_reported_not_raised(tmp_path, monkeypatc
     assert result.errors == 3
     assert result.evicted == 0
     assert len(list(sessions.iterdir())) == 4
+
+
+def test_a_fresh_empty_directory_survives_a_sibling_sweep(tmp_path):
+    """THE regression this grace window exists for. ``_prepare`` creates the
+    session directory before the user has typed a word; a sibling process
+    starting up in that window used to reap it as "empty", and the session's
+    first append died on FileNotFoundError — observed on a real install
+    running ~12 concurrent sessions. ``live_dir`` cannot help: it names the
+    SWEEPING process's session, not the victim's."""
+    sessions = tmp_path / "sessions"
+    victim = sessions / "just-created-by-another-process"
+    victim.mkdir(parents=True)  # fresh mtime — exactly what _prepare leaves
+
+    result = sweep_sessions(sessions, live_dir=None)
+
+    assert victim.exists()
+    assert result.evicted == 0
+
+
+def test_grace_window_boundary(tmp_path):
+    """Inside the window survives; past it is reaped. ``now`` moves the
+    clock so the boundary is tested without sleeping or utime races."""
+    import os
+
+    sessions = tmp_path / "sessions"
+    fresh = _hollow(sessions, "fresh", age_seconds=0.0)
+    aged = _hollow(sessions, "aged", age_seconds=0.0)
+    base = time.time()
+    for path, when in ((fresh, base), (aged, base - EMPTY_DIR_GRACE_SECONDS - 1)):
+        os.utime(path, (when, when))
+
+    result = sweep_sessions(sessions, now=base)
+
+    assert fresh.exists()
+    assert not aged.exists()
+    assert result.evicted == 1
 
 
 def test_a_transcript_is_never_deleted_even_when_a_failure_cascade_hits(tmp_path, monkeypatch):
