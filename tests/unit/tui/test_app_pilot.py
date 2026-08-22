@@ -140,6 +140,19 @@ class FakeSession:
         #: assign a real ``TeamRegistry``; everyone else pays nothing.
         self.team_registry: Any | None = None
         self.attached_teams: list[Any] = []
+        #: Optional agent registry for ``/agent``, same opt-in shape as
+        #: ``team_registry``: tests that exercise profiles assign a real
+        #: ``AgentRegistry``; everyone else pays nothing.
+        self.agent_registry: Any | None = None
+        #: Names ``attach_agent_profile`` was asked for, so a `/agent` test
+        #: can assert the attach happened without a real system-prompt stamp.
+        self.attached_agents: list[str] = []
+        #: The tail ``attach_agent_profile`` last stamped, read by the TUI's
+        #: A2 empty-instructions notice path. Mirrors the real ``agent_brief``.
+        self.agent_brief: str = ""
+        #: How many times ``clear_agent_profile`` was called, so a `/agent
+        #: clear` test can assert the detach reached the session.
+        self.cleared_agents: int = 0
 
     @property
     def session_id(self) -> str:
@@ -184,6 +197,37 @@ class FakeSession:
 
     def attach_team(self, team: Any) -> None:
         self.attached_teams.append(team)
+
+    def attach_agent_profile(self, name: str) -> str | None:
+        # Mirror the real session's resolution ORDER (own role, then own
+        # specialist, then packaged seed) and stamp ``agent_brief`` exactly as
+        # the real one does, so `/agent` tests exercise the real filtering
+        # rules AND the empty-instructions notice path (A2).
+        from local_operator.agent_profiles import is_specialist, resolve_profile
+
+        profile = resolve_profile(name, registry=self.agent_registry)
+        if profile is not None and profile.agent_id is not None:
+            self.agent_brief = profile.preamble.strip()
+            self.attached_agents.append(profile.name)
+            return profile.name
+        if self.agent_registry is not None:
+            agent = self.agent_registry.get_agent_by_name(name)
+            if agent is not None and is_specialist(agent):
+                prompt = (self.agent_registry.get_agent_system_prompt(agent.id) or "").strip()
+                self.agent_brief = f"[agent: {agent.name}]\n{prompt}" if prompt else ""
+                self.attached_agents.append(str(agent.name))
+                return str(agent.name)
+        if profile is not None:
+            self.agent_brief = profile.preamble.strip()
+            self.attached_agents.append(profile.name)
+            return profile.name
+        return None
+
+    def clear_agent_profile(self) -> None:
+        # Mirror the real detach: blank the tail and record the call so a
+        # `/agent clear` test can assert both the effect and that it happened.
+        self.agent_brief = ""
+        self.cleared_agents += 1
 
     @property
     def variables(self) -> Any:

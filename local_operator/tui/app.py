@@ -504,6 +504,19 @@ SLASH_COMMANDS: list[SlashCommand] = [
         aliases=("teams",),
         arguments=ArgumentMode.OPTIONAL,
     ),
+    # Same echo reasoning as `/team`, which this command mirrors surface for
+    # surface: bare `/agent` is a listing (the listing is the receipt), a
+    # named attach prints a notice, and `/agent <name> <message>` reaches the
+    # model as the MESSAGE via `_submit_prompt`, which writes the user row.
+    # This is the USER-driven way to adopt a role/specialist mid-session; the
+    # `agent` TOOL is the model-driven way to author and inspect them — two
+    # surfaces over one registry, not a collision.
+    SlashCommand(
+        "agent",
+        "List agent profiles, or speak to this session as one",
+        aliases=("agents",),
+        arguments=ArgumentMode.OPTIONAL,
+    ),
 ]
 
 
@@ -2832,6 +2845,203 @@ class OperatorApp(App[None]):
         # second row restating `/team name …` would be the duplication
         # the echo policy exists to prevent.
         notice(f"sending to {team.name}. {team.manager} is coordinating.")
+        self._submit_prompt(request)
+
+    # -- /agent -------------------------------------------------------------
+    def _agent_profile_rows(self) -> list[tuple[str, str, str]]:
+        """(name, kind-facts, summary) per role/specialist, roles first.
+
+        ONE enumeration feeding both the listing block and the argument
+        picker, so the two can never disagree about which names `/agent`
+        accepts. Scope is deliberate: only rows tagged as delegation roles
+        (``is_role``) or explicitly authored specialists (``is_specialist``).
+        The registry also holds ordinary conversational and autosave agents;
+        offering those here would be noise at best and a privacy leak at
+        worst — the same boundary the `agent` tool's listing draws.
+        """
+        session = self._session
+        registry = getattr(session, "agent_registry", None) if session is not None else None
+        rows: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        if registry is not None and hasattr(registry, "list_agents"):
+            from local_operator.agent_profiles import (
+                is_role,
+                is_specialist,
+                profile_from_agent,
+            )
+
+            try:
+                agents = list(registry.list_agents())
+            except Exception:
+                agents = []
+            roles: list[tuple[str, str, str]] = []
+            specialists: list[tuple[str, str, str]] = []
+            for agent in agents:
+                try:
+                    if is_role(agent):
+                        profile = profile_from_agent(registry, agent)
+                        facts = "role"
+                        # Model/effort are facts a user picks a hat by; the
+                        # rest of the profile is what the attach applies.
+                        if profile.model:
+                            facts += f" · {profile.model}"
+                        if profile.effort:
+                            facts += f" · effort {profile.effort}"
+                        summary = (profile.when_to_use or profile.description or "").strip()
+                        roles.append((profile.name, facts, summary))
+                        seen.add(profile.name.lower())
+                    elif is_specialist(agent):
+                        summary = str(agent.description or "").strip()
+                        specialists.append((str(agent.name), "specialist", summary))
+                        seen.add(str(agent.name).lower())
+                except Exception:
+                    continue
+            rows.extend(sorted(roles, key=lambda row: row[0].lower()))
+            rows.extend(sorted(specialists, key=lambda row: row[0].lower()))
+        # Packaged starters resolve without being installed (`resolve_profile`
+        # falls through to seeds), so `/agent reviewer` works on a fresh
+        # machine — the listing must therefore offer them too, or it would
+        # deny names the attach path accepts.
+        from local_operator.agent_profiles import list_seeds, load_seed
+
+        seeds: list[tuple[str, str, str]] = []
+        for seed_name in list_seeds():
+            if seed_name.lower() in seen:
+                continue
+            profile = load_seed(seed_name)
+            if profile is None:
+                continue
+            summary = (profile.when_to_use or profile.description or "").strip()
+            seeds.append((profile.name, "role · packaged", summary))
+        rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
+        return rows
+
+    def _agent_choices(self) -> list[ArgumentChoice]:
+        """Roles/specialists the ``/agent`` argument list offers."""
+        return [
+            ArgumentChoice(name, summary or "no description", detail=facts)
+            for name, facts, summary in self._agent_profile_rows()
+        ]
+
+    def _agent_list_block(self, rows: list[tuple[str, str, str]]) -> RichBlock:
+        """A structured profile list for bare ``/agent``.
+
+        Same row-per-field shape as `_team_list_block`, for the same reason:
+        separate rows keep a narrow terminal from wrapping the facts or the
+        description into a position that reads as a child of the next entry.
+        """
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        out: list[Any] = [Text("agents", style=heading)]
+        for name, facts, summary in rows:
+            out.append(Padding(Text(name, style=heading), (0, 0, 0, 2)))
+            out.append(Padding(Text(facts, style=body), (0, 0, 0, 4)))
+            if summary:
+                out.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
+        out.append(Text())
+        out.append(Text("Send: /agent <name> <message>", style=body))
+        # The detach verb belongs in the listing so a user who attached a
+        # profile can find their way back to base instructions without guessing.
+        out.append(Text("Detach: /agent clear", style=body))
+        return RichBlock(Group(*out))
+
+    def _cmd_agent(self, arg: str, notice: NoticeFn) -> None:
+        """``/agent`` — list; ``/agent <name> [<message>]`` — adopt a profile.
+
+        Mirrors ``_cmd_team`` surface for surface. Bare ``/agent`` is a
+        listing, so it does not echo. A named agent attaches that profile's
+        instruction set to THIS session (riding the volatile tail — see
+        ``Session.attach_agent_profile``); with a message the message is then
+        sent as a real user turn, the same one-command-two-acts shape as
+        ``/team <name> <request>``.
+
+        The NAME is the first whitespace-delimited token, exactly like
+        `/team`'s parse. Role/specialist names may in principle contain spaces
+        (the agent registry does not forbid them, unlike team names); a
+        spaced name simply cannot be addressed from this surface, which the
+        agents guide documents as the naming contract for profiles meant to
+        be slash-invokable.
+        """
+        session = self._session
+        if session is None:
+            self._system_notice("session is still starting…", "warning")
+            return
+        if not arg:
+            rows = self._agent_profile_rows()
+            if not rows:
+                notice("no agent profiles yet. Ask the agent to create one.")
+                return
+            self._append_block(self._agent_list_block(rows))
+            return
+        name, _, request = arg.partition(" ")
+        name = name.strip()
+        request = request.strip()
+        # ``clear``/``none`` are the DETACH verb, not a name to look up — the
+        # mirror of ``/goal`` with no text clearing the objective. A real agent
+        # literally named "clear" is a non-concern: profile names are curated,
+        # not user-typed en masse, so reserving two words costs nothing and the
+        # alternative (a name silently un-clearable) is worse. Only the bare
+        # verb detaches; ``/agent clear <anything>`` is a mistyped attach and
+        # falls through to normal resolution, which reports the unknown name.
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "clear_agent_profile", None)
+            if callable(detach):
+                detach()
+            notice("no agent profile active; this session uses its base instructions.")
+            return
+        attach = getattr(session, "attach_agent_profile", None)
+        if not callable(attach):
+            self._system_notice(
+                "agent profiles are unavailable in this session.",
+                "warning",
+            )
+            return
+        try:
+            resolved = attach(name)
+        except Exception as exc:
+            self._system_notice(f"could not attach agent {name!r}: {exc}", "warning")
+            return
+        if resolved is None:
+            self._system_notice(
+                f"no agent named {name!r}. Run /agent to list agents, "
+                "or ask the agent to create one.",
+                "warning",
+            )
+            return
+        # A2: the NAME resolved, but a role/specialist with empty instructions
+        # layered no persona — a "is active" notice would overclaim. Tell the
+        # user the profile carries no instructions so the missing effect is not
+        # read as a silent success. ``agent_brief`` is the tail the attach just
+        # wrote; empty means nothing was stamped.
+        layered = bool((getattr(session, "agent_brief", "") or "").strip())
+        if not layered:
+            if request:
+                # The message is still worth sending — the user asked for a
+                # turn — but say plainly no persona was applied to it.
+                notice(f"agent {resolved} has no instructions; sending your message as-is.")
+                self._submit_prompt(request)
+            else:
+                notice(
+                    f"agent {resolved} resolved but carries no instructions, "
+                    "so nothing was applied."
+                )
+            return
+        if not request:
+            # U3/U4: state the actual EFFECT (the profile governs this session's
+            # later turns, not merely "is active"), and borrow /team's "ready"
+            # idiom so the two surfaces read as siblings. Plain wording, no
+            # em dashes. /agent clear detaches it again.
+            notice(
+                f"agent {resolved} is ready and now governs this session's replies. "
+                f"Send a request with /agent {resolved} <message>, or /agent clear to detach."
+            )
+            return
+        # `_submit_prompt` writes the user row (the message is what the newly
+        # attached profile is told) and starts the turn — same non-echo
+        # reasoning as `_cmd_team`: the message text is the transcript
+        # subject, and a second row restating `/agent name …` would be the
+        # duplication the echo policy exists to prevent.
+        notice(f"agent {resolved} now governs this session's replies.")
         self._submit_prompt(request)
 
     # -- MCP status ---------------------------------------------------------
@@ -7084,6 +7294,8 @@ class OperatorApp(App[None]):
             self._cmd_credential(arg, notice)
         elif command == "/team":
             self._cmd_team(arg, notice)
+        elif command == "/agent":
+            self._cmd_agent(arg, notice)
         else:
             # ``parts[0]``, not the lowered ``command``: with the echo gone this
             # line is the ONLY place the mistyped word appears, so it has to
@@ -9220,6 +9432,10 @@ class OperatorApp(App[None]):
             return
         if message.command in ("team", "teams"):
             picker.set_choices(self._team_choices())
+            picker.set_notice("")
+            return
+        if message.command in ("agent", "agents"):
+            picker.set_choices(self._agent_choices())
             picker.set_notice("")
             return
         if message.command == "effort":

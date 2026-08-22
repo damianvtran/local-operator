@@ -219,6 +219,172 @@ def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatc
     assert "Review before merge." in brief
 
 
+def test_attach_agent_profile_resolves_roles_and_specialists(tmp_path, monkeypatch):
+    """`/agent` scope: registry role wins, explicit specialist works, an
+    ordinary conversational row is refused even on an exact name match."""
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    role = registry.create_agent(
+        _agent_fields(name="auditor", description="Audit changes", tags=["role"])
+    )
+    registry.set_agent_system_prompt(role.id, "You audit changes.")
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="dashboard-sme",
+            description="Dashboard release practices",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(specialist.id, "Follow the dashboard checklist.")
+    private = registry.create_agent(_agent_fields(name="private-chat", description="Notes"))
+    registry.set_agent_system_prompt(private.id, "PRIVATE USER CONTEXT")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    # A registered role rides the tail with its role preamble.
+    assert parent.attach_agent_profile("auditor") == "auditor"
+    assert "You audit changes." in parent._goal_state.agent_brief
+    assert parent._goal_state.agent_brief.startswith("[role: auditor]")
+
+    # A later /agent REPLACES the earlier agent brief (switching hats, not
+    # stacking them) — and a specialist resolves through its explicit marker.
+    assert parent.attach_agent_profile("dashboard-sme") == "dashboard-sme"
+    assert "Follow the dashboard checklist." in parent._goal_state.agent_brief
+    assert "You audit changes." not in parent._goal_state.agent_brief
+    assert parent._goal_state.agent_brief.startswith("[agent: dashboard-sme]")
+
+    # An ordinary conversational agent must NOT be attachable by name.
+    assert parent.attach_agent_profile("private-chat") is None
+    assert "PRIVATE USER CONTEXT" not in parent._goal_state.agent_brief
+
+    # A packaged starter resolves without being installed, so /agent works on
+    # a fresh registry too.
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    assert parent._goal_state.agent_brief.startswith("[role: reviewer]")
+
+    assert parent.attach_agent_profile("no-such-name") is None
+
+
+def test_a_specialist_named_after_a_seed_attaches_its_own_prompt(tmp_path, monkeypatch):
+    """A1 regression: a user's specialist named after a packaged seed word must
+    ATTACH the specialist's prompt, not the seed's persona.
+
+    `resolve_profile` honours only role rows and otherwise returns the SEED, so
+    resolving a specialist AFTER that fallthrough silently shadowed it: bare
+    /agent listed the specialist while attach applied the seed. The fix
+    resolves the operator's own specialist before the seed, so listing and
+    attach agree.
+    """
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    # A specialist deliberately named "reviewer" — a packaged seed word.
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="reviewer",
+            description="Our house reviewer with release-specific rules",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(specialist.id, "HOUSE REVIEW RULES: block on missing tests.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    brief = parent._goal_state.agent_brief
+    # The SPECIALIST's prompt and marker, never the packaged seed's persona.
+    assert "HOUSE REVIEW RULES" in brief, brief
+    assert brief.startswith("[agent: reviewer]"), brief
+    assert "[role: reviewer]" not in brief, brief
+
+
+def test_agent_brief_coexists_with_team_brief(tmp_path, monkeypatch):
+    """The two briefs live in separate fields: attaching an agent must not
+    drop the roster a /team manager is coordinating, and vice versa."""
+    from datetime import datetime, timezone
+
+    from local_operator.teams import Team, TeamMember
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    parent.attach_team(
+        Team(
+            id="t1",
+            name="feature-release",
+            created_date=datetime.now(timezone.utc),
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions="Review before merge.",
+        )
+    )
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    assert "Review before merge." in parent._goal_state.team_brief
+    assert parent._goal_state.agent_brief.startswith("[role: reviewer]")
+
+
+def test_a_team_manager_specialist_named_after_a_seed_wins_over_the_seed(tmp_path, monkeypatch):
+    """The team twin of A1: a manager that is the operator's own specialist
+    named after a packaged seed word must layer the SPECIALIST's prompt, not
+    the seed's. attach_team shares the same resolver as /agent attach, so the
+    two paths cannot disagree about which persona wins."""
+    from datetime import datetime, timezone
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import Team, TeamMember
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    # A specialist deliberately named "reviewer" (a packaged seed word), used
+    # here as a team's MANAGER.
+    manager = registry.create_agent(
+        _agent_fields(
+            name="reviewer",
+            description="Our house reviewer",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(manager.id, "HOUSE MANAGER RULES: gate on evidence.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    parent.attach_team(
+        Team(
+            id="t1",
+            name="feature-release",
+            created_date=datetime.now(timezone.utc),
+            manager="reviewer",
+            members=[TeamMember(role="coder")],
+            instructions="Review before merge.",
+        )
+    )
+    brief = parent._goal_state.team_brief
+    # The manager specialist's prompt, wrapped, never the packaged reviewer seed.
+    assert "HOUSE MANAGER RULES" in brief, brief
+    assert "<manager-profile>" in brief, brief
+    assert "[role: reviewer]" not in brief, brief
+    # The team's collaboration brief still rides after the manager preamble.
+    assert "Review before merge." in brief, brief
+
+
+def test_clear_agent_profile_returns_to_base_instructions(tmp_path, monkeypatch):
+    """U1: attaching then clearing leaves the agent brief empty (session back on
+    its base instructions) without disturbing a separately-held team brief."""
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    assert parent._goal_state.agent_brief.startswith("[role: reviewer]")
+
+    parent.clear_agent_profile()
+    assert parent._goal_state.agent_brief == ""
+    # Idempotent: clearing again is a harmless no-op.
+    parent.clear_agent_profile()
+    assert parent._goal_state.agent_brief == ""
+
+
 @pytest.mark.asyncio
 async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monkeypatch):
     """A manager session's children inherit collaboration and project context
