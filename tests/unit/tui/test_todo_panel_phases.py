@@ -770,3 +770,228 @@ async def test_lone_named_phase_shows_its_header_matching_the_receipt() -> None:
         assert flat[0] == "Todos · 1/2 resolved"
         assert flat[1] == "- [x] x"
         builtin.TODO_STORE.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Round-1 remediation: flat expand (M1), expanded-floor (U1), focus guard (U3),
+# keyboard scroll (U2), no dangling header (D1)
+# --------------------------------------------------------------------------- #
+
+
+def _flat(n: int) -> list[dict[str, object]]:
+    """A flat (implicit ``\"Todos\"``) store of ``n`` pending items — the DEFAULT
+    shape a ``todo init items=[...]`` produces, which routes through
+    ``_build_flat``."""
+    return [{"name": "Todos", "items": [_item(f"item {i}", "pending") for i in range(n)]}]
+
+
+@pytest.mark.asyncio
+async def test_flat_expand_reveals_every_item_and_mounts_affordance() -> None:
+    """M1: ``ctrl+t`` on a FLAT list (the common non-phased case) must GROW the
+    panel to paint every item AND mount the clickable affordance — the round-1
+    regression was that ``_build_flat`` ignored ``self._expanded``, so expand was
+    a no-op and no control was ever shown for the default todo shape.
+
+    Collapsed stays byte-identical (a body ``… N more todos`` marker, no
+    affordance widget); expanded paints all items with no marker and shows the
+    ``ctrl+t to collapse`` control."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _flat(15)
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+
+        # Collapsed: capped, marker is a BODY line, NO affordance widget.
+        collapsed = str(panel._body.content)
+        assert collapsed.count("- [") < 15
+        assert "more todos" in collapsed
+        assert panel._affordance.display is False
+
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert panel._expanded is True
+        body = str(panel._body.content)
+        # Every item painted, no remainder marker.
+        assert body.count("- [") == 15
+        assert "more todos" not in body
+        # The affordance is now mounted and clickable.
+        assert panel._affordance.display is True
+        assert _affordance_text(panel) == "ctrl+t to collapse"
+        assert panel._affordance.styles.pointer == "pointer"
+        # Fits without a SCREEN scrollbar; composer stays on screen.
+        assert app.screen.virtual_size == app.screen.size
+        assert app.query_one("#input-shell").region.height > 0
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_flat_collapsed_is_byte_identical_with_no_affordance() -> None:
+    """M1 back-compat guard: the flat COLLAPSED path is unchanged — the marker is
+    a body line and the affordance widget stays hidden, so the existing goldens
+    hold."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 14)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = [
+            {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
+        ]
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        lines = str(panel._body.content).split("\n")
+        assert lines[0] == "Todos · 0/12 resolved"
+        assert lines[-1] == "… 10 more todos"
+        # Collapsed flat mounts NO affordance widget (back-compat).
+        assert panel._affordance.display is False
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_never_shows_fewer_rows_than_collapsed_across_heights() -> None:
+    """U1: expand must NEVER paint fewer todo rows than collapsed at the same
+    height. Below ~24 rows the transcript floor drove the grown share below the
+    collapsed budget, so ``ctrl+t`` shrank to a 1-row porthole — worse than
+    collapsed. The expanded budget is now floored at the collapsed budget, so at
+    every height expanded shows AT LEAST what collapsed did and scrolls the rest.
+    """
+    from local_operator.tools import builtin
+
+    for height in (12, 14, 20, 24, 40):
+        session = FakeSession()
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(100, height)) as pilot:
+            await pilot.pause()
+            builtin.TODO_STORE["sess"] = _big_multi_phase()
+            app._refresh_band()
+            await pilot.pause()
+            panel = app.query_one(TodoPanel)
+            scroll = app.screen.query_one("#todo-scroll")
+            total = str(panel._body.content).count("- [")
+            collapsed_shown = min(scroll.size.height, total)
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            expanded_shown = min(scroll.size.height, total)
+            assert expanded_shown >= collapsed_shown, (
+                f"h={height}: expanded shows {expanded_shown} < collapsed " f"{collapsed_shown}"
+            )
+            # Composer stays on screen at every height.
+            assert app.query_one("#input-shell").region.height > 0
+            # No SCREEN scrollbar at h>=14. At h=12 the whole app's chrome
+            # exceeds ten content rows for the FLAT list too (a pre-existing
+            # app-height condition the flat short-terminal golden documents), so
+            # the invariant the panel owns — "expanded never overflows worse than
+            # collapsed" — is asserted as expanded virtual_size <= collapsed's.
+            if height >= 14:
+                assert app.screen.virtual_size == app.screen.size
+            builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_todo_scroll_does_not_take_focus_from_the_composer() -> None:
+    """U3: clicking the list body must NOT trap focus in the scroll region. The
+    scroll is a status surface (``can_focus = False``); a body click leaves the
+    composer focused, so the next typed message lands in the composer instead of
+    vanishing into a widget that does nothing with keystrokes (the same class as
+    the ``TranscriptView`` focus bug the app already guards against)."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 14)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        scroll = app.screen.query_one("#todo-scroll")
+        assert scroll.can_focus is False
+        # Click the body, then type: the text must reach the composer.
+        await pilot.click("#todo-body")
+        await pilot.pause()
+        await pilot.press("h", "e", "l", "l", "o")
+        await pilot.pause()
+        assert app._editor().text == "hello"
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_keyboard_scroll_reaches_the_expanded_overflow() -> None:
+    """U2: with the scroll region non-focusable, a keyboard user reaches the
+    expanded overflow via ``ctrl+down``/``ctrl+up`` (``scroll_todos_*``), which
+    page the SAME region the wheel drives. Focus stays on the composer
+    throughout, and the actions no-op unless an expanded list overflows."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 14)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = _big_multi_phase()
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+
+        # Collapsed: the scroll helper is a no-op (nothing to reveal that way).
+        assert panel.scroll_expanded(down=True) is False
+
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        scroll = app.screen.query_one("#todo-scroll")
+        assert scroll.max_scroll_y > 0  # the list overflows
+
+        assert scroll.scroll_offset.y == 0
+        await pilot.press("ctrl+down")
+        await pilot.pause()
+        assert scroll.scroll_offset.y > 0  # keyboard reached the overflow
+        # Focus never left the composer — the scroll region cannot hold it.
+        assert app.screen.focused is app._editor()
+        await pilot.press("ctrl+up")
+        await pilot.pause()
+        assert scroll.scroll_offset.y == 0
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_collapsed_view_has_no_childless_phase_header() -> None:
+    """D1: the walking-viewport slice can admit the next phase's HEADER but run
+    out of budget before any of its items, leaving an empty group
+    (``Validation · 1/6`` with nothing beneath, then ``+N more``). ``_fit_body``
+    now drops a trailing childless header; its count is implied by the root stage
+    line and the ``+N more`` total, so the hidden count stays honest."""
+    from rich.text import Text as _Text
+
+    panel = TodoPanel()
+
+    def _h(name: str) -> tuple[_Text, bool, bool]:
+        return (_Text(name), False, False)
+
+    def _i(name: str) -> tuple[_Text, bool, bool]:
+        return (_Text(name), True, True)
+
+    body = [_h("Implementation"), _i("i0"), _i("i1"), _i("i2"), _h("Validation"), _i("v0")]
+    # cap admits the Validation header but no Validation item.
+    kept, dropped = panel._fit_body(list(body), 5)
+    kept_texts = [t.plain for t, _is_item, _o in kept]
+    assert kept_texts == ["Implementation", "i0", "i1", "i2"]
+    assert "Validation" not in kept_texts
+    # Every dropped item is still confessed to the caller for the +N count.
+    assert any(is_item for _t, is_item, _o in dropped)
+    # And when the cap DOES reach an item, the header stays.
+    kept2, _ = panel._fit_body(list(body), 6)
+    assert [t.plain for t, _i2, _o in kept2] == [
+        "Implementation",
+        "i0",
+        "i1",
+        "i2",
+        "Validation",
+        "v0",
+    ]

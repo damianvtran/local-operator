@@ -110,18 +110,26 @@ export function TodosPanel({ todos }: { todos: TodoPhase[] }) {
 							).length;
 							return (
 								<div key={pi} className="flex flex-col gap-1">
-									{/* Phase header aligns with the panel gutter
-									   (pl-1); its items sit one step deeper
-									   (pl-5) so the grouping reads on a narrow
-									   phone width without a wide indent budget. */}
-									<div className="pl-1 pt-1 text-body-sm text-ink-muted">
+									{/* Phase header aligns with the disclosure's
+									   own `tasks n/n` summary text column, not the
+									   panel's left edge (D2). The summary sits
+									   after the chevron (`w-4`) + `gap-1` = 20px,
+									   i.e. `pl-5`; at `pl-1` the header poked out
+									   LEFT of the control that owns it while items
+									   aligned under the summary, so the group read
+									   as floating outside the panel. Header at
+									   `pl-5` nests it under the summary; items sit
+									   one step deeper (`pl-7`) so they read as
+									   belonging to the phase, not as siblings of
+									   its header. */}
+									<div className="pl-5 pt-1 text-body-sm text-ink-muted">
 										{phase.name}{" "}
 										<span className="font-mono text-mono-sm text-ink-dim">
 											{phaseDone}/{phase.items.length}
 										</span>
 									</div>
 									{phase.items.map((t, i) => (
-										<div key={i} className="pl-5">
+										<div key={i} className="pl-7">
 											<TodoRow t={t} />
 										</div>
 									))}

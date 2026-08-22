@@ -326,6 +326,19 @@ class TodoPanel(Container):
         # the rail is spent ONCE, not doubled by a nested padded child.
         self._body = Static(id="todo-body")
         self._scroll = VerticalScroll(self._body, classes="band-body", id="todo-scroll")
+        # The scroll region must NOT take keyboard focus (U3). It is a status
+        # surface, not an input: `VerticalScroll` is focusable by default, so a
+        # click in the list body moved focus off the composer and INTO the
+        # scroll — the app looked focused while every keystroke vanished into a
+        # widget that does nothing with them, and the next typed message was
+        # silently swallowed. This is the exact class of bug the app already
+        # guards against for `TranscriptView` (app.py `_editor().focus()`, "the
+        # app looked correctly focused while every keystroke went to a widget
+        # that does nothing with them"). Dropping `can_focus` keeps the composer
+        # holding focus through a body click; mouse-wheel scroll over the panel
+        # still works (wheel does not require focus), and the keyboard path is
+        # the app's `scroll_todos_*` bindings (U2), not focus-then-arrow.
+        self._scroll.can_focus = False
         # The collapse/expand control is its OWN widget (defect 2): a `:hover`
         # rule and an `on_click` can then target JUST this row, so a click in the
         # list never toggles and only the affordance lights on hover. It sits
@@ -393,6 +406,29 @@ class TodoPanel(Container):
         refresh = getattr(app, "_refresh_band", None)
         if callable(refresh):
             refresh()
+
+    def scroll_expanded(self, *, down: bool) -> bool:
+        """Scroll the expanded overflow by one page from the KEYBOARD (U2).
+
+        Returns ``True`` when it moved the region, ``False`` when there was
+        nothing to scroll (collapsed, or expanded but fully on screen). The app
+        binds ``ctrl+down``/``ctrl+up`` here and reports the ``False`` to the
+        user, because a key that silently does nothing reads as broken.
+
+        The scroll region itself is non-focusable (U3), so a focus-then-arrow
+        gesture cannot reach the overflow \u2014 the todos the footer says ``ctrl+t``
+        reveals would otherwise be mouse-only. This drives the SAME
+        ``VerticalScroll`` the wheel drives, so the two paths can never diverge,
+        and it is a no-op unless the region actually overflows (``max_scroll_y``
+        > 0), so it never fights the collapsed panel for the key.
+        """
+        if not self._expanded:
+            return False
+        scroll = self._scroll
+        if scroll.max_scroll_y <= 0:
+            return False
+        scroll.scroll_page_down() if down else scroll.scroll_page_up()
+        return True
 
     def compose(self):  # type: ignore[override]
         # Two children now: the scrollable list body, and the affordance row
@@ -539,8 +575,7 @@ class TodoPanel(Container):
         # flat store still routes here because a legacy flat ``init`` coerces to
         # exactly one implicit ``"Todos"`` phase.
         if len(phases) == 1 and phases[0]["name"] == _IMPLICIT_PHASE:
-            lines = self._build_flat(phases[0]["items"])
-            affordance: Text | None = None
+            lines, affordance = self._build_flat(phases[0]["items"])
         else:
             lines, affordance = self._build_phased(phases, hidden)
 
@@ -565,15 +600,32 @@ class TodoPanel(Container):
                 line.append("…", style=dim)
         return Text("\n").join(lines), affordance
 
-    def _build_flat(self, items: list[dict[str, Any]]) -> list[Text]:
+    def _build_flat(self, items: list[dict[str, Any]]) -> tuple[list[Text], Text | None]:
         """The single-phase (implicit ``\"Todos\"``) render — HEADERLESS and
-        byte-identical to the pre-phases panel (design §6.3).
+        byte-identical to the pre-phases panel (design §6.3) when COLLAPSED.
 
-        This is the back-compat contract: an existing caller that never mentions
-        phases must see the exact panel it saw before. The row-budget/marker
+        Returns ``(body_lines, affordance)`` to mirror :meth:`_build_phased`.
+
+        COLLAPSED is the back-compat contract: an existing caller that never
+        mentions phases must see the exact panel it saw before — header, capped
+        items, and the ``… N more todos`` marker AS A BODY LINE, with NO
+        affordance widget (``affordance = None``). The row-budget/marker
         arithmetic here is unchanged from the pre-phases ``_build`` — do not fold
         it into the phased path, because that path spends rows on phase headers
-        and an affordance line this one must not grow.
+        and an affordance line this one must not grow. The ``test_band_panels``
+        goldens assert this body content byte-for-byte.
+
+        EXPANDED (M1/U1): ``ctrl+t`` on a flat list — the DEFAULT shape a
+        ``todo init items=[...]`` produces — was a no-op: this method ignored
+        ``self._expanded`` and capped at ``MAX_TODO_ROWS`` in both states, so the
+        headline ``expand reveals the whole list`` fix never reached the common
+        non-phased case, and no clickable control was ever mounted. The expanded
+        branch mirrors ``_build_phased``: paint EVERY item (no marker), let the
+        scroll region (capped to the expanded budget in :meth:`sync`) absorb any
+        overflow, and return the ``ctrl+t to collapse`` affordance so the flat
+        path gets the same discoverable, clickable button and a keyboard/mouse
+        way back. Nothing is hidden in this state, so the affordance confesses
+        nothing (``0, 0``).
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -615,6 +667,16 @@ class TodoPanel(Container):
         # The header is never negotiable: it is the only line that states the
         # total, so it is not counted here. What is left goes to items, and the
         # overflow marker takes one of them only if there is one to take.
+        # EXPANDED: paint the full list, no marker, and hand back the collapse
+        # affordance. The header is still the one non-negotiable line; every
+        # item follows it and the scroll region (:meth:`sync`) absorbs anything
+        # taller than the expanded budget, so no todo is dropped or clipped.
+        if self._expanded:
+            lines = [header]
+            for text, status, reason in rows:
+                lines.append(self._item_row(text, status, reason))
+            return lines, self._affordance_row(0, 0)
+
         room = max(1, self._body_rows() - 1)
         cap = min(room, MAX_TODO_ROWS)
         # ``room == 1`` keeps the item and drops the marker: on a screen that
@@ -641,7 +703,9 @@ class TodoPanel(Container):
             # Counts what the reader cannot see, not what this loop dropped.
             overflow.append(f"… {len(rows) - len(visible)} more todos", style=dim)
             lines.append(overflow)
-        return lines
+        # Collapsed flat stays byte-identical: the marker is a BODY line and no
+        # affordance widget is mounted (design §6.3, the back-compat goldens).
+        return lines, None
 
     def _build_phased(
         self, phases: list[dict[str, Any]], hidden: frozenset[str]
@@ -832,6 +896,20 @@ class TodoPanel(Container):
             evicted = kept[-1]
             kept = [*kept[:-1], item]
             dropped = [evicted, *dropped[:first_item], *dropped[first_item + 1 :]]
+        # Suppress a DANGLING TRAILING HEADER (D1). The walking-viewport slice
+        # can admit the next phase's HEADER at ``body[cap-1]`` but run out of
+        # budget before any of its items, so the phase renders as an empty group
+        # (``Validation · 1/6`` with nothing beneath it, then ``+N more``) — a
+        # header with no children is visual noise the original defect reports
+        # were about. Drop any trailing kept row that is a header: its ``i/n``
+        # count is already implied by the root stage line and the affordance's
+        # ``+N more``, and the header's items (all in ``dropped``) are still
+        # confessed by that count, so the hidden total stays honest. Never
+        # strips past the last item — the floor above already guarantees one
+        # survives, so this cannot empty the panel.
+        while kept and not kept[-1][1]:  # kept[-1] is a header (is_item False)
+            dropped = [kept[-1], *dropped]
+            kept = kept[:-1]
         return kept, dropped
 
     def _phase_header_row(self, name: str, done: int, total: int) -> Text:
@@ -959,6 +1037,18 @@ class TodoPanel(Container):
         clips. Capped at :data:`_MAX_EXPANDED_ROWS` so the arithmetic cannot run
         away on an enormous virtual screen.
 
+        THE EXPANDED-FLOOR RULE (U1): expand must never show FEWER todos than
+        collapsed at the same height. Below ~24 rows the transcript floor drove
+        the grown share BELOW the collapsed budget, so ``ctrl+t`` shrank the
+        panel to a 1-row porthole into a list the collapsed view had shown three
+        rows of — the exact ``expand is a no-op / makes it worse`` defect this
+        PR exists to kill, returning on the common short terminal. So the
+        expanded budget is floored at the collapsed budget: ``max(collapsed,
+        grown)``. On a genuinely short screen the two are equal and the scroll
+        region (capped to the same budget in :meth:`sync`) absorbs the rest, so
+        expanded shows AT LEAST what collapsed showed and reaches the remainder
+        by scrolling rather than by shrinking.
+
         Both states subtract what the band's other slot is already spending: the
         subagent panel shares this band, and a budget blind to it would put the
         upward clip back the moment a subagent runs on a short terminal. Floor is
@@ -972,11 +1062,14 @@ class TodoPanel(Container):
         if screen_height <= 0:
             return _MAX_EXPANDED_ROWS if self._expanded else collapsed_ceiling
         dock = _DOCK_ROWS + self._band_inset_rows() + self._band_sibling_rows()
+        # The collapsed budget is the floor for BOTH states (see the
+        # expanded-floor rule above): expanded may only ever GROW the panel.
+        collapsed_budget = max(_MIN_BODY_ROWS, min(collapsed_ceiling, screen_height - dock))
         if self._expanded:
-            spare = screen_height - dock - _EXPANDED_TRANSCRIPT_FLOOR
-            return max(_MIN_BODY_ROWS, min(_MAX_EXPANDED_ROWS, spare))
-        spare = screen_height - dock
-        return max(_MIN_BODY_ROWS, min(collapsed_ceiling, spare))
+            grown = screen_height - dock - _EXPANDED_TRANSCRIPT_FLOOR
+            grown = max(_MIN_BODY_ROWS, min(_MAX_EXPANDED_ROWS, grown))
+            return max(collapsed_budget, grown)
+        return collapsed_budget
 
     def _band_inset_rows(self) -> int:
         """Rows the BAND's own top inset is spending, as it is right now.
