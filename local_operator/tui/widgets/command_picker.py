@@ -881,7 +881,22 @@ class CommandPicker(Static):
             # and can never leave a ragged half of one behind.
             column_cells = 0
             reserved = 0
-        body = span - reserved
+        # D2: a row whose OWN detail is empty places NOTHING at the shared column
+        # edge, so it need not pay for the column — its description reclaims the
+        # full body. This is the safe half of D2: detail-BEARING rows still all
+        # reserve the same ``column_cells`` and so keep the one scannable left
+        # edge (the /login/`/theme`/`/mcp logout` state scan the column exists
+        # for), while the many empty-detail rows a mixed list carries (34 of 35
+        # `/theme` rows, most `/mcp` and `/login` rows, `/agent`'s specialists
+        # vs. packaged roles) stop being truncated to make room for a column
+        # they contribute nothing to. Per-row reclaim for a SHORT-but-nonempty
+        # detail is deliberately NOT done: shrinking one row's reserve below the
+        # set width would start its detail at a different x than its neighbours',
+        # which is exactly the ragged-edge regression the shared column forbids
+        # (see the right-align note above). ``_append_detail`` already no-ops on
+        # an empty detail, so the only change here is not charging its body.
+        row_reserved = reserved if detail else 0
+        body = span - row_reserved
 
         description = choice.description.strip()
         if description and width > DESCRIPTION_COLLAPSE_WIDTH:
