@@ -172,7 +172,18 @@ LAST_BLOCK: dict[str, tuple[Any, str]] = {
 }
 
 
-async def _settle(pilot: Any, ticks: int = 4) -> None:
+async def _settle(pilot: Any, ticks: int = 2) -> None:
+    """Pump ``ticks`` idle frames so a just-mutated frame reaches its layout.
+
+    Each ``pause()`` is an idle-wait, not a sleep, so this is load-robust: under
+    CPU contention a tick simply takes longer wall time, it does not skip work.
+    The DEFAULT is two because static content (a block appended, the padding row
+    added) settles in one idle frame and the second is margin — measured across
+    every ``SIZES`` frame. Callers pass a HIGHER count only where the frame is
+    driven by the boot splash's self-rescheduling measurement (an animation on
+    the wall clock, which needs several ticks to span); those counts stay,
+    because there the number of frames IS the thing being waited out.
+    """
     for _ in range(ticks):
         await pilot.pause()
 
