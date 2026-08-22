@@ -1,5 +1,5 @@
 /**
- * Todos panel: collapsible, one line per item.
+ * Todos panel: collapsible, phase-grouped, one line per item.
  *
  * On a phone the panel sits ABOVE the transcript, so a long list expanded by
  * default pushed the actual conversation off the top of the screen (the
@@ -8,9 +8,15 @@
  * items), and when expanded its body is capped to ~40% of the viewport and
  * scrolls internally, so even a 20-item list can never crowd out the
  * messages.
+ *
+ * The store is PHASED (mirrors the TUI's phase model): items are grouped under
+ * named phases rendered as a muted `name · done/total` header with the phase's
+ * items INDENTED beneath it. Back-compat: a single implicit `"Todos"` phase —
+ * how a flat/legacy list is carried — renders HEADERLESS and identical to the
+ * pre-phase flat list, matching the TUI's `_IMPLICIT_PHASE` rule.
  */
 import { cn } from "../lib/cn";
-import type { TodoItem } from "../types";
+import type { TodoItem, TodoPhase } from "../types";
 import { Disclosure } from "./ui/disclosure";
 
 const GLYPH: Record<TodoItem["status"], string> = {
@@ -20,10 +26,56 @@ const GLYPH: Record<TodoItem["status"], string> = {
 	dropped: "-",
 };
 
-export function TodosPanel({ todos }: { todos: TodoItem[] }) {
-	const done = todos.filter(
-		(t) => t.status === "done" || t.status === "dropped",
-	).length;
+/** Keep in sync with the server's `IMPLICIT_TODO_PHASE` / the tool's
+    `_IMPLICIT_PHASE`: a lone phase with this exact name is the flat-list
+    carrier and renders without a header. */
+const IMPLICIT_TODO_PHASE = "Todos";
+
+const CLOSED = new Set(["done", "dropped"]);
+
+function TodoRow({ t }: { t: TodoItem }) {
+	return (
+		<div className="flex items-baseline gap-2">
+			<span
+				className={cn(
+					"shrink-0 font-mono text-mono-sm",
+					t.status === "done" && "text-success",
+					t.status === "blocked" && "text-warning",
+					(t.status === "pending" || t.status === "dropped") &&
+						"text-ink-dim",
+				)}
+				aria-hidden
+			>
+				{GLYPH[t.status]}
+			</span>
+			<span
+				className={cn(
+					"min-w-0 text-body-sm",
+					t.status === "done" && "text-ink-dim",
+					t.status === "dropped" && "text-ink-dim line-through",
+					t.status === "pending" && "text-ink",
+					t.status === "blocked" && "text-ink-muted",
+				)}
+			>
+				{t.text}
+				{t.status === "blocked" && t.reason ? (
+					<span className="text-warning">
+						{" "}
+						— {t.reason}
+					</span>
+				) : null}
+			</span>
+		</div>
+	);
+}
+
+export function TodosPanel({ todos }: { todos: TodoPhase[] }) {
+	const items = todos.flatMap((p) => p.items);
+	const done = items.filter((t) => CLOSED.has(t.status)).length;
+	// Headerless flat-list case: exactly one phase, and it is the implicit
+	// carrier. Anything else (a named phase, or several phases) shows headers.
+	const headerless =
+		todos.length === 1 && todos[0].name === IMPLICIT_TODO_PHASE;
 	return (
 		<Disclosure
 			/* Collapsed by default on the phone: the panel is above the
@@ -36,49 +88,46 @@ export function TodosPanel({ todos }: { todos: TodoItem[] }) {
 				<span className="text-body-sm text-ink-muted">
 					tasks{" "}
 					<span className="font-mono text-mono-sm text-ink-dim">
-						{done}/{todos.length}
+						{done}/{items.length}
 					</span>
 				</span>
 			}
 		>
 			{/* Capped to ~40% of the viewport and scrolls internally: a long
 			   list can never crowd out the messages, even fully expanded. */}
-			<div className="lo-scroll flex max-h-[40dvh] flex-col gap-1 overflow-y-auto pb-2 pl-5">
-				{todos.map((t, i) => (
-					<div key={i} className="flex items-baseline gap-2">
-						<span
-							className={cn(
-								"shrink-0 font-mono text-mono-sm",
-								t.status === "done" && "text-success",
-								t.status === "blocked" && "text-warning",
-								(t.status === "pending" ||
-									t.status === "dropped") &&
-									"text-ink-dim",
-							)}
-							aria-hidden
-						>
-							{GLYPH[t.status]}
-						</span>
-						<span
-							className={cn(
-								"min-w-0 text-body-sm",
-								t.status === "done" && "text-ink-dim",
-								t.status === "dropped" &&
-									"text-ink-dim line-through",
-								t.status === "pending" && "text-ink",
-								t.status === "blocked" && "text-ink-muted",
-							)}
-						>
-							{t.text}
-							{t.status === "blocked" && t.reason ? (
-								<span className="text-warning">
-									{" "}
-									— {t.reason}
-								</span>
-							) : null}
-						</span>
-					</div>
-				))}
+			<div className="lo-scroll flex max-h-[40dvh] flex-col gap-1 overflow-y-auto pb-2">
+				{headerless
+					? todos[0].items.map((t, i) => (
+							/* pl-5 aligns items with the panel gutter, same as
+							   the pre-phase flat list. */
+							<div key={i} className="pl-5">
+								<TodoRow t={t} />
+							</div>
+						))
+					: todos.map((phase, pi) => {
+							const phaseDone = phase.items.filter((t) =>
+								CLOSED.has(t.status),
+							).length;
+							return (
+								<div key={pi} className="flex flex-col gap-1">
+									{/* Phase header aligns with the panel gutter
+									   (pl-1); its items sit one step deeper
+									   (pl-5) so the grouping reads on a narrow
+									   phone width without a wide indent budget. */}
+									<div className="pl-1 pt-1 text-body-sm text-ink-muted">
+										{phase.name}{" "}
+										<span className="font-mono text-mono-sm text-ink-dim">
+											{phaseDone}/{phase.items.length}
+										</span>
+									</div>
+									{phase.items.map((t, i) => (
+										<div key={i} className="pl-5">
+											<TodoRow t={t} />
+										</div>
+									))}
+								</div>
+							);
+						})}
 			</div>
 		</Disclosure>
 	);

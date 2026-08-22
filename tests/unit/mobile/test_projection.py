@@ -154,11 +154,106 @@ def test_transcript_is_capped_from_the_front() -> None:
 
 
 def test_todo_refresh_replaces_wholesale() -> None:
+    # The store is phased: one implicit "Todos" phase carries a flat list.
+    fold = make_fold()
+    fold.set_todos(
+        [
+            {
+                "name": "Todos",
+                "items": [
+                    {"text": "a", "status": "pending"},
+                    {"text": "b", "status": "done"},
+                ],
+            }
+        ]
+    )
+    assert len(fold.projection.todos) == 1
+    assert [t.status for t in fold.projection.todos[0].items] == ["pending", "done"]
+    fold.set_todos([{"name": "Todos", "items": [{"text": "a", "status": "done"}]}])
+    assert len(fold.projection.todos) == 1
+    assert len(fold.projection.todos[0].items) == 1
+
+
+def test_todo_multi_phase_structure_preserved() -> None:
+    """A real multi-phase store maps to TodoPhase/TodoItem with every field —
+    text/status/reason — intact and phase order preserved."""
+    fold = make_fold()
+    fold.set_todos(
+        [
+            {
+                "name": "Design",
+                "items": [
+                    {"text": "sketch", "status": "done"},
+                    {"text": "review", "status": "dropped"},
+                ],
+            },
+            {
+                "name": "Build",
+                "items": [
+                    {"text": "impl", "status": "pending"},
+                    {"text": "deploy", "status": "blocked", "reason": "waiting on infra"},
+                ],
+            },
+        ]
+    )
+    phases = fold.projection.todos
+    assert [p.name for p in phases] == ["Design", "Build"]
+    assert [t.text for t in phases[0].items] == ["sketch", "review"]
+    blocked = phases[1].items[1]
+    assert blocked.status == "blocked"
+    assert blocked.reason == "waiting on infra"
+    # to_json is the wire shape the front-end reads: nested phase → items.
+    wire = phases[1].to_json()
+    assert wire == {
+        "name": "Build",
+        "items": [
+            {"text": "impl", "status": "pending", "reason": ""},
+            {"text": "deploy", "status": "blocked", "reason": "waiting on infra"},
+        ],
+    }
+
+
+def test_todo_legacy_flat_list_coerced_to_one_phase() -> None:
+    """A hand-attached legacy flat list (item dicts at the top level, no phase
+    wrapper) is coerced via ``_as_phases`` to a single implicit "Todos" phase
+    rather than rendering empty-text rows — the bug the phased callers exposed."""
     fold = make_fold()
     fold.set_todos([{"text": "a", "status": "pending"}, {"text": "b", "status": "done"}])
-    assert [t.status for t in fold.projection.todos] == ["pending", "done"]
-    fold.set_todos([{"text": "a", "status": "done"}])
     assert len(fold.projection.todos) == 1
+    assert fold.projection.todos[0].name == "Todos"
+    assert [t.text for t in fold.projection.todos[0].items] == ["a", "b"]
+
+
+def test_todo_open_count_across_phases() -> None:
+    """The session-list ``todos_open`` badge counts open (pending OR blocked)
+    items across ALL phases; done/dropped never count."""
+    fold = make_fold()
+    fold.set_todos(
+        [
+            {
+                "name": "A",
+                "items": [
+                    {"text": "1", "status": "pending"},
+                    {"text": "2", "status": "done"},
+                ],
+            },
+            {
+                "name": "B",
+                "items": [
+                    {"text": "3", "status": "blocked", "reason": "x"},
+                    {"text": "4", "status": "dropped"},
+                    {"text": "5", "status": "pending"},
+                ],
+            },
+        ]
+    )
+    # Mirror the daemon's list-summary arithmetic: pending + blocked across
+    # phases = 3 (items 1, 3, 5), done/dropped excluded.
+    p = fold.projection
+    open_count = sum(
+        1 for phase in p.todos for t in phase.items if t.status in ("pending", "blocked")
+    )
+    assert open_count == 3
 
 
 def test_summarize_args_priority_and_compaction() -> None:

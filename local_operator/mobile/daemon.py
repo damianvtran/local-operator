@@ -148,7 +148,20 @@ class SessionTable:
                     "subagents_running": (
                         sum(1 for s in p.subagents if s.status == "running") if p else 0
                     ),
-                    "todos_open": (sum(1 for t in p.todos if t.status == "pending") if p else 0),
+                    # Open == not closed (``pending`` or ``blocked``; ``blocked``
+                    # is open work waiting on an answer, mirroring the tool's
+                    # ``open_todos``). Summed across ALL phases so a multi-phase
+                    # plan's badge counts every group, not just the first.
+                    "todos_open": (
+                        sum(
+                            1
+                            for phase in p.todos
+                            for t in phase.items
+                            if t.status in ("pending", "blocked")
+                        )
+                        if p
+                        else 0
+                    ),
                 }
             )
         out.sort(key=lambda s: (s["ended"], s["degraded"], -s["pid"]))
@@ -240,6 +253,7 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         PendingRequest,
         SubagentRow,
         TodoItem,
+        TodoPhase,
         TranscriptEntry,
     )
 
@@ -260,7 +274,16 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
     projection.pid = record.pid
     projection.transcript = build(TranscriptEntry, data.get("transcript", []))
     _pin_opening_user_message(projection, record)
-    projection.todos = build(TodoItem, data.get("todos", []))
+    # Todos arrive PHASED (``[{"name", "items":[{...}]}]``); rebuild the two
+    # nested dataclass levels, tolerating missing keys the same way ``build``
+    # does for a rolling upgrade mid-push.
+    projection.todos = [
+        TodoPhase(
+            name=str(phase.get("name", "")),
+            items=build(TodoItem, phase.get("items", []) or []),
+        )
+        for phase in data.get("todos", []) or []
+    ]
     projection.subagents = build(SubagentRow, data.get("subagents", []))
     pending = data.get("pending")
     projection.pending = (
