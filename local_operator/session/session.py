@@ -4176,10 +4176,13 @@ class Session:
             # that expire it.
             # ``[marker, *preserved_user_turns, *kept]``: the marker (rendered
             # as a user message) sitting next to a preserved user turn is a
-            # legal adjacency — the wire path already coalesces consecutive
-            # user content, and the marker+kept boundary produced the same
-            # shape before this change. The preserved turns carry no tool_call
-            # pairing, so none of the orphan invariants can be affected.
+            # legal adjacency. Two consecutive user-role messages are accepted
+            # by every provider wire format we target (they are not required to
+            # strictly alternate on the user side), and this exact shape was
+            # already reachable before this change — a marker immediately
+            # followed by a user turn in ``kept`` produced ``[marker, user,
+            # ...]`` already. The preserved turns carry no tool_call pairing, so
+            # none of the orphan invariants can be affected.
             self._context.messages = [marker, *preserved_messages, *kept]
             history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
