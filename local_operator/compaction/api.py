@@ -28,7 +28,12 @@ from pydantic import BaseModel
 
 from local_operator.harness.types import AgentMessage, CustomMessage, Message, ToolCall
 
-from .cutpoint import find_cut_point, prepare_partitions
+from .cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    extract_preserved_user_turns,
+    find_cut_point,
+    prepare_partitions,
+)
 from .pruning import (
     MIN_PRUNE_TOKENS,
     SUPERSEDED_NOTICE,
@@ -67,6 +72,7 @@ __all__ = [
     "IMAGE_TOKEN_ESTIMATE",
     "MAX_SUMMARY_TOKENS",
     "MIN_PRUNE_TOKENS",
+    "PRESERVED_USER_TURN_KEY",
     "RECOVERY_BAND",
     "SUMMARIZATION_SYSTEM_PROMPT",
     "SUPERSEDED_NOTICE",
@@ -82,6 +88,7 @@ __all__ = [
     "estimate_messages_tokens",
     "estimate_tokens",
     "extract_file_ops_from_messages",
+    "extract_preserved_user_turns",
     "find_cut_point",
     "history_chars",
     "OFFLOAD_MIN_CHARS",

@@ -282,6 +282,7 @@ class Transcript:
         first_kept_entry_id: str,
         tokens_before: int,
         preserve_data: dict[str, Any] | None = None,
+        preserved_user_turns: list[dict[str, str]] | None = None,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -289,6 +290,18 @@ class Transcript:
         ``preserve_data`` carries strategy-specific replay payloads (e.g.
         ``{"snapcompact": Archive.model_dump()}``) that replay renders back
         into LLM context instead of plain text.
+
+        ``preserved_user_turns`` carries the VERBATIM text of every
+        user-authored turn that fell into the summarized partition, so replay
+        can re-inject them unparaphrased between the marker and the kept
+        window. This is the structural half of "never summarize a user turn":
+        a summarizer paraphrases, and a paraphrased constraint is how an agent
+        later does the forbidden thing, so the user's own words must survive a
+        compaction byte for byte rather than as a best-effort summary clause.
+        Replay reconstructs ``[marker, *preserved_user_turns, *kept]`` — the
+        contiguous-suffix replay (``first_kept_entry_id`` onward) alone would
+        drop these turns on the next resume, since they sit BEFORE the cut in
+        the transcript, so they have to ride the marker payload instead.
         """
         payload: dict[str, Any] = {
             "summary": summary,
@@ -297,6 +310,8 @@ class Transcript:
         }
         if preserve_data is not None:
             payload["preserve_data"] = preserve_data
+        if preserved_user_turns:
+            payload["preserved_user_turns"] = preserved_user_turns
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(self, custom_type: str, details: dict[str, Any]) -> TranscriptEntry:
@@ -506,6 +521,34 @@ class Transcript:
                     details=details,
                 )
             )
+            # User-authored turns that fell into the summarized partition are
+            # re-injected VERBATIM right after the marker, so the user's own
+            # words survive the pass byte for byte instead of being paraphrased
+            # away (see :meth:`append_compaction`). They sit before the cut in
+            # the transcript, so the contiguous ``first_kept_entry_id`` suffix
+            # below never replays them — the marker payload is the only carrier
+            # that reaches a resumed session. Reusing each turn's original id is
+            # safe: those message entries live before ``start`` and are not
+            # replayed, so there is no duplicate, and the guard that expires
+            # stale asides keys on ``CustomMessage`` (a real ``user`` Message is
+            # never mistaken for one).
+            preserved_turns = compaction.payload.get("preserved_user_turns") or ()
+            if preserved_turns:
+                # Lazy import keeps this low-level store free of a hard compaction
+                # dependency (the session imports compaction lazily for the same
+                # reason). The flag marks these as already-compacted content so a
+                # post-resume pass does not re-count them as fresh history.
+                from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+
+                for turn in preserved_turns:
+                    if not isinstance(turn, dict):
+                        continue
+                    message = Message.user(str(turn.get("text", "")))
+                    turn_id = turn.get("id")
+                    if isinstance(turn_id, str) and turn_id:
+                        message.id = turn_id
+                    message.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+                    prefix.append(message)
             first_kept_id = compaction.payload.get("first_kept_entry_id")
             # The first kept entry normally sits BEFORE the compaction marker
             # (messages are persisted as they happen; the marker comes last),

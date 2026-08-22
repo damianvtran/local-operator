@@ -305,11 +305,32 @@ async def test_real_compaction_then_resume_replays_the_kept_window(tmp_path):
     assert isinstance(marker, CustomMessage)
     assert marker.custom_type == "compaction_summary"
     assert "SUMMARY:" in marker.details["summary"]
-    # Exactly the kept window followed the marker — nothing from before the
-    # cut came back.
-    ids_after_marker = [m.id for m in resumed[1:]]
+    # Replay shape after the user-turn preservation fix:
+    #   [marker, *preserved_user_turns, *kept_window]
+    # User-authored turns that fell into the summarized partition are re-injected
+    # VERBATIM (marked ``compaction_preserved``) so a paraphrase can never lose a
+    # user constraint. They sit before the cut in the transcript, so the
+    # contiguous ``first_kept_entry_id`` suffix does NOT contain them — the
+    # marker payload carries them instead.
+    preserved = [
+        m
+        for m in resumed[1:]
+        if isinstance(m, Message) and (m.provider_payload or {}).get("compaction_preserved")
+    ]
+    preserved_texts = [m.text for m in preserved]
+    # Only the small user PROMPTS come back verbatim — the expensive read
+    # OUTPUTS this footprint test exists to keep summarized must NOT: resurrecting
+    # them is exactly the silent-restore regression the whole file guards.
+    assert preserved_texts == ["read alpha.py", "read beta.py"]
+    # No preserved turn is a big read OUTPUT: they are all short user prompts,
+    # so the expensive summarized content this file guards never resurfaced.
+    assert all(len(text) < 100 for text in preserved_texts)
+    # The kept window (everything after the preserved turns) is exactly the
+    # contiguous transcript suffix from the cut, nothing from before it.
+    kept = resumed[1 + len(preserved) :]
+    ids_after_preserved = [m.id for m in kept]
     entry_ids = [entry.id for entry in entries]
-    assert ids_after_marker == entry_ids[entry_ids.index(cut_id) :][: len(ids_after_marker)]
+    assert ids_after_preserved == entry_ids[entry_ids.index(cut_id) :][: len(ids_after_preserved)]
 
 
 @pytest.mark.asyncio
