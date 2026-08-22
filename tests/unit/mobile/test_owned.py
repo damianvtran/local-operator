@@ -11,9 +11,11 @@ tests stay off the real provider and event loop machinery.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
+from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.mobile.owned import OwnedSessionHandle
 
 
@@ -123,6 +125,50 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
     assert await second is False
     await asyncio.sleep(0)
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_ask_gate_projects_serializable_option_labels() -> None:
+    """An owned ask WITH options must project a JSON-serializable card.
+
+    Regression: the gate used to push ``options=list(first.options)`` \u2014 raw
+    AskOption pydantic models \u2014 into PendingRequest, whose ``to_json`` is
+    ``asdict`` and leaves those models as objects ``json.dumps`` cannot encode.
+    A daemon-owned session that asked a question with options therefore crashed
+    the very projection push meant to show the card on the phone. The gate now
+    projects option LABELS (strings), which is also what the web card renders
+    and hands back in ask_answer. This test fails on the old code (the
+    ``json.dumps`` below raises ``TypeError: Object of type AskOption is not
+    JSON serializable``) and passes now.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    gate = handle._ask_gate
+
+    question = AskQuestion(
+        id="stale",
+        question="What should happen to the stale rows?",
+        options=[
+            AskOption(label="Drop them", description="nothing reads the column"),
+            AskOption(label="Backfill", description="slower, keeps history"),
+        ],
+    )
+    asked = asyncio.ensure_future(gate([question]))
+    await asyncio.sleep(0)  # let the gate enqueue its card
+
+    pending = handle._fold.projection.pending
+    assert pending is not None
+    assert pending.kind == "ask"
+    assert pending.options == ["Drop them", "Backfill"]
+
+    # The whole point: the projection round-trips over the wire. This is the
+    # line that raised before the fix.
+    wire = json.dumps(handle._fold.projection.to_json())
+    assert '"Drop them"' in wire and '"Backfill"' in wire
+
+    # Answer it back with a label, exactly as the phone does, so the parked
+    # gate resolves under the question's id and the test leaves nothing hanging.
+    await handle.ask_answer(pending.request_id, "Backfill")
+    assert await asyncio.wait_for(asked, 1) == {"stale": ["Backfill"]}
 
 
 @pytest.mark.asyncio
