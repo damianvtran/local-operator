@@ -86,6 +86,39 @@ def format_percent(fraction: float | None) -> str:
     return f"{round(pct)}%"
 
 
+def format_cost(aggregate: "UsageAggregate") -> str:
+    """A dollar figure for one scope: ``$12.34`` / ``$1.2k`` / ``$0.0042`` / ``$—``.
+
+    Reads three states off the aggregate, because "how much did this cost" has
+    three honest answers and collapsing them lies:
+
+    - **Nothing priceable** (``cost_is_known`` false — e.g. a local-model-only
+      run): ``$—``, never ``$0.00``. Free and unknown are different facts, the
+      same distinction the status band's ``$—`` makes.
+    - **Partial** (``cost_is_partial``: some calls used unpriced models): a
+      trailing ``+`` marks the figure as a LOWER BOUND (``$12.30+``) so it is
+      never read as the complete bill.
+    - **Complete**: the plain figure.
+
+    Small sums keep more precision (``$0.0042``) because a fresh install's spend
+    is fractions of a cent and rounding it to ``$0.00`` would read as free;
+    large sums abbreviate (``$1.2k``) for the same glanceability as the tokens.
+    """
+    if not aggregate.cost_is_known:
+        return "$—"
+    usd = aggregate.cost_usd
+    if usd >= 1000:
+        body = f"${usd / 1000:.1f}k".replace(".0k", "k")
+    elif usd >= 1:
+        body = f"${usd:.2f}"
+    elif usd >= 0.01:
+        body = f"${usd:.3f}"
+    else:
+        # Sub-cent: show enough digits that a real spend is not rounded to $0.
+        body = f"${usd:.4f}"
+    return body + ("+" if aggregate.cost_is_partial else "")
+
+
 def proportion_bar(fraction: float, width: int) -> str:
     """A filled proportion bar of ``width`` cells for ``fraction`` in 0..1.
 
@@ -216,6 +249,19 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
             "of context served from cache",
         )
     )
+    # Cost rides the TOTALS block because it is a headline figure, but it is an
+    # ESTIMATE (published list price × billed tokens; it cannot see a plan,
+    # discount, or free tier), so its note says so — the same measured-vs-modelled
+    # honesty the WHERE-INPUT-WENT caveat carries. ``$—`` for a run with no
+    # priceable model; a trailing ``+`` when some calls used an unpriced one.
+    if aggregate.cost_is_known:
+        # The trailing ``+`` on the figure already flags a partial (lower-bound)
+        # sum, so the note stays short enough to fit a narrow frame; the caveat
+        # it must always carry is that this is list price, not a billed invoice.
+        cost_note = "≈ list price × tokens"
+    else:
+        cost_note = "no published price"
+    lines.append(kv("Est. cost", format_cost(aggregate), cost_note))
     lines.append(Text())
 
     # -- input attribution (estimated) --------------------------------------
@@ -256,7 +302,7 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
 
     # -- by provider ---------------------------------------------------------
     if aggregate.by_provider:
-        lines.append(_group_section("BY PROVIDER", aggregate.by_provider))
+        lines.append(_group_section("BY PROVIDER", aggregate.by_provider, width))
         lines.append(Text())
 
     # -- by session ----------------------------------------------------------
@@ -266,21 +312,35 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
             short_session_label(sid, names.get(sid, "")): agg
             for sid, agg in aggregate.by_session.items()
         }
-        lines.append(_group_section("BY SESSION", labelled))
+        lines.append(_group_section("BY SESSION", labelled, width))
 
     return lines
 
 
+#: Below this content width the per-group tables drop the cache column to keep
+#: the cost column, which is the one this feature adds and the one a narrow
+#: frame should not be the reason to lose. Cost + tokens + calls are the
+#: irreducible trio; cache is the first to shed, exactly like the status band's
+#: drop ladder.
+_WIDE_TABLE_MIN = 72
+
+
 def _group_section(
     title: str,
-    groups: dict[str, UsageAggregate],
+    groups: dict[str, "UsageAggregate"],
+    width: int,
 ) -> Text:
     """A per-provider or per-session table as one multi-line ``Text`` block.
 
     Returned as a single ``Text`` with embedded newlines so the caller keeps a
     flat list of blocks; the screen splits on newlines only for the scroll
-    measurement. Sorted by total billed tokens, descending — the biggest
-    spender is what a diagnostics reader looks for first.
+    measurement. Sorted by **cost** (falling back to tokens) descending — the
+    biggest *spend* is what a cost-aware diagnostics reader looks for first, and
+    where nothing is priced this is exactly the old token order.
+
+    ``width`` decides columns: a wide frame shows tokens · cost · calls · cache;
+    a narrow one drops the cache column (see ``_WIDE_TABLE_MIN``) so the cost
+    column this feature adds always survives.
     """
     fg = _semantic("fg")
     label = _semantic("label")
@@ -289,22 +349,31 @@ def _group_section(
     block = Text()
     block.append(title, style=label + Style(bold=True))
 
-    ordered = sorted(groups.items(), key=lambda kv: kv[1].total_tokens, reverse=True)
+    # Sort by cost when any of these groups is priced, else by tokens. Keyed on
+    # the tuple so an unpriced group sorts by tokens as a tiebreak rather than
+    # collapsing to a single $0 bucket.
+    ordered = sorted(
+        groups.items(),
+        key=lambda kv: (kv[1].cost_micro, kv[1].total_tokens),
+        reverse=True,
+    )
     if not ordered:
         block.append("\n  (none)", style=dim)
         return block
 
+    show_cache = width >= _WIDE_TABLE_MIN
     name_col = min(30, max(len(name) for name, _ in ordered) + 1)
+    cost_col = max(len(format_cost(agg)) for _, agg in ordered)
     for name, agg in ordered:
         block.append("\n")
         block.append(f"  {name:<{name_col}}", style=fg)
         block.append(f"{format_tokens(agg.total_tokens):>8} tokens", style=fg)
-        cache = format_percent(agg.cache_hit_rate)
-        # ``dim`` for both columns (D2): the call count and cache rate are the
-        # per-row substance, not decoration, so neither may drop below the
-        # contrast floor the way ``faint`` did.
+        # Cost sits next to tokens as the other headline number, in full-strength
+        # ``fg`` — it is the answer this feature exists to give, not a footnote.
+        block.append(f"   {format_cost(agg):>{cost_col}}", style=fg)
         block.append(f"   {agg.calls:>4} calls", style=dim)
-        block.append(f"   {cache:>4} cache", style=dim)
+        if show_cache:
+            block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
     return block
 
 
@@ -357,10 +426,17 @@ class AnalyticsScreen(ModalScreen[None]):
         self.call_after_refresh(self._sync_hint)
 
     def _card_width(self) -> int:
+        # Track the CSS card (90% of the terminal, capped at 140 — see the
+        # ``.analytics-panel`` rule) minus its 2-cell horizontal padding each
+        # side, so the report's own column maths matches the width it is
+        # actually painted into. The cap here mirrors the CSS cap; raising one
+        # without the other either wastes the frame or overruns it.
         try:
-            return max(40, min(96, self.app.size.width - 8))
+            terminal = self.app.size.width
+            card = min(140, int(terminal * 0.9))
+            return max(40, card - 6)
         except Exception:  # noqa: BLE001 — before mount, a sane default
-            return 80
+            return 88
 
     def _title_text(self) -> Text:
         label = Style(color=theme_mod.semantic_color("label"))

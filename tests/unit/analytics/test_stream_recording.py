@@ -118,6 +118,36 @@ def test_records_authoritative_counts(tmp_path):
     assert agg.components["custom_instructions"] > 0
 
 
+def test_records_cost_for_a_priced_model(tmp_path):
+    # A model with a real registry price records a positive, known cost.
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-cost")
+    request = ChatRequest(
+        model=ModelSpec(provider="anthropic", model_id="claude-sonnet-4-5"),
+        system_blocks=["persona", "tools", "env", "skills"],
+        messages=[Message(role="user", content=[TextContent(text="hi " * 50)])],
+    )
+    usage = Usage(
+        input_tokens=5000,
+        output_tokens=1000,
+        cache_read_tokens=90_000,
+        cache_write_tokens=5000,
+        context_tokens=100_000,
+    )
+    asyncio.run(_drain(fn, request, [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    agg = store.aggregate()
+    assert agg.calls == 1
+    # Cost is computed through the shared cost_for_usage, so it is positive and
+    # known; the exact figure depends on the live price table, so assert the
+    # invariants rather than a brittle dollar amount.
+    assert agg.cost_is_known is True
+    assert agg.cost_is_partial is False
+    assert agg.cost_micro > 0
+    assert agg.by_provider["anthropic"].cost_micro == agg.cost_micro
+
+
 def test_failed_stream_still_recorded(tmp_path):
     store = AnalyticsStore(tmp_path / "a.db")
     rec = reset_recorder_for_test(store)

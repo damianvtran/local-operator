@@ -156,6 +156,18 @@ class CallSnapshot:
     # input tokens and is worth recording, but is counted separately so a
     # provider-outage session does not look like normal spend).
     ok: bool = True
+    # This call's dollar cost in MICRO-USD (USD × 1_000_000), and whether it is
+    # known at all. Cost is computed AT RECORD TIME, where the exact model that
+    # served the call is known — never at aggregation, where tokens from
+    # differently-priced models are already summed and un-priceable. Micro-USD
+    # integers rather than floats so the store's ``SUM`` is exact (a fraction of
+    # a cent per call over millions of calls is real money to drift). A model
+    # with no published price records ``cost_known=False`` and ``cost_micro=0``,
+    # which the report renders as an unknown share of the total rather than a
+    # confident ``$0.00`` — the same "unknown ≠ free" distinction the status
+    # band's ``$—`` already makes (see ``tui/costs.turn_cost``).
+    cost_micro: int = 0
+    cost_known: bool = True
 
 
 def snapshot_component_chars(request: Any) -> dict[str, int]:
@@ -267,6 +279,12 @@ class UsageAggregate:
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     context_tokens: int = 0
+    # Summed dollar cost in MICRO-USD, and how many of ``calls`` had a known
+    # price. ``cost_known_calls < calls`` means the dollar figure is a LOWER
+    # BOUND — some calls used models with no published price — which the report
+    # marks (``$12.30+``) rather than presenting a partial sum as complete.
+    cost_micro: int = 0
+    cost_known_calls: int = 0
     components: dict[str, int] = field(default_factory=lambda: {k: 0 for k in COMPONENT_KEYS})
     by_provider: dict[str, "UsageAggregate"] = field(default_factory=dict)
     by_session: dict[str, "UsageAggregate"] = field(default_factory=dict)
@@ -275,6 +293,30 @@ class UsageAggregate:
     def generation_tokens(self) -> int:
         """Output tokens that were visible generation, not hidden thinking."""
         return max(0, self.output_tokens - self.reasoning_tokens)
+
+    @property
+    def cost_usd(self) -> float:
+        """The summed cost in whole dollars (from the micro-USD accumulator)."""
+        return self.cost_micro / 1_000_000.0
+
+    @property
+    def cost_is_partial(self) -> bool:
+        """True when some priced-in calls had no published price.
+
+        The dollar total is then a lower bound: it counts every call we could
+        price and silently omits the ones we could not. A report must SAY so
+        rather than imply the omitted calls were free.
+        """
+        return self.cost_known_calls < self.calls
+
+    @property
+    def cost_is_known(self) -> bool:
+        """True when at least one call in scope had a known price.
+
+        ``False`` means nothing here is priceable (e.g. a local Ollama-only
+        run), which the report renders as ``$—`` rather than ``$0.00``.
+        """
+        return self.cost_known_calls > 0
 
     @property
     def total_tokens(self) -> int:

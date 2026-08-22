@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS calls (
   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   context_tokens INTEGER NOT NULL DEFAULT 0,
+  -- Dollar cost of the call in MICRO-USD (USD × 1e6) and whether it was
+  -- priceable. Integer so the aggregate SUM is exact; see CallSnapshot.
+  cost_micro INTEGER NOT NULL DEFAULT 0,
+  cost_known INTEGER NOT NULL DEFAULT 0,
   {_COMPONENT_COLUMNS}
 );
 CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts_ms);
@@ -104,7 +108,20 @@ _CALL_COLUMNS = (
     "cache_write_tokens",
     "reasoning_tokens",
     "context_tokens",
+    "cost_micro",
+    "cost_known",
     *(f"c_{key}" for key in COMPONENT_KEYS),
+)
+
+#: Columns added AFTER the first shipped schema (which had no cost columns).
+#: A database created by the token-only release is missing these, and
+#: ``CREATE TABLE IF NOT EXISTS`` will not add a column to an existing table —
+#: so ``_connect`` runs an idempotent ``ALTER TABLE ADD COLUMN`` for each on
+#: open. ``(name, definition)``; the definition carries the default so old rows
+#: read as cost 0 / unknown rather than NULL.
+_MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("cost_micro", "INTEGER NOT NULL DEFAULT 0"),
+    ("cost_known", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 _INSERT_SQL = (
@@ -139,6 +156,8 @@ def _row_values(snapshot: CallSnapshot) -> tuple[Any, ...]:
         snapshot.cache_write_tokens,
         snapshot.reasoning_tokens,
         snapshot.context_tokens,
+        int(snapshot.cost_micro),
+        1 if snapshot.cost_known else 0,
         *(components[key] for key in COMPONENT_KEYS),
     )
 
@@ -197,6 +216,7 @@ class AnalyticsStore:
             # simultaneously do not both executescript into the same file.
             with self._init_lock:
                 conn.executescript(_SCHEMA)
+                self._migrate(conn)
                 conn.commit()
                 if not self._initialized:
                     for path in (
@@ -233,6 +253,30 @@ class AnalyticsStore:
             except Exception:  # noqa: BLE001
                 pass
             self._local.conn = None
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns that a database from an older release is missing.
+
+        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a
+        ledger written by the token-only release has no ``cost_*`` columns. Add
+        each via ``ALTER TABLE ADD COLUMN`` (idempotent: skip the ones already
+        present). Old rows take the column default — cost 0, unknown — so a
+        pre-cost call reads as "unpriced", never as a confident $0. Called under
+        ``_init_lock`` on open; a failure here degrades to the pre-migration
+        shape rather than raising, because analytics is never a hard dependency.
+        """
+        try:
+            existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(calls)").fetchall()}
+        except Exception:  # noqa: BLE001 — an unreadable schema is a no-op migration
+            return
+        for name, definition in _MIGRATION_COLUMNS:
+            if name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
+            except Exception:  # noqa: BLE001 — a failed add leaves the older shape
+                logger.debug("analytics: could not add column %s", name, exc_info=True)
 
     @staticmethod
     def _now_ms() -> int:
@@ -393,10 +437,14 @@ class AnalyticsStore:
         clause = (" WHERE " + " AND ".join(where)) if where else ""
 
         component_sum = ", ".join(f"SUM(c_{key})" for key in COMPONENT_KEYS)
+        # Order is a contract with ``_aggregate_from_row``, which indexes this
+        # tuple positionally: cost_micro and cost_known_calls come after the
+        # token sums and before the component sums.
         base_cols = (
             "COUNT(*), SUM(ok), SUM(input_tokens), SUM(output_tokens), "
             "SUM(cache_read_tokens), SUM(cache_write_tokens), "
-            "SUM(reasoning_tokens), SUM(context_tokens)"
+            "SUM(reasoning_tokens), SUM(context_tokens), "
+            "SUM(cost_micro), SUM(cost_known)"
         )
         try:
             top = conn.execute(
@@ -468,6 +516,9 @@ def _aggregate_from_row(row: Iterable[Any] | None) -> UsageAggregate:
         cache_write_tokens=_n(5),
         reasoning_tokens=_n(6),
         context_tokens=_n(7),
+        cost_micro=_n(8),
+        cost_known_calls=_n(9),
     )
-    agg.components = {key: _n(8 + i) for i, key in enumerate(COMPONENT_KEYS)}
+    # Components follow the two cost sums (see ``base_cols``).
+    agg.components = {key: _n(10 + i) for i, key in enumerate(COMPONENT_KEYS)}
     return agg

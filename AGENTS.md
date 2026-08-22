@@ -236,9 +236,13 @@ Every provider call across every session contributes to one shared, on-disk
 ledger (`<config_dir>/analytics.db`, SQLite/WAL/0600). `/analytics /usage`
 opens an Esc-dismissable screen summarising token consumption: authoritative
 provider counts (input/output/cache, and the thinking-vs-generation split of
-output) plus an *estimated* breakdown of input across the system prompt, custom
-instructions (agent/team profiles), tool inventory, tool schemas, environment,
-knowledge, conversation, and tool results.
+output), an *estimated* dollar **cost** overlay, and an *estimated* breakdown of
+input across the system prompt, custom instructions (agent/team profiles), tool
+inventory, tool schemas, environment, knowledge, conversation, and tool
+results. The frame is responsive — it grows to `max-width: 140` on a large
+terminal (see the `.analytics-panel` CSS and `AnalyticsScreen._card_width`,
+which must stay in step), and the per-provider/per-session tables shed the cache
+column below `_WIDE_TABLE_MIN` to keep the cost column.
 
 Things that will bite you if you forget them:
 
@@ -272,5 +276,20 @@ Things that will bite you if you forget them:
   and estimates must never be presented as the same kind of number — the screen
   says "estimated split of context tokens" for a reason.
 
-- **Adding a component is a schema migration.** `COMPONENT_KEYS` maps to one
-  `c_<key>` column each in `store._SCHEMA`; bump the schema and default 0.
+- **Cost is computed at RECORD time, not aggregation time.** Dollar cost is
+  priced in `SessionStreamFn._cost_micro` (`configure.py`) where the exact model
+  is known, via the shared `cost_for_usage` — so analytics can never disagree
+  with the status band. It is stored per call as `cost_micro` (USD × 1e6,
+  INTEGER so the `SUM` is exact) plus a `cost_known` flag. A model with no
+  published price records `cost_known=False` (rendered `$—`, never `$0.00`); a
+  scope where some calls were unpriced is a LOWER BOUND (rendered `$12.30+`).
+  Cost is an ESTIMATE (list price × tokens; it cannot see a plan, discount, or
+  free tier) and is labelled as one, same discipline as the component split.
+
+- **Adding a component OR a stored column is a schema migration.**
+  `COMPONENT_KEYS` maps to one `c_<key>` column each in `store._SCHEMA`. A
+  database from an older release is upgraded on open by `AnalyticsStore._migrate`
+  (idempotent `ALTER TABLE ADD COLUMN`, since `CREATE TABLE IF NOT EXISTS` never
+  alters an existing table) — this is how the `cost_*` columns reach a
+  token-only ledger. Any new stored column needs a `_MIGRATION_COLUMNS` entry
+  with a DEFAULT so old rows read as a sane value, never NULL.
