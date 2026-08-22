@@ -141,6 +141,24 @@ logger = logging.getLogger(__name__)
 #: ``latest_custom``'s backward scan land on "no fallback pinned" after one.
 ACTIVE_ROUTE_CUSTOM_TYPE = "active_model_route"
 
+#: Transcript custom-entry type recording the model the user explicitly
+#: SELECTED mid-session (``/model <provider>/<id>``), so a resumed session
+#: comes back on it instead of silently reverting to the boot default. The
+#: sibling of :data:`ACTIVE_ROUTE_CUSTOM_TYPE`, which records where a
+#: provider FALLBACK routed requests; this one records where the USER did.
+#: Without it a ``/model`` switch survived exactly as long as the process:
+#: quit and ``--resume`` replayed the whole conversation onto the config
+#: default, which contradicts what the transcript itself shows the user
+#: choosing.
+#:
+#: Each row snapshots ``boot`` — the selector the session was CONSTRUCTED
+#: with — beside the selection, so the restore can tell a journalled switch
+#: that still applies from one stranded by a changed boot selection (a
+#: ``/model default`` write, an edited agent profile, an explicit
+#: ``--hosting``/``--model`` flag on the resume itself). A changed boot
+#: selection wins: it is the newer, more deliberate choice.
+SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
+
 #: How many times the title writer will chase a name that moved under its own
 #: append before giving up and leaving the rest to the dispose flush. A cap
 #: rather than "until it settles" so the bound is structural: the chase is a
@@ -876,6 +894,26 @@ class Session:
         #: ``_background_tasks`` because dispose CANCELS those and this one has
         #: to be awaited instead — see :meth:`_spawn_conversation_name_write`.
         self._conversation_name_task: "asyncio.Future[None] | None" = None
+        #: The ``provider/model_id`` this session was CONSTRUCTED with — the
+        #: boot selection resolved from agent > CLI flag > config. Captured
+        #: before any restore or switch moves ``_model``, because it is the
+        #: reference every ``selected_model`` journal row carries: a resume
+        #: whose boot selection no longer matches a row's ``boot`` must NOT
+        #: adopt that row (the changed default/flag/profile is the newer
+        #: choice). See :data:`SELECTED_MODEL_CUSTOM_TYPE`.
+        self._boot_selector = f"{model.provider}/{model.model_id}"
+        #: True while a mid-session model selection has not reached the
+        #: transcript yet; the same dispose-flush contract as the title (the
+        #: write is a background task, and dispose cancels background tasks,
+        #: so a switch made just before ctrl+c needs the flush to land it).
+        self._selected_model_dirty = False
+        #: The in-flight journal write for the selection, tracked apart from
+        #: ``_background_tasks`` for the same reason the title's write is:
+        #: dispose CANCELS background tasks, and a cancel that lands before
+        #: the wrapped coroutine's first await leaves it un-awaited (asyncio
+        #: then reports it at GC time) as well as unwritten. The flush AWAITS
+        #: this task instead — see :meth:`_spawn_selected_model_write`.
+        self._selected_model_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
         #: Set once a provider refuses a request because of an image block, and
@@ -1050,6 +1088,13 @@ class Session:
         # session would otherwise need its own copy of this, and the one that
         # forgot would boot nameless.
         self._load_conversation_name()
+        # The model the user explicitly SELECTED mid-session, restored before
+        # the fallback pin below — deliberately in that order, because the pin's
+        # own guard compares its persisted primary against the CURRENT
+        # selection: a fallback that rescued the switched-to model must find
+        # that model already restored, or the pin reads as stranded and is
+        # dropped.
+        self._restore_selected_model()
         # Which model is ACTUALLY serving requests, when that is not the
         # selected one: the spec of the pinned fallback route, or None while
         # the primary serves. Owned by the session (not read off the stream
@@ -1638,6 +1683,14 @@ class Session:
                 if refreshed is not None:
                     self._active_fallback = refreshed
             return
+        # A genuine model change is a SELECTION, and selections outlive the
+        # process: journal it so `--resume` comes back on this model instead
+        # of the boot default (see SELECTED_MODEL_CUSTOM_TYPE). Every knob
+        # change (`/effort`, the server's sampling overrides) took the
+        # same-pair early return above, so only real switches reach this line
+        # and the journal stays one row per switch, not one per keystroke.
+        self._selected_model_dirty = True
+        self._spawn_selected_model_write()
         # An explicit switch withdraws the fallback pin's premise: the pin
         # rescued the PREVIOUS selection, and the stream fn's preflight will
         # clear its own route state the moment it sees the new selector. The
@@ -4529,6 +4582,194 @@ class Session:
             },
         )
 
+    # -- selected model (mid-session /model switch persistence) --------------
+
+    def _spawn_selected_model_write(self) -> None:
+        """Start (or coalesce onto) the background journal write for the
+        selection. The same contract as :meth:`_spawn_conversation_name_write`
+        and for the same reason: ``dispose`` cancels ``_background_tasks``
+        wholesale, and a switch made in the closing moments of a session is
+        exactly the write that must still reach disk — so this task is tracked
+        separately and AWAITED by :meth:`_flush_selected_model` instead of
+        being cancelled with the rest.
+
+        One task at a time: the payload is read at write time, so a second
+        switch landing while a write is in flight is covered by the dirty
+        flag — the flush re-persists whatever is in force at teardown.
+        """
+        if self._disposed:
+            return
+        task = self._selected_model_task
+        if task is not None and not task.done():
+            return
+        try:
+            task = asyncio.ensure_future(self._persist_selected_model())
+            # Consume the exception explicitly, as the title's writer does: a
+            # failed journal write is tolerated (the flush retries), but a
+            # task whose exception nobody reads is reported by the loop at GC
+            # time as if the session had leaked it.
+            task.add_done_callback(self._on_selected_model_written)
+            self._selected_model_task = task
+        except RuntimeError:
+            # No running loop (a session driven synchronously in tests). The
+            # dispose flush is the backstop; the selection is not lost.
+            self._selected_model_task = None
+
+    @staticmethod
+    def _on_selected_model_written(task: "asyncio.Future[None]") -> None:
+        """Retrieve the selection write's outcome so asyncio does not report
+        it; the dispose flush is what actually retries a failure."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.debug("model selection write failed; will retry at dispose", exc_info=error)
+
+    async def _persist_selected_model(self) -> None:
+        """Journal the model the user is on (newest entry wins on replay).
+
+        A full snapshot per switch, like every other custom-entry journal
+        here: ``latest_custom`` scans backward and stops at the first hit, so
+        replay cost does not grow with the number of switches. The dirty flag
+        is cleared only AFTER the append lands — a write cancelled at teardown
+        never reaches that line, so the entry still reads as outstanding to
+        :meth:`_flush_selected_model` and is retried there instead of lost.
+
+        A duplicate row (append landed, clear did not) is harmless by
+        construction: each row is a snapshot of the same state, and the
+        backward scan reads one.
+        """
+        model = self._model
+        payload = {
+            "selector": f"{model.provider}/{model.model_id}",
+            "effort": model.reasoning_effort,
+            "boot": self._boot_selector,
+        }
+        await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
+        current = self._model
+        if (f"{current.provider}/{current.model_id}", current.reasoning_effort) == (
+            payload["selector"],
+            payload["effort"],
+        ):
+            self._selected_model_dirty = False
+        else:
+            # The selection moved under the append. Start another pass now
+            # rather than leaving the newer selection to the dispose flush:
+            # the session can run for hours after a switch, and "correct only
+            # if you quit" is not a persistence contract. The current task is
+            # still registered until its callback returns, so scheduling onto
+            # the next loop tick lets `_spawn_selected_model_write` see it as
+            # done and create exactly one successor.
+            asyncio.get_running_loop().call_soon(self._spawn_selected_model_write)
+
+    def _restore_selected_model(self) -> None:
+        """Re-adopt the model a ``/model`` switch selected before the quit.
+
+        Guarded twice, each a real situation rather than paranoia:
+
+        - persisted ``boot`` differs from THIS construction's boot selection →
+          the journal belongs to a boot default the user has since changed (a
+          ``/model default`` write, an edited agent profile, an explicit
+          ``--hosting``/``--model`` flag on the resume command itself). The
+          changed selection is the newer choice and wins; adopting the row
+          would make the flag the user just typed silently not work.
+        - the journalled selector equals the boot selection → the user
+          switched and later switched back; nothing to do, and skipping the
+          no-op keeps a fresh session's construction byte-identical to one
+          that never switched.
+
+        Tolerant of a malformed or unresolvable entry, matching
+        :meth:`_load_conversation_name`: a resume must not be refused because
+        one bookkeeping row could not be read, and a selector whose provider
+        no longer resolves (an uninstalled registry entry) logs and falls
+        back to the boot model rather than constructing a session around a
+        spec that cannot serve requests.
+
+        Restores quietly (no event, no journal write): construction runs
+        before any front end subscribes, so hosts read ``model`` when they
+        build their chrome, and re-journalling the row it just read would
+        grow the transcript on every resume.
+        """
+        details = self._transcript.latest_custom(SELECTED_MODEL_CUSTOM_TYPE)
+        if not details:
+            return
+        selector = str(details.get("selector") or "")
+        if "/" not in selector:
+            return
+        boot = str(details.get("boot") or "")
+        if boot != self._boot_selector:
+            return
+        if selector == self._boot_selector:
+            return
+        raw_effort = details.get("effort")
+        effort = str(raw_effort) if isinstance(raw_effort, str) and raw_effort else None
+        # Validate the PROVIDER before adopting the row, exactly as the TUI's
+        # `/model` does and for the same reason: `spec_for_target` does not
+        # raise on an unknown provider, it returns a spec with `base_url=None`.
+        # A provider that has since left the registry (a renamed id, a build
+        # without it) would therefore resume the session onto a spec that
+        # cannot serve requests, and the failure would surface on the first
+        # prompt as a network error rather than as the stale journal row it is.
+        from local_operator.providers.registry import get_provider_definition
+
+        provider = selector.split("/", 1)[0]
+        if get_provider_definition(provider) is None:
+            logger.warning(
+                "dropping persisted model selection naming an unknown provider: %r", selector
+            )
+            return
+        # The SAME derivation `/model` itself lands on: `spec_for_target`
+        # builds the target model's own spec (its base_url, window,
+        # capabilities) and carries only session sampling preferences across
+        # — re-deriving instead of persisting the whole spec means a registry
+        # update between quit and resume is picked up rather than replayed
+        # stale.
+        spec = self._spec_for_route(selector, effort)
+        if spec is None:
+            logger.warning("dropping unresolvable persisted model selection: %r", selector)
+            return
+        self._model = spec
+        # Same synchronous re-fit hook `set_model` ends on. Nothing is frozen
+        # this early, but a stream fn that keys caches by selector must start
+        # keyed to the model that will actually serve, not the boot default.
+        notify = getattr(self._stream_fn, "on_model_changed", None)
+        if callable(notify):
+            notify(spec)
+
+    async def _flush_selected_model(self) -> None:
+        """Land an outstanding selection write before the session tears down.
+
+        The ordinary write is a background task and :meth:`dispose` CANCELS
+        background tasks, so a ``/model`` switch in the closing moments of a
+        session — the switch-then-ctrl+c this feature exists for — could be
+        cancelled before reaching disk, and the next ``--resume`` would open
+        on the boot default again. Bounded like the title's flush and for the
+        same reason: teardown must not hang on a wedged filesystem, and a
+        timeout costs one journal row, never the conversation.
+        """
+        deadline = time.monotonic() + _NAME_FLUSH_TIMEOUT_S
+        task = self._selected_model_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=max(0.0, deadline - time.monotonic())
+                )
+            except BaseException:  # noqa: BLE001 — fall through to the retry
+                pass
+        if not self._selected_model_dirty:
+            return
+        try:
+            # Bounded with what REMAINS of the shared deadline, like the
+            # title's flush: the append takes the transcript lock, and an
+            # unbounded wait here would let a wedged filesystem hold dispose
+            # open indefinitely.
+            await asyncio.wait_for(
+                self._persist_selected_model(),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+        except Exception:
+            logger.warning("failed to persist the model selection", exc_info=True)
+
     def _restore_active_route(self) -> None:
         """Re-adopt the fallback that was serving when this session last ran.
 
@@ -4781,6 +5022,11 @@ class Session:
             # session (a `/rename` before ctrl+d) would be cancelled in flight
             # and never reach the transcript the next `--resume` reads.
             await self._flush_conversation_name()
+            # Same window, same reason: the selection journal's ordinary write
+            # is a background task about to be cancelled, and a `/model`
+            # switch made moments before quitting is exactly the write that
+            # must still land for the next `--resume` to honour it.
+            await self._flush_selected_model()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):
