@@ -153,6 +153,38 @@ def test_transcript_is_capped_from_the_front() -> None:
     assert fold.projection.transcript[0].text == "note 25"
 
 
+def test_pinned_opener_never_costs_the_newest_row() -> None:
+    """Regression: once the transcript passed the cap WITH the opening user
+    message pinned at the head, the newest row stopped reaching the phone.
+
+    ``_cap_tail`` pins the first user message and fills the rest from the tail.
+    It used to make room by dropping ``tail[-1]`` — the row JUST appended — and
+    because the cap runs on every append, the transcript froze: past the cap no
+    new tool call or notice ever appeared (the field report's missing "last
+    several tool calls"). The pin must cost the OLDEST tail row, never the
+    newest, and the tail must keep advancing.
+    """
+    fold = make_fold()
+    fold.note_user_message("the opening ask — this names the whole conversation")
+    for i in range(PROJECTION_TRANSCRIPT_LIMIT + 40):
+        fold.fold_event(NoticeEvent(text=f"note {i}"))
+
+    transcript = fold.projection.transcript
+    assert len(transcript) == PROJECTION_TRANSCRIPT_LIMIT
+    # Opener stays pinned at the head so the phone always knows the topic.
+    assert transcript[0].kind == "user"
+    assert transcript[0].text.startswith("the opening ask")
+    # The single newest row is present — the whole point of the fix.
+    assert transcript[-1].text == f"note {PROJECTION_TRANSCRIPT_LIMIT + 39}"
+
+    # The tail keeps advancing on further appends (it used to be frozen).
+    fold.fold_event(NoticeEvent(text="the very latest"))
+    transcript = fold.projection.transcript
+    assert len(transcript) == PROJECTION_TRANSCRIPT_LIMIT
+    assert transcript[0].kind == "user"
+    assert transcript[-1].text == "the very latest"
+
+
 def test_todo_refresh_replaces_wholesale() -> None:
     fold = make_fold()
     fold.set_todos([{"text": "a", "status": "pending"}, {"text": "b", "status": "done"}])

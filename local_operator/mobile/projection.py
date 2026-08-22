@@ -712,8 +712,16 @@ class ProjectionFold:
         tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
         first_user = next((e for e in entries if e.kind == "user"), None)
         if first_user is not None and first_user not in tail:
-            # One pinned row + LIMIT-1 tail rows keeps the same bounded size.
-            return [first_user, *tail[:-1]]
+            # Pin the opener and make room by dropping the OLDEST tail row
+            # (``tail[1:]``), never the newest (``tail[:-1]``). ``_cap_tail``
+            # runs on EVERY append, so dropping ``tail[-1]`` here discarded the
+            # row just appended — and did so on each subsequent append, which
+            # froze the transcript: past the cap, no new tool call or message
+            # ever reached the phone (the field report's "last several tool
+            # calls I can't see"). Dropping the oldest keeps the bound (one
+            # pinned + LIMIT-1 newest = LIMIT) while the newest row always
+            # survives. Older rows page back in on scroll via the history API.
+            return [first_user, *tail[1:]]
         return tail
 
     def _find(self, entry_id: str | None) -> TranscriptEntry | None:
