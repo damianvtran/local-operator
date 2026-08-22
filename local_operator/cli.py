@@ -1764,11 +1764,12 @@ def main() -> int:
         # own env config and the session factory does the same lazily — a
         # dead local would only invite drift.
         base_dir = config_dir()
-        agent_home_dir = Path.home() / "local-operator-home"
-
-        # Create the agent home directory if it doesn't exist
-        if not agent_home_dir.exists():
-            agent_home_dir.mkdir(parents=True, exist_ok=True)
+        # The agent home is NO LONGER created here. Creating it unconditionally
+        # before dispatch meant `config list`, `login`, `--version` and every
+        # other non-session subcommand created a workspace directory they never
+        # touch, and it hardcoded ~/local-operator-home while ignoring any
+        # override. It is now created lazily by the paths that actually run a
+        # task (session/exec/serve start), through paths.ensure_agent_home_dir.
 
         if args.subcommand == "credential":
             if args.credential_command == "update":

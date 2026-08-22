@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.optional import missing_extra_error
+from local_operator.paths import default_agent_cwd
 from local_operator.types import Schedule  # Keep existing Schedule import
 from local_operator.types import (
     AgentState,
@@ -309,7 +310,7 @@ class AgentRegistry:
             presence_penalty=agent_edit_metadata.presence_penalty,
             seed=agent_edit_metadata.seed,
             current_working_directory=agent_edit_metadata.current_working_directory
-            or "~/local-operator-home",
+            or default_agent_cwd(),
         )
 
         return self.save_agent(agent_metadata)
@@ -1438,7 +1439,7 @@ class AgentRegistry:
 
                 # Create a new agent with the imported data
                 agent_id = agent_data["id"]
-                agent_data["current_working_directory"] = "~/local-operator-home"
+                agent_data["current_working_directory"] = default_agent_cwd()
                 # Older profile bundles duplicated the final conversation turn
                 # into agent.yml. History files are ignored below, but leaving
                 # this field intact would still import private conversation

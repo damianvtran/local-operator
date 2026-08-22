@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 # AgentEditFields will be used in the routes module
 from local_operator.jobs import JobResult, JobStatus
 from local_operator.model.registry import ModelInfo, ProviderDetail
+from local_operator.paths import default_agent_cwd
 from local_operator.types import (  # Added ScheduleUnit
     CodeExecutionResult,
     ConversationRecord,
@@ -270,7 +271,10 @@ class AgentCreate(BaseModel):
         description="Random number seed for deterministic generation.",
     )
     current_working_directory: str | None = Field(
-        "~/local-operator-home",
+        # default_factory so the LOCAL_OPERATOR_HOME override is honoured at
+        # model-construction time rather than frozen to the literal home path at
+        # import (see paths.default_agent_cwd).
+        default_factory=default_agent_cwd,
         description="The current working directory for the agent.  Updated whenever the "
         "agent changes its working directory through code execution.  Defaults to "
         "'~/local-operator-home'.",
