@@ -472,6 +472,76 @@ class SubagentComms:
             rows.append(self._describe(record, now))
         return rows
 
+    # -- persistence ----------------------------------------------------------
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        """The durable half of every record, for persistence to the transcript.
+
+        Only the fields that survive a process exit and matter to a resumed
+        session: the identity (``job_id``/``label``), the transcript directory
+        that makes resume possible, and the settled outcome so the roster can
+        say how a child ended after its job row is long gone. The live handles
+        (``child``, ``unsubscribe``, ``ask``, ``pending``) are deliberately
+        omitted — they belong to a running loop and cannot cross a restart.
+
+        ``session_dir`` is stored as a string (``Path`` is not JSON-native) and
+        a record with none (a child that never started, so has no transcript)
+        is skipped entirely: it is not resumable and carries nothing a resumed
+        session could act on.
+        """
+        rows: list[dict[str, Any]] = []
+        for record in self._records.values():
+            if record.session_dir is None:
+                continue
+            rows.append(
+                {
+                    "job_id": record.job_id,
+                    "label": record.label,
+                    "session_dir": str(record.session_dir),
+                    "outcome": record.outcome,
+                    "error_text": record.error_text,
+                    "paused": record.paused,
+                    "settled_at": record.settled_at,
+                }
+            )
+        return rows
+
+    def restore(self, rows: list[dict[str, Any]]) -> None:
+        """Rebuild settled records from a persisted snapshot at resume.
+
+        This is the resume basis: ``hub op='resume'`` needs the
+        ``job_id \u2192 session_dir`` mapping to relaunch a child against its old
+        transcript, and the roster needs the recorded outcome to say how each
+        child ended. Both die with the process, so without rehydrating them a
+        resumed session cannot see \u2014 let alone continue \u2014 the children the
+        previous one launched.
+
+        Every restored record is SETTLED: its live child is gone, so it carries
+        no ``child`` handle and is marked ``settled`` with the persisted
+        ``settled_at`` (so eviction order and the roster's age column stay
+        meaningful). A row whose ``job_id`` is already present is skipped \u2014 a
+        live child of this session must never be clobbered by a stale snapshot
+        of its predecessor.
+        """
+        for row in rows:
+            job_id = str(row.get("job_id") or "")
+            if not job_id or job_id in self._records:
+                continue
+            raw_dir = row.get("session_dir")
+            session_dir = Path(str(raw_dir)) if raw_dir else None
+            record = _ChildRecord(
+                job_id=job_id,
+                label=str(row.get("label") or job_id),
+                session_dir=session_dir,
+                settled=True,
+                settled_at=row.get("settled_at"),
+                paused=bool(row.get("paused")),
+                outcome=(str(row["outcome"]) if row.get("outcome") is not None else None),
+                error_text=(str(row["error_text"]) if row.get("error_text") is not None else None),
+            )
+            self._records[job_id] = record
+        self._evict_overflow()
+
     async def peek(
         self,
         job_id: str,
@@ -642,7 +712,19 @@ class SubagentComms:
         # in fact have succeeded — the same disagreement as F1, in the safe
         # direction. The later branches still veto it when there is genuinely
         # nothing to resume.
-        resumable = status in ("completed", "failed", "cancelled", "paused", "gone")
+        # ``interrupted`` is the resume feature's own status: a child that was
+        # running when the process exited, rehydrated from the persisted roster.
+        # Its transcript survived on disk, so it is exactly the case ``resume``
+        # was built for — the later transcript-existence check still vetoes it
+        # if the directory is gone.
+        resumable = status in (
+            "completed",
+            "failed",
+            "cancelled",
+            "paused",
+            "gone",
+            "interrupted",
+        )
         detail = detail if resumable else "not resumable in this state"
         if status in ("running", "queued", "starting"):
             resumable, detail = False, "still running; cancel or pause it first"

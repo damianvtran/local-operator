@@ -3775,6 +3775,47 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
     return [dict(item) for item in items if item.get("status") == "pending"]
 
 
+def todo_snapshot(session_id: str) -> list[dict[str, str]]:
+    """A deep copy of the FULL todo list for ``session_id`` (``[]`` when none).
+
+    The durable form the session persists to its transcript so a resume can
+    rebuild the list (see ``Session._persist_todo_snapshot``). Unlike
+    :func:`open_todos` this keeps EVERY item — done, dropped, blocked, pending —
+    and every field (including a blocked item's ``reason``), because the panel
+    and the progress counter render the whole list, not just the open subset.
+
+    Reads the same SESSION-ID branch of the store as :func:`open_todos`; the
+    caveat there about a host-attached ``ToolContext.todos`` store applies here
+    identically. Copies so a caller holding the result never mutates the store.
+    """
+    items = TODO_STORE.get(session_id)
+    if not items:
+        return []
+    return [dict(item) for item in items]
+
+
+def restore_todos(session_id: str, items: list[dict[str, str]]) -> None:
+    """Seed ``session_id``'s todo list from a persisted snapshot at resume.
+
+    The inverse of :func:`todo_snapshot`. Writes straight into the same
+    module-level table the todo tool uses, so the restored list is
+    indistinguishable from one the tool built — the panel reads it, and the
+    continuation guardrail's fingerprint (:func:`todo_fingerprint`) matches what
+    it was before the restart.
+
+    A no-op when there is nothing to restore or the id is empty, and it REFUSES
+    to overwrite a list the current session already has: restore runs once at
+    construction, before any turn, so a populated slot means a live list that
+    must win over a stale snapshot. Each item is copied so the store never
+    aliases the caller's list.
+    """
+    if not session_id or not items:
+        return
+    if TODO_STORE.get(session_id):
+        return
+    TODO_STORE[session_id] = [dict(item) for item in items]
+
+
 def todo_fingerprint(session_id: str) -> tuple[tuple[str, str], ...]:
     """``(text, status)`` for EVERY item of ``session_id``'s list, in order.
 

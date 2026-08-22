@@ -56,7 +56,11 @@ from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
-from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJobManager
+from local_operator.harness.jobs import (
+    JOB_RESULT_MESSAGE_TYPE,
+    AsyncJob,
+    AsyncJobManager,
+)
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.subagent import run_subagent
 from local_operator.harness.types import (
@@ -121,7 +125,9 @@ from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import (
     TODO_REMINDER_MESSAGE_TYPE,
     open_todos,
+    restore_todos,
     todo_fingerprint,
+    todo_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -158,6 +164,23 @@ ACTIVE_ROUTE_CUSTOM_TYPE = "active_model_route"
 #: ``--hosting``/``--model`` flag on the resume itself). A changed boot
 #: selection wins: it is the newer, more deliberate choice.
 SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
+
+#: Transcript custom-entry type holding a snapshot of the subagents this
+#: session launched (see ``SubagentComms.snapshot``) plus their job rows (see
+#: ``AsyncJobManager``). Both structures live only in memory, so without this a
+#: resumed session opens with an empty subagent panel and no way to reach —
+#: let alone resume — the children the previous process started, even though
+#: their transcripts survive on disk. Re-snapshotted (newest-wins, like every
+#: custom entry) whenever the roster moves; loaded once at construction.
+SUBAGENT_ROSTER_CUSTOM_TYPE = "subagent_roster"
+
+#: Transcript custom-entry type holding the session's todo list. The todo tool
+#: keeps the live list in a module-level table keyed by session id (see
+#: ``local_operator.tools.builtin.TODO_STORE``), which the process loses on
+#: exit; this is the durable copy a resume rehydrates so the todo panel and the
+#: continuation guardrail come back exactly where they were. Snapshotted after
+#: every turn (the only place the list can have moved) and on demand.
+TODO_SNAPSHOT_CUSTOM_TYPE = "todo_snapshot"
 
 #: How many times the title writer will chase a name that moved under its own
 #: append before giving up and leaving the rest to the dispose flush. A cap
@@ -665,6 +688,59 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
     }
 
 
+#: The ONLY ``AsyncJob`` fields the roster snapshot carries. An allowlist, not
+#: an exclude set, because the whole task-row list is re-appended on every
+#: roster move and custom entries are never reclaimed (``compact_file`` folds
+#: only the message prune journal) — so anything unbounded here is written once
+#: per surviving child per move, i.e. O(children²) bytes of superseded data on
+#: disk. The fields kept are all small and bounded: the identity, the timings
+#: the panel prices elapsed from, the model/usage/window it paints, and the
+#: routing/queue flags a restore needs. Everything a reader might want beyond
+#: this — the child's full ``result_text``, its verbatim ``prompt`` (documented
+#: "Unbounded on purpose"), the ``trajectory``, the live ``output_tail`` — is
+#: recoverable on demand from the child's OWN transcript via ``hub op='peek'``,
+#: the same argument the trajectory exclusion already made, carried to its
+#: conclusion.
+_ROSTER_ROW_FIELDS = frozenset(
+    {
+        "id",
+        "type",
+        "status",
+        "start_time",
+        "started_at",
+        "settled_at",
+        "label",
+        "queued",
+        "agent_id",
+        "owner_id",
+        "model_label",
+        "context_window",
+        "usage",
+        "restored",
+    }
+)
+
+#: Cap on the one free-text field the row keeps. ``error_text`` drives the
+#: panel's one-line summary for a restored FAILED row, so it is worth keeping —
+#: but a stack trace or a giant provider error must not reintroduce the
+#: unbounded-growth M1 fix removes, so it is clipped to a sentence's worth.
+_ROSTER_ERROR_CAP = 2_000
+
+
+def _subagent_job_row(job: AsyncJob) -> dict[str, Any]:
+    """One task job as a slim, bounded dict for the roster snapshot.
+
+    Projects the job onto :data:`_ROSTER_ROW_FIELDS` (see its note for why an
+    allowlist rather than an exclude set), plus a length-capped ``error_text``
+    so a restored failed row can still say why it failed. ``model_dump(
+    mode="json")`` makes the nested ``Usage`` JSON-native.
+    """
+    row = job.model_dump(mode="json", include=set(_ROSTER_ROW_FIELDS))
+    if job.error_text:
+        row["error_text"] = job.error_text[:_ROSTER_ERROR_CAP]
+    return row
+
+
 def _parsed_usage(payload: dict[str, Any]) -> Usage | None:
     """One persisted ``usage`` payload as a :class:`Usage`, or ``None``.
 
@@ -1013,6 +1089,11 @@ class Session:
         # with a byte-identical list is not nudged a second time. Reset per user
         # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
         self._todo_reminder_fingerprint: tuple[tuple[str, str], ...] | None = None
+        # The todo fingerprint that was last WRITTEN to the transcript, so the
+        # post-turn snapshot only appends when the list actually moved. Seeded
+        # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
+        # turn after a restore does not re-persist an unchanged restored list.
+        self._persisted_todo_fingerprint: tuple[tuple[str, str], ...] | None = None
 
         self._disposed = False
         # Session-scoped task group (HC-11): wake deliveries and aside
@@ -1054,6 +1135,10 @@ class Session:
         # behaviour is exactly what it was before this was configurable.
         self.jobs = AsyncJobManager(
             on_job_complete=self._on_job_completed,
+            # The manager signals every task-roster move here; the session folds
+            # both halves (job rows + comms records) into ONE persisted snapshot
+            # so a resume can rebuild the subagent panel and the resume basis.
+            on_roster_change=self._schedule_subagent_persist,
             **_configured_max_running(),
         )
         self._wake = WakeScheduler(
@@ -1095,6 +1180,14 @@ class Session:
         # that model already restored, or the pin reads as stranded and is
         # dropped.
         self._restore_selected_model()
+        # Subagents and todos: both live only in memory during a session, so a
+        # resume rebuilds them from the transcript here — the job rows and comms
+        # records that make the subagent panel and ``hub op='resume'`` work, and
+        # the todo list the panel and the continuation guardrail read. Ordered
+        # after the history replay (the transcript is already loaded) and before
+        # the first turn (nothing has written to either store yet).
+        self._load_subagent_roster()
+        self._load_todo_snapshot()
         # Which model is ACTUALLY serving requests, when that is not the
         # selected one: the spec of the pinned fallback route, or None while
         # the primary serves. Owned by the session (not read off the stream
@@ -3037,6 +3130,14 @@ class Session:
             # messages after the compaction entry that superseded them.
             await self._persist_new_messages(new_messages)
 
+            # Snapshot the todo list when it moved this turn. Guarded by the
+            # same full-list fingerprint the continuation guardrail uses, so an
+            # unchanged list costs one tuple comparison and no transcript write,
+            # while any add/done/block/drop/init lands on disk for the next
+            # resume. Placed on the normal path (a turn that raised past here
+            # still has last turn's snapshot; the next clean turn re-writes it).
+            await self._maybe_persist_todos()
+
             pending_incident = self._pending_incident
             self._pending_incident = None
             if pending_incident:
@@ -3106,9 +3207,21 @@ class Session:
         exception escaping into a TaskGroup would cancel every sibling task.
         """
         if self._disposed:
+            # Close the coroutine we were handed rather than dropping it: a
+            # caller building ``self._spawn_background(self._coro())`` has
+            # already created it, and a disposed session that merely returned
+            # left it unawaited — an "coroutine was never awaited" warning, and
+            # under a background subagent runner racing dispose it is a real
+            # path (the runner schedules a roster persist just as teardown
+            # flips this flag).
+            coro.close()
             return
 
+        started = False
+
         async def _guarded() -> None:
+            nonlocal started
+            started = True
             try:
                 await coro
             except asyncio.CancelledError:
@@ -3121,7 +3234,21 @@ class Session:
         else:
             task = asyncio.ensure_future(_guarded())
         self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+
+        def _on_done(finished: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(finished)
+            # If dispose cancelled this task before ``_guarded`` ever ran (it
+            # was still pending), the wrapper's ``try`` never entered and the
+            # INNER ``coro`` was created but never awaited — Python reports it
+            # as "coroutine was never awaited". Closing it here, from the one
+            # callback that fires for every task including a cancelled-pending
+            # one, is what suppresses that. ``started`` is the discriminator:
+            # once the wrapper began, ``await coro`` drove the coroutine and a
+            # late ``close()`` would be redundant (and is skipped).
+            if not started:
+                coro.close()
+
+        task.add_done_callback(_on_done)
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
@@ -4592,6 +4719,159 @@ class Session:
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
 
+    # -- subagent roster (resume basis) --------------------------------------
+
+    def _schedule_subagent_persist(self) -> None:
+        """Roster-change hook from ``AsyncJobManager`` (synchronous).
+
+        The manager fires this on the hot path of a registration or settle, so
+        it must not block or await: it spawns the snapshot write on the session
+        task group and returns at once. A child session (one with a ``job_id``)
+        does not persist a roster of its own — it is itself a leaf whose
+        transcript the PARENT already tracks — so the hook is a no-op there,
+        keeping a grandchild's churn off the child's transcript.
+        """
+        if self._disposed or self._job_id is not None:
+            return
+        self._spawn_background(self._persist_subagent_roster())
+
+    async def _persist_subagent_roster(self) -> None:
+        """Snapshot the task job rows AND the comms records to the transcript.
+
+        Both halves are needed and neither alone suffices. The job ROWS carry
+        what the subagent panel paints (label, status, model, usage, elapsed);
+        the comms RECORDS carry what ``hub op='resume'`` needs (the
+        ``job_id \u2192 session_dir`` mapping and how each child settled). They are
+        written together, newest-wins like every custom entry, so a resume reads
+        one coherent snapshot rather than two that drifted.
+
+        Only ``task`` rows are stored: ``bash`` jobs are host-local processes
+        that cannot outlive the process that spawned them, so persisting them
+        would only invite a resume to show a job it can never touch.
+        """
+        try:
+            rows = [
+                _subagent_job_row(job)
+                for job in self.jobs.list()
+                if getattr(job, "type", "") == "task"
+            ]
+            records = self._subagent_comms.snapshot() if self._subagent_comms is not None else []
+            # Nothing to record means no append: a session that never delegated
+            # must not pay a transcript write (and, at teardown, a wedged-mount
+            # timeout) for an empty roster it will never read back.
+            if not rows and not records:
+                return
+            await self._transcript.append_custom(
+                SUBAGENT_ROSTER_CUSTOM_TYPE,
+                {"jobs": rows, "records": records},
+            )
+        except Exception:  # noqa: BLE001 - persistence must never break a turn
+            logger.warning("could not persist subagent roster", exc_info=True)
+
+    async def _final_persist_snapshots(self) -> None:
+        """Write the last roster and todo snapshots at teardown, in order.
+
+        Split out so :meth:`dispose` can bound the pair with a single
+        ``wait_for``: both are transcript appends and neither may hang teardown.
+        """
+        await self._persist_subagent_roster()
+        await self._maybe_persist_todos()
+
+    def _load_subagent_roster(self) -> None:
+        """Rehydrate the subagent panel and the resume basis from disk.
+
+        Reads the newest snapshot and feeds each half to its owner: the comms
+        records to ``SubagentComms.restore`` (the resume basis) and the job rows
+        to ``AsyncJobManager.restore`` (the panel). Restoring the records
+        MINTS the comms instance if this session had not yet — a resumed session
+        that launched children last time is exactly one that needs it — so the
+        roster is populated before the first turn can ask for it.
+
+        Malformed rows are dropped individually rather than failing the whole
+        load: a resume that lost one child's row is far better than one that
+        booted with an empty panel because a single entry was unreadable.
+
+        A restored row has NO in-process page detail: the slim snapshot
+        projection (:func:`_subagent_job_row`) drops ``prompt``, ``result_text``
+        and ``trajectory``, so opening a restored child's full-page view shows
+        an empty body (the view folds those and handles ``None`` without
+        raising). That is the accepted tradeoff of not writing a child's full
+        output to the parent transcript on every roster move — the detail lives
+        in the CHILD's own transcript and is recovered by resuming or
+        ``hub op='peek'``-ing it, never by re-reading it here.
+        """
+        details = self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
+        if not details:
+            return
+        records = details.get("records") or []
+        if records:
+            # ``self.subagent_comms`` (the property) mints the instance on first
+            # use; restoring into it is what makes the children addressable.
+            try:
+                self.subagent_comms.restore(list(records))
+            except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
+                logger.warning("could not restore subagent records", exc_info=True)
+        rows: list[AsyncJob] = []
+        for raw in details.get("jobs") or []:
+            try:
+                rows.append(AsyncJob.model_validate(raw))
+            except Exception:
+                logger.warning("dropping malformed persisted subagent row: %r", raw)
+        if rows:
+            try:
+                self.jobs.restore(rows)
+            except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
+                logger.warning("could not restore subagent job rows", exc_info=True)
+
+    # -- todo list (resume) --------------------------------------------------
+
+    async def _maybe_persist_todos(self) -> None:
+        """Snapshot the todo list to the transcript when it moved this turn.
+
+        The todo tool keeps the live list in a process-local table, so a
+        transcript snapshot is the only durable copy a resume can read. Guarded
+        by the FULL-list fingerprint (the same one the continuation guardrail
+        compares): an unchanged list is one tuple comparison and no write, while
+        any init/add/done/block/drop lands a fresh newest-wins entry. Never
+        raises — a status write must not break a turn.
+        """
+        fingerprint = todo_fingerprint(self._session_id)
+        if fingerprint == self._persisted_todo_fingerprint:
+            return
+        if not fingerprint and self._persisted_todo_fingerprint is None:
+            # An empty list that was never persisted is the ordinary
+            # never-used-todos session: record nothing and, importantly, do
+            # not append an empty snapshot at teardown (which on a wedged mount
+            # would charge the dispose budget). The guard above already lets a
+            # list that went from populated back to empty through, because its
+            # persisted fingerprint is then non-None.
+            return
+        try:
+            await self._transcript.append_custom(
+                TODO_SNAPSHOT_CUSTOM_TYPE,
+                {"items": todo_snapshot(self._session_id)},
+            )
+            self._persisted_todo_fingerprint = fingerprint
+        except Exception:  # noqa: BLE001 - persistence must never break a turn
+            logger.warning("could not persist todo snapshot", exc_info=True)
+
+    def _load_todo_snapshot(self) -> None:
+        """Rehydrate the todo list from disk so the panel and guardrail return.
+
+        A child session shares no todo store with its parent (the store is keyed
+        by session id), so this is safe for both — a child simply finds no
+        snapshot under its own id and does nothing. The persisted fingerprint is
+        seeded from the restored list so the first post-resume turn does not
+        re-write a list that has not changed.
+        """
+        details = self._transcript.latest_custom(TODO_SNAPSHOT_CUSTOM_TYPE)
+        if not details:
+            return
+        items = details.get("items") or []
+        if items:
+            restore_todos(self._session_id, list(items))
+            self._persisted_todo_fingerprint = todo_fingerprint(self._session_id)
+
     # -- active model route (fallback persistence) ---------------------------
 
     async def _persist_active_route(self, primary: ModelSpec) -> None:
@@ -5075,6 +5355,28 @@ class Session:
                     await self._tg_stack.aclose()
                 self._tg_stack = None
             self._task_group = None
+            # Snapshot the roster and todos ONE last time, directly (the task
+            # group is closed, so ``_spawn_background`` no longer runs) and
+            # BEFORE ``jobs.dispose`` cancels the running children — a child
+            # cancelled by teardown settles ``cancelled``, and persisting after
+            # that would record a status the resume then offers to "resume"
+            # from a run the user only stopped by quitting. Persisting first
+            # captures each child as it actually stood at quit. Guarded so a
+            # write failure never blocks the rest of teardown. Skipped for a
+            # child session (it persists no roster of its own).
+            if self._job_id is None:
+                try:
+                    # Bounded like the conversation-name flush above: a snapshot
+                    # is a transcript append, and teardown must not hang on a
+                    # wedged mount or behind a lock a stuck writer holds. A lost
+                    # final snapshot is cheap — the per-turn and roster-change
+                    # snapshots already captured all but the last few
+                    # milliseconds — so the deadline favours proceeding.
+                    await asyncio.wait_for(
+                        self._final_persist_snapshots(), timeout=_NAME_FLUSH_TIMEOUT_S
+                    )
+                except (Exception, asyncio.TimeoutError):  # noqa: BLE001
+                    logger.warning("final roster/todo snapshot did not land", exc_info=True)
             await self.jobs.dispose()
             self._wake.dispose()
             # A shell receipt can be queued behind a turn that was just aborted.
