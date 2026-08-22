@@ -137,7 +137,7 @@ Switching models is a picker, not a config file — `/model` lists every model
 your signed-in providers offer, with fuzzy filtering:
 
 <p align="center">
-  <img src="./static/tui-model-picker.png" alt="The /model picker filtering across providers" width="720">
+  <img src="./static/tui-model-picker.png" alt="The /model picker with a fuzzy filter applied, showing context length and pricing per model" width="720">
 </p>
 
 Ask for parallel work and the agent delegates: the subagent dock shows each
@@ -153,7 +153,7 @@ Coming back later is `/resume` — a picker over your recent sessions, each
 with its title and age:
 
 <p align="center">
-  <img src="./static/tui-resume.png" alt="The /resume session picker listing recent conversations" width="720">
+  <img src="./static/tui-resume.png" alt="The /resume session picker listing recent conversations with titles, ages, and short ids" width="720">
 </p>
 
 And `/usage` answers the question every agent user has: how much provider
