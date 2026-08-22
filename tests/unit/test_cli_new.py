@@ -400,6 +400,64 @@ def test_credential_delete_command(tmp_home: Path) -> None:
     manager.set_credential.assert_called_once_with("TEST_API_KEY", "")
 
 
+def test_credential_update_ctrl_c_exits_130(tmp_home: Path, capsys) -> None:
+    """Ctrl-C at the prompt is a cancel, not a crash: exit 130 (SIGINT
+    convention), one quiet line, no stack-trace panel (item 4)."""
+    manager = MagicMock()
+    manager.prompt_for_credential.side_effect = KeyboardInterrupt
+    with patch("local_operator.cli.CredentialManager", return_value=manager):
+        args = argparse.Namespace(key="OPENAI_API_KEY")
+        assert credential_update_command(args) == 130
+    err = capsys.readouterr().err
+    assert "Cancelled." in err
+    assert "Traceback" not in err
+
+
+def test_credential_update_empty_input_exits_1_plain(tmp_home: Path, capsys) -> None:
+    """Empty/EOF input exits 1 with one plain line, ANSI stripped (item 4)."""
+    manager = MagicMock()
+    manager.prompt_for_credential.side_effect = ValueError(
+        "\033[1;31mOPENAI_API_KEY is required for this step.\033[0m"
+    )
+    with patch("local_operator.cli.CredentialManager", return_value=manager):
+        args = argparse.Namespace(key="OPENAI_API_KEY")
+        assert credential_update_command(args) == 1
+    err = capsys.readouterr().err
+    assert "is required for this step" in err
+    # The nested escape from the exception message is stripped.
+    assert "\033[1;31m" not in err
+
+
+def test_credential_update_unknown_key_warns(tmp_home: Path, capsys) -> None:
+    """A key the registry does not know gets a difflib suggestion but is still
+    stored (custom providers are legitimate) (item 8)."""
+    manager = MagicMock()
+    with patch("local_operator.cli.CredentialManager", return_value=manager):
+        args = argparse.Namespace(key="OPENAI_API_KY")  # typo
+        assert credential_update_command(args) == 0
+    err = capsys.readouterr().err
+    assert "not a known provider key" in err
+    assert "OPENAI_API_KEY" in err  # the suggestion
+
+
+def test_config_edit_rejects_unknown_key(tmp_home: Path, capsys) -> None:
+    """`config edit` validates against the defaults and rejects a typo with a
+    suggestion + exit 1, instead of silently writing junk (item 7)."""
+    args = argparse.Namespace(key="hostng", value="openai")
+    assert cli.config_edit_command(args) == 1
+    err = capsys.readouterr().err
+    assert "unknown configuration key" in err
+    assert "hosting" in err  # the suggestion
+
+
+def test_config_edit_accepts_known_key(tmp_home: Path) -> None:
+    manager = MagicMock()
+    with patch("local_operator.cli.ConfigManager", return_value=manager):
+        args = argparse.Namespace(key="hosting", value="openai")
+        assert cli.config_edit_command(args) == 0
+    manager.update_config.assert_called_once()
+
+
 def test_config_create_command(tmp_home: Path) -> None:
     manager = MagicMock()
     with patch("local_operator.cli.ConfigManager", return_value=manager):
@@ -491,7 +549,7 @@ def test_agents_delete_command_not_found() -> None:
     registry = MagicMock()
     registry.list_agents.return_value = []
     args = argparse.Namespace(name="Ghost", agent_id=None)
-    assert agents_delete_command(args, registry, Path(".")) == -1
+    assert agents_delete_command(args, registry, Path(".")) == 1
     registry.delete_agent.assert_not_called()
 
 
@@ -660,10 +718,10 @@ def test_main_management_command_dispatch(
 
 
 def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:
-    """Red-banner handling survives: any exception -> message + exit -1."""
+    """Red-banner handling survives: any exception -> message + exit 1."""
     with patch("local_operator.cli.ConfigManager", side_effect=Exception("Test error")):
         with patch("sys.argv", ["program"]):
-            assert main() == -1
+            assert main() == 1
     # STDERR: main() wraps the exec dispatch, so its error presenter must not
     # write to the `exec --json` data channel. Asserting the stream is the
     # point of the test now, not incidental.
@@ -694,6 +752,7 @@ def test_main_interactive_tty_uses_tui(
         theme_name: str = "dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         seen["theme"] = theme_name
         seen["session"] = await session_factory()
@@ -799,11 +858,17 @@ def test_yolo_parses_on_every_subcommand(parser: argparse.ArgumentParser, argv: 
 # --- CL-06: startup preflight ---------------------------------------------------
 
 
-def test_main_preflight_missing_hosting(
+def test_main_preflight_missing_hosting_headless(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """Interactive startup with no hosting configured prints the legacy
-    message shape and exits -1 BEFORE any turn (no session factory call)."""
+    """Non-tty startup with nothing configured prints the COMPLETE first-run
+    quickstart (hosting + model + key + commands) and exits 1 BEFORE any turn.
+
+    Item A1/U1: the fail-fast paths (non-tty, headless, exec) no longer die at
+    the first missing field with just "Hosting platform is not configured" —
+    they name everything missing at once so a scripted user fixes it in one
+    pass. The interactive TUI path takes the setup state instead (see
+    ``test_main_preflight_missing_hosting_tty_enters_setup``)."""
     called: dict[str, bool] = {"factory": False}
 
     async def fake_create_session(*args, **kwargs):
@@ -811,18 +876,70 @@ def test_main_preflight_missing_hosting(
         return MagicMock()
 
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    # Non-tty: no setup state is possible, so this stays fail-fast.
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program"]):
+        assert main() == 1
+    # stderr, matching its sibling _preflight_api_key: an error message belongs
+    # on the diagnostic channel regardless of which front end asked for it.
+    err = capsys.readouterr().err
+    assert "not configured yet" in err
+    # Every remedy named at once, not one field at a time.
+    assert "login <provider>" in err
+    assert "config edit hosting" in err
+    assert "config edit model_name" in err
+    assert "credential update" in err
+    assert called["factory"] is False
+
+
+def test_main_preflight_missing_hosting_tty_enters_setup(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tty + importable TUI + nothing configured -> the app OPENS (setup state)
+    instead of failing at preflight (item A1/U1 headline).
+
+    The session factory is still called: the TUI boots, the factory raises
+    HostingNotConfiguredError inside it, and the app's boot-failure handler
+    turns that into the guided setup state. What matters here is that main()
+    reached the TUI launch (return 0) rather than returning a preflight error."""
+    seen: dict[str, Any] = {}
+
+    async def fake_create_session(*args, **kwargs):
+        # The real factory would raise here; the app handles that. The point of
+        # this test is that main() got PAST preflight to the launch.
+        seen["factory_called"] = True
+        return object()
+
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+
+    fake_tui = types.ModuleType("local_operator.tui")
+
+    async def fake_run_tui(
+        session_factory,
+        theme_name: str = "dark",
+        provider_controller=None,
+        resume_factory=None,
+        on_config_changed=None,
+    ) -> int:
+        # Prove the setup-state plumbing reached the app: the reconciliation
+        # hook is wired so a first-run /login can take effect.
+        seen["on_config_changed"] = on_config_changed
+        return 0
+
+    setattr(fake_tui, "run_tui", fake_run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program"]):
-        assert main() == -1
-    # stderr, matching its sibling _preflight_api_key: an error message belongs
-    # on the diagnostic channel regardless of which front end asked for it.
-    err = capsys.readouterr().err
-    assert "Hosting platform is not configured." in err
-    assert called["factory"] is False
+        assert main() == 0
+    assert seen.get("on_config_changed") is not None
 
 
 def test_main_interactive_missing_api_key_warns_and_starts(
@@ -853,6 +970,7 @@ def test_main_interactive_missing_api_key_warns_and_starts(
         theme_name="dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         await session_factory()
         return 0
@@ -886,7 +1004,7 @@ def test_preflight_api_key_fatal_by_default(
     somewhere harder to read.
     """
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    assert cli._preflight_api_key("openai", _bare_credential_manager()) == -1
+    assert cli._preflight_api_key("openai", _bare_credential_manager()) == 1
     err = capsys.readouterr().err
     assert "OPENAI_API_KEY" in err and "Error" in err
 
@@ -941,6 +1059,7 @@ def test_main_preflight_env_key_passes(
         theme_name="dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         seen.setdefault("provider_controller", provider_controller)
         await session_factory()
@@ -977,6 +1096,7 @@ def test_tui_flag_forces_tui_on_non_tty(
         theme_name="dark",
         provider_controller=None,
         resume_factory=None,
+        on_config_changed=None,
     ) -> int:
         seen.setdefault("provider_controller", provider_controller)
         seen["ran"] = True

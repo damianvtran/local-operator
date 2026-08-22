@@ -304,3 +304,47 @@ def test_version_ordering(left, right, newer) -> None:
     from local_operator.config import _version_tuple
 
     assert (_version_tuple(left) > _version_tuple(right)) is newer
+
+
+# --- Malformed config handling (item 6) -------------------------------------
+
+
+def test_config_manager_malformed_yaml_backs_up_and_defaults(temp_config_dir, capsys):
+    """A YAML syntax error backs the file up to config.yml.bad and starts with
+    defaults instead of a raw traceback (item 6)."""
+    config_file = temp_config_dir / "config.yml"
+    config_file.write_text(": : not valid yaml [")
+    manager = ConfigManager(temp_config_dir)
+    # Degraded to defaults rather than crashing.
+    assert manager.get_config_value("hosting") == ""
+    # Backup name is `config.yml.bad.<timestamp>` so a second bad edit cannot
+    # clobber the first (round-1 CR-MINOR-3), hence the glob rather than an
+    # exact-name check.
+    assert list(temp_config_dir.glob("config.yml.bad.*"))
+    err = capsys.readouterr().err
+    assert "could not parse" in err
+
+
+def test_config_manager_non_mapping_top_level_backs_up(temp_config_dir, capsys):
+    """A config whose top level is a list/scalar is rejected the same way as a
+    parse error (item 6)."""
+    config_file = temp_config_dir / "config.yml"
+    config_file.write_text("- just\n- a\n- list\n")
+    manager = ConfigManager(temp_config_dir)
+    assert manager.get_config_value("hosting") == ""
+    assert list(temp_config_dir.glob("config.yml.bad.*"))
+    err = capsys.readouterr().err
+    assert "not a valid configuration mapping" in err
+
+
+def test_config_dir_created_0700(tmp_path):
+    """A config dir the manager CREATES is 0700 (item 17) — never chmod an
+    existing one."""
+    import os
+
+    if os.name != "posix":
+        pytest.skip("permission test is Unix-only")
+    fresh = tmp_path / "made"
+    manager = ConfigManager(fresh)
+    manager._write_config(vars(manager.config))
+    assert fresh.stat().st_mode & 0o077 == 0

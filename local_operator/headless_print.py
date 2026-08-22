@@ -122,6 +122,9 @@ class PrintRenderer:
         self.failed: bool = False
         self.last_assistant_text: str = ""
         self._streaming_assistant: bool = False
+        #: The attached session, held so an auth-error line can name the active
+        #: provider in its recovery hint. ``None`` until :meth:`attach`.
+        self._session: SessionProtocol | None = None
 
     # -- subscription entry point -------------------------------------------
 
@@ -138,6 +141,7 @@ class PrintRenderer:
 
     def attach(self, session: SessionProtocol) -> Callable[[], None]:
         """Subscribe to a session, returning the unsubscribe callable."""
+        self._session = session
         return session.subscribe(self.handle)
 
     # -- internals -----------------------------------------------------------
@@ -260,8 +264,25 @@ class PrintRenderer:
                 # BEFORE ``_track_outcome`` ran, so the process printed a
                 # traceback instead of the error line and exited 0. The text is
                 # data, never markup. (Review R1-1.)
+                #
+                # Append the local recovery to an auth-classified failure so the
+                # headless user learns they can `local-operator login` / rotate
+                # the key, not just the provider's opaque refusal. No-op for
+                # every other kind. Provider is the first segment of the active
+                # model label.
+                from local_operator.providers.failover import append_auth_recovery
+
+                provider = ""
+                if self._session is not None:
+                    try:
+                        provider = (self._session.model_label or "").partition("/")[0]
+                    except Exception:
+                        provider = ""
                 self.console.print(
-                    f"Error: {event.error}", style="red", highlight=False, markup=False
+                    f"Error: {append_auth_recovery(event.error, provider or None)}",
+                    style="red",
+                    highlight=False,
+                    markup=False,
                 )
             elif event.aborted:
                 self.console.print("[red]aborted[/red]", highlight=False)

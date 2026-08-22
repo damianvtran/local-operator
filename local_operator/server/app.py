@@ -71,11 +71,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize on startup by setting up the credential and config managers
     config_dir = Path.home() / ".local-operator"
-    agent_home_dir = Path.home() / "local-operator-home"
+    # Honour LOCAL_OPERATOR_HOME and create it at the point of use, matching the
+    # CLI session path. The literal ``~/local-operator-home`` here ignored the
+    # override, so a relocated home still had a stray workspace created in the
+    # real home directory.
+    from local_operator.paths import ensure_agent_home_dir
 
-    # Create the agent home directory if it doesn't exist
-    if not agent_home_dir.exists():
-        agent_home_dir.mkdir(parents=True, exist_ok=True)
+    ensure_agent_home_dir()
 
     # Set up the subprocess environment for accessing shell commands
     setup_cross_platform_environment()

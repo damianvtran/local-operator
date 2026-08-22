@@ -15,8 +15,11 @@ Rewrite constraints (docs/REWRITE.md section E + backward-compat contracts):
 - No module-level import of textual / providers / session internals / TUI:
   those are lazy-imported at the point of use so ``import local_operator.cli``
   stays cheap and cannot break while parallel rewrite streams are mid-flight.
-- Exit codes preserved: 0 success, -1 legacy error banner; ``exec`` returns
-  0/1 per the README contract.
+- Exit codes: 0 success, 1 on error; ``exec`` returns 0/1 per the README
+  contract. (Failure paths previously returned -1, which a shell reports as
+  255 — colliding with the xargs/ssh "command not found" sentinel and
+  contradicting the exec 0/non-zero contract. Item A13 changed them to 1; a
+  quiet cancel returns 130, the SIGINT convention.)
 
 Example Usage:
     local-operator --hosting deepseek --model deepseek-chat
@@ -152,9 +155,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
-        "claude-3-5-sonnet-20240620, moonshot-v1-32k, qwen-plus, gemini-2.0-flash, "
-        "mistral-large-latest, test-model, deepseek/deepseek-chat)",
+        help="Model to use (e.g., gpt-4o, claude-3-5-sonnet-latest, deepseek-chat, "
+        "grok-3, glm-5.3, gemini-2.0-flash-001, qwen-plus, moonshot-v1-32k, "
+        "mistral-large-latest, deepseek/deepseek-chat). Optional: when omitted, "
+        "the provider's default model is used.",
     )
     parser.add_argument(
         "--run-in",
@@ -604,8 +608,53 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def credential_update_command(args: argparse.Namespace) -> int:
+    """Prompt for and store one credential. Exit 0/1/130.
+
+    The prompt used to let three ordinary interruptions escape as tracebacks:
+    Ctrl-C raised a bare ``KeyboardInterrupt`` all the way out, and an empty
+    value / closed stdin raised a ``ValueError`` whose message carried nested
+    ANSI escapes that the generic red-banner handler in ``main`` then wrapped in
+    a stack-trace panel. None of the three is a program fault \u2014 they are the
+    user cancelling or mis-entering \u2014 so each gets one plain line and a clean
+    exit code: 130 for a cancel (the shell convention for SIGINT), 1 otherwise.
+    """
+    from local_operator.ansi import strip_control_sequences
+    from local_operator.cli_style import ERROR, WARNING, paint
+    from local_operator.providers.registry import PROVIDER_REGISTRY, env_key_name
+
+    # Warn when the key is not one the registry knows, with the closest match \u2014
+    # a typo'd ``OPENAI_API_KY`` otherwise stores silently and the provider
+    # never sees it. Arbitrary keys stay allowed (custom providers are
+    # legitimate); this is advice, not a gate.
+    known_keys = {name for p in PROVIDER_REGISTRY if (name := env_key_name(p.id))}
+    if args.key not in known_keys:
+        import difflib
+
+        close = difflib.get_close_matches(args.key, sorted(known_keys), n=1)
+        hint = f" Did you mean {close[0]}?" if close else ""
+        print(
+            paint(
+                f"Warning: '{args.key}' is not a known provider key.{hint} " "Storing it anyway.",
+                WARNING,
+                stream=sys.stderr,
+            ),
+            file=sys.stderr,
+        )
+
     credential_manager = CredentialManager(config_dir())
-    credential_manager.prompt_for_credential(args.key, reason="update requested")
+    try:
+        credential_manager.prompt_for_credential(args.key, reason="update requested")
+    except KeyboardInterrupt:
+        # 130 is the shell's SIGINT convention; the message is one quiet line,
+        # not the red stack-trace panel the generic handler would have drawn.
+        print("\nCancelled.", file=sys.stderr)
+        return 130
+    except (ValueError, EOFError) as exc:
+        # Empty input or a closed stdin. Strip any control sequences from the
+        # message before printing \u2014 the presenter owns the colour, and a nested
+        # escape from deeper in the stack would otherwise repaint the line.
+        print(paint(strip_control_sequences(str(exc)), ERROR, stream=sys.stderr), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -630,14 +679,28 @@ def config_create_command() -> int:
 
 def config_open_command() -> int:
     """Open the configuration file using the default system editor."""
+    from local_operator.cli_style import ERROR, paint
+
     config_path = config_dir() / "config.yml"
     if not config_path.exists():
         print(
-            "\n\033[1;31mError: Configuration file does not exist.  Create one with "
-            "`config create`.\033[0m"
+            paint(
+                "Error: Configuration file does not exist.  Create one with `config create`.",
+                ERROR,
+                stream=sys.stderr,
+            ),
+            file=sys.stderr,
         )
-        return -1
+        return 1
 
+    # Try the platform GUI opener first, then fall back to $VISUAL/$EDITOR. The
+    # GUI openers do not exist on a headless/SSH Linux box (there is no
+    # xdg-open without a desktop session), and there `config open` used to fail
+    # outright — yet that is exactly the environment where a terminal editor is
+    # the ONLY way in. Only spawn an interactive editor when stdout is a tty:
+    # an editor launched from a pipe or a non-interactive shell has no terminal
+    # to draw in and would hang or error.
+    gui_error: Exception | None = None
     try:
         if platform.system() == "Windows":
             subprocess.run(["start", str(config_path)], shell=True, check=True)
@@ -647,14 +710,65 @@ def config_open_command() -> int:
             subprocess.run(["xdg-open", str(config_path)], check=True)
         print(f"Opened configuration file at {config_path}")
         return 0
-    except Exception as e:
-        print(f"\n\033[1;31mError opening configuration file: {e}\033[0m")
-        return -1
+    except Exception as e:  # noqa: BLE001 — GUI opener absent or failed
+        gui_error = e
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if editor and sys.stdout.isatty():
+        try:
+            # ``shlex.split`` so a value like ``code --wait`` or ``emacs -nw``
+            # is honoured, not treated as one impossible executable name.
+            import shlex
+
+            subprocess.run([*shlex.split(editor), str(config_path)], check=True)
+            print(f"Opened configuration file at {config_path}")
+            return 0
+        except Exception as e:  # noqa: BLE001 — editor missing or exited non-zero
+            gui_error = e
+
+    print(
+        paint(f"Error opening configuration file: {gui_error}", ERROR, stream=sys.stderr),
+        file=sys.stderr,
+    )
+    print(
+        f"Set $VISUAL or $EDITOR, or edit the file directly at {config_path}.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def config_edit_command(args: argparse.Namespace) -> int:
     """Edit a configuration value."""
+    from local_operator.cli_style import ERROR, paint
+
     config_manager = ConfigManager(config_dir())
+
+    # Validate the key against the shipped defaults BEFORE writing. The old
+    # ``except KeyError`` was dead code \u2014 ``update_config`` calls
+    # ``Config.set_value`` which is a plain ``dict.__setitem__`` and never
+    # raises for an unknown key \u2014 so a typo like ``config edit hostng radient``
+    # printed "Successfully updated hostng" and wrote a junk key the app never
+    # reads. difflib names the closest real key so the fix is one glance away.
+    from local_operator.config import DEFAULT_CONFIG
+
+    valid_keys = set(DEFAULT_CONFIG.values.keys())
+    if args.key not in valid_keys:
+        import difflib
+
+        close = difflib.get_close_matches(args.key, sorted(valid_keys), n=1)
+        hint = f" Did you mean '{close[0]}'?" if close else ""
+        print(
+            paint(
+                f"Error: unknown configuration key: '{args.key}'.{hint}", ERROR, stream=sys.stderr
+            ),
+            file=sys.stderr,
+        )
+        print(
+            "Run `local-operator config list` to see the available keys.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         # Parse the value to the appropriate type
         value = args.value
@@ -684,12 +798,14 @@ def config_edit_command(args: argparse.Namespace) -> int:
 
         print(f"Successfully updated {args.key} to {value}")
         return 0
-    except KeyError:
-        print(f"\n\033[1;31mError: Invalid configuration key: {args.key}\033[0m")
-        return -1
     except Exception as e:
-        print(f"\n\033[1;31mError updating configuration: {e}\033[0m")
-        return -1
+        # 1, not -1: a shell sees -1 as 255, which collides with the
+        # xargs/ssh "command not found" sentinel and contradicts the
+        # documented 0/non-zero exec contract (item A13).
+        print(
+            paint(f"Error updating configuration: {e}", ERROR, stream=sys.stderr), file=sys.stderr
+        )
+        return 1
 
 
 def config_list_command() -> int:
@@ -758,7 +874,7 @@ def mobile_command(args: argparse.Namespace) -> int:
             print("  it is never printed here, so it cannot leak into a transcript.")
             return 0
         print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
-        return -1
+        return 1
 
     if command == "status":
         result = mobile_install.status()
@@ -784,7 +900,7 @@ def mobile_command(args: argparse.Namespace) -> int:
         result = mobile_install.service_action(command)
         if not result["ok"]:
             print(f"\n\033[1;31m{result['error']}\033[0m")
-            return -1
+            return 1
         print(f"mobile daemon {command} ok")
         return 0
 
@@ -835,7 +951,7 @@ def mobile_command(args: argparse.Namespace) -> int:
         return 0
 
     print("usage: lop mobile {install|status|start|stop|restart|logs|password|uninstall|serve}")
-    return -1
+    return 1
 
 
 def serve_command(host: str, port: int, reload: bool) -> int:
@@ -853,7 +969,7 @@ def serve_command(host: str, port: int, reload: bool) -> int:
             f"\n\033[1;31m{missing_extra_error('server', 'The HTTP API server')}\033[0m",
             file=sys.stderr,
         )
-        return -1
+        return 1
 
     print(f"Starting server at http://{host}:{port}")
     if reload:
@@ -927,10 +1043,10 @@ def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
             name = input("\033[1;36mEnter name for new agent: \033[0m").strip()
             if not name:
                 print("\n\033[1;31mError: Agent name cannot be empty\033[0m")
-                return -1
+                return 1
         except (KeyboardInterrupt, EOFError):
             print("\n\033[1;31mAgent creation cancelled\033[0m")
-            return -1
+            return 1
 
     from local_operator.agents import AgentEditFields  # lazy: heavy module
 
@@ -1002,7 +1118,7 @@ def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
         )
     except ValueError as exc:
         print(f"\n\033[1;31mError: {exc}\033[0m")
-        return -1
+        return 1
     print("\n\033[1;32m╭─ Created New Team ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Name: {team.name}\033[0m")
     print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
@@ -1016,7 +1132,7 @@ def teams_show_command(name: str, team_registry: Any) -> int:
     team = team_registry.get_team_by_name(name)
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
-        return -1
+        return 1
     print(f"\n\033[1;32m╭─ Team {team.name} ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
     if team.description:
@@ -1041,7 +1157,7 @@ def teams_delete_command(name: str, team_registry: Any) -> int:
     team = team_registry.get_team_by_name(name)
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
-        return -1
+        return 1
     team_registry.delete_team(team.id)
     print(f"\n\033[1;32mSuccessfully deleted team: {name}\033[0m")
     return 0
@@ -1059,7 +1175,7 @@ def agents_delete_command(
         matching_agents = [a for a in agents if a.name == name]
         if not matching_agents:
             print(f"\n\033[1;31mError: No agent found with name: {name}\033[0m")
-            return -1
+            return 1
 
         agent = matching_agents[0]
         agent_registry.delete_agent(agent.id)
@@ -1073,7 +1189,7 @@ def agents_delete_command(
         api_key = credential_manager.get_credential("RADIENT_API_KEY")
         if not api_key:
             print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
-            return -1
+            return 1
         config_manager = ConfigManager(config_dir)
         base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
         radient_client = RadientClient(api_key=api_key, base_url=base_url)
@@ -1086,10 +1202,10 @@ def agents_delete_command(
             return 0
         except Exception as e:
             print(f"\n\033[1;31mError deleting agent from Radient: {e}\033[0m")
-            return -1
+            return 1
     else:
         print("\n\033[1;31mError: Must provide --name or --id for delete\033[0m")
-        return -1
+        return 1
 
 
 # --- Additive subcommand handlers (rewrite) --------------------------------
@@ -1114,7 +1230,7 @@ def login_command(args: argparse.Namespace) -> int:
         from local_operator.providers.auth_cli import run_login
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
-        return -1
+        return 1
     auth_store, credential_manager = _build_auth_stack(config_dir())
     try:
         return run_login(getattr(args, "provider", None), credential_manager, auth_store)
@@ -1128,7 +1244,7 @@ def logout_command(args: argparse.Namespace) -> int:
         from local_operator.providers.auth_cli import run_logout
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
-        return -1
+        return 1
     auth_store, _credential_manager = _build_auth_stack(config_dir())
     try:
         return run_logout(args.provider, auth_store)
@@ -1142,7 +1258,7 @@ def login_status_command() -> int:
         from local_operator.providers.auth_cli import list_logins
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
-        return -1
+        return 1
     auth_store, credential_manager = _build_auth_stack(config_dir())
     try:
         return list_logins(auth_store, credential_manager)
@@ -1224,7 +1340,7 @@ def mcp_command(args: argparse.Namespace) -> int:
         from local_operator.mcp import config as mcp_config
     except ImportError:
         print("\n\033[1;31mError: MCP support is not available in this build\033[0m")
-        return -1
+        return 1
 
     if args.mcp_command == "list":
         servers = mcp_config.list_effective_servers(Path.cwd())
@@ -1242,7 +1358,7 @@ def mcp_command(args: argparse.Namespace) -> int:
         for item in getattr(args, "server_env", None) or []:
             if "=" not in item:
                 print(f"\n\033[1;31mError: --env expects KEY=VALUE, got: {item}\033[0m")
-                return -1
+                return 1
             key, value = item.split("=", 1)
             env[key] = value
         return mcp_config.add_server(
@@ -1275,7 +1391,7 @@ def mcp_command(args: argparse.Namespace) -> int:
         return mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
 
     print(f"\n\033[1;31mError: Invalid mcp command: {args.mcp_command}\033[0m")
-    return -1
+    return 1
 
 
 # --- Session factory facade -------------------------------------------------
@@ -1319,7 +1435,7 @@ def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
             f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m",
             file=sys.stderr,
         )
-        return -1
+        return 1
     os.chdir(run_in_path)
     # These are OPERATOR notices, not data: they must go to stderr so they
     # never interleave into the `exec --json` event stream on stdout.
@@ -1343,10 +1459,29 @@ async def _run_headless_repl(
     stderr, Ctrl+C aborts the running turn (not the REPL), Ctrl+D/EOF exits.
     """
     import asyncio
+    import logging
 
     from rich.console import Console
 
     from local_operator.headless_print import PrintRenderer
+
+    # Raise the console threshold to WARNING for the REPL. configure_cli_logging
+    # pins the root logger at INFO, and the headless REPL — unlike the TUI,
+    # which wraps its whole run in file_logging() — prints straight to the
+    # terminal, so httpx's one-INFO-line-per-request and every other INFO record
+    # leaked into the transcript BEFORE the first prompt and between turns. The
+    # TUI's remedy (detach console handlers) is wrong here because the REPL's
+    # own output IS console output; lifting the level keeps its prints while
+    # dropping the library chatter. WARNING and above still surface — a genuine
+    # problem the user needs to see is not INFO.
+    #
+    # The noisy HTTP-client loggers are raised EXPLICITLY, not just via the root:
+    # configure_cli_logging pins each of them to INFO by name, and a child logger
+    # with its own level ignores the root's — so raising only the root left
+    # httpx's per-request line leaking. Same list configure_cli_logging quietens.
+    logging.getLogger().setLevel(logging.WARNING)
+    for _noisy in ("requests", "urllib3", "httpx", "httpcore"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     console = Console(stderr=True, highlight=False)
     session = await create_session(
@@ -1392,6 +1527,7 @@ def _preflight_hosting_model(
     args: argparse.Namespace,
     *,
     require_api_key: bool = True,
+    allow_setup_state: bool = False,
 ) -> int | None:
     """Startup preflight (CL-06): resolve hosting/model and verify that a
     credential source exists BEFORE any turn runs.
@@ -1419,25 +1555,91 @@ def _preflight_hosting_model(
     resolution errors stay fatal on every path: without a hosting there is no
     session to build and nothing for a login to fix.
 
-    Returns -1 (already printed) on failure, None to continue. All engine
+    ``allow_setup_state=True`` is the first-run onboarding gate (item A1/U1):
+    when NO hosting can be resolved at all AND we are on the interactive TUI
+    path (tty + TUI enabled), the app is allowed to open in a SETUP STATE
+    instead of dying at preflight. The welcome splash's ``/login`` affordance
+    and the ``/model`` / ``/provider`` surfaces are the guided setup — there is
+    no separate wizard. Every OTHER path (headless REPL, exec, non-tty) keeps
+    fail-fast, and does it with a COMPLETE quickstart that names everything
+    missing at once rather than one field at a time.
+
+    Returns 1 (already printed) on failure, None to continue. All engine
     imports stay lazy so this never weights down parser-only paths.
     """
-    try:
-        from local_operator.session_factory import resolve_hosting_model
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        resolve_hosting_model,
+    )
 
+    try:
         hosting, _model_name = resolve_hosting_model(current_agent, args, config_manager)
+    except HostingNotConfiguredError:
+        # No hosting resolved. On the interactive TUI path this is not an error:
+        # the app opens in a setup state so the user can `/login` from inside it.
+        if allow_setup_state:
+            return None
+        # Every other path keeps fail-fast, but with the WHOLE quickstart at
+        # once (item A1/U1) — the old message named only "Hosting platform is
+        # not configured" and the user fixed it one error at a time.
+        _print_first_run_quickstart(credential_manager)
+        return 1
     except ValueError as exc:
-        # stderr on principle, not because this path is currently reachable from
-        # `exec --json`: it is an ERROR message, and its sibling
-        # `_preflight_api_key` two functions down already writes there. Keeping
-        # the two consistent is what stops the next person wiring this into the
-        # exec route from reintroducing a stdout leak.
-        print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
-        return -1
+        # A model-resolution error (hosting set, no default known): fatal on
+        # every path, one line. stderr on principle, not because this path is
+        # currently reachable from `exec --json`: it is an ERROR message, and
+        # its sibling `_preflight_api_key` two functions down already writes
+        # there. Keeping the two consistent is what stops the next person wiring
+        # this into the exec route from reintroducing a stdout leak.
+        from local_operator.cli_style import ERROR, paint
+
+        print(paint(f"Error: {exc}", ERROR, stream=sys.stderr), file=sys.stderr)
+        return 1
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
 
     return _preflight_api_key(hosting, credential_manager, require_key=require_api_key)
+
+
+def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
+    """One complete message naming hosting, model AND key at once (item A1/U1).
+
+    The fail-fast paths (headless REPL, exec, non-tty) reach this when nothing
+    is configured. The point of naming all three missing pieces together, with
+    the exact commands, is that a scripted or headless user fixes the whole
+    thing in one pass instead of rerunning into "hosting missing", then "model
+    missing", then "key missing" \u2014 the one-error-at-a-time treadmill the
+    interactive setup state exists to avoid and this message is the non-tty
+    equivalent of.
+    """
+    from local_operator.cli_style import ERROR, INFO, paint
+
+    print(
+        paint(
+            "Error: Local Operator is not configured yet \u2014 no hosting provider, "
+            "model, or credential is set.",
+            ERROR,
+            stream=sys.stderr,
+        ),
+        file=sys.stderr,
+    )
+    print(
+        paint(
+            "Set it up with (pick a provider, e.g. openai / anthropic / deepseek):\n"
+            "  local-operator login <provider>          "
+            "# stores the key AND sets hosting + a default model\n"
+            "or configure the pieces individually:\n"
+            "  local-operator config edit hosting <provider>\n"
+            "  local-operator config edit model_name <model>\n"
+            "  local-operator credential update <PROVIDER_API_KEY>\n"
+            "or pass them per-run with the --hosting and --model flags.\n"
+            "On an interactive terminal, just run `local-operator` and log in "
+            "from the setup screen.",
+            INFO,
+            stream=sys.stderr,
+        ),
+        file=sys.stderr,
+    )
 
 
 def _preflight_api_key(
@@ -1493,7 +1695,19 @@ def _preflight_api_key(
     if api_key:
         return None
 
-    key_name = definition.env_keys if isinstance(definition.env_keys, str) else "API key"
+    from local_operator.cli_style import ERROR, WARNING, paint
+    from local_operator.providers.registry import env_key_name
+
+    # ``env_key_name`` returns None for a CALLABLE env_keys resolver (Anthropic
+    # picks between ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_API_KEY, so there is no
+    # single var to name). The old code fell back to the literal string "API
+    # key" and interpolated it into the command template, producing the invalid
+    # advice `credential update API key`. Only offer `credential update <NAME>`
+    # when there is a real env var name; otherwise recommend `login` only.
+    key_name = env_key_name(canonical)
+    credential_hint = f", `local-operator credential update {key_name}`" if key_name else ""
+    env_hint = f", or set {key_name} in the environment" if key_name else ""
+
     if not require_key:
         # Interactive start: name the fact and the remedies, then let the app
         # come up. `/login` is scoped to the TUI because the headless REPL has
@@ -1501,24 +1715,31 @@ def _preflight_api_key(
         # line stays visible on stderr (the TUI repaints over it, but its
         # splash carries the same warning).
         print(
-            f"\n\033[1;33mWarning: no credentials are configured for hosting "
-            f"platform '{hosting}'. Starting anyway — run `/login {canonical}` "
-            f"in the TUI, `local-operator login {canonical}` from a shell, or "
-            f"set {key_name} in the environment.\033[0m",
+            paint(
+                f"Warning: no credentials are configured for hosting platform "
+                f"'{hosting}'. Starting anyway — run `/login {canonical}` in the "
+                f"TUI, `local-operator login {canonical}` from a shell{env_hint}.",
+                WARNING,
+                stream=sys.stderr,
+            ),
             file=sys.stderr,
         )
         return None
     # stderr: this fires on every fresh install and every typo'd --hosting,
     # i.e. it is the single most common `exec --json` failure, and a coloured
     # non-JSON line on stdout breaks the consumer it is trying to inform.
+    subject = key_name if key_name else "an API key"
     print(
-        f"\n\033[1;31mError: {key_name} is required for hosting platform "
-        f"'{hosting}' but is not configured. Set it via `local-operator "
-        f"credential update {key_name}`, the environment, or `local-operator "
-        f"login {canonical}`.\033[0m",
+        paint(
+            f"Error: {subject} is required for hosting platform '{hosting}' but "
+            f"is not configured. Set it via `local-operator login {canonical}`"
+            f"{credential_hint}, or the environment.",
+            ERROR,
+            stream=sys.stderr,
+        ),
         file=sys.stderr,
     )
-    return -1
+    return 1
 
 
 #: Third-party modules the `server` extra provides. Used to decide whether a
@@ -1642,8 +1863,17 @@ def main() -> int:
         parser = build_cli_parser()
         args = parser.parse_args()
 
-        # Set up the subprocess environment early
-        setup_cross_platform_environment()
+        # Prime the login-shell PATH only on paths that actually spawn
+        # subprocess work: the interactive session, exec, serve and mobile all
+        # run shell commands whose PATH must match a login terminal's, but
+        # `config list`, `credential`, `login`, `agents` and the like never
+        # spawn a tool — yet every one of them used to pay a full login-shell
+        # round-trip (`$SHELL -l -c 'echo $PATH'`) on startup. The helper keeps
+        # a per-process cache, so a session that later needs it still primes at
+        # most once. ``None`` is the bare interactive launch.
+        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile"})
+        if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
+            setup_cross_platform_environment()
 
         # Resolve `--resume` HERE, before anything is started. Left to the
         # session factory it surfaces inside the TUI as "session failed to
@@ -1693,11 +1923,12 @@ def main() -> int:
         # own env config and the session factory does the same lazily — a
         # dead local would only invite drift.
         base_dir = config_dir()
-        agent_home_dir = Path.home() / "local-operator-home"
-
-        # Create the agent home directory if it doesn't exist
-        if not agent_home_dir.exists():
-            agent_home_dir.mkdir(parents=True, exist_ok=True)
+        # The agent home is NO LONGER created here. Creating it unconditionally
+        # before dispatch meant `config list`, `login`, `--version` and every
+        # other non-session subcommand created a workspace directory they never
+        # touch, and it hardcoded ~/local-operator-home while ignoring any
+        # override. It is now created lazily by the paths that actually run a
+        # task (session/exec/serve start), through paths.ensure_agent_home_dir.
 
         if args.subcommand == "credential":
             if args.credential_command == "update":
@@ -1741,7 +1972,7 @@ def main() -> int:
                     print(
                         "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
                     )
-                    return -1
+                    return 1
                 config_manager = ConfigManager(base_dir)
                 base_url = config_manager.get_config_value(
                     "radient_base_url", "https://api.radienthq.com"
@@ -1754,17 +1985,17 @@ def main() -> int:
                     agent = agent_registry.get_agent_by_name(args.name)
                     if not agent:
                         print(f"\n\033[1;31mError: No agent found with name: {args.name}\033[0m")
-                        return -1
+                        return 1
                 elif getattr(args, "id", None):
                     try:
                         agent = agent_registry.get_agent(args.id)
                         agent_id_to_overwrite = args.id
                     except KeyError:
                         print(f"\n\033[1;31mError: No agent found with ID: {args.id}\033[0m")
-                        return -1
+                        return 1
                 else:
                     print("\n\033[1;31mError: Must provide --name or --id for push\033[0m")
-                    return -1
+                    return 1
                 zip_path, _ = agent_registry.export_agent(agent.id)
                 try:
                     agent_id = agent_registry.upload_agent_to_radient(
@@ -1783,7 +2014,7 @@ def main() -> int:
                     return 0
                 except Exception as e:
                     print(f"\n\033[1;31mError pushing agent to Radient: {e}\033[0m")
-                    return -1
+                    return 1
             elif args.agents_command == "pull":
                 # Pull agent from Radient
                 from local_operator.clients.radient import RadientClient  # lazy
@@ -1806,7 +2037,7 @@ def main() -> int:
                     return 0
                 except Exception as e:
                     print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
-                    return -1
+                    return 1
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "teams":
@@ -1871,19 +2102,18 @@ def main() -> int:
                     hosting, _model = resolve_hosting_model_dry(exec_args)
                 except ValueError as exc:
                     # stderr: this is the FOREGROUND `exec --json` path, so
-                    # stdout is the event stream. The byte-identical twins in
-                    # exec_mode._spawn_background were fixed earlier and these
-                    # were missed — the flag combination that reaches them
-                    # (`exec --json` with a bad or absent hosting/model) is the
-                    # most likely one to be scripted.
+                    # stdout is the event stream. Return 1 (not -1) so the
+                    # scripted `exec --json` case exits with a clean non-zero;
+                    # the byte-identical twins in exec_mode._spawn_background
+                    # follow the same contract.
                     print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
-                    return -1
+                    return 1
                 except Exception as exc:  # noqa: BLE001
                     print(
                         f"\n\033[1;31mError: preflight failed: {exc}\033[0m",
                         file=sys.stderr,
                     )
-                    return -1
+                    return 1
                 key_result = _preflight_api_key(hosting, CredentialManager(base_dir))
                 if key_result is not None:
                     return key_result
@@ -1949,7 +2179,7 @@ def main() -> int:
                 else:
                     # This case should logically not happen
                     print("\n\033[1;31mError: Failed to create or retrieve agent.\033[0m")
-                    return -1
+                    return 1
 
         # Legacy behavior: the auto-save config value persists interactive
         # sessions via the registry's autosave agent (exec is excluded —
@@ -1957,6 +2187,46 @@ def main() -> int:
         auto_save_enabled = config_manager.get_config_value("auto_save_conversation", False)
         if auto_save_enabled:
             args.train = True
+
+        # Interactive path: full-screen TUI when stdout is a tty and not
+        # disabled; plain headless REPL otherwise. ``--tui`` (CL-13) forces
+        # the TUI even when stdout is not a tty — with a clear error when
+        # that is impossible.
+        #
+        # Decided BEFORE the preflight (it used to come after) because the
+        # preflight now needs the answer: only the TUI path may open in a
+        # first-run setup state instead of failing, so ``use_tui`` gates that.
+        force_tui = bool(getattr(args, "tui", False))
+        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
+        run_tui = None
+        if use_tui:
+            try:
+                from local_operator.tui import run_tui  # lazy: textual
+            except ImportError:
+                run_tui = None
+                if force_tui:
+                    # Forced but impossible: surface WHY, don't silently fall
+                    # back to the plain REPL (the user asked for the TUI).
+                    from local_operator.cli_style import ERROR, paint
+
+                    print(
+                        paint(
+                            "Error: the TUI is not available in this build/install "
+                            "(missing 'local_operator.tui'); remove --tui to use the "
+                            "plain REPL.",
+                            ERROR,
+                            stream=sys.stderr,
+                        ),
+                        file=sys.stderr,
+                    )
+                    return 1
+                use_tui = False
+
+        # Whether the app can open in a first-run setup state: only when the
+        # full-screen TUI is actually going to run, since the splash's `/login`
+        # affordance is the setup UI. The headless REPL and every non-tty path
+        # (piped stdout, `--no-tui`) keep fail-fast with the complete quickstart.
+        setup_state_ok = bool(use_tui and run_tui is not None)
 
         # Startup preflight (CL-06): hosting/model resolution fails fast with
         # the legacy message shape BEFORE any turn (the factory raises the
@@ -1972,32 +2242,10 @@ def main() -> int:
             current_agent,
             args,
             require_api_key=False,
+            allow_setup_state=setup_state_ok,
         )
         if preflight_result is not None:
             return preflight_result
-
-        # Interactive path: full-screen TUI when stdout is a tty and not
-        # disabled; plain headless REPL otherwise. ``--tui`` (CL-13) forces
-        # the TUI even when stdout is not a tty — with a clear error when
-        # that is impossible.
-        force_tui = bool(getattr(args, "tui", False))
-        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
-        run_tui = None
-        if use_tui:
-            try:
-                from local_operator.tui import run_tui  # lazy: textual
-            except ImportError:
-                run_tui = None
-                if force_tui:
-                    # Forced but impossible: surface WHY, don't silently fall
-                    # back to the plain REPL (the user asked for the TUI).
-                    print(
-                        "\n\033[1;31mError: the TUI is not available in this "
-                        "build/install (missing 'local_operator.tui'); remove "
-                        "--tui to use the plain REPL.\033[0m"
-                    )
-                    return -1
-                use_tui = False
 
         # asyncio is imported HERE, not at module scope. It is the heaviest
         # single item on the CLI's import graph (34.4 ms, +6.5 MB RSS, +77
@@ -2038,7 +2286,16 @@ def main() -> int:
                 # disabling every provider slash command while the app still
                 # starts cleanly. functools.partial pins it by name so a future
                 # signature change cannot re-introduce that silent failure.
-                tui_entry = functools.partial(run_tui, provider_controller=tui_controller)
+                # ``on_config_changed`` re-reads config.yml into THIS manager
+                # after the app's first-run ``/login`` writes hosting/model to
+                # disk. The session factory closes over this exact instance, so
+                # without the reload the post-login rebuild would resolve the
+                # same empty config and bounce back into the setup state.
+                tui_entry = functools.partial(
+                    run_tui,
+                    provider_controller=tui_controller,
+                    on_config_changed=config_manager.reload,
+                )
 
                 # ``/resume <id>`` in the TUI needs a factory that boots an
                 # ARBITRARY session, not just the one the launch args named.
@@ -2122,7 +2379,7 @@ def main() -> int:
             "\n\033[1;33mPlease review and correct the error to continue.\033[0m",
             file=sys.stderr,
         )
-        return -1
+        return 1
 
 
 if __name__ == "__main__":

@@ -248,10 +248,13 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         resolve_hosting_model_dry(exec_args)
     except ValueError as exc:
         print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
-        return -1
+        # Return 1, not -1: this becomes the process exit code via exit(main()),
+        # and a negative return maps to exit 255 (item 18's contract is that a
+        # preflight failure exits with a clean non-zero, not a wrapped -1).
+        return 1
     except Exception as exc:  # noqa: BLE001 — never spawn blind
         print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m", file=sys.stderr)
-        return -1
+        return 1
 
     _ensure_logs_dir()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

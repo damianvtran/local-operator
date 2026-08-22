@@ -987,6 +987,7 @@ class OperatorApp(App[None]):
         theme_name: str = "dark",
         provider_controller: Any | None = None,
         resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
+        on_config_changed: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         # Dark is the product's island night and the fallback: `theme_name`
@@ -1013,6 +1014,16 @@ class OperatorApp(App[None]):
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
         self._providers = provider_controller
+        #: True between a first-run "no hosting configured" boot failure and the
+        #: `/login` that resolves it. While set, a successful login reloads the
+        #: session (there is none yet) rather than only re-polling the splash.
+        self._setup_state = False
+        #: Invoked before a post-login session rebuild so the launch-time config
+        #: manager (captured by the session factory closure) re-reads the
+        #: hosting/model that `/login` just wrote to disk. ``None`` outside the
+        #: CLI path (tests build the app directly), where the factory reads
+        #: config live and no reconciliation is needed.
+        self._on_config_changed = on_config_changed
         #: The real theme while a ``/theme`` list preview repaints the screen
         #: in a candidate ramp; ``None`` when no preview is standing. Stashed
         #: on the first highlight and spent on close-or-commit, so however the
@@ -1457,7 +1468,10 @@ class OperatorApp(App[None]):
         with self._transcript:
             yield WelcomeView(
                 lambda: session_welcome_info(
-                    self._session, self._providers, notice=self._splash_notice
+                    self._session,
+                    self._providers,
+                    notice=self._splash_notice,
+                    setup=self._setup_state,
                 )
             )
         # The dock band: subagent task list + todo list, sitting between the
@@ -2247,6 +2261,19 @@ class OperatorApp(App[None]):
         user what to do next at exactly the moment they need it, leaving a single
         red line over an empty screen.
         """
+        # First-run setup state (item A1/U1): the ONE construction "failure" that
+        # is not an error is "no hosting configured at all". The CLI let the app
+        # open precisely so the user can `/login` from here, so this reports the
+        # guided next step in the app's own warning voice rather than a red
+        # "session failed to start" that reads like a crash. The splash's
+        # `/login` affordance and the `/model` / `/provider` surfaces are the
+        # setup UI — no separate wizard. Imported lazily beside every other
+        # session_factory reference in this module.
+        from local_operator.session_factory import HostingNotConfiguredError
+
+        if isinstance(error, HostingNotConfiguredError):
+            self._enter_setup_state()
+            return
         self._system_notice(f"session failed to start: {error}", "error")
         assert self._status is not None
         # `model_name` goes with the label it belongs to. Leaving it set is not
@@ -2255,6 +2282,38 @@ class OperatorApp(App[None]):
         # `MoonshotAI: Kimi K2` — has nothing to collide with, so it would be
         # accepted and painted where the app meant to say "session error".
         self._status.update(model_label="session error", model_name="", streaming=False)
+
+    def _enter_setup_state(self) -> None:
+        """First-run setup: guide the user to `/login` with no session yet.
+
+        Reached when the session could not be built because NOTHING is
+        configured (see :meth:`_on_boot_failed`). No parallel wizard: the splash
+        already owns the empty-state real estate and carries a notice row, so the
+        guidance lives there, the status band says "setup" instead of a model
+        name, and the existing `/login` / `/model` / `/provider` commands do the
+        work. A successful `/login` sets hosting + a default model and reloads
+        the session (see :meth:`_login_flow`), which lands the user in a normal
+        working app.
+        """
+        self._setup_state = True
+        # A notice, not a red error: the splash paints this in the warning voice
+        # beside its `/login` hint, which is exactly the affordance the user
+        # needs. Toast headline included so it is noticed on a busy first frame.
+        # Action-first word order: on a narrow terminal the splash line is
+        # truncated from the right, so the command the user must run has to come
+        # BEFORE the diagnosis or it is what drops (D2). The band and toast
+        # already carry "no provider configured", so leading with the remedy
+        # spends the scarce columns on the one thing they do not.
+        self._announce_on_splash(
+            "Run /login <provider> to get started (e.g. /login openai) "
+            "— no provider configured yet, or /provider to see the list.",
+            "warning",
+        )
+        if self._status is not None:
+            # "setup" rather than a model name: there is no model until the user
+            # picks a provider, and leaving MODEL_PENDING up would read as a
+            # session still booting rather than one waiting on the user.
+            self._status.update(model_label="setup", model_name="", streaming=False)
 
     async def _reload_session(self, *, keep_context: bool = False) -> None:
         """Dispose the current session, boot its replacement, and rebuild the
@@ -10268,6 +10327,36 @@ class OperatorApp(App[None]):
             if self._key_prompt is block:
                 self._key_prompt = None
 
+    def _apply_login_defaults(self, provider: str) -> str | None:
+        """Adopt a just-logged-in provider as hosting when none is set.
+
+        Returns a one-line receipt naming what was written, or ``None`` when
+        hosting was already configured (nothing changed, nothing to say). The
+        provider id is the credential's storage id \u2014 an OAuth flavour like
+        ``xai-oauth`` stores under ``xai``, and that is the hosting the app
+        should point at. Config-write failure is reported but never fatal: the
+        login itself already succeeded.
+        """
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.model.defaults import default_model_for
+            from local_operator.paths import config_dir
+            from local_operator.providers.registry import credential_provider_id
+
+            manager = ConfigManager(config_dir())
+            if manager.get_config_value("hosting"):
+                return None
+            hosting = credential_provider_id(provider)
+            manager.set_config_value("hosting", hosting)
+            model = default_model_for(hosting) or ""
+            receipt = f"set default hosting to '{hosting}'"
+            if model and not manager.get_config_value("model_name"):
+                manager.set_config_value("model_name", model)
+                receipt += f", model to '{model}'"
+            return receipt
+        except Exception as error:  # noqa: BLE001 — never fail a completed login
+            return f"logged in, but could not save default hosting/model: {error}"
+
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
 
@@ -10296,10 +10385,31 @@ class OperatorApp(App[None]):
             self._providers.set_login_callbacks(self._login_callbacks)
             message = await self._providers.login(provider)
             await notice(message, "success")
-            # Nothing else needs poking: the splash re-polls its credential
-            # warning whenever it becomes visible again (`set_visible(True)`
-            # calls `_poll`), and it is hidden right now because the notice
-            # above is a transcript block.
+            # Make the fresh login usable as the boot default when nothing is
+            # configured yet: set hosting to this provider and model_name to its
+            # default. Without this, `/login` stored the credential but left
+            # hosting empty, so a first-run user logged in and still had no
+            # session — the same dead end the setup state exists to end. When
+            # hosting is already set we touch nothing (the user is adding a
+            # second provider, not changing their default).
+            set_msg = self._apply_login_defaults(provider)
+            if set_msg:
+                await notice(set_msg, "info")
+            # In the first-run setup state there is no session yet, so a
+            # successful login has to BUILD one — re-polling the splash would
+            # leave the user staring at a configured-but-not-started app. Outside
+            # setup, the splash re-polls its credential warning whenever it
+            # becomes visible again (`set_visible(True)` calls `_poll`), and it
+            # is hidden right now because the notice above is a transcript block.
+            if self._setup_state:
+                self._setup_state = False
+                # Reconcile the launch-time config manager with what
+                # `_apply_login_defaults` just wrote, or the rebuild resolves the
+                # same empty config and drops back into setup.
+                if self._on_config_changed is not None:
+                    self._on_config_changed()
+                await notice("starting session…", "info")
+                await self._reload_session()
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken
@@ -10934,7 +11044,23 @@ class OperatorApp(App[None]):
             cost=cost_text,
         )
         if message.error:
-            self._append_block(NoticeBlock(message.error, "error"))
+            # Append the local recovery to an auth-classified failure: the
+            # provider's own "invalid api-key" says what happened but not what
+            # the user can do from here, and `/login`/`credential update` are
+            # exactly that. No-op for every other error kind (a quota 403 reads
+            # differently and a login cannot fix it). The provider is the first
+            # segment of the model label, the same convention /model uses.
+            from local_operator.providers.failover import append_auth_recovery
+
+            provider = ""
+            if self._session is not None:
+                try:
+                    provider = (self._session.model_label or "").partition("/")[0]
+                except Exception:
+                    provider = ""
+            self._append_block(
+                NoticeBlock(append_auth_recovery(message.error, provider or None), "error")
+            )
         elif message.aborted and not self._interrupted_cards:
             # Only when NOTHING was in flight. A stopped turn already says so on
             # each card it stopped (`⊘ interrupted`), and that per-card mark is
@@ -12204,6 +12330,13 @@ def _splash_toast_headline(text: str) -> str:
         target = body[index + len(marker) :].strip()
         if target:
             return f"Fell back to {target}"
+    # The first-run notice leads with the REMEDY (D2), but the toast's job is
+    # the glance — the state, not the command. A blind 35-cell cut of that
+    # sentence lands mid-word ("…configured ye…") and repeats the greeting the
+    # splash already owns (D5), so the setup notice gets its own clean headline
+    # naming the condition rather than a truncated slice of the action line.
+    if "no provider configured" in body.lower():
+        return "No provider configured"
     # One clause, no wrap: the toast sits over the lockup, and a second
     # row is what buried the mark. 36 cells is comfortably inside the
     # right-hand gutter of a 80-col boot frame.
