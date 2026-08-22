@@ -6,8 +6,10 @@ import pytest
 
 from local_operator.incidents import (
     SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     classify_incident,
     format_incident_message,
+    format_model_switch_message,
 )
 
 
@@ -53,3 +55,41 @@ def test_unknown_has_no_invented_hint():
 def test_message_type_constant_is_stable():
     # Persisted into transcripts; renaming it would orphan old sessions' replay.
     assert SESSION_INCIDENT_MESSAGE_TYPE == "session_incident"
+
+
+def test_model_switch_deliberate_names_old_and_new_and_persists():
+    text = format_model_switch_message(
+        "anthropic/claude-opus-4-8",
+        "zai/glm-5.3",
+        reason="model switched",
+    )
+    assert text.startswith("[model switch] You are now running as anthropic/claude-opus-4-8")
+    assert "was zai/glm-5.3" in text
+    assert "applies from now on" in text
+    # A deliberate switch is not transient, so it must not carry the fallback caveat.
+    assert "temporary fallback" not in text
+
+
+def test_model_switch_transient_fallback_is_marked_temporary():
+    text = format_model_switch_message(
+        "kimi/k3",
+        "anthropic/claude-opus-4-8",
+        reason="anthropic 429 — falling back",
+        transient=True,
+    )
+    assert "You are now running as kimi/k3" in text
+    assert "temporary fallback" in text
+    assert "Reason: anthropic 429 — falling back" in text
+    assert "applies from now on" not in text
+
+
+def test_model_switch_without_previous_label_reads_cleanly():
+    # The return-to-primary edge passes no previous label.
+    text = format_model_switch_message("anthropic/claude-opus-4-8")
+    assert text.startswith("[model switch] You are now running as anthropic/claude-opus-4-8.")
+    assert "(was" not in text
+
+
+def test_model_switch_message_type_constant_is_stable():
+    # Persisted into transcripts; renaming it would orphan replay of old sessions.
+    assert SESSION_MODEL_SWITCH_MESSAGE_TYPE == "session_model_switch"
