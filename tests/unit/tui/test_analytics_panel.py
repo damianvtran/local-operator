@@ -186,22 +186,35 @@ def test_empty_aggregate_says_no_data():
 
 def test_report_shows_totals_and_split():
     text = _text(_agg())
-    assert "TOTALS" in text
+    # Section headers are title-case (not all-caps — the app uses that nowhere),
+    # marked with the accent bar.
+    assert "Totals" in text
     assert "100 calls" in text
     assert "(2 failed)" in text
     # authoritative headline numbers
     assert "Cache hit rate" in text
     # the estimated component split, largest first
-    assert "WHERE INPUT WENT" in text
+    assert "Where input went" in text
     assert "estimated" in text
     assert "Conversation" in text
     assert "System prompt" in text
     # per-provider and per-session tables
-    assert "BY PROVIDER" in text
+    assert "By provider" in text
     assert "anthropic" in text
-    assert "BY SESSION" in text
+    assert "By session" in text
     # named session shows its title, not the id
     assert "my session" in text
+
+
+def test_section_headers_are_not_all_caps():
+    # Guard the deliberate choice: the app uses no all-caps headers, so the
+    # analytics sections must not regress to them.
+    text = _text(_agg())
+    for caps in ("TOTALS", "WHERE INPUT WENT", "BY PROVIDER", "BY SESSION"):
+        assert caps not in text
+    # And each section carries the accent delineation mark.
+    assert "▌ Totals" in text
+    assert "▌ By provider" in text
 
 
 def test_component_split_ordered_largest_first():
@@ -268,7 +281,7 @@ def test_render_lines_for_test_available():
             screen = await _push(pilot, app, _agg())
             lines = screen.render_lines_for_test()
             joined = "\n".join(lines)
-            assert "TOTALS" in joined
-            assert "WHERE INPUT WENT" in joined
+            assert "Totals" in joined
+            assert "Where input went" in joined
 
     asyncio.run(run())
