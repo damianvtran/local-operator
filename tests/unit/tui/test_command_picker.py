@@ -2198,19 +2198,197 @@ async def test_partial_name_is_not_highlighted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_multiline_buffer_does_not_highlight_a_second_line() -> None:
-    """The command lives on line 0 only; a newline makes the rest a message
-    body, and no command highlight may leak onto it."""
+async def test_ordinary_command_highlight_dies_on_a_newline() -> None:
+    """An ordinary command lives on line 0 only; a newline makes the rest a
+    message body and the user has abandoned the command, so no command highlight
+    may leak onto either row."""
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        app.editor.text = "/team frontend-guild\nmore text"
+        # `/usage` is not a NAME+message command, so the single-line discipline
+        # still applies: the newline turns it into prose and the highlight dies.
+        app.set_editor_text("/usage some\nmore text")
         await pilot.pause()
-        # A newline after the command word means neither token is a live list
-        # surface: nothing is highlighted on either row.
         signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        dim = theme_mod.semantic_color("dim").lower()
+        for y in (0, 1):
+            cells = _slash_ink(app.editor, y)
+            assert all(fg not in (signal, green, dim) for _, fg in cells)
+
+
+@pytest.mark.asyncio
+async def test_name_command_keeps_highlight_across_a_multiline_message() -> None:
+    """The reported bug: `/team <known-name>` highlights the command and name
+    tokens on a single line, then loses ALL highlight the instant a newline is
+    added to the message.
+
+    NAME+message commands (`/team`, `/agent`) are DEFINED as
+    ``/<cmd> <name> <free-text message>`` where the message is expected to span
+    lines, and the leading command still dispatches as that command across the
+    newline. So the command and name tokens must stay lit over a multi-line body,
+    while the message tail — on line 0 or the wrapped lines — stays prose.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # Open the list on a single line so the app pushes the name snapshot...
+        app.set_editor_text("/team frontend-guild fix it")
+        app.editor.set_name_choices(frozenset({"frontend-guild"}))
+        await pilot.pause()
+        signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        # ``set_editor_text`` parks the caret at the end, so the command renders
+        # as one ``/team`` segment (not a split ``/`` + ``team``).
+        single = _slash_ink(app.editor)
+        assert _ink_of(single, "/team") == signal
+        assert _ink_of(single, "frontend-guild") == green
+        # ...now add a newline and keep typing the message. BEFORE the fix every
+        # token went dark here; the command and name must stay lit.
+        app.set_editor_text("/team frontend-guild\nfix it across\nmany lines")
+        await pilot.pause()
+        row0 = _slash_ink(app.editor, 0)
+        assert _ink_of(row0, "/team") == signal
+        assert _ink_of(row0, "frontend-guild") == green
+        # The message body lines carry no command/name highlight — they are prose.
+        for y in (1, 2):
+            body = _slash_ink(app.editor, y)
+            assert all(c not in (signal, green) for _, c in body)
+
+
+@pytest.mark.asyncio
+async def test_multiline_name_command_with_partial_name_stays_prose() -> None:
+    """A half-typed name is in-progress state even on a multi-line body: only an
+    exact snapshot hit paints the name, so a newline must not suddenly light up
+    an unrecognized name."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # Open the list so the snapshot is pushed, then break the name and go
+        # multi-line: `front` is not a known team.
+        app.set_editor_text("/team front")
+        app.editor.set_name_choices(frozenset({"frontend-guild"}))
+        await pilot.pause()
+        app.set_editor_text("/team front\nmore")
+        await pilot.pause()
         green = theme_mod.semantic_color("string").lower()
         for y in (0, 1):
             cells = _slash_ink(app.editor, y)
-            assert all(fg not in (signal, green) for _, fg in cells)
+            assert all(fg != green for _, fg in cells)
+
+
+@pytest.mark.asyncio
+async def test_cross_family_word_swap_while_multiline_drops_the_name() -> None:
+    """A team name must NOT paint under `/agent` after an atomic word-swap.
+
+    The rosters are disjoint, so a name valid for one family is prose for the
+    other. Because a multi-line buffer never re-opens the argument list (the
+    picker is suppressed once a newline follows the leading word), an atomic
+    replacement `/team <team-name>\\n…` -> `/agent <team-name>\\n…` cannot rely on
+    the list re-deriving the right roster — the preserved snapshot has to be
+    rejected on the family switch or the team name paints green under `/agent`.
+    This locks that: the command word still highlights (it is a recognized
+    command), but the inherited team name falls back to prose.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # Fill the TEAM snapshot on a single line, then go multi-line so it is
+        # preserved across the newline.
+        app.set_editor_text("/team frontend-guild fix it")
+        app.editor.set_name_choices(frozenset({"frontend-guild"}))
+        await pilot.pause()
+        app.set_editor_text("/team frontend-guild\nfix it")
+        await pilot.pause()
+        signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        row0 = _slash_ink(app.editor)
+        assert _ink_of(row0, "frontend-guild") == green  # premise: it paints here
+        # Atomic word-swap to /agent while STILL multiline (no list re-opens).
+        app.set_editor_text("/agent frontend-guild\nfix it")
+        await pilot.pause()
+        row0 = _slash_ink(app.editor)
+        # The command word is recognized and still highlighted (one ``/agent``
+        # segment, caret parked at the end by ``set_editor_text``)...
+        assert _ink_of(row0, "/agent") == signal
+        # ...but the inherited team name must NOT paint under the wrong family.
+        assert all(fg != green for _, fg in row0)
+
+
+@pytest.mark.asyncio
+async def test_name_token_soft_wraps_across_rows_on_a_multiline_body() -> None:
+    """The soft-wrap row mapping (`_slash_cells`) must place the name token on
+    the right SCREEN rows even when the buffer also has a multi-line message.
+
+    The single-row multiline tests never exercise the wrap-boundary math, and
+    the pre-existing soft-wrap test uses a single-line buffer. This is the
+    intersection: a name long enough to wrap AND a newline-terminated body, so
+    the command line's own wrapped rows carry the tokens while the body lines
+    below are left untouched.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(24, 20)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        long_name = "frontend-platform-guild-alpha"
+        # Make the message multi-line first, THEN push the bespoke snapshot: on a
+        # multi-line buffer ``_sync_picker`` does not re-open the argument list
+        # (so the harness's ``on_argument_query_opened`` will not overwrite the
+        # snapshot with its fixed rows), and the family gate keeps a snapshot
+        # whose family matches the leading ``/team``. This mirrors the app's real
+        # ordering deterministically for a name not in the fixed roster.
+        app.set_editor_text(f"/team {long_name}\nsecond line\nthird line")
+        app.editor.set_name_choices(frozenset({long_name}))
+        await pilot.pause()
+        wrapped = app.editor.wrapped_document
+        assert len(wrapped.get_offsets(0)) >= 2, "premise: the name itself wraps"
+        green = theme_mod.semantic_color("string").lower()
+        # Gather every green run across ALL wrapped rows of the buffer: the whole
+        # name is painted, contiguously, and nothing on the body lines is.
+        painted = ""
+        for y in range(wrapped.height):
+            for text, fg in _slash_ink(app.editor, y):
+                if fg == green:
+                    painted += text
+        assert painted == long_name
+
+
+@pytest.mark.asyncio
+async def test_team_chart_subcommand_never_paints_a_name() -> None:
+    """`/team chart <name>` paints ONLY the `/team` token — never `chart`, never
+    the name (single-line AND multiline).
+
+    Guards the #258 integration: `/team` is two-level — `chart` is a reserved
+    SUBCOMMAND in the first argument slot, and the team NAME the chart wants
+    lives in the SECOND slot after `chart `. The highlighter reads the name as
+    the FIRST argument token, which for a chart request is `chart` — not a roster
+    member — so no name run is emitted and `chart` stays prose. The test injects
+    `chart` AND the second-slot name into `_name_choices` adversarially: even if
+    both were roster members, the first-token rule must keep the whole argument
+    prose, so a future refactor that reads the name via a caret-anchored helper
+    (which would resolve the second-slot token) is caught here.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        # Adversarial snapshot: both the reserved subcommand word and the
+        # second-slot name are present, so only the first-token rule prevents a
+        # mispaint.
+        adversarial = frozenset({"chart", "frontend-guild"})
+        for text in ("/team chart frontend-guild", "/team chart frontend-guild\nbody text"):
+            app.set_editor_text(text)
+            app.editor.set_name_choices(adversarial)
+            await pilot.pause()
+            cells = _slash_ink(app.editor)
+            # `/team` command token is lit...
+            assert _ink_of(cells, "/team") == signal
+            # ...and nothing on the row is painted with the argument-name colour:
+            # neither `chart` nor the second-slot name is highlighted.
+            assert all(fg != green for _, fg in cells)
