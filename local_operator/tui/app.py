@@ -958,6 +958,17 @@ class OperatorApp(App[None]):
         # `screen.focus_next`/`focus_previous` directly rather than through the
         # key.
         Binding("shift+tab", "cycle_effort", "Cycle reasoning effort", show=False, priority=True),
+        # Expand/collapse the dock's todo list between the current-work preview
+        # (active phase + a few following, settled phases auto-hidden) and every
+        # phase and item. `ctrl+t` mnemonic: todos.
+        #
+        # NOT `priority=True`: like Esc it bubbles, so a focused picker keeps
+        # first refusal on the key; unlike `shift+tab` there is no Screen-level
+        # binding on `ctrl+t` to jump ahead of. Audited free — no other `ctrl+t`
+        # in `local_operator/tui/`, and Textual's `TextArea` binds
+        # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
+        # editing key it had.
+        Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
     ]
 
     def __init__(
@@ -8172,6 +8183,21 @@ class OperatorApp(App[None]):
                 # block repaints, and nothing else repaints an offscreen
                 # block. A list that never painted (opened, closed) skips it.
                 self._repaint_themed_widgets()
+
+    def action_toggle_todos(self) -> None:
+        """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
+
+        View-only: it never touches the store, so the guardrail's ``open_todos``
+        and ``todo_fingerprint`` are untouched (design §5.4). ``toggle_expanded``
+        flips the panel flag and drops its equality-guard so the change repaints;
+        ``_refresh_band`` settles the band inset and row budget in the same tick
+        the flag changed, so the list never paints one frame at the wrong height.
+        A no-op before the panel exists — the toggle silently does nothing rather
+        than raising, matching the app's other pre-boot key handlers.
+        """
+        if self._todo_panel is not None:
+            self._todo_panel.toggle_expanded()
+            self._refresh_band()
 
     def action_cycle_effort(self) -> None:
         """``shift+tab`` — step one level up this model's ladder, wrapping.
