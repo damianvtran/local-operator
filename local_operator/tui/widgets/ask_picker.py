@@ -641,6 +641,51 @@ class AskPickerScreen(Container):
         self._hovered = None
         self._repaint()
 
+    def answer_current(self, values: list[str]) -> bool:
+        """Answer the CURRENT question with ``values`` and advance, or settle.
+
+        The external-answer twin of :meth:`action_accept`: a phone answer routed
+        in over the mobile bridge records this question's answer and moves the
+        SAME picker to the next question, only settling after the last one. This
+        is what makes a multi-question ask answerable question-by-question from
+        the phone instead of the whole card resolving on the first answer and
+        silently discarding the rest (UX round 1, U1).
+
+        Returns True when this answer settled the card (it was the last
+        question), False when the picker advanced and is now waiting on the next
+        question — the caller re-projects the new current question on False.
+
+        ``values`` is already the chosen text (labels for options, the typed
+        string for free-text/secret); an empty list means "nothing chosen",
+        which settles with None on the FIRST question (the harness's "user did
+        not answer" signal) rather than recording an empty answer. On a later
+        question an empty answer keeps whatever earlier questions collected, the
+        same partial-report rule Escape follows.
+        """
+        # Guarded like action_accept: never commit an answer for a question the
+        # card could not even draw.
+        if self.settled:
+            return True
+        if not values:
+            # Nothing chosen. On Q0 this is "the user answered nothing" — settle
+            # with None so the tool falls back to its recommendation. Past Q0,
+            # keep the partial map (Escape's rule) rather than throwing away the
+            # answers already given.
+            self.settle(self._answers or None)
+            return True
+        self._answers[self.question.id] = values
+        if self._index + 1 >= len(self._questions):
+            self.settle(self._answers)
+            return True
+        # Advance the live picker so a terminal user watching sees the next
+        # question too, exactly as Enter would move it.
+        self._index += 1
+        self._offset = 0
+        self._hovered = None
+        self._rejected = False
+        self._repaint()
+        return False
+
     def _rejection(self) -> str:
         """What the footer says instead of the keys, or ``""`` to keep them.
 

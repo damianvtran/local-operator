@@ -227,6 +227,27 @@ class SubagentRow:
 
 
 @dataclass
+class AskOptionWire:
+    """One selectable answer on an ``ask`` question, as it crosses the wire.
+
+    The phone needs the SAME information the terminal picker shows: the label
+    AND the one-line consequence under it (``AskOption.description``), because
+    ``ask`` exists for consequential either/or decisions and dropping the
+    description makes the remote user answer a materially thinner question
+    (UX round 1, U3). A dataclass rather than a bare string so ``asdict``
+    serializes it to ``{"label", "description"}`` — JSON-serializable, unlike
+    the pydantic ``AskOption`` the harness uses (which ``asdict`` would leave
+    as an object ``json.dumps`` cannot encode; that crash is what the label-only
+    projection originally worked around)."""
+
+    label: str
+    description: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class PendingRequest:
     """An approval gate or ask dialog waiting on the user — the phone's
     highest-priority render (branding.md §7: a question for the user is the
@@ -236,10 +257,63 @@ class PendingRequest:
     kind: Literal["approval", "ask"]
     title: str
     detail: str = ""
-    options: list[str] = field(default_factory=list)  # ask pickers; empty = free text
+    # Ask pickers; empty means a free-text/secret paste field. Objects, not
+    # bare labels, so the phone can render each option's consequence line the
+    # same way the terminal does (U3).
+    options: list[AskOptionWire] = field(default_factory=list)
+    # True when this ask requests a credential (``AskQuestion.secret``): the
+    # phone must render a MASKED paste field with a "not stored in transcript"
+    # affordance rather than a plain text box (D1/U2). The secret VALUE still
+    # never rides the projection — only this flag does.
+    secret: bool = False
+    # Position of the CURRENT question within a multi-question ask, so the phone
+    # can show "Question 1 of 2" the way the terminal header does and the user
+    # knows more questions follow (U1). ``question_total`` is 1 for the common
+    # single-question ask.
+    question_index: int = 0
+    question_total: int = 1
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def ask_pending_request(
+    request_id: str,
+    question: Any,
+    *,
+    question_index: int = 0,
+    question_total: int = 1,
+) -> PendingRequest:
+    """Build the phone's ask card from an ``AskQuestion`` (harness type).
+
+    The single seam both projection sites use — the TUI bridge
+    (:mod:`.tui_handle`) and the daemon-owned gate (:mod:`.owned`) — so the two
+    surfaces cannot drift in what they carry to the phone (was UX nit-1: one
+    site used a ``str(option)`` fallback, the other ``""``). Reading through
+    ``getattr`` keeps this decoupled from the pydantic model and lets tests pass
+    a duck-typed stand-in.
+
+    Carries the option consequence lines (U3), the ``secret`` flag so the card
+    can mask the paste field (D1/U2) — never the secret value, which lives only
+    in the picker's future — and the question position for the "N of M" header
+    (U1)."""
+    options = [
+        AskOptionWire(
+            label=str(getattr(option, "label", "")),
+            description=str(getattr(option, "description", "") or ""),
+        )
+        for option in (getattr(question, "options", []) or [])
+    ]
+    return PendingRequest(
+        request_id=request_id,
+        kind="ask",
+        title=str(getattr(question, "question", "") or "the agent is asking"),
+        detail="",
+        options=options,
+        secret=bool(getattr(question, "secret", False)),
+        question_index=question_index,
+        question_total=question_total,
+    )
 
 
 @dataclass

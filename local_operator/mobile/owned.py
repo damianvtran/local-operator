@@ -32,7 +32,11 @@ if TYPE_CHECKING:
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle
 from local_operator.mobile.registrant import image_blocks as _image_blocks
-from local_operator.mobile.types import PendingRequest, SessionProjection
+from local_operator.mobile.types import (
+    PendingRequest,
+    SessionProjection,
+    ask_pending_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,53 +148,57 @@ class OwnedSessionHandle(SessionHandle):
                 # Nothing to ask: answer NOTHING (the harness's "user escaped"
                 # signal) rather than parking a card with no question on it.
                 return None
-            request_id = secrets.token_hex(8)
-            future: asyncio.Future[dict[str, list[str]] | None] = self._loop.create_future()
-            self._pending_futures[request_id] = future
-            first = questions[0]
-            # The answer map is keyed by the QUESTION'S id, not our request id
-            # — AskUserFn's contract answers ``question.id -> choices``, and
-            # the harness validates the keys it gets back. Stash the mapping
-            # so ask_answer resolves with the right key.
-            self._pending_question_ids[request_id] = (
-                getattr(first, "id", "") if first is not None else ""
-            )
-            if len(questions) > 1:
+            total = len(questions)
+            if total > 1:
                 logger.info(
-                    "mobile ask gate: %d questions, projecting the first only",
-                    len(questions),
+                    "mobile ask gate: %d questions, projecting question-by-question",
+                    total,
                 )
-            self._fold.push_pending(
-                PendingRequest(
-                    request_id=request_id,
-                    kind="ask",
-                    title=getattr(first, "question", "the agent is asking")
-                    or "the agent is asking",
-                    detail="",
-                    # Option LABELS, not AskOption objects: PendingRequest goes
-                    # over the wire as JSON (to_json -> asdict -> json.dumps),
-                    # and AskOption is a pydantic model that asdict leaves as an
-                    # object json.dumps cannot serialize — an options ask would
-                    # crash the projection push. The label is also exactly what
-                    # the web card renders and hands back in ask_answer, so a
-                    # bare string is the right wire shape (matches the TUI path
-                    # in tui_handle.note_ask_pending and options: list[str]).
-                    options=[
-                        getattr(option, "label", str(option))
-                        for option in (getattr(first, "options", []) or [])
-                    ],
+            # Answer the questions one at a time on the SAME card so a
+            # multi-question ask is answerable end to end from the phone rather
+            # than the first answer resolving the whole set and dropping the
+            # rest (U1). Each question parks its own future; the phone's
+            # ask_answer resolves the FRONT one, and we advance to the next.
+            answers: dict[str, list[str]] = {}
+            for index, question in enumerate(questions):
+                request_id = secrets.token_hex(8)
+                future: asyncio.Future[dict[str, list[str]] | None] = self._loop.create_future()
+                self._pending_futures[request_id] = future
+                # The answer map is keyed by the QUESTION'S id, not our request
+                # id — AskUserFn's contract answers ``question.id -> choices``.
+                self._pending_question_ids[request_id] = getattr(question, "id", "") or ""
+                # Built through the shared seam so this projection carries option
+                # descriptions (U3), the secret flag (D1/U2, never the value),
+                # and the "N of M" position (U1) identically to the TUI path.
+                self._fold.push_pending(
+                    ask_pending_request(
+                        request_id,
+                        question,
+                        question_index=index,
+                        question_total=total,
+                    )
                 )
-            )
-            self._notify()
-            try:
-                return await asyncio.wait_for(future, timeout=PENDING_REQUEST_TIMEOUT_S)
-            except TimeoutError:
-                return None
-            finally:
-                self._pending_futures.pop(request_id, None)
-                self._pending_question_ids.pop(request_id, None)
-                self._fold.pop_pending(request_id)
                 self._notify()
+                try:
+                    answer = await asyncio.wait_for(future, timeout=PENDING_REQUEST_TIMEOUT_S)
+                except TimeoutError:
+                    # A timed-out question ends the whole ask: report whatever
+                    # earlier questions collected (partial, like the terminal's
+                    # Escape) rather than blocking forever on the next one.
+                    return answers or None
+                finally:
+                    self._pending_futures.pop(request_id, None)
+                    self._pending_question_ids.pop(request_id, None)
+                    self._fold.pop_pending(request_id)
+                    self._notify()
+                if not answer:
+                    # The user answered nothing on this question. On the FIRST
+                    # question that is "escaped" — fall back to the model's
+                    # recommendation (None). Past it, keep the partial map, the
+                    # same rule the terminal picker follows on Escape.
+                    return answers or None
+                answers.update(answer)
+            return answers or None
 
         # Kept as attributes as well as registered on the session: the handle
         # is the single owner of the gate behaviour, and holding the reference
@@ -389,7 +397,16 @@ class OwnedSessionHandle(SessionHandle):
         # Resolve with the QUESTION id the harness asked under — never our
         # request id, which the harness never saw.
         question_id = self._pending_question_ids.get(request_id, request_id)
-        self._resolve_pending(request_id, {question_id: [value]} if value else None)
+        future = self._pending_futures.get(request_id)
+        if future is None or future.done():
+            # Human, reconciling copy (U4): a stale tap means this question
+            # already settled elsewhere — say so rather than the developer-
+            # worded "no longer waiting", so the phone user learns their tap
+            # lost a race instead of the card silently vanishing.
+            raise ValueError("that question was already answered")
+        self._loop.call_soon_threadsafe(
+            future.set_result, {question_id: [value]} if value else None
+        )
         return "answered"
 
     async def refresh(self) -> None:
