@@ -3204,6 +3204,33 @@ class OperatorApp(App[None]):
             self.call_later(_show)
 
         manager.on_auth_required = on_auth_required
+
+        def on_startup_settled(outcome: Any) -> None:
+            # The boot report (``_report_mcp_startup``) ran against the gate
+            # snapshot, which is SILENT while servers are still connecting
+            # (McpStartupOutcome.reportable is False when settling). This fires
+            # once the round settles with the final tally, so the toast/notice
+            # the user actually sees carries the real "N of M up" and the
+            # complete failure list — never the momentary "0 of 7" a fast
+            # failure would have flashed mid-handshake. Hop onto the Textual
+            # thread: this fires from the manager's continuation task.
+            def _report() -> None:
+                # ``session.mcp_startup`` was already rebuilt by the factory's
+                # settle callback before this ran, so re-reading the session is
+                # enough; ``outcome`` is passed for parity and future use. Read
+                # the CURRENT session, not the one captured at wire time: a
+                # session swap between boot and settle must not re-report a
+                # retired session's outcome onto the live one.
+                current = self._session
+                if current is not None:
+                    self._report_mcp_startup(current)
+
+            self.call_later(_report)
+
+        try:
+            session._on_mcp_startup_settled = on_startup_settled  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — a missing attr must not break wiring
+            pass
         self._refresh_mcp_status()
 
     def _refresh_mcp_status(self) -> None:

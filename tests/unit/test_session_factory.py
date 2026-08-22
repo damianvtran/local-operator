@@ -538,16 +538,31 @@ async def test_knowledge_selection_freezes_after_the_first_session_query() -> No
 
 
 class FakeMcpManager:
-    def __init__(self, configured: list[str] | None = None, connected: list[str] | None = None):
+    def __init__(
+        self,
+        configured: list[str] | None = None,
+        connected: list[str] | None = None,
+        settling: bool = False,
+        startup_failures: dict[str, str] | None = None,
+    ):
         self.disconnected = 0
         self.callback: Callable[[list[Any]], Any] | None = None
         self._configured = list(configured or [])
         self._connected = list(connected or [])
         self.tools: list[Any] = []
         self.meta: dict[str, dict[str, Any]] = {}
+        self._settling = settling
+        self._startup_failures = dict(startup_failures or {})
+        self.on_startup_settled: Callable[[], None] | None = None
 
     def set_on_tools_changed(self, cb) -> None:
         self.callback = cb
+
+    def startup_settling(self) -> bool:
+        return self._settling
+
+    def startup_failures(self) -> dict[str, str]:
+        return dict(self._startup_failures)
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -640,6 +655,59 @@ async def test_mcp_tools_stay_lazy_across_live_updates_and_dispose(monkeypatch) 
     await session.dispose()
     assert session.disposed == 1
     assert manager.disconnected == 1
+
+
+@pytest.mark.asyncio
+async def test_settling_boot_snapshot_is_provisional_and_re_reported_on_settle(
+    monkeypatch,
+) -> None:
+    """A boot snapshot taken while servers are still connecting past the gate is
+    marked ``settling`` (so front ends stay quiet), and the manager's
+    ``on_startup_settled`` callback rebuilds ``mcp_startup`` with the final
+    combined tally and notifies the session's settle sink."""
+    builtin = MagicMock(name="builtin_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    # notion deferred past the gate: configured but not yet connected, so the
+    # round is settling and one server has a not-yet-final auth failure.
+    manager = FakeMcpManager(
+        configured=["notion", "linear"],
+        connected=["linear"],
+        settling=True,
+        startup_failures={"notion": "needs authorization — run /mcp login notion"},
+    )
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [MagicMock(name="mcp_tool")], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    settled_outcomes: list[Any] = []
+    session._on_mcp_startup_settled = settled_outcomes.append
+
+    await wire_mcp_into_session(session, [builtin], ".", has_ui=True)
+
+    # Boot snapshot: provisional, so a front end suppresses its failure surface.
+    boot = session.mcp_startup
+    assert boot is not None
+    assert boot.settling is True
+    assert boot.reportable is False
+    # The manager installed a settle callback.
+    assert manager.on_startup_settled is not None
+
+    # The round settles: notion connected after the gate.
+    manager._settling = False
+    manager._connected = ["notion", "linear"]
+    manager._startup_failures = {}
+    manager.on_startup_settled()
+
+    settled = session.mcp_startup
+    assert settled is not None
+    assert settled.settling is False
+    assert set(settled.connected) == {"notion", "linear"}
+    assert settled.failures == {}
+    # The session's settle sink was handed the final outcome.
+    assert settled_outcomes == [settled]
 
 
 @pytest.mark.asyncio
