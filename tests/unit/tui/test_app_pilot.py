@@ -197,6 +197,24 @@ class FakeSession:
 
     def attach_team(self, team: Any) -> None:
         self.attached_teams.append(team)
+        # Track the active roster so the band's active-team segment (U2) can be
+        # driven through the real accessor path, exactly as the real session
+        # exposes it via ``active_team``/``active_team_name``.
+        self._active_team = team
+
+    @property
+    def active_team_name(self) -> str:
+        team = getattr(self, "_active_team", None)
+        if team is None:
+            return ""
+        return str(getattr(team, "name", "") or "")
+
+    @property
+    def active_agent(self) -> str:
+        # Mirror the real session: the display NAME of the profile in force, ""
+        # once cleared. Stamped alongside ``agent_brief`` below so a `/agent`
+        # test can assert the band segment as well as the brief (U2).
+        return getattr(self, "_active_agent", "")
 
     def attach_agent_profile(self, name: str) -> str | None:
         # Mirror the real session's resolution ORDER (own role, then own
@@ -208,6 +226,7 @@ class FakeSession:
         profile = resolve_profile(name, registry=self.agent_registry)
         if profile is not None and profile.agent_id is not None:
             self.agent_brief = profile.preamble.strip()
+            self._active_agent = profile.name
             self.attached_agents.append(profile.name)
             return profile.name
         if self.agent_registry is not None:
@@ -215,18 +234,22 @@ class FakeSession:
             if agent is not None and is_specialist(agent):
                 prompt = (self.agent_registry.get_agent_system_prompt(agent.id) or "").strip()
                 self.agent_brief = f"[agent: {agent.name}]\n{prompt}" if prompt else ""
+                self._active_agent = str(agent.name)
                 self.attached_agents.append(str(agent.name))
                 return str(agent.name)
         if profile is not None:
             self.agent_brief = profile.preamble.strip()
+            self._active_agent = profile.name
             self.attached_agents.append(profile.name)
             return profile.name
         return None
 
     def clear_agent_profile(self) -> None:
-        # Mirror the real detach: blank the tail and record the call so a
-        # `/agent clear` test can assert both the effect and that it happened.
+        # Mirror the real detach: blank the tail AND the active name (U2), and
+        # record the call so a `/agent clear` test can assert both the effect
+        # and that it happened.
         self.agent_brief = ""
+        self._active_agent = ""
         self.cleared_agents += 1
 
     @property

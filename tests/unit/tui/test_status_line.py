@@ -32,6 +32,8 @@ from local_operator.tui.widgets.status_line import (
     _SEP_RIGHT,
     _SPINNER_FRAMES,
     _UNBOUNDED_RUNGS,
+    AGENT_PROFILE_CELLS,
+    ICON_AGENT_PROFILE,
     ICON_AGENTS,
     ICON_APPROVALS,
     ICON_CONTEXT,
@@ -41,6 +43,7 @@ from local_operator.tui.widgets.status_line import (
     ICON_JOBS,
     ICON_MCP,
     ICON_MODEL,
+    ICON_TEAM,
     NAME_CELLS,
     NAME_CELLS_FLOOR,
     McpStatus,
@@ -126,6 +129,15 @@ def _full_band(width: int = 200) -> tuple[StatusLine, FakeClock]:
         cost="$12.40",
         conversation_name="Status band enrichment",
     )
+    # U2 note: the active-agent/team segments are DELIBERATELY not populated in
+    # this shared fixture. They widen the worst case, and the many geometric
+    # sweep tests below (name-flex, eviction floors) are calibrated to the
+    # pre-U2 segment set; recalibrating all of them to carry two always-on
+    # segments would be a broad, error-prone change to tests that are not about
+    # U2. The identity segments are instead driven explicitly where they are
+    # under test: the ladder-ORDER test sets them so their shed position is
+    # pinned, and the dedicated U2 tests cover their rendering, cap, and live
+    # attach/detach.
     status._active_seconds = 2461.0  # 41m1s
     return status, clock
 
@@ -411,6 +423,10 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     status, _clock = _full_band()
+    # U2: drive the two static-identity segments explicitly here (they are kept
+    # out of the shared fixture — see `_full_band`) so their shed order is
+    # pinned against the rest of the ladder.
+    status.update(team="release-team", agent_profile="auditor")
     probes = {
         "subagents": "3 agents",
         "duration": "41m1s",
@@ -419,6 +435,11 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
         "cost": "$12.40",
         "context": "49.6%/1M",
         "effort": "high",
+        # U2: the two static-identity segments. Their names are chosen not to
+        # collide with any other probe's needle ("auditor"/"release-team" appear
+        # nowhere else on the band).
+        "team": "release-team",
+        "agent": "auditor",
         "cwd-full": "~/work/local-operator",
         "cwd-short": "local-operator",
         "model-full": "openrouter/moonshotai/kimi-k2-thinking",
@@ -447,6 +468,13 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
         "cwd-full",  # shortened to its basename, not dropped
         "model-full",  # shortened to the bare model id, not dropped
         "effort",  # a static setting: it does not change while they watch
+        # U2: the two static-identity settings shed AFTER effort (kept longer)
+        # because each names a persona/roster the user just deliberately
+        # attached — higher-information than the effort word. team before agent:
+        # the roster is the broader context and the profile is "who is replying
+        # here", so the profile is the last static setting to go.
+        "team",
+        "agent",
         # Only now does the name go — one rung later than it used to sit in
         # ENTIRETY, and after everything above it has already been spent.
         "name-short",
@@ -473,6 +501,101 @@ def test_shortening_keeps_the_segment_rather_than_dropping_it() -> None:
     assert "~/work/local-operator" not in row
     assert "kimi-k2-thinking" in row
     assert "openrouter/moonshotai/" not in row
+
+
+# -- U2: active agent / team segments ----------------------------------------
+
+
+def test_the_active_agent_and_team_segments_paint_with_their_glyphs() -> None:
+    """Both static-identity segments render `icon name` on a wide band."""
+    status, _clock = _full_band()
+    status.update(team="release-team", agent_profile="auditor")
+    row = status.render_text(200).plain
+    assert f"{ICON_TEAM} release-team" in row
+    assert f"{ICON_AGENT_PROFILE} auditor" in row
+
+
+def test_the_identity_segments_are_absent_until_attached() -> None:
+    """An unattached session shows neither segment, so its fit is unchanged.
+
+    The two rungs are inert when their setting is unset: they occupy no cells,
+    which is what keeps a session that never ran /agent or /team rendering
+    exactly as it did before U2.
+    """
+    clock = FakeClock()
+    status = StatusLine(_dock(200), clock=clock)
+    status.update(model_label="test/model", cwd="/tmp", conversation_name="x")
+    row = status.render_text(200).plain
+    assert ICON_TEAM not in row
+    assert ICON_AGENT_PROFILE not in row
+
+
+def test_the_identity_segments_appear_and_clear_live() -> None:
+    """attach -> re-attach -> detach flows through update() the way the app
+    drives it: "" clears the segment, a new name replaces it."""
+    clock = FakeClock()
+    status = StatusLine(_dock(200), clock=clock)
+    status.update(model_label="test/model", cwd="/tmp", conversation_name="x")
+
+    status.update(agent_profile="auditor", team="release-team")
+    row = status.render_text(200).plain
+    assert f"{ICON_AGENT_PROFILE} auditor" in row
+    assert f"{ICON_TEAM} release-team" in row
+
+    # Re-attach a different profile: the segment changes, it does not stack.
+    status.update(agent_profile="reviewer")
+    row = status.render_text(200).plain
+    assert "reviewer" in row
+    assert "auditor" not in row
+
+    # Detach both with the "" the app pushes on /agent clear and team detach.
+    status.update(agent_profile="", team="")
+    row = status.render_text(200).plain
+    assert ICON_AGENT_PROFILE not in row
+    assert ICON_TEAM not in row
+
+
+def test_a_long_identity_name_is_capped_not_unbounded() -> None:
+    """The name is a BOUNDED rung: a pathological profile name is truncated to
+    :data:`AGENT_PROFILE_CELLS` rather than pushing the model label off the row.
+    """
+    clock = FakeClock()
+    status = StatusLine(_dock(200), clock=clock)
+    long_name = "x" * 80
+    status.update(
+        model_label="test/model",
+        cwd="/tmp",
+        conversation_name="x",
+        agent_profile=long_name,
+    )
+    row = status.render_text(200).plain
+    # The full 80-char name never reaches the band; the cap bounds the ink.
+    assert long_name not in row
+    assert "x" * AGENT_PROFILE_CELLS not in row  # truncation eats an ellipsis cell
+    assert ICON_AGENT_PROFILE in row
+
+
+def test_the_identity_rungs_are_bounded_and_present_in_every_ladder() -> None:
+    """team/agent are on every ladder variant and neither is an unbounded rung.
+
+    Being bounded is what lets them sit ahead of the numbers without risking the
+    self-defeating tail cwd is barred from: a capped name always fits its floor.
+    """
+    for ladder in (
+        _DROP_LADDER,
+        _DROP_LADDER_QUIET,
+        _DROP_LADDER_ESTIMATE,
+        _DROP_LADDER_QUIET_ESTIMATE,
+    ):
+        assert "team" in ladder
+        assert "agent" in ladder
+        assert "team" not in _UNBOUNDED_RUNGS
+        assert "agent" not in _UNBOUNDED_RUNGS
+        # team sheds before agent (broader context goes first), and both shed
+        # before the numbers an operator acts on.
+        assert ladder.index("team") < ladder.index("agent")
+        assert ladder.index("agent") < ladder.index("context")
+        assert ladder.index("effort") < ladder.index("team")
 
 
 # -- update() contract -------------------------------------------------------

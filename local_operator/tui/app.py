@@ -513,7 +513,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # surfaces over one registry, not a collision.
     SlashCommand(
         "agent",
-        "List agent profiles, or speak to this session as one",
+        # D4: "agents", standardizing the noun with the listing header and the
+        # attach/detach notices rather than saying "agent profiles" here.
+        "List agents, or speak to this session as one",
         aliases=("agents",),
         arguments=ArgumentMode.OPTIONAL,
     ),
@@ -1675,6 +1677,14 @@ class OperatorApp(App[None]):
             model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
+            # The active /agent profile and /team roster segments (U2). Read
+            # defensively via getattr: an embedded-SDK or test double may not
+            # expose these accessors, and a missing one must leave the segment
+            # empty rather than raise on boot. A resumed session that carried an
+            # attached profile/team restores it here, so the band names it
+            # immediately instead of only after the next attach.
+            agent_profile=str(getattr(session, "active_agent", "") or ""),
+            team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
         )
@@ -2762,9 +2772,13 @@ class OperatorApp(App[None]):
         child of the next item — the flat debug-style line this replaces did
         exactly that at both 100 and 60 columns.
         """
+        # D1: the section header outranks its entries, same treatment as
+        # ``_agent_list_block`` so the two listings stay consistent — bright
+        # bold `fg` for the header, muted `heading` for each team name.
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("teams", style=heading)]
+        rows: list[Any] = [Text("teams", style=section)]
         for team in teams:
             slots = len(team.members) + 1
             rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
@@ -2833,6 +2847,10 @@ class OperatorApp(App[None]):
             except Exception as exc:
                 self._system_notice(f"could not attach team {name!r}: {exc}", "warning")
                 return
+        # U2: the band names the roster now managed by this session. Synced from
+        # the session after the attach, so the segment matches what was actually
+        # stamped rather than the name the user typed.
+        self._sync_team_band()
         if not request:
             notice(
                 f"team {team.name} is ready. {team.manager} leads it. "
@@ -2930,9 +2948,16 @@ class OperatorApp(App[None]):
         separate rows keep a narrow terminal from wrapping the facts or the
         description into a position that reads as a child of the next entry.
         """
+        # D1: the SECTION header must outrank its entries. Entry names take the
+        # muted body-ish `heading` weight; the section header takes bright `fg`
+        # AND bold, so it reads as a header rather than as one more (indented)
+        # entry name. Indentation alone did not separate them — header and names
+        # shared the one muted style, so only the two-cell indent told them
+        # apart, which a narrow frame or a quick scan loses.
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        out: list[Any] = [Text("agents", style=heading)]
+        out: list[Any] = [Text("agents", style=section)]
         for name, facts, summary in rows:
             out.append(Padding(Text(name, style=heading), (0, 0, 0, 2)))
             out.append(Padding(Text(facts, style=body), (0, 0, 0, 4)))
@@ -2944,6 +2969,30 @@ class OperatorApp(App[None]):
         # profile can find their way back to base instructions without guessing.
         out.append(Text("Detach: /agent clear", style=body))
         return RichBlock(Group(*out))
+
+    def _sync_agent_band(self) -> None:
+        """Repaint the band's active-agent segment from the session (U2).
+
+        The session is the source of truth (``active_agent`` is "" once
+        ``clear_agent_profile`` runs, the resolved name after an attach), so the
+        band is synced FROM it rather than handed a string by each call site —
+        the two cannot then drift, and a future attach path gets the segment for
+        free. No-op before the band or session exists (early boot).
+        """
+        if self._status is None or self._session is None:
+            return
+        self._status.update(agent_profile=str(getattr(self._session, "active_agent", "") or ""))
+
+    def _sync_team_band(self) -> None:
+        """Repaint the band's active-team segment from the session (U2).
+
+        Mirror of :meth:`_sync_agent_band` for the roster: read straight off
+        ``active_team_name`` so an attach (and, when one exists, a detach) both
+        flow through the same one-line sync.
+        """
+        if self._status is None or self._session is None:
+            return
+        self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
 
     def _cmd_agent(self, arg: str, notice: NoticeFn) -> None:
         """``/agent`` — list; ``/agent <name> [<message>]`` — adopt a profile.
@@ -2969,7 +3018,10 @@ class OperatorApp(App[None]):
         if not arg:
             rows = self._agent_profile_rows()
             if not rows:
-                notice("no agent profiles yet. Ask the agent to create one.")
+                # D4: "agents", not "agent profiles" — the noun is standardized
+                # on "agent" across this surface, and this mirrors /team's
+                # "no teams yet" empty-state exactly.
+                notice("no agents yet. Ask the agent to create one.")
                 return
             self._append_block(self._agent_list_block(rows))
             return
@@ -2987,12 +3039,21 @@ class OperatorApp(App[None]):
             detach = getattr(session, "clear_agent_profile", None)
             if callable(detach):
                 detach()
-            notice("no agent profile active; this session uses its base instructions.")
+            # U2: the band's active-agent segment disappears on detach. Synced
+            # from the session (the source of truth `clear_agent_profile` just
+            # blanked), not by pushing "" directly, so the band and session can
+            # never disagree about what is attached.
+            self._sync_agent_band()
+            # D4: standardize the noun on "agent" — the listing header, attach
+            # notice, and this detach notice all say "agent", never "agent
+            # profile". Plain wording, no em dashes.
+            notice("no agent active; this session uses its base instructions.")
             return
         attach = getattr(session, "attach_agent_profile", None)
         if not callable(attach):
             self._system_notice(
-                "agent profiles are unavailable in this session.",
+                # D4: "agents", matching /team's "teams are unavailable".
+                "agents are unavailable in this session.",
                 "warning",
             )
             return
@@ -3008,6 +3069,11 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        # U2: the profile is now attached (including the A2 hollow case, which
+        # still governs which persona is named even though it layered no text),
+        # so the band names it from here. Synced before the notices below rather
+        # than after, so the segment is up by the time the receipt scrolls in.
+        self._sync_agent_band()
         # A2: the NAME resolved, but a role/specialist with empty instructions
         # layered no persona — a "is active" notice would overclaim. Tell the
         # user the profile carries no instructions so the missing effect is not
