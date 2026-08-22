@@ -272,6 +272,36 @@ class SessionProtocol(Protocol):
         batches at the next boundary)."""
         ...
 
+    def queued_steering(self) -> list[AgentMessage]:
+        """A FIFO snapshot of the steering queue, without draining it.
+
+        The read half of the recall seam: hosts deciding what is still
+        recallable must be able to see the queue, whose entries keep their
+        identity.
+        """
+        ...
+
+    def steer_message(self, message: Message) -> None:
+        """Queue a caller-built steering message, sharing the caller's object.
+
+        The identity-preserving twin of :meth:`steer`, for hosts that keep a
+        reference to what they queued so :meth:`recall_steering` can take it
+        back.
+        """
+        ...
+
+    def recall_steering(self, message: AgentMessage) -> bool:
+        """Remove ONE specific message from the steering queue, if present.
+
+        Lets a host unsend a queued mid-turn steer — the TUI's Esc lifts the
+        newest one back into the composer. Matched by identity (the very
+        object ``steer_message`` queued), so equal-but-distinct messages and
+        queue entries the host never queued (wake deliveries) are untouched.
+        False when the message is not queued — already drained at a boundary,
+        or never queued — and changes nothing.
+        """
+        ...
+
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end."""
         ...

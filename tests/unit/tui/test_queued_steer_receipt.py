@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import ImageContent, ModelSpec, SteeringDeliveredEvent
+from local_operator.harness.types import ModelSpec, SteeringDeliveredEvent
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
@@ -53,8 +53,12 @@ class _Streaming(FakeSession):
     def is_streaming(self) -> bool:
         return True
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        self.steers.append(text)
+    def steer_message(self, message: Any) -> None:
+        # The app queues via `steer_message` now; record the text the old
+        # `steer` override did and let the base fake hold the object so Esc
+        # can recall it.
+        self.steers.append(message.text)
+        super().steer_message(message)
 
 
 def _notice_blocks(app: OperatorApp) -> list[NoticeBlock]:
