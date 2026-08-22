@@ -11125,9 +11125,12 @@ class OperatorApp(App[None]):
         # The newest entry whose message is STILL queued. Delivered entries
         # are skipped, not dropped here: `on_steering_delivered` removes them
         # the moment their receipt lands, so by the time Esc runs the list's
-        # tail is either queued (recallable) or already gone.
+        # tail is either queued (recallable) or already gone. ONE snapshot per
+        # press: the membership scan below would otherwise drain-and-rebuild
+        # the queue once per held entry on the cancel key's hot path.
+        queued_now = session.queued_steering()
         for entry in reversed(self._held_steer_blocks):
-            if self._queue_holds(session, entry[0]):
+            if any(item is entry[0] for item in queued_now):
                 break
         else:
             return
@@ -11175,10 +11178,12 @@ class OperatorApp(App[None]):
         editor.move_cursor(editor._end_of_buffer())
         # Only now is the recall irreversible: the composer holds the text.
         if not session.recall_steering(message):
-            # Raced a boundary between the availability filter and here. The
-            # composer has the text and the queue delivered it too — the user
-            # sees both and can delete the draft; putting the message back
-            # would double-send it.
+            # Defence, not a live race: this handler runs synchronously on the
+            # session's own loop, so nothing drains the queue between the
+            # snapshot above and here. Kept for a future host that runs the
+            # session off this loop; if it ever fires, the composer has the
+            # text and the queue delivered it too — the user sees both and can
+            # delete the draft, and putting the message back would double-send.
             logger.debug("recall raced a steering delivery; composer keeps the text")
         # `entry`, not the list's tail: the tail can be a delivered entry the
         # receipt has not yet removed, and the recall must take exactly the
@@ -11193,7 +11198,7 @@ class OperatorApp(App[None]):
         # stale-row class the queued-steer receipts exist to eliminate. Retire
         # it with the steer's own rows (design round 2, D4).
         stop_notice = self._stop_notice
-        if stop_notice is not None and stop_notice._text == RECALL_DECLINE_NOTICE:
+        if stop_notice is not None and stop_notice.text() == RECALL_DECLINE_NOTICE:
             transcript.remove_block(stop_notice)
             self._stop_notice = None
         # The steer branch registered its text as a pending user echo so the
@@ -11211,16 +11216,6 @@ class OperatorApp(App[None]):
                 self._deferred_steer_notices.remove(held)
                 break
         editor.focus()
-
-    def _queue_holds(self, session: SessionProtocol, message: Message) -> bool:
-        """True when the session's steering queue still holds ``message``.
-
-        Identity, not equality: the same text steered twice is two messages,
-        and a recall must name the one the composer is about to hold. Read
-        through `queued_steering`, the protocol's snapshot seam — the queue
-        itself is engine-internal.
-        """
-        return any(item is message for item in session.queued_steering())
 
     def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.

@@ -2064,9 +2064,15 @@ class Session:
 
         ``asyncio.Queue`` has no public peek, so the snapshot is a drain and
         a rebuild through the get/put API — the same shape
-        :meth:`recall_steering` uses, minus the removal. The queue is a
-        handful of messages at most, and the loop only reads it at
-        boundaries, so the rebuild cannot race a drain.
+        :meth:`recall_steering` uses, minus the removal. A drain CAN
+        interleave with this rebuild — ``_drain_steering`` awaits a disk
+        append between its ``get_nowait``s, and a key handler runs on the
+        same loop — and the interleaving is BENIGN: a message the drain
+        already holds simply fails the caller's identity check (it is no
+        longer in the queue, so it is not recallable), and the re-put items
+        join the same boundary's delivery. What this method promises is only
+        that it never loses or reorders an entry, which the get/put round
+        trip keeps.
         """
         snapshot: list[AgentMessage] = []
         while not self._steering_queue.empty():
@@ -2102,7 +2108,11 @@ class Session:
         The rebuild goes through the public get/put API rather than the
         queue's private deque: ``asyncio.Queue`` is the contract this queue
         has with the loop, and reaching inside it would couple the session
-        to an implementation detail.
+        to an implementation detail. A concurrent ``_drain_steering`` can
+        interleave between the get and the put (it awaits a disk append per
+        message); the interleaving is benign for the same reasons
+        :meth:`queued_steering` documents — the drain takes what it finds,
+        the rebuild re-puts the rest, and nothing is lost either way.
         """
         remaining: list[AgentMessage] = []
         found = False
