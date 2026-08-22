@@ -178,6 +178,105 @@ def test_unknown_session_command_is_a_409() -> None:
     assert reply.status_code == 409
 
 
+def test_spawn_dir_gate_allows_home_and_tmp_only(tmp_path, monkeypatch) -> None:
+    """The phone may start a session anywhere under home or in the system temp
+    dir (a common scratch root), and nowhere else — the gate guards against a
+    fat-fingered/traversed path, not against the owner."""
+    from pathlib import Path
+
+    from local_operator.mobile import daemon as daemon_mod
+    from local_operator.mobile.daemon import _spawn_dir_allowed
+
+    # pytest's tmp_path already lives UNDER the real system temp dir, so pin an
+    # explicit fake tmp and home under it and assert against those bounds —
+    # otherwise "outside" would still be a child of the real /tmp and allowed.
+    home = tmp_path / "home"
+    home.mkdir()
+    fake_tmp = tmp_path / "scratch"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(daemon_mod, "_tmp_dir", lambda: str(fake_tmp.resolve()))
+
+    # Under home: allowed. Home itself: allowed.
+    sub = home / "projects"
+    sub.mkdir()
+    assert _spawn_dir_allowed(home.resolve())
+    assert _spawn_dir_allowed(sub.resolve())
+
+    # The (fake) temp dir and a child of it: allowed.
+    assert _spawn_dir_allowed(fake_tmp.resolve())
+    child = fake_tmp / "work"
+    child.mkdir()
+    assert _spawn_dir_allowed(child.resolve())
+
+    # Somewhere neither under home nor tmp: refused.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert not _spawn_dir_allowed(outside.resolve())
+
+
+def test_directories_endpoint_offers_tmp(monkeypatch) -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    app = build_app(daemon)
+    client = TestClient(app, follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    body = client.get("/api/directories").json()
+    assert "home" in body
+    assert "recent" in body
+    # /tmp is offered as a scratch start dir beside home.
+    assert body.get("tmp")
+
+
+def test_image_bytes_reads_attachment_from_transcript(tmp_path, monkeypatch) -> None:
+    """The image endpoint's helper decodes the Nth image block of a message
+    from the on-disk transcript — the lazy source the phone fetches pixels
+    from. Index counts IMAGE blocks only, matching _image_refs."""
+    import asyncio as _asyncio
+    import base64
+
+    from local_operator.harness.types import ImageContent, Message
+    from local_operator.mobile.daemon import _image_bytes
+    from local_operator.mobile.types import SessionRecord
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    # _image_bytes imports config_dir from local_operator.paths at call time,
+    # so patching the source module is what redirects it to the fake config.
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    session_id = "sess-img"
+    directory = cfg / "sessions" / session_id
+    directory.mkdir(parents=True)
+    raw = b"\x89PNG\r\n\x1a\nHELLO"
+    message = Message.user(
+        "look",
+        [ImageContent(data=base64.b64encode(raw).decode(), mime_type="image/png")],
+    )
+    transcript = Transcript(directory)
+    _asyncio.run(transcript.append_message(message))
+
+    record = SessionRecord(
+        pid=1,
+        kind="daemon",
+        session_id=session_id,
+        conversation_name="",
+        cwd=str(tmp_path),
+        model_label="",
+        control_port=0,
+        control_key="k",
+    )
+    found = _image_bytes(record, message.id, 0)
+    assert found is not None
+    data, mime = found
+    assert data == raw
+    assert mime == "image/png"
+
+    # Out-of-range index and unknown entry both miss cleanly.
+    assert _image_bytes(record, message.id, 1) is None
+    assert _image_bytes(record, "nope", 0) is None
+
+
 def test_slash_catalogue_excludes_terminal_chrome() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     names = [c["name"] for c in daemon.slash_commands()]

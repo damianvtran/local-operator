@@ -160,6 +160,14 @@ class TranscriptEntry:
     elapsed_s: float = 0.0
     error: str = ""
     details: dict[str, Any] = field(default_factory=dict)  # expand payload
+    # Image attachments on a user turn, as lightweight REFERENCES not bytes:
+    # each is ``{"index": int, "mime_type": str}``. The bytes are fetched
+    # lazily from ``/api/sessions/{pid}/image?entry=<id>&i=<index>`` (which
+    # reads them from the on-disk transcript), NEVER inlined here — a
+    # projection repaint fires on every streaming token, and a few hundred KB
+    # of base64 re-sent per token would swamp the SSE. ``id`` is the message
+    # id the endpoint resolves against.
+    images: list[dict[str, Any]] = field(default_factory=list)
     # assistant rows stream: ``final`` flips true on message_end
     final: bool = True
 
@@ -250,7 +258,12 @@ class SessionProjection:
     transcript: list[TranscriptEntry] = field(default_factory=list)
     todos: list[TodoItem] = field(default_factory=list)
     subagents: list[SubagentRow] = field(default_factory=list)
+    #: The FRONT waiting request; the phone renders it as the pinned card.
     pending: PendingRequest | None = None
+    #: How many requests are waiting in total (>= 1 while ``pending`` is set).
+    #: A parallel tool batch can open several approvals at once; the phone
+    #: shows "1 of N" so the user knows more cards follow this one.
+    pending_count: int = 0
     usage: dict[str, int] = field(default_factory=dict)  # input/output tokens
     version: int = 0  # projection epoch; the phone drops stale repaints
 

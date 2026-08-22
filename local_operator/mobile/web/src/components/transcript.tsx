@@ -12,28 +12,114 @@ import { useEffect, useRef, useState } from "react";
 import { Markdown } from "./markdown"
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
-import { getHistory } from "../api";
+import { getHistory, imageUrl } from "../api";
 import { cn } from "../lib/cn";
 import type { TranscriptEntry } from "../types";
 
 const PAGE = 120;
 
-function Entry({ entry }: { entry: TranscriptEntry }) {
+/**
+ * One inline attachment thumbnail with designed loading and failure states.
+ *
+ * A phone loads images over a flaky link, so the two off-happy-path states are
+ * common, not edge cases, and both are designed rather than left to the
+ * browser: a bare <img> would paint the native broken-image glyph on a 404
+ * (which reads as a bug) and would reflow the bubble taller the instant bytes
+ * decode (motion branding §7 rules out). Both are avoided by reserving a
+ * fixed box up front and swapping a muted placeholder in on error.
+ */
+function AttachmentImage({
+	pid,
+	entryId,
+	index,
+}: {
+	pid: number;
+	entryId: string;
+	index: number;
+}) {
+	const [state, setState] = useState<"loading" | "loaded" | "error">("loading");
+	/* The reserved frame: a fixed height so the row never jumps when the
+	   bytes arrive, capped width so a wide image cannot push the bubble past
+	   the viewport. object-contain keeps aspect within the frame. */
+	if (state === "error") {
+		return (
+			<div className="flex h-40 w-40 flex-col items-center justify-center gap-1 rounded-sm border border-hairline bg-sunken text-ink-dim">
+				<span aria-hidden className="text-body">
+					⊘
+				</span>
+				<span className="text-meta">image unavailable</span>
+			</div>
+		);
+	}
+	return (
+		<span
+			className={cn(
+				"relative block h-40 overflow-hidden rounded-sm border border-hairline",
+				state === "loading" && "w-40 bg-sunken",
+			)}
+		>
+			{state === "loading" ? (
+				<span
+					aria-hidden
+					className="absolute inset-0 flex items-center justify-center text-meta text-ink-dim"
+				>
+					loading…
+				</span>
+			) : null}
+			<img
+				src={imageUrl(pid, entryId, index)}
+				alt="attachment"
+				onLoad={() => setState("loaded")}
+				onError={() => setState("error")}
+				className={cn(
+					"h-40 max-w-full rounded-sm object-contain",
+					state === "loading" && "invisible",
+				)}
+			/>
+		</span>
+	);
+}
+
+function Entry({ entry, pid }: { entry: TranscriptEntry; pid: number }) {
 	switch (entry.kind) {
-		case "user":
+		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
 			   but the marker of identity is the accent edge on the leading
 			   side: a user turn is the one thing in the transcript the human
 			   said, and the accent is reserved for exactly that kind of "this
 			   is what the turn is on" signal (branding §7). Surface ground +
 			   hairline keeps it quiet next to the answer that follows. */
+			const images = entry.images ?? [];
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5 text-body leading-normal break-words whitespace-pre-wrap">
-						{entry.text}
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+						{/* Attachments render inline like the TUI's image block: the
+						   picture the user sent is part of the turn, not a stripped
+						   "[image attached]" note. AttachmentImage owns the loading
+						   and failure states (reserved box, designed placeholder) so
+						   a flaky-link 404 or a slow decode never shows a broken
+						   glyph or reflows the bubble. */}
+						{images.length > 0 ? (
+							<div className="flex flex-wrap gap-1.5">
+								{images.map((img) => (
+									<AttachmentImage
+										key={img.index}
+										pid={pid}
+										entryId={entry.id}
+										index={img.index}
+									/>
+								))}
+							</div>
+						) : null}
+						{entry.text ? (
+							<div className="text-body leading-normal break-words whitespace-pre-wrap">
+								{entry.text}
+							</div>
+						) : null}
 					</div>
 				</div>
 			);
+		}
 		case "steer":
 			return (
 				<div className="flex min-w-0 justify-end">
@@ -210,7 +296,7 @@ export function Transcript({
 				/* A boundary per row: one malformed entry must not unmount the
 				   whole app (the "tap → blank screen" failure). */
 				<RowBoundary key={e.id}>
-					<Entry entry={e} />
+					<Entry entry={e} pid={pid} />
 				</RowBoundary>
 			))}
 		</div>

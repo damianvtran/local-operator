@@ -103,6 +103,16 @@ export function sendCommand(
 	});
 }
 
+/** URL for one image attachment on a user turn. The bytes are served lazily
+    from the transcript (never carried in the projection), keyed by the entry
+    id plus the image-only index the ref emitted. Same-origin, cacheable and
+    immutable — a message's attachments never change — so an <img src> can use
+    it directly. */
+export function imageUrl(pid: number, entryId: string, index: number): string {
+	const q = new URLSearchParams({ entry: entryId, i: String(index) });
+	return `/api/sessions/${pid}/image?${q}`;
+}
+
 /** Older transcript entries for lazy loading. ``before`` is the id of the
     oldest entry the client already has; the daemon returns the page
     immediately older than it (chronological within the page) plus whether

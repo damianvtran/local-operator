@@ -109,6 +109,31 @@ def _compact(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
+    """Lightweight references to a user message's image blocks — index + mime,
+    never the bytes. The phone fetches the pixels lazily from the image
+    endpoint (see daemon.api_session_image), which reads them back out of the
+    on-disk transcript by the same index. Carrying only the reference keeps a
+    per-token projection repaint from re-sending megabytes of base64.
+
+    A block with an empty ``data`` (an attachment reference that no longer
+    resolves) is still listed: the endpoint degrades it to a broken-image
+    marker, which is more honest than silently dropping the attachment row.
+    """
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return []
+    refs: list[dict[str, Any]] = []
+    # ``index`` counts IMAGE blocks only (a text caption does not shift it),
+    # which is exactly what the image endpoint's _image_bytes indexes by.
+    image_index = 0
+    for block in content:
+        if isinstance(block, ImageContent):
+            refs.append({"index": image_index, "mime_type": block.mime_type or "image/png"})
+            image_index += 1
+    return refs
+
+
 def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
     """Green/red counts from a tool result's details, when the tool reported
     them (write/edit do). Zeroes, not guesses, everywhere else."""
@@ -149,14 +174,14 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
             continue
         if message.role == "user":
-            # An image-only prompt (composer allows "" text + images) must not
-            # round-trip through history as an EMPTY bubble. Render a receipt
-            # line naming the attachments, matching the live fold's receipt.
-            images = sum(1 for b in message.content if isinstance(b, ImageContent))
+            # Carry image attachments as references so an image-only prompt
+            # (the composer allows "" text + images) renders its thumbnails on
+            # replay instead of round-tripping as an empty bubble — the same
+            # inline render the live fold produces. The bytes are fetched
+            # lazily from the image endpoint; only the reference travels here.
+            refs = _image_refs(message)
             text = message.text
-            if not text.strip() and images:
-                text = f"[{images} image{'s' if images != 1 else ''} attached]"
-            entries.append(TranscriptEntry(id=message.id, kind="user", text=text))
+            entries.append(TranscriptEntry(id=message.id, kind="user", text=text, images=refs))
         elif message.role == "assistant":
             if message.text:
                 entries.append(TranscriptEntry(id=message.id, kind="assistant", text=message.text))
@@ -218,6 +243,10 @@ class ProjectionFold:
         self._subagent_started_at: dict[str, float] = {}
         # The working line's clock origin and the label's current source.
         self._activity_started_at: float | None = None
+        # Approval/ask requests waiting on the user, FIFO. Owned sessions can
+        # have several at once (a parallel tool batch); the phone renders the
+        # front one and a "1 of N" badge. See push_pending/pop_pending.
+        self._pending_queue: list[PendingRequest] = []
 
     # -- history -----------------------------------------------------------
 
@@ -236,7 +265,14 @@ class ProjectionFold:
                     )
                 continue
             if message.role == "user":
-                entries.append(TranscriptEntry(id=message.id, kind="user", text=message.text))
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="user",
+                        text=message.text,
+                        images=_image_refs(message),
+                    )
+                )
             elif message.role == "assistant":
                 if message.text:
                     entries.append(
@@ -459,11 +495,22 @@ class ProjectionFold:
         if not isinstance(message, Message) or message.role != "user":
             return False
         text = message.text
+        refs = _image_refs(message)
         # De-dupe the optimistic echo: same text already sitting at the tail.
+        # A phone-sent prompt was echoed by note_user_message WITHOUT image
+        # refs (the handle has only the wire images, not a persisted id), so
+        # when the real MessageStartEvent arrives carrying the attachments,
+        # upgrade the echoed row's id and image refs in place rather than
+        # skipping it — otherwise the thumbnails never appear for the sender.
         for entry in reversed(self.projection.transcript[-3:]):
             if entry.kind in ("user", "steer") and entry.text == text:
+                if refs and not entry.images:
+                    entry.id = message.id
+                    entry.images = refs
                 return False
-        self._append(TranscriptEntry(id=message.id, kind="user", text=text, final=True))
+        self._append(
+            TranscriptEntry(id=message.id, kind="user", text=text, images=refs, final=True)
+        )
         return True
 
     def note_prompt_rejected(self, reason: str) -> None:
@@ -538,7 +585,46 @@ class ProjectionFold:
         self._bump()
 
     def set_pending(self, pending: PendingRequest | None) -> None:
-        self.projection.pending = pending
+        """Replace the whole pending queue with zero or one request.
+
+        The TUI-mirror handle (:class:`~local_operator.mobile.tui_handle`)
+        uses this: the terminal owns approval serialization, so the phone only
+        ever mirrors the ONE card the TUI shows. Owned sessions use the
+        request-identified :meth:`push_pending`/:meth:`pop_pending` instead,
+        because their gates resolve concurrently and a bare ``None`` cannot say
+        WHICH one settled.
+        """
+        self._pending_queue = [pending] if pending is not None else []
+        self._sync_pending()
+
+    def push_pending(self, pending: PendingRequest) -> None:
+        """Enqueue a request behind any already waiting; show the front one.
+
+        A tool batch can open two write/exec approvals at once (``shared``
+        tools run in parallel — see harness.loop._execute_tool_calls). Each
+        gate calls this from its own task, so without a queue the second card
+        overwrote the first and the first tool hung forever with no way to
+        answer it. FIFO: the phone answers the oldest wait first, and the next
+        surfaces on the repaint that clears it.
+        """
+        self._pending_queue.append(pending)
+        self._sync_pending()
+
+    def pop_pending(self, request_id: str) -> None:
+        """Remove a settled (or timed-out) request by id and re-front the rest.
+
+        Identified by id, not position: concurrent gates settle in whatever
+        order the user answers or a timeout fires, which is not the order they
+        were enqueued."""
+        self._pending_queue = [req for req in self._pending_queue if req.request_id != request_id]
+        self._sync_pending()
+
+    def _sync_pending(self) -> None:
+        """Project the queue onto the wire fields the phone renders: the front
+        request as ``pending`` plus the total ``pending_count`` for the "1 of
+        N" badge."""
+        self.projection.pending = self._pending_queue[0] if self._pending_queue else None
+        self.projection.pending_count = len(self._pending_queue)
         self._bump()
 
     def set_state(

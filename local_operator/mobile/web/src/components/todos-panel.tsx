@@ -1,6 +1,13 @@
 /**
- * Todos panel: collapsible, one line per item. Default-collapsed once most
- * items are done — a finished list is context, not work in progress.
+ * Todos panel: collapsible, one line per item.
+ *
+ * On a phone the panel sits ABOVE the transcript, so a long list expanded by
+ * default pushed the actual conversation off the top of the screen (the
+ * reported "todos pop up very high"). Two guards fix that: it starts
+ * COLLAPSED (the count in the header is enough at a glance; tap to see the
+ * items), and when expanded its body is capped to ~40% of the viewport and
+ * scrolls internally, so even a 20-item list can never crowd out the
+ * messages.
  */
 import { cn } from "../lib/cn";
 import type { TodoItem } from "../types";
@@ -17,10 +24,13 @@ export function TodosPanel({ todos }: { todos: TodoItem[] }) {
 	const done = todos.filter(
 		(t) => t.status === "done" || t.status === "dropped",
 	).length;
-	const defaultOpen = !(done > 4 && done >= todos.length - 1);
 	return (
 		<Disclosure
-			defaultOpen={defaultOpen}
+			/* Collapsed by default on the phone: the panel is above the
+			   transcript, and an auto-expanded list pushed the conversation off
+			   screen. The header's count is the at-a-glance signal; tap to work
+			   the list. */
+			defaultOpen={false}
 			className="border-t border-hairline px-4"
 			header={
 				<span className="text-body-sm text-ink-muted">
@@ -31,7 +41,9 @@ export function TodosPanel({ todos }: { todos: TodoItem[] }) {
 				</span>
 			}
 		>
-			<div className="flex flex-col gap-1 pb-2 pl-5">
+			{/* Capped to ~40% of the viewport and scrolls internally: a long
+			   list can never crowd out the messages, even fully expanded. */}
+			<div className="lo-scroll flex max-h-[40dvh] flex-col gap-1 overflow-y-auto pb-2 pl-5">
 				{todos.map((t, i) => (
 					<div key={i} className="flex items-baseline gap-2">
 						<span
