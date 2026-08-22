@@ -1482,7 +1482,7 @@ class TestAuthRequiredHandling:
         seen: list[tuple[str, str]] = []
         manager.on_auth_required = lambda name, msg: seen.append((name, msg))
         manager._fire_auth_required("notion", McpAuthRequiredError("https://mcp.notion.com/mcp"))
-        assert seen == [("notion", "needs authorization — run /mcp login notion")]
+        assert seen == [("notion", "run /mcp login notion to authorize")]
 
     def test_fire_auth_required_survives_a_raising_sink(self) -> None:
         """A broken UI hook must not take down the connect machinery."""

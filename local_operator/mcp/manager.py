@@ -1591,11 +1591,17 @@ class McpManager:
     def _auth_required_text(name: str, exc: McpAuthRequiredError) -> str:
         """The startup-toast wording for a server that needs an OAuth login.
 
-        Names the command that fixes it. The same string lands in the durable
-        transcript notice and in ``/mcp``, so one helper keeps all three
-        surfaces agreeing.
+        Leads with the COMMAND that fixes it rather than the diagnosis. The
+        toast renders this after a ``failed: <name> — `` prefix and then clamps
+        to the card width, so the tail is what gets truncated: putting
+        ``run /mcp login <name>`` first keeps the one actionable thing on screen
+        even on a narrow terminal, where ``needs authorization — run /mcp login
+        <name>`` used to sever the command mid-word (design review D1). One
+        ``—`` only, so the composed line is not a chain of dashes (D4). The same
+        string lands in the durable transcript notice and in ``/mcp``, so one
+        helper keeps all three surfaces agreeing.
         """
-        return f"needs authorization — run /mcp login {name}"
+        return f"run /mcp login {name} to authorize"
 
     def _fire_auth_required(self, name: str, exc: McpAuthRequiredError) -> None:
         """Notify the UI that ``name`` needs an OAuth login (best-effort).

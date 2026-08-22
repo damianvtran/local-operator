@@ -674,7 +674,7 @@ async def test_settling_boot_snapshot_is_provisional_and_re_reported_on_settle(
         configured=["notion", "linear"],
         connected=["linear"],
         settling=True,
-        startup_failures={"notion": "needs authorization — run /mcp login notion"},
+        startup_failures={"notion": "run /mcp login notion to authorize"},
     )
 
     async def fake_discover(cwd, auth_store=None):
