@@ -513,7 +513,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # surfaces over one registry, not a collision.
     SlashCommand(
         "agent",
-        "List agent profiles, or speak to this session as one",
+        # D4: "agents", standardizing the noun with the listing header and the
+        # attach/detach notices rather than saying "agent profiles" here.
+        "List agents, or speak to this session as one",
         aliases=("agents",),
         arguments=ArgumentMode.OPTIONAL,
     ),
@@ -3016,7 +3018,10 @@ class OperatorApp(App[None]):
         if not arg:
             rows = self._agent_profile_rows()
             if not rows:
-                notice("no agent profiles yet. Ask the agent to create one.")
+                # D4: "agents", not "agent profiles" — the noun is standardized
+                # on "agent" across this surface, and this mirrors /team's
+                # "no teams yet" empty-state exactly.
+                notice("no agents yet. Ask the agent to create one.")
                 return
             self._append_block(self._agent_list_block(rows))
             return
