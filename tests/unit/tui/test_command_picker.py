@@ -58,6 +58,21 @@ PROVIDER_CHOICES = [
 ]
 
 
+#: Team rows the `/team` argument list offers. NAME+message commands: choosing
+#: a row fills the name and a space and waits for the message, and the typed
+#: name is highlighted once it exactly matches one of these.
+TEAM_CHOICES = [
+    ArgumentChoice("frontend-guild", "Ship the web surface", detail="3 roles"),
+    ArgumentChoice("release-crew", "Cut releases", detail="2 roles"),
+]
+
+#: Agent rows the `/agent` argument list offers — the mirror of TEAM_CHOICES.
+AGENT_CHOICES = [
+    ArgumentChoice("auditor", "Audit changes for risk", detail="role"),
+    ArgumentChoice("dashboard-sme", "Knows the dashboard", detail="specialist"),
+]
+
+
 def _logout_choices() -> list[ArgumentChoice]:
     """What `/logout` offers, shaped as the app builds it.
 
@@ -111,6 +126,14 @@ class PickerHarnessApp(App[None]):
         # two sets distinct so `/logout` can be shown to offer strictly less.
         message.stop()
         self.provider_queries.append(message.command)
+        if message.command in ("team", "teams", "agent", "agents"):
+            # Mirror the app: fill the rows AND hand the editor the name snapshot
+            # its highlighter reads, so the NAME+message completion and the
+            # argument-name highlight are exercised over the real registry seam.
+            choices = TEAM_CHOICES if message.command in ("team", "teams") else AGENT_CHOICES
+            self.editor.picker.set_choices(list(choices))
+            self.editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+            return
         choices = _logout_choices() if message.command == "logout" else PROVIDER_CHOICES
         self.editor.picker.set_choices(list(choices))
 
@@ -1488,3 +1511,279 @@ def test_the_wheel_on_a_closed_picker_is_a_no_op() -> None:
     picker = _picker(SLASH_COMMANDS)
     picker.on_mouse_scroll_down(_wheel_down())  # must not raise
     assert picker.suggestions() == []
+
+
+# ---------------------------------------------------------------------------
+# NAME+message completion (`/team`, `/agent`) — fill a name and a space, never
+# submit; the message tail and the blank-attach are the existing submit paths.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enter_on_a_team_row_fills_the_name_and_a_space_without_submitting() -> None:
+    """Enter on a team row is "chosen, now type the message", not "switch now".
+
+    The key difference from a provider row (which Enter RUNS when unambiguous):
+    for a NAME+message command neither Tab nor Enter ever submits — the name is
+    filled with a trailing space and the caret parks after it.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team frontend-guild"
+        await pilot.pause()
+        assert app.editor.picker.highlighted_name() == "frontend-guild"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.editor.text == "/team frontend-guild "
+        assert app.editor.cursor_location == app.editor._end_of_buffer()
+        assert app.submissions == []
+        assert not app.editor.picker.is_open()
+        assert app.editor.has_focus
+
+
+@pytest.mark.asyncio
+async def test_tab_on_a_team_row_fills_name_and_space() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team front"
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        # Tab fills the name AND a space here — the opposite of the provider
+        # list, where Tab leaves no space so the matcher keeps matching.
+        assert app.editor.text == "/team frontend-guild "
+        assert app.submissions == []
+
+
+@pytest.mark.asyncio
+async def test_click_on_a_team_row_fills_name_and_space_without_submitting() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team "
+        await pilot.pause()
+        await pilot.click(CommandPicker, offset=(4, 0))
+        await pilot.pause()
+        assert app.editor.text == "/team frontend-guild "
+        assert app.submissions == []
+        assert not app.editor.picker.is_open()
+
+
+@pytest.mark.asyncio
+async def test_arrowing_onto_a_team_row_still_does_not_submit() -> None:
+    """The unambiguous branch that RUNS a provider must not run a team row: for
+    a NAME+message command "one match / arrowed" is still only "ready"."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team "
+        await pilot.pause()
+        await pilot.press("down")  # arrow onto row 1 — an explicit move
+        await pilot.pause()
+        assert app.editor.picker.highlighted_name() == "release-crew"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.editor.text == "/team release-crew "
+        assert app.submissions == []
+
+
+@pytest.mark.asyncio
+async def test_blank_enter_after_a_completed_team_name_submits_attach_only() -> None:
+    """The blank tail after the space is not a picker gesture — the list is
+    closed, so Enter submits, and the app's dispatch collapses the bare name to
+    an attach-only switch."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team frontend-guild "
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+        await pilot.press("enter")
+        await pilot.pause()
+        # The whole line submits; the arg is `frontend-guild ` which dispatch
+        # strips to the bare name (attach-only). We assert the submitted text.
+        assert app.submissions == ["/team frontend-guild "]
+
+
+@pytest.mark.asyncio
+async def test_typing_a_message_then_enter_sends_the_whole_line() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team frontend-guild fix the flaky test"
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/team frontend-guild fix the flaky test"]
+
+
+@pytest.mark.asyncio
+async def test_agent_row_behaves_like_team() -> None:
+    """`/agent` is the mirror of `/team`: complete the name + space, no submit."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/agent audit"
+        await pilot.pause()
+        assert app.editor.picker.highlighted_name() == "auditor"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.editor.text == "/agent auditor "
+        assert app.submissions == []
+
+
+@pytest.mark.asyncio
+async def test_enum_tail_login_row_still_runs_on_enter() -> None:
+    """Regression guard: the enum-tail path is untouched — an unambiguous
+    provider Enter still completes AND runs, unlike a name command."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login anthropic"
+        await pilot.pause()
+        assert len(app.editor.picker.suggestions()) == 1
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/login anthropic"]
+
+
+# ---------------------------------------------------------------------------
+# slash-command syntax highlighting — the render pass paints the recognized
+# command word, the recognized name, and a muted unknown word, and nothing else.
+# ---------------------------------------------------------------------------
+
+
+def _slash_ink(editor: Editor, y: int = 0) -> list[tuple[str, str | None]]:
+    """(text, fg hex) per segment of the editor's rendered row ``y``.
+
+    Reads the FINISHED strip ``render_line`` produces — the same thing the
+    terminal is sent — so the assertions probe what the user actually sees, not
+    an intention. Foreground only, because the highlight is foreground-only.
+    """
+    strip = editor.render_line(y)
+    cells: list[tuple[str, str | None]] = []
+    for segment in strip._segments:
+        style = segment.style
+        fg = style.color.get_truecolor().hex.lower() if style and style.color else None
+        cells.append((segment.text, fg))
+    return cells
+
+
+def _ink_of(cells: list[tuple[str, str | None]], text: str) -> str | None:
+    """The fg of the first segment whose text is exactly ``text``."""
+    return next(fg for seg_text, fg in cells if seg_text == text)
+
+
+@pytest.mark.asyncio
+async def test_recognized_command_word_gets_the_slash_command_style() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # A space closes the command picker so the highlight is not suppressed.
+        app.editor.text = "/usage "
+        await pilot.pause()
+        cells = _slash_ink(app.editor)
+        signal = theme_mod.semantic_color("signal").lower()
+        assert _ink_of(cells, "/") == signal
+        assert _ink_of(cells, "usage") == signal
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_word_gets_the_unknown_style_when_picker_closed() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/notacommand hello"
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+        cells = _slash_ink(app.editor)
+        muted = theme_mod.semantic_color("muted").lower()
+        assert _ink_of(cells, "/") == muted
+        assert _ink_of(cells, "notacommand") == muted
+        # The message tail after the space stays prose.
+        fg = theme_mod.semantic_color("fg").lower()
+        assert _ink_of(cells, " hello ") == fg
+
+
+@pytest.mark.asyncio
+async def test_command_word_is_not_flagged_unknown_while_the_picker_is_open() -> None:
+    """A prefix under an open command list is in progress, not a typo — the
+    unknown treatment is suppressed so it does not flash on every keystroke."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/te"
+        await pilot.pause()
+        assert app.editor.picker.is_open()
+        assert app.editor.picker.mode is PickerMode.COMMAND
+        cells = _slash_ink(app.editor)
+        muted = theme_mod.semantic_color("muted").lower()
+        # `/te` is not a full command, but no cell is painted the unknown colour.
+        assert all(fg != muted for _, fg in cells if _.strip())
+
+
+@pytest.mark.asyncio
+async def test_recognized_team_name_gets_the_argument_style() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        # Open the list so the app pushes the name snapshot, then type a message.
+        app.editor.text = "/team frontend-guild fix it"
+        await pilot.pause()
+        cells = _slash_ink(app.editor)
+        signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        fg = theme_mod.semantic_color("fg").lower()
+        assert _ink_of(cells, "team") == signal
+        assert _ink_of(cells, "frontend-guild") == green
+        # The message tail is NOT highlighted — the whole point of the feature.
+        assert _ink_of(cells, " fix it ") == fg
+
+
+@pytest.mark.asyncio
+async def test_partial_name_is_not_highlighted() -> None:
+    """A half-typed name is normal in-progress state, not an error — only an
+    exact snapshot hit paints the name."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team front"
+        await pilot.pause()
+        cells = _slash_ink(app.editor)
+        green = theme_mod.semantic_color("string").lower()
+        assert all(fg != green for _, fg in cells)
+
+
+@pytest.mark.asyncio
+async def test_multiline_buffer_does_not_highlight_a_second_line() -> None:
+    """The command lives on line 0 only; a newline makes the rest a message
+    body, and no command highlight may leak onto it."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/team frontend-guild\nmore text"
+        await pilot.pause()
+        # A newline after the command word means neither token is a live list
+        # surface: nothing is highlighted on either row.
+        signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        for y in (0, 1):
+            cells = _slash_ink(app.editor, y)
+            assert all(fg not in (signal, green) for _, fg in cells)

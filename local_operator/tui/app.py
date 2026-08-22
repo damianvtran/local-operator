@@ -9528,12 +9528,20 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command in ("team", "teams"):
-            picker.set_choices(self._team_choices())
+            choices = self._team_choices()
+            picker.set_choices(choices)
             picker.set_notice("")
+            # Hand the editor a cheap immutable snapshot of the names so its
+            # syntax highlighter can recognize the typed team name without
+            # walking the registry on every render frame (see
+            # ``Editor.set_name_choices``).
+            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
             return
         if message.command in ("agent", "agents"):
-            picker.set_choices(self._agent_choices())
+            choices = self._agent_choices()
+            picker.set_choices(choices)
             picker.set_notice("")
+            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
             return
         if message.command == "effort":
             levels = self._effort_levels()

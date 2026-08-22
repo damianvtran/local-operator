@@ -466,6 +466,41 @@ Editor .text-area--image-marker-selected {
     background: $lo-tint-attach-hi;
 }
 
+/* ── slash-command syntax highlighting ───────────────────────────────────
+ *
+ * Foreground-only tints on the composer's leading `/command` word and, for
+ * `/team`·`/agent`, the recognized team/agent NAME. The point is legibility of
+ * intent: the user sees which tokens are the recognized command and its
+ * argument NAME (structure that will NOT be sent as message text) versus the
+ * free-text tail that will. Foreground-only so the tint composes cleanly with
+ * the cursor's inverse and the selection ground without a competing background
+ * — see `Editor._paint_slash`. Component classes reading `$lo-*` (never a
+ * Python hex) so a `/theme` switch repaints them for free, exactly like the
+ * attachment chip above. `$lo-accent` is deliberately NOT used here: it is
+ * reserved for "a turn is live" (see this file's header), and a recognized
+ * command word is structure, not activity. */
+/* A recognized slash command. `signal` is the ramp's cool file/reference hue
+ * (already the chip's ink), which reads as "structured token", not the accent
+ * green of a live turn. Bold lifts the short word above the prose around it. */
+Editor .text-area--slash-command {
+    color: $lo-signal;
+    text-style: bold;
+}
+/* The recognized team/agent NAME after the command word. `string` (the
+ * success/string green) distinguishes the resolved argument from the command
+ * word so the two reads never collapse into one, without a second ground. */
+Editor .text-area--slash-argument {
+    color: $lo-string;
+}
+/* A leading /word that resolves to NO command: dimmed so the user sees it is
+ * inert text that WILL be sent, not a recognized command. `muted`, not a
+ * danger colour — an unknown slash is a typo-in-progress, not an error to
+ * alarm about (and it is suppressed entirely while the command picker is still
+ * choosing the word). */
+Editor .text-area--slash-unknown {
+    color: $lo-muted;
+}
+
 /* ── startup toast ───────────────────────────────────────────────────────
  *
  * Top-right transient overlay. The host HUGS its card (`width: auto`) and both
