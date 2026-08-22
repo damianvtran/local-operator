@@ -2131,16 +2131,27 @@ class Session:
         """Exposed so the wake tool can list/create/cancel schedules."""
         return self._wake
 
-    async def preflight_usage(self) -> None:
+    async def preflight_usage(self, *, consume_boundary: bool = True) -> None:
         """Run the stream's message-boundary quota check without starting a turn.
 
         The TUI calls this after subscribing, so an exhausted default provider
         becomes a visible warning while startup itself remains successful.
+
+        ``consume_boundary=False`` is the ``/model`` switch probe: it evaluates
+        the NEW selector immediately (a spent family cap on the previous model
+        must not ride across the switch) without spending the message-boundary
+        token the next request's effort classification is owed.
         """
         preflight = getattr(self._stream_fn, "preflight_usage", None)
         if not callable(preflight):
             return
-        result = preflight(self._model)
+        # The kwarg rides only when set: stream fakes that predate the
+        # switch probe declare the bare ``(model)`` shape.
+        result = (
+            preflight(self._model)
+            if consume_boundary
+            else preflight(self._model, consume_boundary=False)
+        )
         if inspect.isawaitable(result):
             await result
 
