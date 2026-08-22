@@ -377,12 +377,22 @@ def test_clear_agent_profile_returns_to_base_instructions(tmp_path, monkeypatch)
 
     assert parent.attach_agent_profile("reviewer") == "reviewer"
     assert parent._goal_state.agent_brief.startswith("[role: reviewer]")
+    # The NAME is stamped alongside the brief so the band (U2) can name it.
+    assert parent.active_agent == "reviewer"
 
     parent.clear_agent_profile()
     assert parent._goal_state.agent_brief == ""
+    # M1: the NAME must clear too, not just the brief. The band reads
+    # ``active_agent``; if the detach dropped only the brief, the segment would
+    # keep painting ``◉ reviewer`` while the notice says "no agent active". This
+    # assertion is on the REAL Session on purpose — the pilot's FakeSession
+    # double already blanked both, so only a real-Session check catches the
+    # source drifting from the double.
+    assert parent.active_agent == ""
     # Idempotent: clearing again is a harmless no-op.
     parent.clear_agent_profile()
     assert parent._goal_state.agent_brief == ""
+    assert parent.active_agent == ""
 
 
 @pytest.mark.asyncio

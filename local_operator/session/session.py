@@ -1874,6 +1874,13 @@ class Session:
         can still report plainly.
         """
         self._goal_state.agent_brief = ""
+        # Blank the NAME as well, not just the brief. The band's active-profile
+        # segment (U2) reads ``active_agent`` (i.e. ``agent_name``), so a detach
+        # that dropped only the brief would leave ``◉ auditor`` painted next to a
+        # "no agent active" notice — the two surfaces of the same detach
+        # contradicting each other. Both fields are stamped together in
+        # ``_stamp_agent_brief``; they must be cleared together too.
+        self._goal_state.agent_name = ""
 
     def _stamp_agent_brief(self, body: str, display_name: str) -> str:
         """Store the resolved brief on the volatile tail and report success.
