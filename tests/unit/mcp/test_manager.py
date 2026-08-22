@@ -875,6 +875,41 @@ class TestTeardownLatency:
         assert manager._connections == {}
 
 
+async def _pid_from_stderr(stderr_log: Any) -> int:
+    """The pid a transport child reported on its own stderr.
+
+    The tests below assert about a SPECIFIC process, not about anything that
+    merely matches a ``pgrep`` pattern — a pattern match can hit an unrelated
+    process on a shared machine in both directions (false leak, and a false
+    pass of the ``== ""`` assertion). The child prints ``pid=<n>`` to stderr,
+    the transport's stderr pump captures it, and this reads it back.
+    """
+    import re
+
+    for _ in range(100):
+        match = re.search(r"pid=(\d+)", stderr_log.tail_text())
+        if match:
+            return int(match.group(1))
+        await asyncio.sleep(0.05)
+    raise AssertionError("child never reported its pid on stderr")
+
+
+def _process_is_alive(pid: int) -> bool:
+    """True when ``pid`` names a RUNNING process; a zombie counts as dead.
+
+    ``os.kill(pid, 0)`` cannot be the probe: a child killed but not yet
+    waited on is a zombie, which still answers signal 0 — the kill-on-cancel
+    path deliberately does not wait (see ``_stop``), so the reaped-vs-leaked
+    question must accept ``Z`` as dead.
+    """
+    import subprocess as sp
+
+    out = sp.run(
+        ["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True
+    ).stdout.strip()
+    return bool(out) and not out.startswith("Z")
+
+
 class TestStdioStopIsEventDriven:
     """The stdio ``_stop`` waits on process exit, not on a polling tick.
 
@@ -916,19 +951,30 @@ class TestStdioStopIsEventDriven:
         ``_teardown_connection`` cancels the stack close at its bound; the
         cancel lands inside ``_stop``'s waits, and absorbing it without a
         kill would leave the server running past the session.
+
+        TWO cancels, deliberately. The first is consumed at the parked
+        ``sleep(3600)`` — after it, the transport's ``finally`` runs ``_stop``
+        UNcancelled, and the ordinary kill rung would reap the child even if
+        the ``except CancelledError`` handler were deleted (review round 1,
+        F1: the single-cancel version of this test passed with the handler
+        removed). The second cancel is timed to land while ``_stop`` sits in
+        its EOF-rung wait, which is the state a bounded dispose actually
+        delivers: only the handler reaps the child from there, so this is
+        the arrangement that fails when the handler is gone.
         """
-        import signal
         import sys
 
         import local_operator.mcp.manager as manager_mod
         from local_operator.mcp.config import MCPStdioServerConfig
         from local_operator.mcp.manager import McpServerStderr, _stdio_transport
 
-        # Ignores stdin EOF and SIGTERM: only SIGKILL removes it.
+        # Reports its pid, then ignores stdin EOF and SIGTERM: only SIGKILL
+        # removes it, so a surviving pid can only mean the kill never came.
         script = (
-            "import signal, sys, time\n"
+            "import os, signal, sys, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "print('pid', flush=True)\n"
+            "sys.stderr.write(f'pid={os.getpid()}\\n')\n"
+            "sys.stderr.flush()\n"
             "while True: time.sleep(0.2)\n"
         )
         cfg = MCPStdioServerConfig(command=sys.executable, args=["-c", script])
@@ -945,23 +991,20 @@ class TestStdioStopIsEventDriven:
         manager_mod.STDIO_EXIT_GRACE_S = 0.2  # keep the ladder fast in CI
         try:
             task = asyncio.get_running_loop().create_task(run())
-            await asyncio.sleep(0.5)  # let the child start
+            pid = await _pid_from_stderr(stderr_log)
+            task.cancel()
+            # Let the first cancel unwind the park and start ``_stop``; well
+            # under the 0.2 s grace, so the second cancel lands inside the
+            # EOF-rung wait rather than after the ladder has finished.
+            await asyncio.sleep(0.05)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
         finally:
             manager_mod.STDIO_EXIT_GRACE_S = original
-        # The transport's finally ran under cancellation; the child must be
-        # gone. We cannot read its pid from outside the closure, so assert
-        # the observable: no python child of ours is still running the
-        # stubborn script.
-        import subprocess as sp
-
-        out = sp.run(
-            ["pgrep", "-f", "signal.SIG_IGN"], capture_output=True, text=True
-        ).stdout.strip()
-        assert out == "", f"stubborn child leaked: pids {out!r}"
-        _ = signal  # imported for the docstring's contract, used in the child
+        # The kill-on-cancel path does not wait on the child, so it may be a
+        # zombie — which is dead for this purpose. Alive means leaked.
+        assert not _process_is_alive(pid), f"stubborn child leaked: pid {pid}"
 
     @pytest.mark.asyncio
     async def test_sigterm_rung_still_reaps_a_deaf_reader(self) -> None:
@@ -969,7 +1012,12 @@ class TestStdioStopIsEventDriven:
 
         Guards the escalation ladder itself: event-driven waits must still
         escalate (EOF grace → terminate → kill) rather than returning early
-        on the first rung's timeout.
+        on the first rung's timeout. The assertion is on the child's PID, not
+        on reaching the end of the context — ``_stop`` runs under
+        ``suppress(Exception)`` and every wait in it is bounded, so the
+        context exits cleanly even when the ladder is broken (review round 1,
+        F2: a ``_stop`` mutated to return after the first rung passed the
+        reach-the-end version of this test while leaking the child).
         """
         import sys
 
@@ -977,8 +1025,15 @@ class TestStdioStopIsEventDriven:
         from local_operator.mcp.config import MCPStdioServerConfig
         from local_operator.mcp.manager import McpServerStderr, _stdio_transport
 
-        # Never reads stdin; dies on SIGTERM (the default disposition).
-        script = "import time\nwhile True: time.sleep(0.2)\n"
+        # Reports its pid; never reads stdin; dies on SIGTERM (the default
+        # disposition). Ladder rung 1 (EOF grace) therefore expires, and only
+        # rung 2's terminate can reap it.
+        script = (
+            "import os, sys, time\n"
+            "sys.stderr.write(f'pid={os.getpid()}\\n')\n"
+            "sys.stderr.flush()\n"
+            "while True: time.sleep(0.2)\n"
+        )
         cfg = MCPStdioServerConfig(command=sys.executable, args=["-c", script])
         stderr_log = McpServerStderr("deaf")
         # Shrink the per-rung grace so the EOF rung times out quickly.
@@ -986,11 +1041,13 @@ class TestStdioStopIsEventDriven:
         manager_mod.STDIO_EXIT_GRACE_S = 0.2
         try:
             async with _stdio_transport(cfg, lambda: None, stderr_log):
-                await asyncio.sleep(0.3)
-            # Reaching here at all proves the ladder escalated past the EOF
-            # rung and reaped the child via terminate.
+                pid = await _pid_from_stderr(stderr_log)
         finally:
             manager_mod.STDIO_EXIT_GRACE_S = original
+        # Rung 2 awaits ``process.wait()`` after terminating, so a reaped
+        # child is GONE (not even a zombie); alive means the ladder never
+        # escalated past the EOF rung.
+        assert not _process_is_alive(pid), f"deaf child leaked: pid {pid}"
 
 
 class TestWindowsProcessTarget:
