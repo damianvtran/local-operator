@@ -533,14 +533,16 @@ studying and drawing inspiration from the projects below. We're grateful to
 their authors and contributors for building in the open.
 
 - **[opencode](https://github.com/anomalyco/opencode)** — created by
-  [Dax Raad (`thdxr`)](https://github.com/thdxr) and the SST/Anomaly team.
-  Its terminal-native, model-agnostic coding-agent design informed our
+  [Dax Raad (`thdxr`)](https://github.com/thdxr) and the Anomaly (formerly SST)
+  team. Its terminal-native, model-agnostic coding-agent design informed our
   thinking on the interactive CLI experience and provider-agnostic model
   handling.
-- **[oh-my-pi](https://github.com/can1357/oh-my-pi)** — created by
-  [Can Bölük (`can1357`)](https://github.com/can1357). Its approach to agent
-  orchestration and harness ergonomics inspired aspects of our subagent and
-  tooling implementation.
+- **[oh-my-pi](https://github.com/can1357/oh-my-pi)** — authored and maintained
+  by [Can Bölük (`can1357`)](https://github.com/can1357), building on
+  [Pi](https://github.com/badlogic/pi-mono) by
+  [Mario Zechner (`mariozechner`)](https://github.com/mariozechner). Its
+  approach to agent orchestration and harness ergonomics inspired aspects of our
+  subagent and tooling implementation.
 
 Inspiration drawn from these projects informed our own independent
 implementation; any mistakes here are our own.
