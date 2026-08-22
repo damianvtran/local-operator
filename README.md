@@ -89,18 +89,21 @@ Requires Python 3.12+.
 pip install local-operator     # pipx install local-operator on Linux (PEP 668)
 ```
 
+The install provides both `local-operator` and its short alias `lop` — the
+rest of this page uses `lop`.
+
 Sign in to a provider (or skip this — the app tells you what's missing on
 first run):
 
 ```bash
-local-operator login           # lists login-capable providers
-local-operator login anthropic # OAuth sign-in in your browser
+lop login           # lists login-capable providers
+lop login anthropic # OAuth sign-in in your browser
 ```
 
 Then start it:
 
 ```bash
-local-operator
+lop
 ```
 
 That's it. Type what you want done. `esc` stops the agent, `/help` lists
@@ -114,7 +117,7 @@ Prefer a fully local model? Install [Ollama](https://ollama.com/download),
 pull a model, and point the agent at it:
 
 ```bash
-local-operator --hosting ollama --model qwen2.5:14b
+lop --hosting ollama --model qwen2.5:14b
 ```
 
 ## 🖥️ A Tour of the TUI
@@ -153,11 +156,12 @@ with its title and age:
   <img src="./static/tui-resume.png" alt="The /resume session picker listing recent conversations" width="720">
 </p>
 
-And `/usage` answers the question every agent user has: how much quota is
-left, and what did this session cost?
+And `/usage` answers the question every agent user has: how much provider
+quota is left, and what the account has spent (the status line tracks the
+current session's cost live).
 
 <p align="center">
-  <img src="./static/tui-usage.png" alt="The /usage panel showing provider quota and per-session spend" width="720">
+  <img src="./static/tui-usage.png" alt="The /usage panel showing per-provider quota windows and account spend" width="720">
 </p>
 
 ### Slash commands
@@ -174,7 +178,7 @@ left, and what did this session cost?
 | `/goal`, `/loop` | Set an objective, then iterate autonomously toward it |
 | `/btw` | Ask a side question off the record — it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
-| `/usage`, `/context` | Provider quota and spend · what's occupying the context window |
+| `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
 | `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
 | `/search` | Configure web-search providers and load balancing |
 | `/team` | Launch a saved team: `/team <name> <request>` puts a manager and roster on it |
@@ -203,7 +207,7 @@ the key locally; Ollama runs models on your own hardware.
 | Anthropic / Claude | OAuth or `ANTHROPIC_API_KEY` |
 | Kimi (Moonshot) | OAuth or `KIMI_API_KEY` |
 | xAI / Grok | OAuth or `XAI_API_KEY` |
-| Z.AI (GLM) | OAuth or API key |
+| Z.AI (GLM) | OAuth or `ZAI_API_KEY` |
 | Qwen (Alibaba) | OAuth (token plan) or API key |
 | Google Gemini | `GOOGLE_AI_STUDIO_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
@@ -213,14 +217,14 @@ the key locally; Ollama runs models on your own hardware.
 | Ollama | Local, no key, no network |
 
 ```bash
-local-operator login              # list login-capable providers
-local-operator login openai       # OAuth flow
-local-operator login-status       # what's signed in
-local-operator logout kimi
+lop login              # list login-capable providers
+lop login openai       # OAuth flow
+lop login-status       # what's signed in
+lop logout kimi
 ```
 
 Legacy `--hosting <name> --model <name>` flags keep working, and API keys can
-be set non-interactively with `local-operator credential update <KEY_NAME>`.
+be stored with `lop credential update <KEY_NAME>` (a masked prompt).
 
 ## 🧰 What the Agent Can Do
 
@@ -229,7 +233,7 @@ The agent's built-in tools, each with its own card in the transcript:
 - **Run things** — `bash` (shell commands), `eval` (a persistent Python
   kernel: variables survive across calls).
 - **Work with files** — `read`, `write`, `edit` (surgical search/replace),
-  `glob`, `grep`, plus `lsp` for language-server-backed code intelligence.
+  `glob`, `grep`, plus `lsp` for Jedi-backed Python code intelligence.
 - **Reach the web** — load-balanced `web_search` across seven providers and a
   `browser` tool for pages that need rendering or interaction.
 - **Stay organized** — a visible `todo` list for multi-step work, `ask` to
@@ -245,12 +249,12 @@ enabled by default, and requests rotate across providers with automatic
 fallback when one is rate-limited or down:
 
 ```bash
-local-operator search list
-local-operator search test "Python 3.13 release notes"
-local-operator search enable perplexity
-local-operator search setup brave --api-key
-local-operator search setup tavily --oauth      # official Tavily MCP server
-local-operator search setup searxng --endpoint https://search.example.com
+lop search list
+lop search test "Python 3.13 release notes"
+lop search enable perplexity
+lop search setup brave --api-key
+lop search setup tavily --oauth      # official Tavily MCP server
+lop search setup searxng --endpoint https://search.example.com
 ```
 
 | Provider | Access | Default |
@@ -306,9 +310,9 @@ the right roles on it.
 Agents can also be managed from the CLI:
 
 ```bash
-local-operator agents create "My Agent"
-local-operator agents list
-local-operator teams list
+lop agents create "My Agent"
+lop agents list
+lop teams list
 ```
 
 ### 🧠 Skills and guides
@@ -327,9 +331,9 @@ and individual tool schemas enter the context only when the agent actually
 enables them.
 
 ```bash
-local-operator mcp add linear --url https://mcp.linear.app/mcp --oauth
-local-operator mcp login linear     # complete the OAuth flow
-local-operator mcp list
+lop mcp add linear --url https://mcp.linear.app/mcp --oauth
+lop mcp login linear     # complete the OAuth flow
+lop mcp list
 ```
 
 Server configs are discovered from the project (`.local-operator/mcp.json`,
@@ -344,9 +348,9 @@ before enabling project-supplied servers.
 **One-shot execution** for scripts and automation:
 
 ```bash
-local-operator exec "summarize the failures in ./test.log"
-local-operator exec "long migration" --background   # detach with a log file
-local-operator exec "audit deps" --json             # one JSON line per event
+lop exec "summarize the failures in ./test.log"
+lop exec "long migration" --background   # detach with a log file
+lop exec "audit deps" --json             # one JSON line per event
 ```
 
 Exit code 0 on success — pipeline-friendly.
@@ -356,15 +360,15 @@ Exit code 0 on success — pipeline-friendly.
 
 ```bash
 pip install "local-operator[server]"
-local-operator serve                 # http://localhost:1111, docs at /docs
+lop serve                 # http://localhost:1111, docs at /docs
 ```
 
 **Phone access** — an optional mobile portal daemon lets you check on and
 steer sessions from your phone:
 
 ```bash
-local-operator mobile install
-local-operator mobile status
+lop mobile install
+lop mobile status
 ```
 
 ## 📦 Installation Options
@@ -374,11 +378,12 @@ extras:
 
 | Extra | Adds |
 | --- | --- |
-| `server` | The HTTP API server (`local-operator serve`) and background scheduler |
+| `server` | The HTTP API server (`lop serve`) and background scheduler |
 | `mcp` | Model Context Protocol client support |
 | `images` | HEIC/HEIF image attachment decoding |
 | `tokenizer` | Exact BPE token counting (estimated otherwise) |
-| `all` | Everything above |
+| `lsp` | Jedi-backed symbol-aware Python navigation for the `lsp` tool |
+| `all` | Everything above except `lsp` |
 
 ```bash
 pip install "local-operator[all]"    # quote it — shells glob the brackets
@@ -397,10 +402,10 @@ provided `flake.nix`.
 Configuration lives at `~/.local-operator/config.yml`:
 
 ```bash
-local-operator config create      # scaffold it
-local-operator config list        # every option, with descriptions
-local-operator config edit <key> <value>
-local-operator config open        # open it in your editor
+lop config create      # scaffold it
+lop config list        # every option, with descriptions
+lop config edit <key> <value>
+lop config open        # open it in your editor
 ```
 
 Commonly set values: `hosting` and `model_name` (skip the CLI flags),
@@ -412,26 +417,26 @@ Credentials are stored in `~/.local-operator/credentials.env` and never
 echoed:
 
 ```bash
-local-operator credential update TAVILY_API_KEY
-local-operator credential delete TAVILY_API_KEY
+lop credential update TAVILY_API_KEY
+lop credential delete TAVILY_API_KEY
 ```
 
-OAuth tokens from `local-operator login` are stored separately and refresh
+OAuth tokens from `lop login` are stored separately and refresh
 themselves.
 
 ## 🌟 Radient Agent Hub
 
 [Radient](https://console.radienthq.com) adds two optional capabilities:
 
-- **Automatic model selection** — `local-operator --hosting radient` picks
+- **Automatic model selection** — `lop --hosting radient` picks
   the best model per step to balance quality and cost, no `--model` needed.
 - **Agent sharing** — push your agents to the public hub, pull agents others
   published:
 
 ```bash
-local-operator credential update RADIENT_API_KEY
-local-operator agents push --name "My Agent"
-local-operator agents pull --id "<agent_id>"     # no key needed to pull
+lop credential update RADIENT_API_KEY
+lop agents push --name "My Agent"
+lop agents pull --id "<agent_id>"     # no key needed to pull
 ```
 
 ## 🔒 Safety Model
