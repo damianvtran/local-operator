@@ -293,3 +293,46 @@ Things that will bite you if you forget them:
   alters an existing table) — this is how the `cost_*` columns reach a
   token-only ledger. Any new stored column needs a `_MIGRATION_COLUMNS` entry
   with a DEFAULT so old rows read as a sane value, never NULL.
+
+## The tool-surface footprint ladder
+
+Every core tool ships its schema on **every** API request. The tools array
+rides in the same cache prefix as the system prompt (`tools/registry.py`
+builds it in a stable order precisely so that prefix stays cache-stable), so
+adding a core tool is a permanent per-call token tax on every session and every
+subagent, paid whether or not the tool is ever called. The realized core surface
+is on the order of a few thousand schema tokens — lean, and worth keeping that
+way (the exact figure moves as `createIf`-gated tools drop out of a session that
+cannot use them; `/context` reports the live number). Before adding a tool, take
+the **highest (least-footprint) rung** that solves the problem:
+
+1. **Extend an existing tool.** The capability is usually a variation of
+   `bash`, `read`, `edit`, `grep`, or `eval`. A new parameter or mode on a tool
+   that already exists costs no new schema. This is the default answer.
+2. **A skill + `bash`.** Config, state, or infra work expressible as shell
+   commands belongs in a `skill://` guide the agent runs through `bash`, not in
+   a new tool. Zero model-schema footprint.
+3. **A `createIf`-gated tool.** If the capability genuinely needs structured
+   params AND only makes sense when a prerequisite is present, add it to
+   `TOOL_BUILDERS` (`tools/registry.py`) as a factory that returns `None` when
+   the prerequisite is absent — the way `build_wake_tool` returns `None` with no
+   scheduler attached and `build_browser_tool` returns `None` with no browser
+   surface. A gated tool costs zero schema in every session that cannot use it.
+4. **An MCP server.** If it is tool-shaped but not core-fundamental, put it
+   behind the MCP client: `mcp://` discovery is lazy, so its schema stays out of
+   the prefix until the session enables it. Prefer this over a new core tool for
+   anything integration-specific.
+5. **A new core tool — last resort.** Only when the capability is fundamental,
+   useful to nearly every session, and unreachable via the rungs above. The
+   ungated core tools (`read`, `grep`, `eval`, `bash`) clear that bar; a niche
+   or setup-specific capability does not. (`browser` reads as core but is
+   actually rung 3 — `build_browser_tool` returns `None` without a browser
+   surface — which is the ladder working as intended.)
+
+**Gating answers reachability or opt-in, not host identity.** A `createIf`
+factory may ask "is the dependency configured or reachable?" — it must not
+encode "which host spawned me" in a way that strips a tool a reachable client
+could otherwise use. And when a tool's cost is in doubt, measure it: add it,
+run `/context`, and confirm the schema delta is justified by the capability.
+Adding a second gating convention beside `createIf` is itself a footprint
+regression — extend the table, do not invent a parallel mechanism.
