@@ -167,7 +167,18 @@ class OwnedSessionHandle(SessionHandle):
                     title=getattr(first, "question", "the agent is asking")
                     or "the agent is asking",
                     detail="",
-                    options=list(getattr(first, "options", []) or []),
+                    # Option LABELS, not AskOption objects: PendingRequest goes
+                    # over the wire as JSON (to_json -> asdict -> json.dumps),
+                    # and AskOption is a pydantic model that asdict leaves as an
+                    # object json.dumps cannot serialize — an options ask would
+                    # crash the projection push. The label is also exactly what
+                    # the web card renders and hands back in ask_answer, so a
+                    # bare string is the right wire shape (matches the TUI path
+                    # in tui_handle.note_ask_pending and options: list[str]).
+                    options=[
+                        getattr(option, "label", str(option))
+                        for option in (getattr(first, "options", []) or [])
+                    ],
                 )
             )
             self._notify()
