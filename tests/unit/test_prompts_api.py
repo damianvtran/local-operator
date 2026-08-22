@@ -144,6 +144,29 @@ def test_system_md_loads_and_renders() -> None:
     assert "Local Operator" in text
 
 
+def test_system_md_states_harness_identity() -> None:
+    """The prompt must tell the agent it IS the local-operator harness, run as
+    ``lop``, so a question about the harness/itself is answered rather than
+    treated as an unknown third-party tool. Asserts the behaviour contract, not
+    exact wording — reword freely, but keep the identity and the command name.
+    """
+    text = render_template("system.md", {})
+    assert "harness" in text
+    # The standard command name must be named so the agent can tell a user how
+    # to run/update it.
+    assert "`lop`" in text
+
+
+def test_system_md_teaches_eval_digest_pipeline() -> None:
+    """The prompt must steer multi-step work into one ``eval`` that prints a
+    compact digest, with full output kept fetchable via ``spill://`` — the
+    token-efficiency guidance. Contract, not wording.
+    """
+    text = render_template("system.md", {})
+    assert "eval" in text
+    assert "spill://" in text
+
+
 def test_compaction_summary_renders_optional_sections() -> None:
     full = render_template(
         "compaction_summary.md",
