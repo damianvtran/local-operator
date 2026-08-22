@@ -237,6 +237,7 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
     from dataclasses import fields
 
     from local_operator.mobile.types import (
+        AskOptionWire,
         PendingRequest,
         SubagentRow,
         TodoItem,
@@ -263,13 +264,28 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
     projection.todos = build(TodoItem, data.get("todos", []))
     projection.subagents = build(SubagentRow, data.get("subagents", []))
     pending = data.get("pending")
-    projection.pending = (
-        PendingRequest(
-            **{k: v for k, v in pending.items() if k in {f.name for f in fields(PendingRequest)}}
-        )
-        if isinstance(pending, dict)
-        else None
-    )
+    if isinstance(pending, dict):
+        known_pending = {f.name for f in fields(PendingRequest)}
+        pending_kwargs = {k: v for k, v in pending.items() if k in known_pending}
+        # ``options`` crosses the wire as a list of {label, description} dicts;
+        # rebuild the dataclass so downstream code (and to_json round-trips) see
+        # AskOptionWire, not bare dicts. Tolerant of the label-only shape a
+        # rolling upgrade mid-push could still send.
+        raw_options = pending_kwargs.get("options") or []
+        pending_kwargs["options"] = [
+            (
+                AskOptionWire(
+                    label=str(opt.get("label", "")),
+                    description=str(opt.get("description", "")),
+                )
+                if isinstance(opt, dict)
+                else AskOptionWire(label=str(opt))
+            )
+            for opt in raw_options
+        ]
+        projection.pending = PendingRequest(**pending_kwargs)
+    else:
+        projection.pending = None
     return projection
 
 

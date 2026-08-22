@@ -162,9 +162,23 @@ async def test_tui_ask_projects_a_pending_ask_to_the_phone() -> None:
         assert pending is not None
         assert pending.kind == "ask"
         assert pending.title == "What should happen to the stale rows?"
-        assert pending.options == ["Drop them", "Backfill"]
-        # The wire is JSON; option labels are strings, not AskOption objects.
-        assert pending.to_json()["options"] == ["Drop them", "Backfill"]
+        assert [o.label for o in pending.options] == ["Drop them", "Backfill"]
+        # U3: option consequence lines ride the wire so the phone user decides
+        # with the same information the terminal shows.
+        assert [o.description for o in pending.options] == [
+            "nothing reads the column",
+            "slower, keeps history",
+        ]
+        assert pending.secret is False
+        assert (pending.question_index, pending.question_total) == (0, 1)
+        # The whole card must be JSON-serializable (asdict -> dict).
+        wire = pending.to_json()
+        assert wire["options"] == [
+            {"label": "Drop them", "description": "nothing reads the column"},
+            {"label": "Backfill", "description": "slower, keeps history"},
+        ]
+        assert wire["secret"] is False
+        json.dumps(projection.to_json())
 
         # Clean up the parked call.
         app._settle_ask_picker()
@@ -226,10 +240,10 @@ async def test_terminal_answer_first_makes_a_late_phone_answer_fail() -> None:
             assert handle._fold.projection.pending is None
 
             # A phone answer arriving now must not double-resolve: the socket
-            # returns an error frame carrying the "no longer waiting" message.
+            # returns an error frame with the human "already answered" message (U4).
             reply = await control.send("ask_answer", request_id=request_id, value="Backfill")
             assert reply["op"] == "error"
-            assert "no longer waiting" in str(reply["message"])
+            assert "already answered" in str(reply["message"])
         finally:
             control.close()
 
@@ -258,7 +272,7 @@ async def test_phone_answer_first_takes_the_terminal_card_down() -> None:
             assert picker is not None and not picker.is_attached
 
             reply = await control.send("ask_answer", request_id=request_id, value="Backfill")
-            assert reply["op"] == "error" and "no longer waiting" in str(reply["message"])
+            assert reply["op"] == "error" and "already answered" in str(reply["message"])
         finally:
             control.close()
 
@@ -280,6 +294,12 @@ async def test_secret_ask_projects_a_free_text_card_without_leaking_the_value() 
             assert pending is not None
             assert pending.kind == "ask"
             assert pending.options == []
+            # D1/U2: the secret flag rides the wire so the phone masks the
+            # paste field — but the VALUE never does.
+            assert pending.secret is True
+            wire = handle._fold.projection.to_json()
+            assert wire["pending"]["secret"] is True
+            assert "sk-" not in json.dumps(wire)
             request_id = pending.request_id
 
             reply = await control.send("ask_answer", request_id=request_id, value="sk-supersecret")
@@ -289,6 +309,71 @@ async def test_secret_ask_projects_a_free_text_card_without_leaking_the_value() 
             answer = await asyncio.wait_for(asked, 2)
             assert answer == {"OPENAI_API_KEY": ["sk-supersecret"]}
             # The secret never rode the projection.
+            assert handle._fold.projection.pending is None
+        finally:
+            control.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_question_ask_advances_instead_of_truncating() -> None:
+    """U1: a phone answer to Q1 of a two-question ask must advance the picker
+    to Q2 (re-projecting it) rather than settling the whole card and dropping
+    Q2. Only after the last question is answered does the tool call resolve,
+    and it resolves with BOTH answers."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        handle = await _wait_for_handle(app, pilot)
+        control = await _control_for(app, pilot)
+        try:
+            q1 = AskQuestion(
+                id="env",
+                question="Which environment?",
+                options=[
+                    AskOption(label="prod", description="the live one"),
+                    AskOption(label="staging", description="safe to break"),
+                ],
+            )
+            q2 = AskQuestion(
+                id="confirm",
+                question="Confirm the deploy?",
+                options=[
+                    AskOption(label="yes", description="ship it"),
+                    AskOption(label="no", description="hold"),
+                ],
+            )
+            asked = asyncio.create_task(app.request_user_choice([q1, q2]))
+            for _ in range(4):
+                await pilot.pause()
+
+            # Q1 is up, with the "1 of 2" position on the wire.
+            pending = handle._fold.projection.pending
+            assert pending is not None
+            assert pending.title == "Which environment?"
+            assert (pending.question_index, pending.question_total) == (0, 2)
+            request_id = pending.request_id
+
+            # Answer Q1 from the phone: the card must NOT settle — it advances.
+            reply = await control.send("ask_answer", request_id=request_id, value="prod")
+            assert reply["op"] == "ack"
+            for _ in range(4):
+                await pilot.pause()
+            assert not asked.done(), "the tool call settled after only Q1 (U1 truncation)"
+
+            # Q2 is now projected under the SAME request id, position 2 of 2.
+            pending = handle._fold.projection.pending
+            assert pending is not None
+            assert pending.title == "Confirm the deploy?"
+            assert (pending.question_index, pending.question_total) == (1, 2)
+            assert pending.request_id == request_id
+
+            # Answer Q2: now the whole card settles with both answers.
+            reply = await control.send("ask_answer", request_id=request_id, value="yes")
+            assert reply["op"] == "ack"
+            for _ in range(4):
+                await pilot.pause()
+            answer = await asyncio.wait_for(asked, 2)
+            assert answer == {"env": ["prod"], "confirm": ["yes"]}
             assert handle._fold.projection.pending is None
         finally:
             control.close()

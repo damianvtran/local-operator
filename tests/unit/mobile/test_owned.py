@@ -128,18 +128,16 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ask_gate_projects_serializable_option_labels() -> None:
-    """An owned ask WITH options must project a JSON-serializable card.
+async def test_ask_gate_projects_serializable_options_with_descriptions() -> None:
+    """An owned ask WITH options must project a JSON-serializable card that
+    carries each option's consequence line (U3).
 
-    Regression: the gate used to push ``options=list(first.options)`` \u2014 raw
-    AskOption pydantic models \u2014 into PendingRequest, whose ``to_json`` is
-    ``asdict`` and leaves those models as objects ``json.dumps`` cannot encode.
-    A daemon-owned session that asked a question with options therefore crashed
-    the very projection push meant to show the card on the phone. The gate now
-    projects option LABELS (strings), which is also what the web card renders
-    and hands back in ask_answer. This test fails on the old code (the
-    ``json.dumps`` below raises ``TypeError: Object of type AskOption is not
-    JSON serializable``) and passes now.
+    Regression origin: the gate once pushed raw AskOption pydantic models into
+    PendingRequest, whose ``to_json`` is ``asdict`` and leaves those models as
+    objects ``json.dumps`` cannot encode — crashing the projection push. The
+    wire now carries {label, description} dicts (still JSON-serializable), and
+    the phone renders both. The ``json.dumps`` below is what raised on the old
+    object-valued shape.
     """
     handle, _ = make_handle(auto_approve=False)
     gate = handle._ask_gate
@@ -158,17 +156,91 @@ async def test_ask_gate_projects_serializable_option_labels() -> None:
     pending = handle._fold.projection.pending
     assert pending is not None
     assert pending.kind == "ask"
-    assert pending.options == ["Drop them", "Backfill"]
+    assert [o.label for o in pending.options] == ["Drop them", "Backfill"]
+    assert [o.description for o in pending.options] == [
+        "nothing reads the column",
+        "slower, keeps history",
+    ]
+    assert pending.secret is False
+    assert (pending.question_index, pending.question_total) == (0, 1)
 
     # The whole point: the projection round-trips over the wire. This is the
-    # line that raised before the fix.
+    # line that raised on the old object-valued shape.
     wire = json.dumps(handle._fold.projection.to_json())
-    assert '"Drop them"' in wire and '"Backfill"' in wire
+    assert '"Drop them"' in wire and '"nothing reads the column"' in wire
 
     # Answer it back with a label, exactly as the phone does, so the parked
     # gate resolves under the question's id and the test leaves nothing hanging.
     await handle.ask_answer(pending.request_id, "Backfill")
     assert await asyncio.wait_for(asked, 1) == {"stale": ["Backfill"]}
+
+
+@pytest.mark.asyncio
+async def test_ask_gate_projects_secret_flag_without_the_value() -> None:
+    """D1/U2: a secret ask projects secret=True and no options (paste field),
+    and the pasted value never rides the projection or the wire."""
+    handle, _ = make_handle(auto_approve=False)
+    gate = handle._ask_gate
+
+    question = AskQuestion(id="OPENAI_API_KEY", question="Paste your key", secret=True)
+    asked = asyncio.ensure_future(gate([question]))
+    await asyncio.sleep(0)
+
+    pending = handle._fold.projection.pending
+    assert pending is not None
+    assert pending.secret is True
+    assert pending.options == []
+
+    await handle.ask_answer(pending.request_id, "sk-topsecret")
+    # The value never appeared on the wire while the card was live or after.
+    assert "sk-topsecret" not in json.dumps(handle._fold.projection.to_json())
+    assert await asyncio.wait_for(asked, 1) == {"OPENAI_API_KEY": ["sk-topsecret"]}
+
+
+@pytest.mark.asyncio
+async def test_ask_gate_asks_multiple_questions_one_at_a_time() -> None:
+    """U1: an owned multi-question ask projects and resolves question by
+    question — answering Q1 advances to Q2 rather than settling the whole set,
+    and the gate returns BOTH answers only after the last is answered."""
+    handle, _ = make_handle(auto_approve=False)
+    gate = handle._ask_gate
+
+    q1 = AskQuestion(
+        id="env",
+        question="Which environment?",
+        options=[AskOption(label="prod"), AskOption(label="staging")],
+    )
+    q2 = AskQuestion(
+        id="confirm",
+        question="Confirm?",
+        options=[AskOption(label="yes"), AskOption(label="no")],
+    )
+    asked = asyncio.ensure_future(gate([q1, q2]))
+    await asyncio.sleep(0)
+
+    first = handle._fold.projection.pending
+    assert first is not None
+    assert first.title == "Which environment?"
+    assert (first.question_index, first.question_total) == (0, 2)
+
+    await handle.ask_answer(first.request_id, "prod")
+    # The answer resolves via call_soon_threadsafe; let the gate resume, pop Q1,
+    # and push Q2 across a few loop turns before inspecting the new front card.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not asked.done(), "the gate resolved after only Q1 (U1 truncation)"
+
+    second = handle._fold.projection.pending
+    assert second is not None
+    assert second.title == "Confirm?"
+    assert (second.question_index, second.question_total) == (1, 2)
+    # A distinct request id per question: Q1's stale request must no longer
+    # resolve anything.
+    assert second.request_id != first.request_id
+
+    await handle.ask_answer(second.request_id, "yes")
+    assert await asyncio.wait_for(asked, 1) == {"env": ["prod"], "confirm": ["yes"]}
+    assert handle._fold.projection.pending is None
 
 
 @pytest.mark.asyncio
