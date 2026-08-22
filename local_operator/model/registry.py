@@ -819,12 +819,16 @@ def _anthropic_family(model_id: str) -> Optional[tuple[str, tuple[int, ...]]]:
 def model_family(model_id: str) -> str:
     """The vendor's model FAMILY a model-scoped quota cap would name.
 
-    Anthropic scopes some weekly caps to a family (``7 day (Fable)``), and the
-    usage layer keys those caps on a slug of the family's display name. The
-    slug of this function's return value is exactly that key (``fable``), so a
-    quota verdict can say WHICH family it bound on and a credential block can
-    be scoped to that family instead of taking the whole account out of
-    rotation for a model that never draws on the spent window.
+    Anthropic scopes some weekly caps to a family (``7 day (Fable)``), and
+    the Anthropic usage fetcher keys those caps on a slug of the family's
+    display name — for Anthropic ids the slug of this function's return
+    value is exactly that key (``fable``), so a quota verdict can say WHICH
+    family it bound on and a credential block can be scoped to that family
+    instead of taking the whole account out of rotation for a model that
+    never draws on the spent window. Other providers' tier rows key on
+    vendor display names that need not parse out of the model id (xAI's
+    ``Grok 4``), which is why block READS match by "slug in model id" (the
+    usage layer's own gating rule) rather than through this function.
 
     Empty means "no family parseable from the id" — the caller then has no
     family dimension to scope anything by, and account-wide treatment is the

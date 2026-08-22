@@ -1627,6 +1627,7 @@ async def stream_with_failover(
                     error,
                     read_only=request.isolated,
                     model_id=spec.model_id,
+                    scoped_blocks=retry.usage_aware_fallback,
                 )
                 token = access.access_token if access is not None else None
                 if token != current_token:
@@ -1663,7 +1664,12 @@ async def stream_with_failover(
                     # target, so a provider whose usage endpoint disagrees
                     # with its wire answers cannot loop the walk.
                     quota_recovery_attempted = True
-                    recovered = await _recover_quota_blocked(auth, provider, spec.model_id)
+                    recovered = await _recover_quota_blocked(
+                        auth,
+                        provider,
+                        spec.model_id,
+                        reserve_percent=retry.usage_reserve_percent,
+                    )
                     if recovered is not None:
                         access = recovered
                         error = None
@@ -1981,6 +1987,7 @@ async def _recover_quota_blocked(
     auth: FailoverAuthStore,
     provider: str,
     model_id: str,
+    reserve_percent: float = 10.0,
 ) -> "OAuthAccess | None":
     """Probe accounts that quota blocks hid from the cascade, for THIS family.
 
@@ -2042,12 +2049,14 @@ async def _recover_quota_blocked(
             report = None
         if report is None:
             continue
-        health = usage_health(report, model_id)
+        health = usage_health(report, model_id, reserve_percent=reserve_percent)
         if health.state not in ("healthy", "reserve"):
             continue  # genuinely spent for this family: the block stands
         _clear_blocks_for_model(auth, row.id, provider, model_id)
+        # The usage endpoint's verdict, not a wire request: the next attempt
+        # is the proof, and the log must not claim more than the probe gave.
         logger.info(
-            "quota recovery: credential %d for %s serves %s again (%s)",
+            "quota recovery: usage says credential %d for %s serves %s again (%s)",
             row.id,
             provider,
             model_id,
@@ -2100,6 +2109,7 @@ async def _resolve_access_for_provider(
     *,
     read_only: bool = False,
     model_id: str = "",
+    scoped_blocks: bool = False,
 ) -> "OAuthAccess | None":
     """Bridge AuthStore into the a/b/c resolver shape, returning the
     :class:`~local_operator.providers.auth_store.OAuthAccess` record (or
