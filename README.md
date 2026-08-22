@@ -295,7 +295,7 @@ product this instance owns). Swap the project brief and the same roster staffs
 a different product. `/team` lists your saved teams:
 
 <p align="center">
-  <img src="./static/tui-teams.png" alt="The /team picker listing a saved team with its description and a '6 roles · led by manager' summary" width="720">
+  <img src="./static/tui-teams.png" alt="The /team picker listing the saved lopdev team" width="720">
 </p>
 
 <p align="center"><i>The team picker. Launch one with <code>/team &lt;name&gt; &lt;request&gt;</code> — the current agent becomes that roster's manager and delegates from there:</i></p>
