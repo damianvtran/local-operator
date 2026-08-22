@@ -1720,7 +1720,6 @@ class AnthropicClient:
                 "none": {"type": "none"},
                 "required": {"type": "any"},
             }.get(request.tool_choice, {"type": "auto"})
-        body.update(_sampling_params(request))
         effort = _reasoning_effort(request)
         if effort is not None:
             # `output_config`, NOT a `thinking` budget: Anthropic's effort
@@ -1735,6 +1734,22 @@ class AnthropicClient:
             # model with no effort ladder is still sent neither key.
             body["thinking"] = {"type": "adaptive"}
             body["output_config"] = {"effort": effort}
+        else:
+            # The sampling pair goes out ONLY when thinking does not. Anthropic
+            # rejects the combination — HTTP 400 ``` `temperature` may only be
+            # set to 1 when thinking is enabled or in adaptive mode ``` (and the
+            # same for `top_p`), observed live on `claude-opus-4-8` on
+            # 2026-08-21 — and every turn on such a model died on it. Generation
+            # 5+ never hit this because `_NO_SAMPLING_PARAMS` already drops the
+            # pair, but 4.5–4.9 models accept temperature on its own while
+            # carrying an effort ladder, and the ladder is what switches
+            # adaptive thinking on above. Keying the omission on the SAME gate
+            # that writes `thinking` (rather than on a second model-name list)
+            # means any future model with an effort ladder is automatically
+            # safe: whichever way the gate resolves, the body is one Anthropic
+            # accepts. Omitting the pair costs nothing real — with thinking on,
+            # the only accepted value is the provider default.
+            body.update(_sampling_params(request))
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
         return body
