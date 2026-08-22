@@ -1722,48 +1722,81 @@ class Session:
         # resolved by name is enough; a missing profile costs nothing.
         manager_name = getattr(team, "manager", "") or ""
         if manager_name and self.agent_registry is not None:
-            try:
-                from local_operator.agent_profiles import resolve_profile
-
-                profile = resolve_profile(manager_name, registry=self.agent_registry)
-            except Exception:  # noqa: BLE001
-                profile = None
-            # A1 (latent, related): this has the same resolution-order shape as
-            # ``attach_agent_profile`` did — ``resolve_profile`` is consulted
-            # before the specialist path, so a specialist manager named after a
-            # packaged seed would layer the SEED here. It is not fixed in this
-            # change because a team's ``manager`` is authored deliberately in
-            # the team config (not free-typed like ``/agent <name>``), so the
-            # collision is far less reachable; the fix would mirror the reorder
-            # above and belongs in a dedicated team-attach change with its own
-            # regression test rather than riding this PR.
-            if profile is not None and profile.preamble:
+            # Same resolution ORDER as ``/agent`` attach, via the ONE shared
+            # resolver: own role, then own specialist (BEFORE a same-named
+            # packaged seed), then the seed. This closes the twin of A1 — a
+            # team whose manager is the operator's own specialist named after a
+            # seed word (reviewer/coder/…) previously layered the SEED here,
+            # because ``resolve_profile`` was consulted before the specialist
+            # path. Both call sites share ``_resolve_profile_or_specialist`` so
+            # the order cannot drift between them again.
+            kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
+            if kind in ("role", "seed") and profile is not None and profile.preamble:
                 preamble = profile.preamble + (preamble or "")
-            elif profile is None:
-                # ``resolve_profile`` intentionally resolves only delegation
-                # roles. A team manager may instead be a reusable specialist;
-                # load its base prompt directly, but only when the explicit
-                # specialist marker is present so private chat agents are not
-                # pulled into team context by a coincidental name.
-                try:
-                    from local_operator.agent_profiles import is_specialist
-
-                    specialist = self.agent_registry.get_agent_by_name(manager_name)
-                    specialist_prompt = (
-                        self.agent_registry.get_agent_system_prompt(specialist.id)
-                        if specialist is not None and is_specialist(specialist)
-                        else ""
-                    )
-                except Exception:  # noqa: BLE001
-                    specialist_prompt = ""
-                if specialist_prompt.strip():
-                    preamble = (
-                        "<manager-profile>\n"
-                        + specialist_prompt.strip()
-                        + "\n</manager-profile>\n\n"
-                        + (preamble or "")
-                    )
+            elif kind == "specialist" and specialist_prompt:
+                # A specialist has no role preamble header; wrap it so the model
+                # can tell the manager's own base voice apart from the team brief
+                # layered after it.
+                preamble = (
+                    "<manager-profile>\n"
+                    + specialist_prompt
+                    + "\n</manager-profile>\n\n"
+                    + (preamble or "")
+                )
         self._goal_state.team_brief = preamble or ""
+
+    def _resolve_profile_or_specialist(self, name: str) -> tuple[str | None, Any, str, str]:
+        """Resolve a NAME to an attachable profile, priority order fixed here.
+
+        The SINGLE source of truth for how ``/agent`` attach and a team's
+        manager resolution turn a name into a persona, so the two can never
+        disagree about which of a role, a specialist, and a packaged seed wins
+        (the A1 bug and its team twin were exactly that disagreement).
+
+        Order, strongest first:
+
+        1. the operator's own registered ROLE — ``resolve_profile`` returns a
+           profile with a non-``None`` ``agent_id`` only for a real registry
+           role (never a packaged seed), so an ``agent_id`` here is the
+           operator's own role and outranks everything below;
+        2. the operator's own SPECIALIST — checked BEFORE the seed fallthrough,
+           which is the whole fix: ``resolve_profile`` honours only role rows
+           and otherwise returns the SEED, so a specialist named after a seed
+           word would otherwise be shadowed by that seed;
+        3. a packaged SEED resolved by ``resolve_profile`` (``agent_id`` is
+           ``None``), so ``reviewer`` and friends still resolve on a fresh
+           machine with no registry row of that name.
+
+        Returns ``(kind, profile, specialist_prompt, display_name)`` where
+        ``kind`` is ``"role"``/``"seed"`` (``profile`` set, ``specialist_prompt``
+        empty), ``"specialist"`` (``profile`` ``None``, ``specialist_prompt``
+        set), or ``None`` (nothing attachable by that name — ``profile`` ``None``
+        and both strings empty). Ordinary conversational/autosave rows are not
+        attachable: only an explicit ``is_specialist`` marker or a role tag
+        qualifies, so a private chat agent's prompt is never pulled in by a
+        coincidental name.
+        """
+        key = (name or "").strip()
+        if not key:
+            return (None, None, "", "")
+        from local_operator.agent_profiles import is_specialist, resolve_profile
+
+        profile = resolve_profile(key, registry=self.agent_registry)
+        if profile is not None and profile.agent_id is not None:
+            return ("role", profile, "", profile.name)
+        if self.agent_registry is not None:
+            try:
+                specialist = self.agent_registry.get_agent_by_name(key)
+                if specialist is not None and is_specialist(specialist):
+                    prompt = (
+                        self.agent_registry.get_agent_system_prompt(specialist.id) or ""
+                    ).strip()
+                    return ("specialist", None, prompt, str(specialist.name))
+            except Exception:  # noqa: BLE001 - registry problems mean "not found"
+                pass
+        if profile is not None:
+            return ("seed", profile, "", profile.name)
+        return (None, None, "", "")
 
     def attach_agent_profile(self, name: str) -> str | None:
         """Attach a named role/specialist's instructions to THIS session.
@@ -1782,58 +1815,36 @@ class Session:
         brief, because the user is switching hats, not stacking them.
 
         Resolution ORDER matters and must match ``_agent_profile_rows`` in the
-        TUI, or listing and attach disagree: the user's OWN registry row wins —
-        a role via ``resolve_profile`` (which already prefers a registered role
-        over the packaged seed), OR an explicit specialist — and only then does
-        a same-named packaged seed apply. Checking the specialist BEFORE the
-        seed fallthrough is the fix for A1: ``resolve_profile`` honours only
-        role rows and otherwise returns the SEED, so a user's specialist named
-        after a seed word (reviewer/coder/…) would be listed as their
-        specialist yet silently attach the seed's persona. Ordinary
-        conversational/autosave rows are refused — honouring one would stamp a
-        private chat agent's prompt onto this session under a name collision.
+        TUI, or listing and attach disagree. It is delegated to the ONE shared
+        resolver ``_resolve_profile_or_specialist`` (own role, then own
+        specialist BEFORE a same-named packaged seed, then the seed) so this
+        path and the team-manager path cannot drift — see that method for why
+        the specialist has to be checked before the seed (the A1 bug).
 
         Returns the resolved profile's display name, or ``None`` when nothing
         by that name is a role or specialist (the caller reports it; a typo
         must not half-attach anything).
         """
-        key = (name or "").strip()
-        if not key:
-            return None
-        from local_operator.agent_profiles import is_specialist, resolve_profile
-
-        # A registered ROLE the operator owns wins first: ``resolve_profile``
-        # returns a profile carrying an ``agent_id`` only when the row is a
-        # real registry role (not a packaged seed), so an ``agent_id`` here is
-        # the operator's own role and takes precedence over everything below.
-        profile = resolve_profile(key, registry=self.agent_registry)
-        if profile is not None and profile.agent_id is not None:
+        kind, profile, specialist_prompt, display_name = self._resolve_profile_or_specialist(name)
+        if kind in ("role", "seed") and profile is not None:
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
-
-        # The operator's own SPECIALIST is next, and — critically — it beats a
-        # same-named packaged seed. This is the A1 fix: resolve the specialist
-        # BEFORE falling through to ``resolve_profile``'s seed, so bare-/agent
-        # listing (which shows the specialist) and attach agree on the persona.
-        if self.agent_registry is not None:
-            try:
-                specialist = self.agent_registry.get_agent_by_name(key)
-                if specialist is not None and is_specialist(specialist):
-                    prompt = (
-                        self.agent_registry.get_agent_system_prompt(specialist.id) or ""
-                    ).strip()
-                    # Tagged with the specialist's name so the model can tell
-                    # whose voice this is — the same shape a role preamble has.
-                    body = f"[agent: {specialist.name}]\n{prompt}" if prompt else ""
-                    return self._stamp_agent_brief(body, str(specialist.name))
-            except Exception:  # noqa: BLE001 - registry problems mean "not found"
-                pass
-
-        # Finally a packaged seed resolved by ``resolve_profile`` (no
-        # ``agent_id``), so ``/agent reviewer`` still works on a fresh machine
-        # with no registry row of that name.
-        if profile is not None:
-            return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
+        if kind == "specialist":
+            # Tagged with the specialist's name so the model can tell whose
+            # voice this is — the same shape a role preamble carries.
+            body = f"[agent: {display_name}]\n{specialist_prompt}" if specialist_prompt else ""
+            return self._stamp_agent_brief(body, display_name)
         return None
+
+    def clear_agent_profile(self) -> None:
+        """Detach any active ``/agent`` profile (the ``/agent clear`` verb).
+
+        Mirrors ``set_goal("")`` clearing the goal: the brief rides the
+        volatile tail, so blanking it drops the persona from the next turn
+        without touching the cached prefix or the separately-held team brief.
+        Idempotent — clearing when nothing is attached is a no-op the caller
+        can still report plainly.
+        """
+        self._goal_state.agent_brief = ""
 
     def _stamp_agent_brief(self, body: str, display_name: str) -> str:
         """Store the resolved brief on the volatile tail and report success.
