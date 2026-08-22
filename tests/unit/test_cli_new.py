@@ -400,6 +400,64 @@ def test_credential_delete_command(tmp_home: Path) -> None:
     manager.set_credential.assert_called_once_with("TEST_API_KEY", "")
 
 
+def test_credential_update_ctrl_c_exits_130(tmp_home: Path, capsys) -> None:
+    """Ctrl-C at the prompt is a cancel, not a crash: exit 130 (SIGINT
+    convention), one quiet line, no stack-trace panel (item 4)."""
+    manager = MagicMock()
+    manager.prompt_for_credential.side_effect = KeyboardInterrupt
+    with patch("local_operator.cli.CredentialManager", return_value=manager):
+        args = argparse.Namespace(key="OPENAI_API_KEY")
+        assert credential_update_command(args) == 130
+    err = capsys.readouterr().err
+    assert "Cancelled." in err
+    assert "Traceback" not in err
+
+
+def test_credential_update_empty_input_exits_1_plain(tmp_home: Path, capsys) -> None:
+    """Empty/EOF input exits 1 with one plain line, ANSI stripped (item 4)."""
+    manager = MagicMock()
+    manager.prompt_for_credential.side_effect = ValueError(
+        "\033[1;31mOPENAI_API_KEY is required for this step.\033[0m"
+    )
+    with patch("local_operator.cli.CredentialManager", return_value=manager):
+        args = argparse.Namespace(key="OPENAI_API_KEY")
+        assert credential_update_command(args) == 1
+    err = capsys.readouterr().err
+    assert "is required for this step" in err
+    # The nested escape from the exception message is stripped.
+    assert "\033[1;31m" not in err
+
+
+def test_credential_update_unknown_key_warns(tmp_home: Path, capsys) -> None:
+    """A key the registry does not know gets a difflib suggestion but is still
+    stored (custom providers are legitimate) (item 8)."""
+    manager = MagicMock()
+    with patch("local_operator.cli.CredentialManager", return_value=manager):
+        args = argparse.Namespace(key="OPENAI_API_KY")  # typo
+        assert credential_update_command(args) == 0
+    err = capsys.readouterr().err
+    assert "not a known provider key" in err
+    assert "OPENAI_API_KEY" in err  # the suggestion
+
+
+def test_config_edit_rejects_unknown_key(tmp_home: Path, capsys) -> None:
+    """`config edit` validates against the defaults and rejects a typo with a
+    suggestion + exit 1, instead of silently writing junk (item 7)."""
+    args = argparse.Namespace(key="hostng", value="openai")
+    assert cli.config_edit_command(args) == 1
+    err = capsys.readouterr().err
+    assert "unknown configuration key" in err
+    assert "hosting" in err  # the suggestion
+
+
+def test_config_edit_accepts_known_key(tmp_home: Path) -> None:
+    manager = MagicMock()
+    with patch("local_operator.cli.ConfigManager", return_value=manager):
+        args = argparse.Namespace(key="hosting", value="openai")
+        assert cli.config_edit_command(args) == 0
+    manager.update_config.assert_called_once()
+
+
 def test_config_create_command(tmp_home: Path) -> None:
     manager = MagicMock()
     with patch("local_operator.cli.ConfigManager", return_value=manager):

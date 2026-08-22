@@ -3418,3 +3418,32 @@ async def test_primary_success_with_a_pinned_route_settles_the_recovery() -> Non
     ]
     assert edges == [None]
     assert state.active is None
+
+
+# --- Auth recovery hints (item 9) -------------------------------------------
+
+
+def test_append_auth_recovery_adds_hint_to_auth_error() -> None:
+    from local_operator.providers.failover import append_auth_recovery
+
+    rendered = "authentication failed (HTTP 401): invalid x-api-key"
+    out = append_auth_recovery(rendered, "openai")
+    assert rendered in out
+    assert "/login openai" in out
+    assert "credential update <OPENAI_API_KEY>" in out
+
+
+def test_append_auth_recovery_ignores_non_auth_errors() -> None:
+    from local_operator.providers.failover import append_auth_recovery
+
+    rendered = "rate limit or quota exceeded (HTTP 429): slow down"
+    # A quota error is left alone — a login cannot fix it.
+    assert append_auth_recovery(rendered, "openai") == rendered
+
+
+def test_append_auth_recovery_generic_without_provider() -> None:
+    from local_operator.providers.failover import append_auth_recovery
+
+    rendered = "authentication failed (HTTP 401): bad key"
+    out = append_auth_recovery(rendered, None)
+    assert "/login <provider>" in out

@@ -304,3 +304,31 @@ def test_version_ordering(left, right, newer) -> None:
     from local_operator.config import _version_tuple
 
     assert (_version_tuple(left) > _version_tuple(right)) is newer
+
+
+# --- Malformed config handling (item 6) -------------------------------------
+
+
+def test_config_manager_malformed_yaml_backs_up_and_defaults(temp_config_dir, capsys):
+    """A YAML syntax error backs the file up to config.yml.bad and starts with
+    defaults instead of a raw traceback (item 6)."""
+    config_file = temp_config_dir / "config.yml"
+    config_file.write_text(": : not valid yaml [")
+    manager = ConfigManager(temp_config_dir)
+    # Degraded to defaults rather than crashing.
+    assert manager.get_config_value("hosting") == ""
+    assert (temp_config_dir / "config.yml.bad").exists()
+    err = capsys.readouterr().err
+    assert "could not parse" in err
+
+
+def test_config_manager_non_mapping_top_level_backs_up(temp_config_dir, capsys):
+    """A config whose top level is a list/scalar is rejected the same way as a
+    parse error (item 6)."""
+    config_file = temp_config_dir / "config.yml"
+    config_file.write_text("- just\n- a\n- list\n")
+    manager = ConfigManager(temp_config_dir)
+    assert manager.get_config_value("hosting") == ""
+    assert (temp_config_dir / "config.yml.bad").exists()
+    err = capsys.readouterr().err
+    assert "not a valid configuration mapping" in err
