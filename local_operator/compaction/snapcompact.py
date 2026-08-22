@@ -40,7 +40,7 @@ from local_operator.harness.types import ImageContent, Message, ModelSpec, TextC
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from .png import encode_grayscale_png
-from .tokens import estimate_tokens
+from .tokens import _CHARS_PER_TOKEN_FALLBACK, estimate_tokens
 
 # ---------------------------------------------------------------------------
 # Constants (snapcompact)
@@ -204,6 +204,76 @@ def frame_token_estimate_for(provider: str, model_id: str) -> int:
         return -(-(patches * 12) // 10)  # ceil(patches * 1.2)
     patches = min((-(-edge // 28)) ** 2, 4784)
     return -(-(patches * 105) // 100)  # ceil(patches * 1.05)
+
+
+#: Fraction of the context window the archive's two VERBATIM text edges may
+#: occupy together. The edges are the one part of a replayed archive the token
+#: budget cannot trim (it only drops imaged pages), so an unbounded edge is a
+#: floor that scales with the frame SHAPE instead of the window: for the
+#: default ``HQ_EDGE_FRAMES * capacity`` the pair is ~31.5k tokens for the
+#: Anthropic 1932px reader (capacity 21000) and ~35.7k for the Gemini reader
+#: (capacity 23808), whether the window is 1M or 64k. Capping the pair at 15%
+#: keeps them a minority of the post-compaction context — the imaged middle
+#: carries the bulk, at ~4x the density per token — while still preserving
+#: enough exact head/tail text for the model to anchor the oldest and newest
+#: turns. Chosen to sit under the default 0.5*window archive budget with room
+#: for frames beside the edges.
+#:
+#: The cap binds — i.e. trims below the shape default — whenever the default
+#: pair exceeds 15% of the window, which is ``default_pair_chars / 0.6`` in
+#: window tokens. For the 1932px reader (pair 126000 chars → 31.5k tokens)
+#: that threshold is ~210k, so its NATIVE 200k window is trimmed slightly
+#: (63000→60000 chars/edge, a deliberate 15.75%→15% haircut); the Gemini
+#: reader (238k threshold) is likewise trimmed at 200k, and every shape is
+#: trimmed at 96k/128k. Only windows above the shape's threshold (e.g. any
+#: window for the Sonnet/OpenAI 13916-capacity readers up to 139k, or ≥210k
+#: for the 1932px reader) keep full-default edges. This is the intended
+#: behaviour, not an accident: the whole point is that the edges follow the
+#: window, so a reader whose default already exceeds its 15% share gives a
+#: little verbatim text back to the imaged middle.
+EDGE_WINDOW_FRACTION = 0.15
+
+
+def _edge_chars_for(shape: Shape, context_window: int | None) -> int:
+    """Chars kept VERBATIM at each archive edge, bounded by the window.
+
+    Defaults to ``HQ_EDGE_FRAMES * shape.capacity`` — enough source text to
+    fill the high-quality edge frames replay renders — but never lets the two
+    edges together exceed :data:`EDGE_WINDOW_FRACTION` of ``context_window``.
+    Without the cap the edges are a fixed, un-trimmable floor set by the frame
+    shape, not the window (see :data:`EDGE_WINDOW_FRACTION`): on a small window
+    the two edges alone can outrun the whole archive budget, so the frame loop
+    drops every page and the pass STILL commits a context above its own
+    target. Bounding here moves the excess oldest-edge text into the imaged
+    region, where the budget can actually act on it.
+
+    Priced in the estimator's fallback char density (``chars ≈ 4 × tokens``,
+    :data:`~local_operator.compaction.tokens._CHARS_PER_TOKEN_FALLBACK`) so the
+    cap is a nominal token share rather than a raw char count that would mean
+    something different per tokenizer. It is only NOMINAL: the budget loop that
+    consumes these edges prices them through the real tokenizer
+    (:func:`estimate_archive_tokens`), and token-dense content (code, JSON,
+    long unbroken runs) tokenizes below 4 chars/token, so on such content the
+    edges can occupy more than 15% of the REAL budget. Ordinary prose sits near
+    4, and the frame budget still bounds total size, so the approximation is
+    deliberate.
+
+    Returns at least one page's worth (``shape.capacity``) so a tiny window
+    never collapses the edges to nothing — an archive with no verbatim anchor
+    is worse than a small one. Below that floor the archive can still exceed
+    ``0.5 * window`` (one page per edge is ~5k tokens, above a 24k window's 12k
+    budget): the floor RAISES the window at which the pass fits its budget, it
+    does not make it fit universally, and the frame budget remains the ultimate
+    bound on total archive size.
+    """
+    default = HQ_EDGE_FRAMES * shape.capacity
+    if not context_window or context_window <= 0:
+        return default
+    # Half the pair's token allowance, converted to chars, is the per-edge cap.
+    pair_token_budget = int(context_window * EDGE_WINDOW_FRACTION)
+    per_edge_chars = (pair_token_budget // 2) * _CHARS_PER_TOKEN_FALLBACK
+    # Never below one page: some verbatim anchor always beats none.
+    return max(shape.capacity, min(default, per_edge_chars))
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +680,21 @@ def compact_to_archive(
     else:
         archive_text = serialized
 
-    edge_chars = HQ_EDGE_FRAMES * shape.capacity
+    # The two verbatim text edges are the archive's HARD floor: replay sends
+    # them uncompressed, the frame budget loop below can only drop IMAGED
+    # pages, and nothing else in the pass trims them. At the default
+    # HQ_EDGE_FRAMES * capacity they are ~31.5k tokens for the Anthropic 1932px
+    # reader (pair 126000 chars) — and MORE than the whole archive budget on a
+    # small window, where the loop drops every frame and the pass still
+    # overshoots its own 0.5*window budget by 2x (measured: a 64k window gives
+    # a 32k budget against a ~31.5k edge-only replay). That is the same "a pass
+    # meant to get under the line ends up above it" failure the frame budget
+    # exists to prevent, one layer down. So bound the per-edge char count to a
+    # window-proportional share BEFORE slicing (see EDGE_WINDOW_FRACTION for
+    # which windows this trims): the trimmed-away oldest edge content is not
+    # lost, it flows into image_text and is imaged (or dropped with the
+    # standard marker) like any other middle history.
+    edge_chars = _edge_chars_for(shape, context_window)
     if len(archive_text) <= 2 * edge_chars:
         return Archive(
             frames=[],
