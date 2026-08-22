@@ -84,21 +84,20 @@ jobs:
         # pytest-cov (not `coverage run -m pytest`) because the suite now runs
         # under xdist: coverage has to be collected inside each worker
         # subprocess and merged, which pytest-cov does automatically and a
-        # top-level `coverage run` cannot. The 80% floor is enforced by
-        # `fail_under` in [tool.coverage.report], so the step no longer parses
-        # the percentage out of the report by hand.
+        # top-level `coverage run` cannot. `-n auto` (from addopts) gives one
+        # worker per logical core — 4 on GitHub's ubuntu-latest. The 80% floor
+        # is enforced by `fail_under` in [tool.coverage.report], so the step no
+        # longer parses the percentage out of the report by hand.
         #
-        # `-n 8` OVERRIDES the `-n auto` default (which would be 4 on this
-        # 2-core-hyperthreaded runner). The suite is wait-bound — pilot tests
-        # spend their wall time letting the event loop settle, not on CPU — so
-        # running 2x as many workers as cores overlaps that idle time and cuts
-        # wall clock further without saturating the CPU. Measured locally,
-        # `-n 8` ran the suite in roughly half the `-n 4` wall time. It is a
-        # deliberate constant, not `auto`, because the right degree of
-        # oversubscription is a property of THIS suite's wait profile, not of
-        # the runner's core count.
+        # Do NOT oversubscribe (`-n` greater than the core count) here. It looks
+        # tempting because the suite is wait-bound, and it does help on a
+        # many-core dev box that still has idle cores at `-n 8`. On this 4-vCPU
+        # runner it does not: it left wall time unchanged and starved three
+        # timing-sensitive tests (a parked job, a late-parking tool, a held
+        # key) whose deadlines are real wall clock, turning them red. One worker
+        # per core is the stable point.
         run: |
-          pytest -n 8 --cov --cov-report=term-missing:skip-covered --cov-report=html
+          pytest --cov --cov-report=term-missing:skip-covered --cov-report=html
 
       - name: Upload coverage report
         # `if: always()` so a coverage-threshold failure still uploads the HTML,
