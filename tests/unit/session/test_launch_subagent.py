@@ -266,6 +266,39 @@ def test_attach_agent_profile_resolves_roles_and_specialists(tmp_path, monkeypat
     assert parent.attach_agent_profile("no-such-name") is None
 
 
+def test_a_specialist_named_after_a_seed_attaches_its_own_prompt(tmp_path, monkeypatch):
+    """A1 regression: a user's specialist named after a packaged seed word must
+    ATTACH the specialist's prompt, not the seed's persona.
+
+    `resolve_profile` honours only role rows and otherwise returns the SEED, so
+    resolving a specialist AFTER that fallthrough silently shadowed it: bare
+    /agent listed the specialist while attach applied the seed. The fix
+    resolves the operator's own specialist before the seed, so listing and
+    attach agree.
+    """
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "config")
+    # A specialist deliberately named "reviewer" — a packaged seed word.
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="reviewer",
+            description="Our house reviewer with release-specific rules",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(specialist.id, "HOUSE REVIEW RULES: block on missing tests.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    brief = parent._goal_state.agent_brief
+    # The SPECIALIST's prompt and marker, never the packaged seed's persona.
+    assert "HOUSE REVIEW RULES" in brief, brief
+    assert brief.startswith("[agent: reviewer]"), brief
+    assert "[role: reviewer]" not in brief, brief
+
+
 def test_agent_brief_coexists_with_team_brief(tmp_path, monkeypatch):
     """The two briefs live in separate fields: attaching an agent must not
     drop the roster a /team manager is coordinating, and vice versa."""

@@ -2992,6 +2992,24 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        # A2: the NAME resolved, but a role/specialist with empty instructions
+        # layered no persona — a "is active" notice would overclaim. Tell the
+        # user the profile carries no instructions so the missing effect is not
+        # read as a silent success. ``agent_brief`` is the tail the attach just
+        # wrote; empty means nothing was stamped.
+        layered = bool((getattr(session, "agent_brief", "") or "").strip())
+        if not layered:
+            if request:
+                # The message is still worth sending — the user asked for a
+                # turn — but say plainly no persona was applied to it.
+                notice(f"agent {resolved} has no instructions; sending your message as-is.")
+                self._submit_prompt(request)
+            else:
+                notice(
+                    f"agent {resolved} resolved but carries no instructions, "
+                    "so nothing was applied."
+                )
+            return
         if not request:
             notice(f"agent {resolved} is active. Send a request with /agent {resolved} <message>.")
             return

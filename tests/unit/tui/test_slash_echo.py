@@ -16,6 +16,7 @@ to keep a default for the picker fixtures that have no opinion at all.
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -223,10 +224,7 @@ async def test_bare_team_lists_without_a_user_row() -> None:
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path("/tmp/lo-team-test-unused"))
     # In-memory: point the registry at a throwaway dir via the session.
-    import tempfile
-
     tmp = tempfile.mkdtemp()
     registry = TeamRegistry(Path(tmp))
     registry.create_team(
@@ -255,8 +253,6 @@ async def test_bare_team_lists_without_a_user_row() -> None:
 @pytest.mark.asyncio
 async def test_team_request_attaches_and_sends() -> None:
     """`/team <name> <request>` stamps the team and sends the request as a turn."""
-    import tempfile
-
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
@@ -329,6 +325,13 @@ def _agent_registry(tmp: str):
     registry.set_agent_system_prompt(specialist.id, "Follow the dashboard checklist.")
     private = registry.create_agent(_fields(name="private-chat", description="My diary"))
     registry.set_agent_system_prompt(private.id, "PRIVATE USER CONTEXT")
+    # A role that RESOLVES by name but carries no instructions — the A2 case:
+    # the attach layers nothing, and the notice must say so rather than
+    # claiming the persona is active.
+    hollow = registry.create_agent(
+        _fields(name="hollow-role", description="Resolves but says nothing", tags=["role"])
+    )
+    registry.set_agent_system_prompt(hollow.id, "")
     return registry
 
 
@@ -336,7 +339,6 @@ def _agent_registry(tmp: str):
 async def test_bare_agent_lists_without_a_user_row() -> None:
     """`/agent` is a listing; the listing is the receipt. Only roles and
     specialists appear — a plain conversational agent stays private."""
-    import tempfile
 
     session = FakeSession()
     session.agent_registry = _agent_registry(tempfile.mkdtemp())
@@ -360,7 +362,6 @@ async def test_bare_agent_lists_without_a_user_row() -> None:
 @pytest.mark.asyncio
 async def test_agent_name_alone_attaches_without_a_turn() -> None:
     """`/agent <name>` adopts the profile and prints the notice — no prompt."""
-    import tempfile
 
     session = FakeSession()
     session.agent_registry = _agent_registry(tempfile.mkdtemp())
@@ -380,7 +381,6 @@ async def test_agent_name_alone_attaches_without_a_turn() -> None:
 async def test_agent_message_attaches_and_sends() -> None:
     """`/agent <name> <message>` stamps the profile then sends the message as
     a turn — the `/team <name> <request>` shape, including a specialist."""
-    import tempfile
 
     session = FakeSession()
     session.agent_registry = _agent_registry(tempfile.mkdtemp())
@@ -398,7 +398,6 @@ async def test_agent_message_attaches_and_sends() -> None:
 async def test_agent_rejects_unknown_and_private_names() -> None:
     """An unknown name warns; so does a PRIVATE conversational agent — its
     exact name must not be enough to pull its prompt into this session."""
-    import tempfile
 
     session = FakeSession()
     session.agent_registry = _agent_registry(tempfile.mkdtemp())
@@ -412,6 +411,30 @@ async def test_agent_rejects_unknown_and_private_names() -> None:
     assert session.prompts == []
     assert any("no agent named 'no-such-profile'" in n for n in notices), notices
     assert any("no agent named 'private-chat'" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_agent_with_no_instructions_says_nothing_was_applied() -> None:
+    """A2: a role/specialist that resolves but carries no instructions must
+    NOT claim to be active — the notice states nothing was applied, and with a
+    message the message is still sent (labelled as carrying no persona)."""
+    session = FakeSession()
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/agent hollow-role")
+        bare_notices = list(_notice_texts(app))
+        await _submit(pilot, app, "/agent hollow-role do the thing")
+        notices = _notice_texts(app)
+    # The name resolved (so it was "attached"), but no persona layered.
+    assert session.attached_agents == ["hollow-role", "hollow-role"]
+    assert any(
+        "no instructions" in n or "nothing was applied" in n for n in bare_notices
+    ), bare_notices
+    # With a message: still sent, but the notice does not claim a persona.
+    assert session.prompts == ["do the thing"]
+    assert not any("hollow-role is active" in n for n in notices), notices
 
 
 @pytest.mark.asyncio
