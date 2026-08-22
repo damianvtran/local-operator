@@ -174,9 +174,11 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
             continue
         if message.role == "user":
-            # An image-only prompt (composer allows "" text + images) must not
-            # round-trip through history as an EMPTY bubble. Render a receipt
-            # line naming the attachments, matching the live fold's receipt.
+            # Carry image attachments as references so an image-only prompt
+            # (the composer allows "" text + images) renders its thumbnails on
+            # replay instead of round-tripping as an empty bubble — the same
+            # inline render the live fold produces. The bytes are fetched
+            # lazily from the image endpoint; only the reference travels here.
             refs = _image_refs(message)
             text = message.text
             entries.append(TranscriptEntry(id=message.id, kind="user", text=text, images=refs))

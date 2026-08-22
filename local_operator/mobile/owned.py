@@ -93,6 +93,10 @@ class OwnedSessionHandle(SessionHandle):
         # OperatorApp._name_requested: the first substantive prompt fires ONE
         # background naming call, alongside the turn it decorates.
         self._name_requested = False
+        # Strong references to detached background tasks (the naming errand),
+        # so the event loop cannot garbage-collect one mid-flight and drop the
+        # title silently. Each task removes itself on completion.
+        self._background_tasks: set[asyncio.Future[Any]] = set()
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         # request_id -> the AskQuestion.id the harness is waiting on (the
@@ -251,7 +255,11 @@ class OwnedSessionHandle(SessionHandle):
             self._name_requested = True
             return
         self._name_requested = True
-        asyncio.ensure_future(self._name_conversation_worker(text))
+        # Hold a strong reference until the task settles: a bare ensure_future
+        # is only weakly held by the loop and can be collected before it runs.
+        task = asyncio.ensure_future(self._name_conversation_worker(text))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _name_conversation_worker(self, text: str) -> None:
         """Ask the model for a title once, cheaply, off the turn's lock.

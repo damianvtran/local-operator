@@ -68,6 +68,14 @@ export function NewSessionScreen() {
 		});
 	}, [dirs]);
 
+	/* Whether the current selection IS one of the quick-picks — when it is,
+	   the free-text fallback stays empty so it does not duplicate the picked
+	   row's path as an apparent fourth option (D3). */
+	const cwdIsQuickPick = useMemo(
+		() => quickPicks.some(({ path }) => path === cwd),
+		[quickPicks, cwd],
+	);
+
 	const start = async () => {
 		if (!cwd.trim() || starting) return;
 		setStarting(true);
@@ -144,15 +152,21 @@ export function NewSessionScreen() {
 							))}
 						</div>
 					) : null}
+					{/* The free-text fallback for a directory not in the picks.
+					   Demoted below the quick-picks in both order and weight,
+					   and it mirrors ``cwd`` ONLY when the selection is a custom
+					   path — when a quick-pick is active the field stays empty
+					   with its placeholder, so it never reads as a fourth option
+					   duplicating the home row's absolute path (D3). */}
 					<input
 						id="cwd-input"
-						value={cwd}
+						value={cwdIsQuickPick ? "" : cwd}
 						onChange={(e) => setCwd(e.target.value)}
-						placeholder="or type a path…"
+						placeholder="or type another path…"
 						spellCheck={false}
 						autoCapitalize="off"
 						autoCorrect="off"
-						className="min-h-11 rounded-sm border border-control bg-surface px-3 font-mono text-mono text-ink outline-none placeholder:text-ink-dim"
+						className="min-h-9 rounded-sm border border-hairline bg-transparent px-3 font-mono text-mono-sm text-ink-muted outline-none placeholder:text-ink-dim focus:border-control focus:text-ink"
 					/>
 				</section>
 

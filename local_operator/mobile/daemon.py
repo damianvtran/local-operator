@@ -844,9 +844,15 @@ def build_app(daemon: MobileDaemon):
         block index + mime) so a per-token repaint stays small; the pixels are
         served here on demand. The bytes come from the on-disk transcript
         (which resolves the attachment store back to inline base64), so this
-        works for history the live fold long dropped as well as the tail. The
-        response is cacheable and immutable: a message's attachments never
-        change, and the ``entry``+``i`` pair is a stable content key.
+        works for history the live fold long dropped as well as the tail.
+
+        Cacheable and immutable: the true content key is the ``entry`` id — a
+        globally-unique message uuid — plus the image-only ``i``. The ``pid``
+        in the path only routes to a live session; pids recycle, but a
+        recycled pid maps to a DIFFERENT session whose transcript does not
+        contain this message uuid, so it 404s rather than serving another
+        session's cached bytes. The uuid content key is what makes ``immutable``
+        safe despite the mutable pid in the URL.
         """
         denied = gate(request)
         if denied is not None:
