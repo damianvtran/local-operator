@@ -31,6 +31,34 @@ async def test_append_message_writes_jsonl(transcript):
 
 
 @pytest.mark.asyncio
+async def test_append_recreates_a_vanished_directory(tmp_path):
+    """The session must survive its directory being deleted underneath it.
+
+    A sibling process's startup sweep (or a user tidying ``sessions/`` by
+    hand) can remove a directory that still looks empty — the gap between
+    Session construction and the first turn is as long as the user takes to
+    type. The old behaviour was fatal: the first append raised
+    ``FileNotFoundError: .../transcript.jsonl`` and the whole session died.
+    The append now recreates the directory and rebuilds the file from the
+    in-memory entries, so nothing already appended is lost either.
+    """
+    import shutil
+
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("before the deletion"))
+
+    shutil.rmtree(directory)  # what the racing sweep used to do
+
+    await transcript.append_message(Message.assistant("after the deletion"))
+
+    lines = transcript.path.read_text().splitlines()
+    assert len(lines) == 2  # rebuilt complete, not truncated to the new row
+    texts = [json.loads(line)["payload"]["content"][0]["text"] for line in lines]
+    assert texts == ["before the deletion", "after the deletion"]
+
+
+@pytest.mark.asyncio
 async def test_reloads_from_disk(tmp_path):
     directory = tmp_path / "sess"
     first = Transcript(directory)
