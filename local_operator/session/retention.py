@@ -185,6 +185,14 @@ def sweep_sessions(
             bytes_remaining += size
             continue
         try:
+            # A directory's st_mtime is bumped whenever an entry is added to
+            # or removed from it, so for a directory that is still empty this
+            # is its CREATION time — exactly the "how long has this been
+            # waiting for its first turn" signal the grace window needs. The
+            # one edge case: creating and then deleting a transient file
+            # inside an otherwise-empty dir resets this clock, extending the
+            # grace window rather than shortening it, which stays on the safe
+            # side (an unreaped empty dir costs nothing).
             age = moment - child.stat().st_mtime
         except OSError:
             # Removed by another process between the size walk and the stat.
