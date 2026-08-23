@@ -92,7 +92,9 @@ pip install local-operator     # pipx install local-operator on Linux (PEP 668)
 ```
 
 The install provides both `local-operator` and its short alias `lop` — the
-rest of this page uses `lop`.
+rest of this page uses `lop`. `lop update` upgrades that install from PyPI;
+`lop-update` (hyphen) is the developer script that rebuilds the global
+runtime from a local git checkout.
 
 Sign in to a provider (or skip this — on an interactive terminal `lop` opens
 in a setup state and walks you through `/login`; a headless or piped run prints

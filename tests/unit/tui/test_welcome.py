@@ -305,6 +305,55 @@ def test_a_harness_notice_sheds_before_the_credential_warning() -> None:
     assert _warning_body(two)
 
 
+def test_update_row_is_absent_when_none() -> None:
+    """Do not reserve the row. A current install must match today's splash."""
+    info = WelcomeInfo(version="0.27.0", model_label="test/model", cwd="/tmp")
+    rows = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
+    assert "latest is" not in rows
+    assert "/update" not in rows
+
+
+def test_update_row_copy_and_narrow_drop() -> None:
+    info = WelcomeInfo(
+        version="0.27.0",
+        model_label="test/model",
+        cwd="/tmp",
+        update_available="0.28.0",
+    )
+    wide = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
+    assert "! latest is v0.28.0 — /update" in wide
+    narrow = plain(build_welcome_lines(info, 22, ROOMY_H))
+    assert "latest is v0.28.0" in narrow
+    assert "/update" not in narrow
+    assert "/upd" not in narrow
+
+
+def test_update_sheds_before_harness_notice_and_login() -> None:
+    """Update is optional news. A quota fallback outranks it; login outranks both."""
+    info = WelcomeInfo(
+        version="0.27.0",
+        model_label="anthropic/claude-opus-5",
+        cwd="/tmp",
+        missing_credential="anthropic",
+        notice="anthropic quota low — falling back to zai/glm-5.3",
+        update_available="0.28.0",
+    )
+    one = build_welcome_lines(info, ROOMY_W, 1)
+    assert _warning_body(one)
+    assert "latest is" not in plain(one)
+    assert "quota low" not in plain(one)
+
+    two = build_welcome_lines(info, ROOMY_W, 2)
+    assert "quota low" in plain(two)
+    assert _warning_body(two)
+    assert "latest is" not in plain(two)
+
+    three = build_welcome_lines(info, ROOMY_W, 3)
+    assert "latest is v0.28.0" in plain(three)
+    assert "quota low" in plain(three)
+    assert _warning_body(three)
+
+
 def _warning_body(lines: list[Text]) -> bool:
     return any("not logged in" in line.plain for line in lines)
 
@@ -752,7 +801,10 @@ async def test_no_credential_warning_appears() -> None:
     provider and the command that fixes it."""
     app = _make_app(FakeSession(), FakeProviders(missing={"openrouter": True}))
     async with app.run_test(size=(80, 26)) as pilot:
-        await pilot.pause()
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
         welcome = _welcome(app)
         welcome._poll()  # the factory has resolved by now; force one read
         body = plain(build_welcome_lines(welcome._info, welcome.size.width, welcome.size.height))

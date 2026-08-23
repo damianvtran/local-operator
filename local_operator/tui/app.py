@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -367,9 +368,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand("new", "Start a new conversation"),
-    # "reloading session…" while it runs; `_reconcile_reload` posts the receipt
-    # that survives the ledger being rebuilt, and it names what came back.
-    SlashCommand("reload", "Reboot the session, keeping this conversation"),
+    # In-process reboot cannot load a replaced wheel; this command exists so
+    # ``/update`` is not the only way to pick up new code. Same relaunch
+    # helper as ``/update`` — the conversation comes back via ``--resume``.
+    SlashCommand("reload", "Relaunch this conversation on the current install"),
+    # The notice (or the relaunch) is the receipt. echo=False is the default;
+    # pin it in ECHO_POLICY so a later flip cannot sneak a user row onto an
+    # empty splash that ``/update`` is required to leave standing.
+    SlashCommand("update", "Install the latest version from PyPI and relaunch"),
     # The picker (or "resuming session <id>…") is the receipt, and a resume
     # replaces the transcript anyway.
     SlashCommand(
@@ -1254,6 +1260,14 @@ class OperatorApp(App[None]):
         #: one only: the splash is one row. Cleared on a session swap
         #: because it describes the session that just died.
         self._splash_notice: str | None = None
+        #: PyPI version strictly newer than this install, filled by the
+        #: one-shot mount worker. ``None`` until then AND when current —
+        #: the splash does not reserve the row.
+        self._update_available: str | None = None
+        #: Stashed so ``cli.main`` can ``replace_self`` after ``run_tui``
+        #: has restored the terminal. ``None`` unless ``/update`` or
+        #: ``/reload`` asked to relaunch.
+        self._restart_plan: Any | None = None
         # Whatever held focus when the usage panel opened, so closing it returns
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
@@ -1621,6 +1635,7 @@ class OperatorApp(App[None]):
                     self._providers,
                     notice=self._splash_notice,
                     setup=self._setup_state,
+                    update_available=self._update_available,
                 )
             )
         # The dock band: subagent task list + todo list, sitting between the
@@ -1777,6 +1792,13 @@ class OperatorApp(App[None]):
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
+        # After first paint, not on the welcome poll timer (that one only
+        # waits for the model label). Deferred so this thread worker cannot
+        # steal the first tick from boot. Network failure is silent.
+        self.call_after_refresh(self._start_update_check)
+
+    def _start_update_check(self) -> None:
+        self.run_worker(self._check_for_update, thread=True, group="update-check")
 
     @staticmethod
     async def _warm_session_imports() -> None:
@@ -2871,35 +2893,93 @@ class OperatorApp(App[None]):
         )
 
     def _cmd_reload(self, notice: NoticeFn) -> None:
-        """``/reload`` — re-run boot against the SAME conversation.
+        """``/reload`` — relaunch this conversation on the current install.
 
-        What a reload is FOR is the boot: MCP servers reconnected, credentials
-        re-read, the model re-resolved. The conversation is not what went
-        wrong, and with ``/new`` standing as the explicit fresh start there is
-        no reason for this to discard it. It discarded it anyway: the launch
-        factory is ``create_session`` bound to the args the app started with,
-        which name no session to resume, so every ``/reload`` minted a NEW
-        transcript directory. The model lost the conversation while the screen
-        went on showing it.
-
-        So rebind to this conversation's id first, exactly as
-        :meth:`_resume_session` does — a reload IS a resume of the session
-        already open, and ``Session`` seeds its context from the transcript it
-        is pointed at. Gated on that transcript being on disk, because
-        ``resume_dir`` refuses an id it cannot find: a reload before the first
-        turn persisted would otherwise fail to boot at all. The same gate keeps
-        the command's original purpose intact — a session that never
-        constructed has no id to rebind to, so it retries the launch factory
-        exactly as it always did.
+        In-process reboot cannot load a replaced wheel; this command exists
+        so ``/update`` is not the only way to pick up new code. ``/new`` and
+        ``/resume`` stay in-process — they swap conversations, not binaries.
         """
-        resume_id = self._resumable_session_id()
-        if resume_id and self._resume_factory is not None:
-            self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
-        # Transient by design: the reload rebuilds the ledger from the session
-        # it boots, so this line is the acknowledgement WHILE that happens and
-        # `_reconcile_reload`'s receipt is what the user is left holding.
-        notice("reloading session…")
-        self.run_worker(self._reload_session(keep_context=True), thread=False, group="session")
+        del notice
+        self._request_relaunch()
+
+    def _turn_is_live(self) -> bool:
+        """A mid-turn exec would drop work the user can still abort with esc."""
+        session = self._session
+        streaming = session is not None and bool(getattr(session, "is_streaming", False))
+        return bool(streaming or self._loop_running or self._streaming_block is not None)
+
+    def _request_relaunch(self) -> None:
+        """Stash a :class:`RestartPlan` and exit 75 so ``cli.main`` re-execs."""
+        if self._turn_is_live():
+            self._system_notice("esc first — a turn is still running", "warning")
+            return
+        from local_operator.reexec import REEXEC_CODE, make_plan, stash_plan
+
+        resume_id = self._resumable_session_id() or None
+        plan = make_plan(list(sys.argv), resume_id=resume_id)
+        self._restart_plan = plan
+        stash_plan(plan)
+        # Keyword: Textual's first positional is ``result``, not the code.
+        self.exit(return_code=REEXEC_CODE)
+
+    def _check_for_update(self) -> None:
+        """Background splash probe. Any failure stays silent — no toast."""
+        from local_operator.update import check_latest
+
+        try:
+            result = check_latest()
+        except Exception:
+            return
+        if not result.behind or not result.latest:
+            return
+        self._update_available = result.latest
+        welcome = self._welcome
+        if welcome is not None:
+            self.call_from_thread(welcome.refresh_info)
+
+    def _cmd_update(self, notice: NoticeFn) -> None:
+        """``/update`` — live PyPI check, upgrade, then the shared relaunch."""
+        del notice
+        if self._turn_is_live():
+            self._system_notice("esc first — a turn is still running", "warning")
+            return
+        self.run_worker(self._run_update, thread=True, group="update")
+
+    def _run_update(self) -> None:
+        from local_operator.update import (
+            UpdateError,
+            check_latest,
+            perform_upgrade,
+        )
+
+        try:
+            result = check_latest(force=True)
+        except Exception as exc:
+            self.call_from_thread(
+                self._system_notice, f"could not check for updates: {exc}", "warning"
+            )
+            return
+        if result.latest is None:
+            self.call_from_thread(
+                self._system_notice, "could not reach PyPI to learn the latest version", "warning"
+            )
+            return
+        if not result.behind:
+            self.call_from_thread(
+                self._system_notice, f"already on v{result.installed or result.latest}"
+            )
+            return
+        self.call_from_thread(self._notice, f"updating to v{result.latest}…")
+        try:
+            installed = perform_upgrade(target=result.latest)
+        except UpdateError as exc:
+            self.call_from_thread(self._system_notice, str(exc), "warning")
+            return
+        except Exception as exc:
+            self.call_from_thread(self._system_notice, f"update failed: {exc}", "error")
+            return
+        self.call_from_thread(self._notice, f"updated to v{installed} — restarting…")
+        self.call_from_thread(self._request_relaunch)
 
     def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
         """``/resume`` — pick a conversation; ``/resume <id>`` — resume one.
@@ -8139,6 +8219,8 @@ class OperatorApp(App[None]):
             self._clear_transcript()
         elif command == "/reload":
             self._cmd_reload(notice)
+        elif command == "/update":
+            self._cmd_update(notice)
         elif command == "/new":
             self._cmd_new(notice)
         elif command == "/resume":
