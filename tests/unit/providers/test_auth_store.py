@@ -216,6 +216,70 @@ async def test_a_blocked_row_returns_to_service_when_its_window_passes(
     assert await store.get_api_key("openai") == "k1"
 
 
+async def test_block_credential_caps_at_max(store: AuthStore, monkeypatch: Any) -> None:
+    """A multi-day block request is clamped to MAX_CREDENTIAL_BLOCK_MS.
+
+    A genuinely full-week-depleted account keys its block to the weekly
+    reset (days out); the cap guarantees no reading -- a usage reset estimate
+    or a hostile Retry-After -- strands an account past the point where
+    re-probing is cheaper than waiting. This is the single choke point the cap
+    lives at, so it protects every caller (preflight AND rotate_sibling)."""
+    from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS
+
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(AuthStore, "_now_ms", staticmethod(lambda: clock["now"]))
+    row = store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
+    # A seven-day block request -- the shape a raw weekly usage reset writes.
+    store.block_credential(row.id, "openai", block_ms=7 * 86_400_000)
+    stored = store._conn.execute(
+        "SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ?",
+        (row.id,),
+    ).fetchone()
+    assert stored is not None
+    # Capped: the stored horizon is at most one hour out, not seven days.
+    assert stored[0] - clock["now"] == MAX_CREDENTIAL_BLOCK_MS
+
+
+async def test_block_credential_floor_still_applies(store: AuthStore, monkeypatch: Any) -> None:
+    """A 0/negative block still floors at 1000 ms (the cap did not remove it)."""
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(AuthStore, "_now_ms", staticmethod(lambda: clock["now"]))
+    row = store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
+    store.block_credential(row.id, "openai", block_ms=0)
+    stored = store._conn.execute(
+        "SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ?",
+        (row.id,),
+    ).fetchone()
+    assert stored is not None
+    assert stored[0] - clock["now"] == 1000
+
+
+async def test_rotate_sibling_retry_after_is_capped(store: AuthStore, monkeypatch: Any) -> None:
+    """The reactive rotation path inherits the cap for free.
+
+    ``rotate_sibling`` writes ``block_ms=max(block_ms, retry_after or 0)``, so
+    a provider that answers a quota 429 with ``Retry-After: 604800`` (a week)
+    would, uncapped, strand the account for a week. The cap lives in
+    ``block_credential`` -- the single choke point -- so this site needs no
+    inline clamp and still cannot write a multi-day block."""
+    from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS
+    from local_operator.providers.failover import ProviderError
+
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(AuthStore, "_now_ms", staticmethod(lambda: clock["now"]))
+    row = store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
+    store.upsert_credential("openai", {"key": "k2", "type": "api_key"})
+    # A hostile week-long Retry-After on a usage-limit 429.
+    hostile = ProviderError(429, "rate limit reached", retryable=True, retry_after_ms=604_800_000)
+    store.rotate_sibling("openai", None, hostile, api_key="k1")
+    stored = store._conn.execute(
+        "SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ?",
+        (row.id,),
+    ).fetchone()
+    assert stored is not None
+    assert stored[0] - clock["now"] == MAX_CREDENTIAL_BLOCK_MS
+
+
 async def test_rotate_sibling_blocks_failing_and_reports_remaining(store: AuthStore) -> None:
     store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
     row2 = store.upsert_credential("openai", {"key": "k2", "type": "api_key"})

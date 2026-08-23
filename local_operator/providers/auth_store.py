@@ -57,6 +57,17 @@ logger = logging.getLogger("local_operator.providers.auth_store")
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
 DEFAULT_BLOCK_MS = 60_000  # rate-limit / 401 backoff
 
+#: Hard ceiling on ANY credential block, whatever computed it (a usage
+#: reset estimate, a provider Retry-After header, a caller's block_ms). A
+#: block is a cost-avoidance backoff, not a correctness gate -- every message
+#: boundary re-probes usage and the cascade re-checks blocked rows -- so no
+#: reading, however large or however hostile the header, may strand an
+#: account for more than this. An hour outlives a working session's need to
+#: stop re-hitting a spent account, and is short enough that a wrong estimate
+#: self-heals on the next boundary. Guards the days-long block a raw weekly
+#: reset or a Retry-After: 604800 would otherwise write.
+MAX_CREDENTIAL_BLOCK_MS = 60 * 60 * 1000  # 1 hour
+
 #: How long a provider-fault demotion keeps a credential at the back of the pool
 #: (see ``AuthStore.deprioritize_credential``). Deliberately short: the mark says
 #: "this account was failing a moment ago", which stops being useful information
@@ -500,7 +511,15 @@ class AuthStore:
         credential = self.get_credential(credential_id)
         provider = self._storage_id(provider)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
-        until = self._now_ms() + max(1000, int(block_ms))
+        # Floor keeps a 0/negative block from being a no-op; the ceiling
+        # (MAX_CREDENTIAL_BLOCK_MS) guarantees no reading -- a multi-day usage
+        # reset, a hostile Retry-After -- can strand an account past the point
+        # where re-probing is cheaper than waiting. This is the single choke
+        # point every block passes through (preflight AND reactive
+        # rotate_sibling AND any future caller), so the cap protects them all
+        # from a rogue provider header for free. See the constant's docstring.
+        block_ms = max(1000, min(int(block_ms), MAX_CREDENTIAL_BLOCK_MS))
+        until = self._now_ms() + block_ms
         self._conn.execute(
             "INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope,"
             " blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)"
