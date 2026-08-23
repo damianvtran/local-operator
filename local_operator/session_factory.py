@@ -1035,9 +1035,14 @@ async def _prepare(
     # store is quiet, and both are best-effort by construction. A no-op on
     # every later launch — each directory is answered once and never
     # re-stamped.
-    from local_operator.resume import backfill_session_origins
+    from local_operator.resume import backfill_session_origins, backfill_session_titles
 
     backfill_session_origins(Path(agent_registry.config_dir))
+    # Stamp the title sidecar alongside the origin marker, so a pre-existing
+    # session is findable by every name it has borne on the first launch after
+    # upgrade rather than only after its next rename. Same best-effort,
+    # once-per-session-ever contract as the origin backfill above.
+    backfill_session_titles(Path(agent_registry.config_dir))
 
     # --- model + stream fn (stream B contracts) ---------------------------
     from local_operator.env import get_env_config

@@ -2376,6 +2376,23 @@ class Session:
                 "user_set": self._conversation_name.user_set,
             }
             await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
+            # Journal the same title to the sidecar the picker reads O(1), on
+            # the SAME event that writes it to the transcript. This is what
+            # makes a title in the untouched middle of a large transcript
+            # findable without a full read on the picker's synchronous path —
+            # see resume.write_session_title / TITLE_SCAN_BYTES. Imported here
+            # rather than at module top so the CLI's import-guard on
+            # ``resume`` is unaffected, and best-effort by the helper's own
+            # contract: a failed sidecar write never fails a turn.
+            from local_operator.resume import read_title_names, write_session_title
+
+            session_dir = self._transcript.directory
+            write_session_title(
+                session_dir,
+                str(payload["text"]),
+                user_set=bool(payload["user_set"]),
+                past_names=read_title_names(session_dir),
+            )
             if (self._conversation_name.text, self._conversation_name.user_set) == (
                 payload["text"],
                 payload["user_set"],
