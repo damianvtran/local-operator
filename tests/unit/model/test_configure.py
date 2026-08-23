@@ -2714,3 +2714,64 @@ async def test_quota_pinned_fallback_is_reprobed_at_the_next_boundary(tmp_path) 
     finally:
         await stream.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_reuses_stale_row_when_a_peer_holds_the_lease(tmp_path) -> None:
+    """Cross-process fan-out collapse, through the real configure→helper wiring.
+
+    Two sessions share one HOME (hence one ``usage_cache.db``). Session A holds
+    the account's preflight fetch lease, standing in for a peer mid-fetch. Session
+    B's ``preflight_usage`` must reach a real verdict off A's last-good row WITHOUT
+    the patched fetcher ever being invoked for that account — proving the ``:pf:``
+    lease diverts the duplicate network hit that earned the endpoint its 429 storm
+    (BUG 3). This exercises the whole path (``_cached_account_usage`` →
+    ``account_preflight_key`` → ``leased_account_usage``), not the helper alone."""
+    from local_operator.providers.usage_cache import account_preflight_key
+
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    settings = {
+        "retry": {
+            "usageAwareFallback": True,
+            "usageReservePercent": 10,
+            "fallbackChains": {"default": ["zai/glm-5.3"]},
+        }
+    }
+    stream_a = create_stream_fn(store, settings, session_id="session-a")
+    stream_b = create_stream_fn(store, settings, session_id="session-b")
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-4-8")
+    # The reactive probe keys on ``access.account_id`` here (``_oauth`` sets no
+    # email), so this is the exact row site 2150 will read for account-a.
+    key = account_preflight_key("anthropic", "account-a")
+
+    calls: list[dict[str, Any]] = []
+
+    async def recorder(*_args, **kwargs):
+        # If the lease-loser ever crossed the network this would fire (and, being
+        # a depleted 99% report, would flip the verdict) — so an empty ``calls``
+        # is a two-sided proof the network was NOT crossed.
+        calls.append(kwargs)
+        return _anthropic_usage(99.0)
+
+    try:
+        # A seeds a healthy last-good row and holds the lease (peer mid-fetch).
+        cache_a = stream_a._usage_cache_store()
+        assert cache_a is not None
+        cache_a.set(key, "anthropic", [_anthropic_usage(20.0)], expires_at_ms=cache_a._now_ms() - 1)
+        assert cache_a.try_lease(key) is True
+
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=recorder):
+            stream_b.begin_message()
+            await stream_b.preflight_usage(model)
+
+        # Verdict reached off the stale healthy row: account stays in service, no
+        # fallback pinned — and the patched fetcher was never called for account-a.
+        assert calls == []
+        assert stream_b._route_state.active is None
+        assert not store.is_blocked(account.id, "anthropic")
+    finally:
+        await stream_a.close()
+        await stream_b.close()
+        store.close()

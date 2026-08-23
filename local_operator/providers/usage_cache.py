@@ -55,6 +55,7 @@ import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -195,6 +196,26 @@ def fingerprint_secret(secret: str) -> str:
     cache-hit purposes.
     """
     return "key:" + hashlib.sha256(secret.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def account_preflight_key(storage_id: str, account_identity: str) -> str:
+    """Cache key for ONE account's preflight usage probe.
+
+    A namespace disjoint from the warmer's per-provider-set keys: the ``:pf:``
+    segment appears in no ``provider_cache_key`` output, so a preflight row can
+    never collide with a warmer row even when a provider has exactly one account
+    (where ``fingerprint_accounts([id])`` would otherwise match). Kept separate on
+    purpose — see the module note in the spec: the two subsystems cache different
+    shapes (one account vs the full set) with different freshness policies, and the
+    raw preflight fetch does not backfill ``UsageReport.identity``, so the warmer's
+    set-row cannot be reliably sliced per account anyway.
+
+    ``account_identity`` is a NON-SECRET stable identifier (email, account id, or a
+    ``fingerprint_secret`` digest for the API-key route — never a raw key or a
+    rotating OAuth token). It is hashed again here so no identity string sits in
+    the row's primary key, matching the warmer's discipline.
+    """
+    return f"{storage_id}:pf:{fingerprint_accounts([account_identity])}"
 
 
 class UsageCacheStore:
@@ -458,3 +479,64 @@ class UsageCacheStore:
                 )
         except Exception:  # noqa: BLE001
             logger.debug("usage cache: lease release failed", exc_info=True)
+
+
+async def leased_account_usage(
+    store: "UsageCacheStore | None",
+    key: str,
+    provider: str,
+    fetch: Callable[[], Awaitable["UsageReport | None"]],
+) -> "UsageReport | None":
+    """One account's usage for a ROUTING decision: fetch live, but collapse a
+    concurrent peer's duplicate fetch.
+
+    Unlike the display read-through (:meth:`ProviderController._refresh_provider_usage`)
+    this NEVER serves a fresh cached value on the fast path — a routing probe must be
+    free to notice recovery/depletion on its own next boundary. The cache does exactly
+    one job here: when a PEER process already holds the fetch lease for this account,
+    this process serves the peer's last-good value instead of crossing the network for
+    the identical answer (Anthropic/OpenAI rate-limit the usage endpoint per source IP,
+    so a synchronized fan-out is how a routing check earns its own 429).
+
+    Degrades to the pre-cache behaviour whenever coordination is unavailable: no store,
+    or a lease it could not take with nothing on hand, means fetch live. ``fetch``
+    returning ``None`` (transport/HTTP failure OR no quota) is passed through unchanged,
+    so the caller's fail-open path is preserved exactly.
+    """
+    if store is None:
+        return await fetch()
+
+    # The lease is contended only when a peer is mid-fetch. A free lease (the common
+    # case, and ALWAYS the case in a single-process test) means: this process fetches.
+    if not store.try_lease(key):
+        # A peer owns the in-flight fetch; its result lands in this same row for the
+        # next boundary. Serve what we have rather than doubling the network hit. With
+        # nothing on hand (cold start) we cannot serve nothing — fetch live, matching
+        # the controller's "the lease only protects a stale value" rule.
+        #
+        # The stale read lives HERE, not before the lease check, on purpose: the
+        # free-lease fast path (the overwhelming majority of calls) never consumes
+        # ``stale_report``, so reading it up front spent one SQLite query per probe
+        # for nothing. Deferring it to the contended branch also reads a marginally
+        # fresher row — any write the peer landed between here and the lease check.
+        stale = store.get(key, include_expired=True)
+        stale_report = stale[0] if stale else None
+        return stale_report if stale_report is not None else await fetch()
+
+    try:
+        report = await fetch()
+        if report is not None:
+            store.set(
+                key,
+                provider,
+                [report],
+                expires_at_ms=store._now_ms() + USAGE_REPORT_TTL_MS,
+            )
+            return report
+        # None = failure or genuinely-empty. Keep the last-good value servable to a
+        # concurrent lease-loser under the short failure cool-down; return None so the
+        # ROUTING caller fails open exactly as it does today.
+        store.write_failure(key, provider)
+        return None
+    finally:
+        store.release_lease(key)

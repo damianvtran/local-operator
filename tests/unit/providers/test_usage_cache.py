@@ -17,8 +17,10 @@ from local_operator.providers.usage_cache import (
     USAGE_FAILURE_BACKOFF_MS,
     USAGE_LAST_GOOD_RETENTION_MS,
     UsageCacheStore,
+    account_preflight_key,
     fingerprint_accounts,
     fingerprint_secret,
+    leased_account_usage,
     provider_cache_key,
     report_from_dict,
     report_to_dict,
@@ -228,3 +230,185 @@ def test_a_write_leaves_no_open_transaction_behind(cache) -> None:
         assert other.get("k3") is not None, "peer write was silently lost"
     finally:
         other.close()
+
+
+# -- preflight read-through (leased_account_usage) ----------------------------
+# The routing helper is deliberately NOT the display read-through: it fetches
+# live on every fast path (so a boundary can notice recovery/depletion) and only
+# uses the lease to divert a concurrent PEER process that would otherwise
+# duplicate the same account's fetch and earn the endpoint a per-source-IP 429.
+# These tests pin exactly that contract. See docs/specs/preflight-usage-cache.md.
+
+
+@pytest.mark.asyncio
+async def test_preflight_lease_loser_serves_stale_without_a_network_fetch(tmp_path) -> None:
+    """Fan-out collapse (the headline proof): 2 processes, 2 preflights, 1 fetch.
+
+    Process A holds the account's fetch lease (mid-fetch). Process B's preflight
+    must serve A's last-good row instead of crossing the network for the identical
+    answer — the whole point of the ``:pf:`` lease.
+    """
+    db = tmp_path / "usage_cache.db"
+    store_a = UsageCacheStore(db)
+    store_b = UsageCacheStore(db)
+    key = account_preflight_key("anthropic", "account-a")
+    report_a = _report(percent=10.0)
+    report_b = _report(percent=90.0)
+    calls: list[str] = []
+
+    async def fetch():
+        calls.append("net")
+        return report_b
+
+    try:
+        # A stale row A already wrote, and A holding the lease (mid-fetch).
+        store_a.set(key, "anthropic", [report_a], expires_at_ms=store_a._now_ms() - 1)
+        assert store_a.try_lease(key) is True
+
+        served = await leased_account_usage(store_b, key, "anthropic", fetch)
+
+        assert served is not None
+        assert served.limits[0].amount.used == report_a.limits[0].amount.used  # stale served
+        assert calls == []  # network NOT crossed by the lease-loser
+    finally:
+        store_a.close()
+        store_b.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_free_lease_fetches_writes_and_releases(tmp_path) -> None:
+    """The common (single-process) case: a free lease always fetches live, caches
+    the result, and releases the lease so the next boundary can re-probe."""
+    store = UsageCacheStore(tmp_path / "usage_cache.db")
+    key = account_preflight_key("anthropic", "account-a")
+    report = _report(percent=42.0)
+    calls: list[str] = []
+
+    async def fetch():
+        calls.append("net")
+        return report
+
+    try:
+        served = await leased_account_usage(store, key, "anthropic", fetch)
+
+        assert served is report
+        assert calls == ["net"]
+        cached = store.get(key)
+        assert cached is not None and cached[0].limits[0].amount.used == 42.0
+        # Lease was released, not left to expire — the next boundary can fetch.
+        assert store.try_lease(key) is True
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_keys_isolate_accounts_and_avoid_the_warmer_namespace(
+    tmp_path,
+) -> None:
+    """Per-account isolation: two accounts get disjoint ``:pf:`` keys, each
+    returning its OWN report — the namespace, not ``UsageReport.identity`` (which
+    the raw preflight fetch never backfills), is what separates accounts. And the
+    keys never collide with the warmer's per-provider-set rows."""
+    db = tmp_path / "usage_cache.db"
+    holder = UsageCacheStore(db)  # holds each account's lease → forces stale serving
+    reader = UsageCacheStore(db)
+    key_a = account_preflight_key("anthropic", "account-a")
+    key_b = account_preflight_key("anthropic", "account-b")
+    report_a = _report(percent=11.0)
+    report_b = _report(percent=22.0)
+
+    async def _fail():  # must never run: both are lease-losers with stale on hand
+        raise AssertionError("lease-loser crossed the network")
+
+    try:
+        # Distinct namespace: contains ":pf:" and differs from the warmer's key.
+        assert ":pf:" in key_a and ":pf:" in key_b
+        assert key_a != key_b
+        warmer_key = provider_cache_key("anthropic", fingerprint_accounts(["account-a"]))
+        assert key_a != warmer_key
+
+        reader.set(key_a, "anthropic", [report_a], expires_at_ms=reader._now_ms() - 1)
+        reader.set(key_b, "anthropic", [report_b], expires_at_ms=reader._now_ms() - 1)
+        assert holder.try_lease(key_a) is True
+        assert holder.try_lease(key_b) is True
+
+        served_a = await leased_account_usage(reader, key_a, "anthropic", _fail)
+        served_b = await leased_account_usage(reader, key_b, "anthropic", _fail)
+
+        assert served_a is not None and served_a.limits[0].amount.used == 11.0
+        assert served_b is not None and served_b.limits[0].amount.used == 22.0
+    finally:
+        holder.close()
+        reader.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_lease_loser_with_no_stale_fetches_live(tmp_path) -> None:
+    """A cold start: the lease is held by a peer but no row exists. The loser
+    cannot serve nothing, so it fetches live — matching the pre-cache behaviour."""
+    db = tmp_path / "usage_cache.db"
+    holder = UsageCacheStore(db)
+    loser = UsageCacheStore(db)
+    key = account_preflight_key("anthropic", "account-a")
+    report = _report(percent=7.0)
+    calls: list[str] = []
+
+    async def fetch():
+        calls.append("net")
+        return report
+
+    try:
+        assert holder.try_lease(key) is True  # peer mid-fetch, nothing cached yet
+        served = await leased_account_usage(loser, key, "anthropic", fetch)
+
+        assert served is report
+        assert calls == ["net"]
+    finally:
+        holder.close()
+        loser.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_open_when_the_cache_is_unavailable() -> None:
+    """No store means the pre-cache behaviour: fetch live and pass the result
+    through unchanged, including a ``None`` the routing caller fails open on."""
+    calls: list[str] = []
+
+    async def fetch_ok():
+        calls.append("net")
+        return _report(percent=3.0)
+
+    async def fetch_none():
+        calls.append("net")
+        return None
+
+    served = await leased_account_usage(None, "k", "anthropic", fetch_ok)
+    assert served is not None and served.limits[0].amount.used == 3.0
+
+    served_none = await leased_account_usage(None, "k", "anthropic", fetch_none)
+    assert served_none is None
+    assert calls == ["net", "net"]
+
+
+@pytest.mark.asyncio
+async def test_preflight_none_result_preserves_last_good_and_fails_open(tmp_path) -> None:
+    """A ``None`` fetch (transport failure OR genuinely-empty) returns ``None`` so
+    the routing caller fails open, while the last-good row stays servable to a
+    concurrent lease-loser under the write_failure cool-down."""
+    store = UsageCacheStore(tmp_path / "usage_cache.db")
+    key = account_preflight_key("anthropic", "account-a")
+    good = _report(percent=50.0)
+
+    async def fetch_none():
+        return None
+
+    try:
+        store.set(key, "anthropic", [good], expires_at_ms=store._now_ms() + 60_000)
+        served = await leased_account_usage(store, key, "anthropic", fetch_none)
+
+        assert served is None  # caller fails open
+        # Last-good survives (write_failure re-wrote it under the short cool-down).
+        retained = store.get(key, include_expired=True)
+        assert retained is not None and retained[0].limits[0].amount.used == 50.0
+    finally:
+        store.close()
