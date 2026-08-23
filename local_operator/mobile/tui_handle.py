@@ -39,10 +39,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle, image_blocks
-from local_operator.mobile.types import (
-    SessionProjection,
-    ask_pending_request,
-)
+from local_operator.mobile.types import SessionProjection, ask_pending_request
 
 if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
