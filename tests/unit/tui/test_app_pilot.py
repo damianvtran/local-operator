@@ -105,6 +105,10 @@ class FakeSession:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        #: The images each prompt carried, index-aligned with ``prompts``. Kept
+        #: so a test can prove a screenshot reached the model through a command
+        #: that submits a prompt (``/team``/``/agent``), not just the text.
+        self.prompt_images: list[list[Any]] = []
         self.aborts: list[str] = []
         #: Bang-mode commands this fake was asked to persist. A list of
         #: ``(command, result)`` so a test can say the TUI recorded what ran
@@ -288,6 +292,10 @@ class FakeSession:
 
     async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
+        # Parallel to ``prompts``: the pixels the turn carried, so a test can
+        # assert an image survived a route (e.g. `/team <name> <request>` with
+        # a pasted screenshot) rather than only that the words did.
+        self.prompt_images.append(list(images or []))
 
     async def record_shell(self, command: str, result: Any) -> None:
         self.shell_records.append((command, result))

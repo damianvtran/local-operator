@@ -3114,13 +3114,46 @@ class OperatorApp(App[None]):
         rows.append(Text("Send: /team <name> <message>", style=body))
         return RichBlock(Group(*rows))
 
-    def _cmd_team(self, arg: str, notice: NoticeFn) -> None:
+    def _submit_command_prompt(
+        self, request: str, attachments: Mapping[int, Attachment] | None
+    ) -> None:
+        """Send a prompt-carrying slash command's argument as a real user turn.
+
+        The shared tail of ``/team <name> <request>`` and ``/agent <name>
+        <message>``: both attach something to the session and then hand the
+        argument to the model. The images the argument cites are resolved from
+        the text itself (``resolve_markers``) — the same authority the composer
+        uses, so a marker the request no longer cites drops its image and order
+        follows the text — and both the resolved list and the raw index→image
+        map go to ``_submit_prompt`` so a held draft (steer/compaction) can
+        rebuild its pixels exactly as a plain prompt would.
+
+        Extracted so the resolve-then-submit pair lives in ONE place: it was
+        copied into three call sites (``/team``, ``/agent`` with and without a
+        layered persona), and three copies of "which text resolves the markers"
+        is exactly the kind of drift the composer's single ``resolve_markers``
+        walk exists to prevent.
+        """
+        images = resolve_markers(request, attachments or {})
+        self._submit_prompt(request, images, attachments)
+
+    def _cmd_team(
+        self,
+        arg: str,
+        notice: NoticeFn,
+        attachments: Mapping[int, Attachment] | None = None,
+    ) -> None:
         """``/team`` — list; ``/team <name> <request>`` — talk to the manager.
 
         Bare ``/team`` is a listing, so it does not echo. A named team with a
         request attaches that team to this session (stamping the roster and
         briefs onto the manager) and sends the request as a real user turn —
         the one case besides ``/goal`` whose argument reaches the model.
+
+        ``attachments`` is the composer's image map at submit time. Only the
+        markers the REQUEST still cites are resolved and sent, so a screenshot
+        pasted before the user typed ``/team ops <request about it>`` reaches
+        the manager as pixels rather than a dead ``[Image #N]`` marker.
         """
         session = self._session
         if session is None:
@@ -3206,8 +3239,13 @@ class OperatorApp(App[None]):
         # not echoed: the request text is the transcript subject, and a
         # second row restating `/team name …` would be the duplication
         # the echo policy exists to prevent.
+        #
+        # ``_submit_command_prompt`` resolves the request's own image markers
+        # and sends them — the marker sits in the request tail the user typed
+        # around, so a pasted screenshot reaches the manager as pixels, not a
+        # dead ``[Image #N]`` marker.
         notice(f"sending to {team.name}. {team.manager} is coordinating.")
-        self._submit_prompt(request)
+        self._submit_command_prompt(request, attachments)
 
     def _cmd_team_chart(self, name: str, registry: Any, notice: NoticeFn) -> None:
         """``/team chart [name]`` — open the org-chart mode for a team.
@@ -3395,7 +3433,12 @@ class OperatorApp(App[None]):
             return
         self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
 
-    def _cmd_agent(self, arg: str, notice: NoticeFn) -> None:
+    def _cmd_agent(
+        self,
+        arg: str,
+        notice: NoticeFn,
+        attachments: Mapping[int, Attachment] | None = None,
+    ) -> None:
         """``/agent`` — list; ``/agent <name> [<message>]`` — adopt a profile.
 
         Mirrors ``_cmd_team`` surface for surface. Bare ``/agent`` is a
@@ -3404,6 +3447,10 @@ class OperatorApp(App[None]):
         ``Session.attach_agent_profile``); with a message the message is then
         sent as a real user turn, the same one-command-two-acts shape as
         ``/team <name> <request>``.
+
+        ``attachments`` mirrors ``_cmd_team``: the composer's image map, so a
+        screenshot the MESSAGE cites reaches the attached persona as pixels
+        rather than a bare ``[Image #N]`` marker.
 
         The NAME is the first whitespace-delimited token, exactly like
         `/team`'s parse. Role/specialist names may in principle contain spaces
@@ -3484,9 +3531,11 @@ class OperatorApp(App[None]):
         if not layered:
             if request:
                 # The message is still worth sending — the user asked for a
-                # turn — but say plainly no persona was applied to it.
+                # turn — but say plainly no persona was applied to it. The
+                # message's own image markers are resolved and sent, same as the
+                # instruction-carrying path below.
                 notice(f"agent {resolved} has no instructions; sending your message as-is.")
-                self._submit_prompt(request)
+                self._submit_command_prompt(request, attachments)
             else:
                 notice(
                     f"agent {resolved} resolved but carries no instructions, "
@@ -3507,9 +3556,11 @@ class OperatorApp(App[None]):
         # attached profile is told) and starts the turn — same non-echo
         # reasoning as `_cmd_team`: the message text is the transcript
         # subject, and a second row restating `/agent name …` would be the
-        # duplication the echo policy exists to prevent.
+        # duplication the echo policy exists to prevent. The message's image
+        # markers are resolved from the text, the same authority the composer
+        # uses, so a cited screenshot reaches the persona as pixels.
         notice(f"agent {resolved} now governs this session's replies.")
-        self._submit_prompt(request)
+        self._submit_command_prompt(request, attachments)
 
     # -- MCP status ---------------------------------------------------------
     def _wire_mcp_status(self, session: SessionProtocol) -> None:
@@ -4249,7 +4300,17 @@ class OperatorApp(App[None]):
             # below it always appended. Without that, it would retire the splash
             # for a command that draws nothing into the transcript — a
             # ``/usage`` panel over a screen with no splash and no ledger.
-            self._run_slash_command(text)
+            #
+            # The attachments ride along: the two ``consumes_prompt`` commands
+            # that send their argument to the model (``/team <name> <request>``,
+            # ``/agent <name> <message>``) need the pasted screenshot the request
+            # cites, or the ``[Image #N]`` marker reaches the model as bare text
+            # with no pixels — the exact bug where attaching an image and then
+            # routing it through ``/team`` silently dropped the image. Handed as
+            # the index→attachment MAP (not the pre-resolved ``images`` list),
+            # because the handler submits only the REQUEST tail and must resolve
+            # the markers THAT text still cites, not the whole slash line's.
+            self._run_slash_command(text, message.attachments)
             return
         self._submit_prompt(text, images, message.attachments)
 
@@ -7897,8 +7958,17 @@ class OperatorApp(App[None]):
         """The input editor. Queried rather than held: Textual owns the widget."""
         return self.query_one(Editor)
 
-    def _run_slash_command(self, text: str) -> None:
+    def _run_slash_command(
+        self, text: str, attachments: Mapping[int, Attachment] | None = None
+    ) -> None:
         """Dispatch a typed slash command (with arguments) to its handler.
+
+        ``attachments`` is the composer's index→image map at submit time, passed
+        through so the two prompt-sending commands (``/team``/``/agent``) can
+        forward the pixels their request cites to the model. It defaults to
+        ``None`` because most commands take no prompt and the mid-draft inline
+        path (:meth:`on_inline_command_requested`) leaves the draft — images and
+        all — in the composer rather than submitting it.
 
         The typed word is resolved to its registry PRIMARY name first, so the
         branches below only ever have to know one spelling. They used to match
@@ -7984,9 +8054,9 @@ class OperatorApp(App[None]):
         elif command == "/credential":
             self._cmd_credential(arg, notice)
         elif command == "/team":
-            self._cmd_team(arg, notice)
+            self._cmd_team(arg, notice, attachments)
         elif command == "/agent":
-            self._cmd_agent(arg, notice)
+            self._cmd_agent(arg, notice, attachments)
         else:
             # ``parts[0]``, not the lowered ``command``: with the echo gone this
             # line is the ONLY place the mistyped word appears, so it has to
