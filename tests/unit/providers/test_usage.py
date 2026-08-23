@@ -1261,6 +1261,34 @@ async def test_xai_uncapped_unified_account_still_reports_its_spend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_xai_uncapped_note_survives_a_credits_url_failure() -> None:
+    """Partial failure: the credits URL 401s but the bare monthly URL answers.
+
+    The bare body carries ``isUnifiedBillingUser`` too, so the unified signal
+    must be derived from the *effective* config after both URLs are tried. A
+    version that read the flag only from the credits config left this row
+    unmeasurable with ``notes=None`` — a dotted bar with no reason, exactly the
+    rendering-defect outcome the note exists to prevent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "format=credits" in str(request.url):
+            return httpx.Response(401, json={})
+        # The bare monthly body must self-identify as unified for the note to
+        # fire, mirroring what production returns on this URL.
+        body = {"config": {**XAI_UNIFIED_MONTHLY_BODY["config"], "isUnifiedBillingUser": True}}
+        return httpx.Response(200, json=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    row = next(limit for limit in report.limits if limit.id == "xai:usage:1mo")
+    assert row.amount.used == pytest.approx(443.0)
+    assert row.amount.fraction() is None
+    assert report.notes == "unified billing — spend is reported without a metered cap"
+
+
+@pytest.mark.asyncio
 async def test_xai_answered_but_empty_shape_reports_a_note_not_none() -> None:
     """An endpoint that ANSWERS with nothing renderable is still an account.
 

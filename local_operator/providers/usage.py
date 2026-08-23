@@ -1687,6 +1687,16 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
         if on_demand is not None:
             limits.append(on_demand)
 
+    # Recompute the unified flag from the *effective* config once both URLs have
+    # had their chance. The pre-fetch value above only gates whether the monthly
+    # URL is probed; when the credits URL 401s but the bare monthly URL answers
+    # for an uncapped unified account, that config carries isUnifiedBillingUser
+    # too, and without this the explanatory note would be dropped — an
+    # unmeasurable bar with no reason reads exactly like the rendering defect
+    # this code warns against. Deriving it here keeps both note branches below
+    # on the same live signal.
+    unified = config is not None and config.get("isUnifiedBillingUser") is True
+
     # Ids are unique by construction, but both shapes can carry the same
     # on-demand cap when an account reports weekly and monthly at once.
     seen: set[str] = set()
@@ -1706,7 +1716,7 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
         # meter for this plan".
         note = (
             "unified billing — no metered windows reported"
-            if config.get("isUnifiedBillingUser") is True
+            if unified
             else "no measurable windows reported"
         )
         return UsageReport(provider="xai", limits=[], notes=note)
