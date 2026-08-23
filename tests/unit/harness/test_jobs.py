@@ -14,6 +14,7 @@ from local_operator.harness.jobs import (
     AsyncJob,
     AsyncJobManager,
 )
+from local_operator.harness.types import Usage
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:
@@ -43,6 +44,65 @@ def require_output(manager: AsyncJobManager, job_id: str, since: int = 0) -> tup
 async def quick_runner(job_id, signal, report_progress):
     report_progress("halfway")
     return f"done:{job_id}"
+
+
+def test_accumulate_usage_sums_provider_reported_dollars() -> None:
+    """A tool-using child's money is spread across its per-message usage, and the
+    runner's accumulator must sum the provider-reported dollar the same way it
+    sums the token buckets — never take only the last message's figure."""
+    from local_operator.harness.subagent import _accumulate_usage
+
+    class _Job:
+        def __init__(self, usage=None) -> None:
+            self.usage = usage
+
+    job = _Job()
+    _accumulate_usage(job, Usage(input_tokens=10, output_tokens=0, usd_cost=0.001))
+    _accumulate_usage(job, Usage(input_tokens=20, output_tokens=0, usd_cost=0.002))
+    assert job.usage is not None
+    assert job.usage.input_tokens == 30
+    assert job.usage.usd_cost == pytest.approx(0.003)
+
+
+def test_accumulate_usage_non_finite_reported_dollar_does_not_poison_total() -> None:
+    """A non-finite child figure (``inf``/``NaN``, wire-reachable via
+    ``json.loads``) must be dropped, not summed: ``inf + x == inf`` would pin the
+    child's running total at infinity for the rest of its life with no recovery."""
+    import math
+
+    from local_operator.harness.subagent import _accumulate_usage
+
+    class _Job:
+        def __init__(self) -> None:
+            self.usage = None
+
+    job = _Job()
+    _accumulate_usage(job, Usage(input_tokens=10, output_tokens=0, usd_cost=0.001))
+    _accumulate_usage(job, Usage(input_tokens=20, output_tokens=0, usd_cost=float("inf")))
+    assert job.usage is not None
+    # The poison message is dropped; only the valid one contributes, and a later
+    # valid message still folds in cleanly because the total was never poisoned.
+    _accumulate_usage(job, Usage(input_tokens=5, output_tokens=0, usd_cost=0.002))
+    assert job.usage.usd_cost == pytest.approx(0.003)
+    assert job.usage.usd_cost is not None and math.isfinite(job.usage.usd_cost)
+
+
+def test_accumulate_usage_leaves_reported_dollar_none_when_unreported() -> None:
+    """A child whose providers never report a dollar figure keeps ``usd_cost``
+    ``None`` — "not reported" is not a sum of zeros and must fall back to the
+    token estimate downstream."""
+    from local_operator.harness.subagent import _accumulate_usage
+
+    class _Job:
+        def __init__(self) -> None:
+            self.usage = None
+
+    job = _Job()
+    _accumulate_usage(job, Usage(input_tokens=10))
+    _accumulate_usage(job, Usage(input_tokens=20))
+    assert job.usage is not None
+    assert job.usage.usd_cost is None
+    assert job.usage.input_tokens == 30
 
 
 @pytest.mark.asyncio

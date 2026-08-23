@@ -22,6 +22,7 @@ import asyncio
 import email.utils
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -109,6 +110,39 @@ def _first_text(*candidates: Any) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return ""
+
+
+def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
+    """A provider's own precomputed dollar cost for one request, or ``None``.
+
+    Some providers (OpenRouter's ``usage.cost``) bill the request themselves and
+    return the amount they charged. That number is authoritative in a way no
+    token×rate reconstruction can be: it already reflects the per-route price the
+    request actually landed on, reasoning-token splits, cache discounts, and any
+    time- or value-banded overrides — none of which a single flat table row can
+    express. Return it as ``None`` when absent, so a caller can tell "the
+    provider didn't say" apart from a real ``0.0`` (billed as free).
+
+    Defensive about shape: the field is a JSON number, but a provider that spells
+    it as a numeric string must not turn into an exception that aborts a stream.
+    """
+    if not isinstance(raw_usage, Mapping):
+        return None
+    value = raw_usage.get("cost")
+    if value is None:
+        return None
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(cost) or cost < 0:
+        # A negative bill is malformed provider data, not a credit to hand back,
+        # and a non-finite one (``json.loads`` parses the non-standard literals
+        # ``Infinity``/``NaN`` by default, so ``inf`` is wire-reachable) would
+        # poison every summed total forever — ``inf + x == inf`` never recovers.
+        # Both fall through to ``None`` so the token×rate estimate answers.
+        return None
+    return cost
 
 
 #: Longest provider message carried into an error frame. Every branch of the
@@ -1180,6 +1214,14 @@ class OpenAICompatClient:
                         # trigger prefers over its own estimate, and what the
                         # TUI status line reports.
                         context_tokens=int(raw.get("prompt_tokens", 0)) or None,
+                        # OpenRouter (and any OpenAI-compatible aggregator that
+                        # precomputes billing) reports the dollar amount it
+                        # actually charged here. Prefer it over the token×rate
+                        # estimate: the routed provider's own price, reasoning-
+                        # token split, cache discount and any override are all
+                        # already baked in, and none of them are recoverable from
+                        # the flat per-model table price.
+                        usd_cost=_usd_cost(raw),
                     )
                     yield StreamUsageEvent(usage=usage)
                 choices = chunk.get("choices") or []

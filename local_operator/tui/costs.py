@@ -51,7 +51,27 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
     if usage is None or not model_label:
         return None
     try:
-        from local_operator.model.configure import cost_for_usage, resolve_model_info
+        # A provider-reported dollar amount is authoritative without a table:
+        # OpenRouter (and any aggregator that precomputes billing) returns the
+        # exact charge it printed, per-routed-provider pricing and reasoning
+        # splits included. It must win even when the model has no published price
+        # row, because the provider's bill is the fact the table is an estimate of.
+        #
+        # Coerced and floored through the SAME helper the pricing path uses on
+        # the wire values rather than a bare ``float()`` here: a negative or
+        # non-numeric amount is malformed provider data and must fall back to the
+        # estimate, not render an upside-down credit or degrade the whole turn to
+        # unpriceable while a table price exists. (The wire client already drops
+        # these to ``None``, but ``turn_cost`` also serves rehydrated mappings.)
+        from local_operator.model.configure import (
+            _usage_cost,
+            cost_for_usage,
+            resolve_model_info,
+        )
+
+        reported = _usage_cost(usage)
+        if reported is not None:
+            return reported
 
         provider, _, model_id = model_label.partition("/")
         info = resolve_model_info(provider, model_id)
