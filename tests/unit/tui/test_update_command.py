@@ -13,7 +13,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from local_operator.tui.widgets.welcome import WelcomeView
-from local_operator.update import UpdateError, VersionCheck
+from local_operator.update import MobileRefresh, UpdateError, VersionCheck
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _set_editor_line
 
 
@@ -26,9 +26,31 @@ def _clear_reexec_plan() -> Iterator[None]:
     take_plan()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_mobile_refresh() -> Iterator[None]:
+    """Existing success paths must not probe the live LaunchAgent.
+
+    Tests that care about the bounce patch this target themselves; the
+    default is a no-op skip so CI never talks to launchctl.
+    """
+    with patch(
+        "local_operator.update.refresh_mobile_after_upgrade",
+        return_value=MobileRefresh(kind="skipped"),
+    ):
+        yield
+
+
 def _notices(app: OperatorApp) -> list[str]:
     return [
         block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
+    ]
+
+
+def _notice_kinds(app: OperatorApp) -> list[tuple[str, str]]:
+    return [
+        (block._text, block._token)
         for block in app.query_one(TranscriptView).blocks()
         if isinstance(block, NoticeBlock)
     ]
@@ -438,4 +460,107 @@ async def test_installer_failure_names_a_shell_retry() -> None:
             notices = _notices(app)
             assert any("uv tool upgrade local-operator" in text for text in notices)
             assert app.query_one(WelcomeView).display is True
+            assert app.return_code != REEXEC_CODE
+
+
+@pytest.mark.asyncio
+async def test_update_refresh_fail_still_exits_75() -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    check = VersionCheck(installed="0.27.0", latest="0.28.0", behind=True)
+    with (
+        patch("local_operator.update.check_latest", return_value=check),
+        patch("local_operator.update.perform_upgrade", return_value="0.28.0"),
+        patch("local_operator.update.install_kind") as kind,
+        patch("local_operator.update.is_git_snapshot", return_value=False),
+        patch(
+            "local_operator.update.refresh_mobile_after_upgrade",
+            return_value=MobileRefresh(kind="failed", error="kickstart failed"),
+        ),
+    ):
+        from local_operator.update import InstallKind
+
+        kind.return_value = InstallKind.UV_TOOL
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            editor = app.query_one(Editor)
+            editor.focus()
+            _set_editor_line(editor, "/update")
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause()
+                if app.return_code == REEXEC_CODE:
+                    break
+            assert app.return_code == REEXEC_CODE
+            assert isinstance(app._restart_plan, RestartPlan)
+            notices = _notices(app)
+            assert any(
+                "updated, but the mobile daemon did not restart — run lop mobile restart" in text
+                for text in notices
+            )
+            assert any("updated to v0.28.0 — restarting…" in text for text in notices)
+            assert app._update_in_progress is True
+            assert editor.read_only is True
+            kinds = {text: token for text, token in _notice_kinds(app)}
+            assert (
+                kinds["updated, but the mobile daemon did not restart — run lop mobile restart"]
+                == "warning"
+            )
+
+
+@pytest.mark.asyncio
+async def test_update_refresh_success_still_exits_75() -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    check = VersionCheck(installed="0.27.0", latest="0.28.0", behind=True)
+    with (
+        patch("local_operator.update.check_latest", return_value=check),
+        patch("local_operator.update.perform_upgrade", return_value="0.28.0"),
+        patch("local_operator.update.install_kind") as kind,
+        patch("local_operator.update.is_git_snapshot", return_value=False),
+        patch(
+            "local_operator.update.refresh_mobile_after_upgrade",
+            return_value=MobileRefresh(kind="restarted"),
+        ),
+    ):
+        from local_operator.update import InstallKind
+
+        kind.return_value = InstallKind.UV_TOOL
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            editor = app.query_one(Editor)
+            editor.focus()
+            _set_editor_line(editor, "/update")
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause()
+                if app.return_code == REEXEC_CODE:
+                    break
+            assert app.return_code == REEXEC_CODE
+            assert isinstance(app._restart_plan, RestartPlan)
+            notices = _notices(app)
+            assert any("mobile daemon restarted — refresh the phone UI" in text for text in notices)
+            assert any("updated to v0.28.0 — restarting…" in text for text in notices)
+            kinds = {text: token for text, token in _notice_kinds(app)}
+            assert kinds["mobile daemon restarted — refresh the phone UI"] == "dim"
+
+
+@pytest.mark.asyncio
+async def test_update_when_current_does_not_refresh() -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    check = VersionCheck(installed="0.27.0", latest="0.27.0", behind=False)
+    with (
+        patch("local_operator.update.check_latest", return_value=check),
+        patch("local_operator.update.refresh_mobile_after_upgrade") as refresh,
+    ):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            editor = app.query_one("Editor")
+            editor.focus()
+            _set_editor_line(editor, "/update")
+            await pilot.press("enter")
+            for _ in range(40):
+                await pilot.pause()
+                if any("already on" in text for text in _notices(app)):
+                    break
+            assert any("already on v0.27.0" in text for text in _notices(app))
+            refresh.assert_not_called()
             assert app.return_code != REEXEC_CODE

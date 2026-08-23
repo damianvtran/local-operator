@@ -158,9 +158,11 @@ Screens, following branding.md §7's agent-output hierarchy:
   flips to *ended*, offering resume.
 - **Two daemons**: the LaunchAgent label owns the port; a second `serve`
   fails to bind and exits loudly. No split-brain by construction.
-- **Upgrade**: `lop mobile restart` after `lop-update`; the daemon re-serves
-  the new bundle, phones reload on next open, cookies survive (keyed on the
-  password, not the build).
+- **Upgrade**: `lop update` / `/update` run `lop mobile restart` when the
+  LaunchAgent is installed. The daemon re-serves the new wheel's
+  `mobile/web/dist`; phones reload on next open; cookies survive (keyed on
+  the password, not the build). A developer `lop-update` snapshot still
+  needs a manual `lop mobile restart`.
 - **Approvals on terminal sessions**: a TUI-mounted approval card is answered
   at the terminal (the phone shows the wait and says so); phone-answering
   needs a resolution protocol the TUI card does not yet have. Sessions the

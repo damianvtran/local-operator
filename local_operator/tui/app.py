@@ -3036,6 +3036,7 @@ class OperatorApp(App[None]):
             install_kind,
             is_git_snapshot,
             perform_upgrade,
+            refresh_mobile_after_upgrade,
             tui_editable_refusal,
             tui_installer_failure,
         )
@@ -3083,12 +3084,29 @@ class OperatorApp(App[None]):
             self.call_from_thread(self._system_notice, f"update failed: {exc}", "error")
             self.call_from_thread(self._finish_update)
             return
+        # Bounce the LaunchAgent *before* the TUI image is replaced so the
+        # new daemon is already scanning when this process comes back.
+        # Failure is a notice, never a rollback: the wheel is already in.
+        mobile = refresh_mobile_after_upgrade()
+
         # ``restarting…`` only once exit 75 is actually happening — a
         # typed-ahead turn used to make ``_request_relaunch`` refuse after
         # this line had already painted. Wrapped so ``call_from_thread``
         # does not have to forward the keyword.
 
         def _relaunch_after_upgrade() -> None:
+            if mobile.kind == "restarted":
+                self._system_notice("mobile daemon restarted — refresh the phone UI")
+            elif mobile.kind == "failed":
+                self._system_notice(
+                    "updated, but the mobile daemon did not restart — run lop mobile restart",
+                    "warning",
+                )
+            elif mobile.kind == "unsupervised":
+                self._system_notice(
+                    "a mobile daemon is running unsupervised; restart it to pick up the new UI",
+                    "warning",
+                )
             self._system_notice(f"updated to v{installed} — restarting…")
             self._request_relaunch(force=True)
 

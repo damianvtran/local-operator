@@ -92,7 +92,8 @@ pip install local-operator     # pipx install local-operator on Linux (PEP 668)
 ```
 
 The install provides both `local-operator` and its short alias `lop` — the
-rest of this page uses `lop`. `lop update` upgrades that install from PyPI;
+rest of this page uses `lop`. `lop update` upgrades that install from PyPI
+and restarts the mobile daemon when the LaunchAgent is installed;
 `lop-update` (hyphen) is the developer script that rebuilds the global
 runtime from a local git checkout.
 

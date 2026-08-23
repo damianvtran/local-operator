@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +17,7 @@ from local_operator import update as update_mod
 from local_operator.update import (
     TTL_S,
     InstallKind,
+    MobileRefresh,
     UpdateError,
     check_latest,
     install_kind,
@@ -21,6 +25,7 @@ from local_operator.update import (
     is_behind,
     parse_version,
     perform_upgrade,
+    refresh_mobile_after_upgrade,
     tui_editable_refusal,
     tui_installer_failure,
     update_command,
@@ -267,29 +272,46 @@ def _check(installed: str, latest: str | None, behind: bool) -> update_mod.Versi
 
 
 def test_update_command_check_behind(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.28.0", True)):
+    with (
+        patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.28.0", True)),
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+    ):
         assert update_command(check=True) == 2
+        refresh.assert_not_called()
     out = capsys.readouterr().out
     assert "local-operator 0.27.0" in out
     assert "latest on PyPI: 0.28.0" in out
     assert "run `lop update` to install" in out
+    assert "mobile" not in out.lower()
 
 
 def test_update_command_check_current(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False)):
+    with (
+        patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False)),
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+    ):
         assert update_command(check=True) == 0
+        refresh.assert_not_called()
     assert capsys.readouterr().out.strip() == "local-operator 0.27.0 is the latest"
 
 
 def test_update_command_check_network_error(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(update_mod, "check_latest", return_value=_check("0.27.0", None, False)):
+    with (
+        patch.object(update_mod, "check_latest", return_value=_check("0.27.0", None, False)),
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+    ):
         assert update_command(check=True) == 1
+        refresh.assert_not_called()
     assert "could not reach PyPI" in capsys.readouterr().err
 
 
 def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False)):
+    with (
+        patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False)),
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+    ):
         assert update_command(check=False) == 0
+        refresh.assert_not_called()
     assert capsys.readouterr().out.strip() == "local-operator 0.27.0 is the latest"
 
 
@@ -299,13 +321,19 @@ def test_update_command_upgrades(capsys: pytest.CaptureFixture[str]) -> None:
         patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
         patch.object(update_mod, "is_git_snapshot", return_value=False),
         patch.object(update_mod, "perform_upgrade", return_value="0.28.0") as upgrade,
+        patch.object(
+            update_mod, "refresh_mobile_after_upgrade", return_value=MobileRefresh(kind="skipped")
+        ) as refresh,
     ):
         assert update_command(check=False) == 0
         upgrade.assert_called_once()
-    out = capsys.readouterr().out
-    assert "local-operator 0.27.0 (latest is 0.28.0)" in out
-    assert "upgrading via uv tool…" in out
-    assert "installed 0.28.0" in out
+        refresh.assert_called_once()
+    captured = capsys.readouterr()
+    assert "local-operator 0.27.0 (latest is 0.28.0)" in captured.out
+    assert "upgrading via uv tool…" in captured.out
+    assert "installed 0.28.0" in captured.out
+    assert "mobile" not in captured.out
+    assert captured.err == ""
 
 
 def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -324,3 +352,225 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
         cmd.assert_called_once_with(check=False)
+
+
+class _FakePlist:
+    """Reports existence without touching ``~/Library/LaunchAgents``."""
+
+    def __init__(self, exists: bool) -> None:
+        self._exists = exists
+
+    def exists(self) -> bool:
+        return self._exists
+
+
+@contextmanager
+def _upgrade_cmd():
+    """Successful ``update_command`` path with the installer already done."""
+    with (
+        patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.28.0", True)),
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "is_git_snapshot", return_value=False),
+        patch.object(update_mod, "perform_upgrade", return_value="0.28.0"),
+    ):
+        yield
+
+
+def test_refresh_skipped_when_plist_absent() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(False)),
+        patch.object(update_mod, "_mobile_healthz_answers", return_value=False),
+        patch("subprocess.run") as run,
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result == MobileRefresh(kind="skipped")
+    run.assert_not_called()
+
+
+def test_refresh_unsupervised_when_live_without_plist() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(False)),
+        patch.object(update_mod, "_mobile_healthz_answers", return_value=True),
+        patch("subprocess.run") as run,
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result == MobileRefresh(kind="unsupervised")
+    run.assert_not_called()
+
+
+def test_refresh_restarts_via_new_distribution() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run,
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result == MobileRefresh(kind="restarted")
+    run.assert_called_once()
+    assert run.call_args.args[0] == [
+        sys.executable,
+        "-m",
+        "local_operator.cli",
+        "mobile",
+        "restart",
+    ]
+
+
+def test_refresh_failed_child_exit() -> None:
+    completed = subprocess.CompletedProcess([], 1, stdout="", stderr="launchctl: no such service")
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", return_value=completed),
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result.kind == "failed"
+    assert "no such service" in result.error
+
+
+def test_refresh_failed_missing_binary() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", side_effect=FileNotFoundError("launchctl")),
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result.kind == "failed"
+    assert "launchctl" in result.error
+
+
+def test_refresh_failed_timeout() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=30)),
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result == MobileRefresh(kind="failed", error="timed out")
+
+
+def test_refresh_falls_back_to_path_lop_when_executable_gone() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch.object(update_mod.sys, "executable", "/gone/python"),
+        patch.object(Path, "exists", return_value=False),
+        patch("shutil.which", return_value="/usr/local/bin/lop"),
+        patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run,
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result == MobileRefresh(kind="restarted")
+    assert run.call_args.args[0] == ["/usr/local/bin/lop", "mobile", "restart"]
+
+
+def test_refresh_failed_when_no_executable_and_no_lop() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch.object(update_mod.sys, "executable", "/gone/python"),
+        patch.object(Path, "exists", return_value=False),
+        patch("shutil.which", return_value=None),
+        patch("subprocess.run") as run,
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result.kind == "failed"
+    assert "lop is not on PATH" in result.error
+    run.assert_not_called()
+
+
+def test_update_command_no_plist_prints_only_install_lines(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with (
+        _upgrade_cmd(),
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(False)),
+        patch.object(update_mod, "_mobile_healthz_answers", return_value=False),
+        patch("subprocess.run") as run,
+    ):
+        assert update_command(check=False) == 0
+    captured = capsys.readouterr()
+    run.assert_not_called()
+    assert captured.out.splitlines() == [
+        "local-operator 0.27.0 (latest is 0.28.0)",
+        "upgrading via uv tool…",
+        "installed 0.28.0",
+    ]
+    assert captured.err == ""
+
+
+def test_update_command_restarted_prints_phone_line(capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        _upgrade_cmd(),
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run,
+    ):
+        assert update_command(check=False) == 0
+    captured = capsys.readouterr()
+    assert run.call_args.args[0] == [
+        sys.executable,
+        "-m",
+        "local_operator.cli",
+        "mobile",
+        "restart",
+    ]
+    assert "installed 0.28.0" in captured.out
+    assert "mobile daemon restarted — refresh the phone UI" in captured.out
+    assert captured.err == ""
+
+
+def test_update_command_refresh_fail_still_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    completed = subprocess.CompletedProcess([], 1, stdout="", stderr="kickstart failed")
+    with (
+        _upgrade_cmd(),
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", return_value=completed) as run,
+    ):
+        assert update_command(check=False) == 0
+    captured = capsys.readouterr()
+    assert run.call_count == 1
+    assert "installed 0.28.0" in captured.out
+    assert "warning: mobile daemon did not restart:" in captured.err
+    assert "kickstart failed" in captured.err
+
+
+def test_update_command_refresh_missing_binary_still_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with (
+        _upgrade_cmd(),
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", side_effect=FileNotFoundError("No such file: launchctl")),
+    ):
+        assert update_command(check=False) == 0
+    captured = capsys.readouterr()
+    assert "installed 0.28.0" in captured.out
+    assert "warning: mobile daemon did not restart:" in captured.err
+
+
+def test_update_command_refresh_timeout_still_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        _upgrade_cmd(),
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=30)),
+    ):
+        assert update_command(check=False) == 0
+    assert "warning: mobile daemon did not restart:" in capsys.readouterr().err
+
+
+def test_update_command_unsupervised_warns(capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        _upgrade_cmd(),
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(False)),
+        patch.object(update_mod, "_mobile_healthz_answers", return_value=True),
+        patch("subprocess.run") as run,
+    ):
+        assert update_command(check=False) == 0
+    captured = capsys.readouterr()
+    run.assert_not_called()
+    assert "installed 0.28.0" in captured.out
+    assert "warning: a mobile daemon is running unsupervised" in captured.err
+
+
+def test_perform_upgrade_does_not_refresh() -> None:
+    with (
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+        patch("subprocess.run") as run,
+    ):
+        out = perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=lambda _: 0)
+    assert out == "0.28.0"
+    refresh.assert_not_called()
+    run.assert_not_called()
