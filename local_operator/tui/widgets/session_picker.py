@@ -961,7 +961,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # Hints DROP to fit, in reverse order of need — the same discipline the
         # columns use. A footer that overflowed the card was the one row that
         # could not afford to: it is the only statement of how to get out.
-        for index, (key, what) in enumerate(_footer_hints(width)):
+        # The marker legend appears only when a marked row is actually on
+        # screen, so an empty query or a pure name match never advertises a mark
+        # the user cannot see (D2: teach the glyph where it is used, not always).
+        has_marked = bool(self.body_matched_ids)
+        for index, (key, what) in enumerate(_footer_hints(width, has_marked=has_marked)):
             if index:
                 out.append(" · ", style=faint)
             out.append(key, style=dim)
@@ -981,8 +985,26 @@ _FOOTER_HINTS: tuple[tuple[str, str], ...] = (
 )
 _FOOTER_DROP_ORDER = ("pgup/pgdn", "type", "↑↓")
 
+#: The ``"`` body-match marker is load-bearing but unlabelled in the list: a
+#: first-time reader sees a lone right-quote at the start of some rows and can
+#: read it as a rendering artifact rather than "this row matched inside the
+#: conversation" (design round 1, D2). So when any visible row carries the
+#: marker, the footer states what it means — keyed on the marker GLYPH itself
+#: so the legend and the mark are unmistakably the same thing.
+_MARKER_LEGEND: tuple[str, str] = (BODY_MATCH_MARKER.strip(), "matched inside")
 
-def _footer_hints(width: int) -> list[tuple[str, str]]:
+#: Drop priority once the legend is in play. The full key-hint row is ~69 cells
+#: against a ~74-cell card, so a legend can only appear by DISPLACING a hint —
+#: dropping it "first" would make it never show, i.e. no fix at all. So it
+#: outranks the two genuinely disposable hints (``pgup/pgdn``, ``type``, which
+#: describe conveniences a user discovers anyway) and is shed BEFORE the
+#: movement and action keys. Because it is dropped before the bare-key stage,
+#: it never survives as an unlabelled glyph — a lone ``"`` in the footer would
+#: be exactly the artifact-looking mark D2 flagged.
+_FOOTER_DROP_ORDER_MARKED = ("pgup/pgdn", "type", _MARKER_LEGEND[0], "↑↓")
+
+
+def _footer_hints(width: int, *, has_marked: bool = False) -> list[tuple[str, str]]:
     """The key hints that fit in ``width`` cells, dropping the least needed.
 
     Three stages, because the footer is the one row that must not overflow the
@@ -990,15 +1012,26 @@ def _footer_hints(width: int) -> list[tuple[str, str]]:
     with their labels will not fit (a card under about 26 cells), drop the
     LABELS and keep the keys. Two bare keys still say which keys exist, which
     is more than a clipped row says.
+
+    ``has_marked`` adds the ``"``-marker legend (see :data:`_MARKER_LEGEND`)
+    so the glyph the list is drawing is explained where the reader already
+    looks for meaning. It sits at the FRONT (adjacent to nothing that could be
+    read as a key) and is shed under width pressure per
+    :data:`_FOOTER_DROP_ORDER_MARKED` — above the disposable hints so it can
+    actually appear on a normal card, below the movement and action keys.
     """
     hints = list(_FOOTER_HINTS)
+    drop_order = _FOOTER_DROP_ORDER
+    if has_marked:
+        hints = [_MARKER_LEGEND, *hints]
+        drop_order = _FOOTER_DROP_ORDER_MARKED
 
     def cells(pairs: list[tuple[str, str]]) -> int:
         return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
             0, len(pairs) - 1
         )
 
-    for droppable in _FOOTER_DROP_ORDER:
+    for droppable in drop_order:
         if cells(hints) <= width:
             return hints
         hints = [pair for pair in hints if pair[0] != droppable]

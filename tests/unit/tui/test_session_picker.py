@@ -27,6 +27,7 @@ from local_operator.resume import (
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
+    _MARKER_LEGEND,
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
@@ -35,6 +36,7 @@ from local_operator.tui.widgets.session_picker import (
     PAGE_ROWS_MAX,
     PICKER_MIN_WIDTH,
     SessionPickerScreen,
+    _footer_hints,
     filter_rows,
     matched_in_body,
     plan_columns,
@@ -1202,3 +1204,35 @@ async def test_a_row_matched_only_by_a_past_name_is_shown_and_marked() -> None:
         await pilot.pause()
         assert [r.id for r in screen.visible_rows] == ["aaa1"]
         assert screen.body_matched_ids == {"aaa1"}
+
+
+def test_footer_legend_appears_only_when_a_row_is_marked() -> None:
+    """D2: the ``"`` marker is meaningless without a legend, but advertising it
+    when nothing is marked would explain a glyph the user cannot see. So the
+    legend is present exactly when the footer has room AND a marked row exists,
+    and absent otherwise."""
+    # A card wide enough to hold the legend beside the essential keys.
+    with_legend = _footer_hints(74, has_marked=True)
+    assert _MARKER_LEGEND in with_legend
+    # Same width, nothing marked: no legend, and the full key row is intact.
+    without = _footer_hints(74, has_marked=False)
+    assert _MARKER_LEGEND not in without
+    assert ("pgup/pgdn", "page") in without
+
+
+def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
+    """The legend teaches; it must never crowd out the keys that OPERATE the
+    card. Under width pressure it sheds after the two disposable hints but
+    before movement/resume/cancel, and it never survives as a bare unlabelled
+    glyph (which would be the very artifact-looking mark D2 flagged)."""
+    # Wide: legend shown, and it displaced only a disposable hint (pgup/pgdn).
+    wide = _footer_hints(74, has_marked=True)
+    assert _MARKER_LEGEND in wide
+    assert ("pgup/pgdn", "page") not in wide
+    # Narrow: the essential keys survive and the legend is gone entirely — not
+    # reduced to a lone glyph.
+    narrow = _footer_hints(40, has_marked=True)
+    assert _MARKER_LEGEND not in narrow
+    assert (_MARKER_LEGEND[0], "") not in narrow
+    assert ("enter", "resume") in narrow
+    assert ("esc", "cancel") in narrow
