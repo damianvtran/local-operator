@@ -263,8 +263,8 @@ def test_a_listing_name_reaches_the_band_for_a_model_no_registry_row_covers() ->
 def test_the_unknown_placeholder_does_not_reach_the_band() -> None:
     """The word the shared fallback is named, not a model. A nameless listing
     used to keep it and paint it on the band for every unshipped id."""
-    assert format_model_label("xai/grok-4.6", short=False, name="Unknown") == "xai/grok-4.6"
-    assert format_model_label("xai/grok-4.6", short=True, name="Unknown") == "grok-4.6"
+    assert format_model_label("xai/grok-4.20", short=False, name="Unknown") == "xai/grok-4.20"
+    assert format_model_label("xai/grok-4.20", short=True, name="Unknown") == "grok-4.20"
 
 
 def test_a_resold_model_keeps_its_selector_however_the_reseller_names_it() -> None:

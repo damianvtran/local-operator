@@ -20,6 +20,8 @@ from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
+    StreamUsageEvent,
+    Usage,
 )
 from local_operator.model.configure import build_model_spec
 from local_operator.providers import failover as failover_module
@@ -475,6 +477,73 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_failover_stamps_serving_spec_on_usage() -> None:
+    """After a primary→xai walk the usage event names xai, not the primary.
+
+    The analytics recorder reads serving identity off Usage. Without this stamp
+    it would keep attributing the successful Grok call to anthropic — the
+    missing-provider bug. A primary success is covered by the same helper
+    (it stamps whatever ``current_request.model`` is) so this cannot
+    mis-attribute a call that never left the primary.
+    """
+    usage = Usage(input_tokens=10, output_tokens=4)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "anthropic":
+            return ScriptedClient(ProviderError(500, "boom", retryable=True))
+        return ScriptedClient(
+            [
+                StreamTextDelta(delta="ok"),
+                StreamUsageEvent(usage=usage),
+                StreamEndEvent(stop_reason="stop", usage=usage),
+            ]
+        )
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["xai/grok-4.6"]},
+        }
+    }
+    auth = FakeAuth({"anthropic": ["k1"], "xai": ["k2"]})
+    got = [
+        event
+        async for event in stream_with_failover(
+            _request("anthropic", "claude-opus-4-8"), auth, settings, client_for
+        )
+    ]
+    usage_events = [e for e in got if isinstance(e, StreamUsageEvent)]
+    end_events = [e for e in got if isinstance(e, StreamEndEvent)]
+    assert usage_events and usage_events[0].usage.provider == "xai"
+    assert usage_events[0].usage.model_id == "grok-4.6"
+    assert end_events and end_events[0].usage is not None
+    assert end_events[0].usage.provider == "xai"
+    assert end_events[0].usage.model_id == "grok-4.6"
+
+
+async def test_primary_success_stamps_primary_spec() -> None:
+    """A call that never failed over must still name the session primary."""
+    usage = Usage(input_tokens=3, output_tokens=1)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(
+            [StreamUsageEvent(usage=usage), StreamEndEvent(stop_reason="stop", usage=usage)]
+        )
+
+    got = [
+        event
+        async for event in stream_with_failover(
+            _request("anthropic", "claude-opus-4-8"),
+            FakeAuth({"anthropic": ["k"]}),
+            None,
+            client_for,
+        )
+    ]
+    stamped = next(e for e in got if isinstance(e, StreamUsageEvent)).usage
+    assert stamped.provider == "anthropic"
+    assert stamped.model_id == "claude-opus-4-8"
 
 
 async def test_fallback_chain_deduplicates_current_model_and_effort() -> None:

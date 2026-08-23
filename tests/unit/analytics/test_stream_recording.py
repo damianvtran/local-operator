@@ -203,3 +203,112 @@ def test_analytics_failure_never_breaks_turn(tmp_path, monkeypatch):
     out = asyncio.run(_drain(fn, _request(), [StreamEndEvent(stop_reason="stop", usage=usage)]))
     # The turn's event still came through; the analytics failure was swallowed.
     assert [type(e).__name__ for e in out] == ["StreamEndEvent"]
+
+
+def test_records_serving_model_not_session_primary(tmp_path):
+    """A primary→xai failover must land under xai/grok-4.6, not anthropic.
+
+    ``stream_with_failover`` rewrites the on-the-wire request but used to leave
+    the recorder reading the ORIGINAL ChatRequest. After Anthropic failed over
+    to Grok every successful call was stored as ``anthropic/claude-opus-4-8``
+    and priced at Opus rates — which is why By provider showed only anthropic.
+    The failover layer now stamps the serving spec onto Usage; this is the
+    contract the recorder must honour.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-failover")
+    request = _request()  # anthropic/claude-opus-5
+    usage = Usage(
+        input_tokens=1000,
+        output_tokens=200,
+        context_tokens=1000,
+        provider="xai",
+        model_id="grok-4.6",
+    )
+    asyncio.run(_drain(fn, request, [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    agg = store.aggregate()
+    assert agg.calls == 1
+    assert "xai" in agg.by_provider
+    assert "anthropic" not in agg.by_provider
+    rec.close()
+    store.close()
+
+
+def test_records_primary_success_under_primary(tmp_path):
+    """A call that never failed over must still attribute to the session primary.
+
+    The serving-spec stamp is how failover is honest; it must not invent a
+    fallback on a primary success (or an isolated naming call that never
+    walked the chain).
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn()
+    usage = Usage(
+        input_tokens=100,
+        output_tokens=20,
+        context_tokens=100,
+        provider="anthropic",
+        model_id="claude-opus-5",
+    )
+    asyncio.run(_drain(fn, _request(), [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    assert set(store.aggregate().by_provider) == {"anthropic"}
+    rec.close()
+    store.close()
+
+
+def test_canonicalizes_login_flavour_to_storage_id(tmp_path):
+    """``xai-oauth`` spend must roll up under ``xai``, not a second row.
+
+    The login flavour is the same billable vendor as the API-key id. Splitting
+    them in By provider was the other half of "I am on grok and analytics
+    still shows only anthropic" once the serving-spec stamp landed.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn()
+    request = ChatRequest(
+        model=ModelSpec(provider="xai-oauth", model_id="grok-4.6"),
+        system_blocks=["persona", "tools", "env", "skills"],
+        messages=[Message(role="user", content=[TextContent(text="hi " * 50)])],
+    )
+    usage = Usage(input_tokens=100, output_tokens=20, context_tokens=100)
+    asyncio.run(_drain(fn, request, [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    assert set(store.aggregate().by_provider) == {"xai"}
+    rec.close()
+    store.close()
+
+
+def test_provider_reported_usd_cost_survives_into_the_ledger(tmp_path):
+    """OpenRouter's ``usage.cost`` must become ``cost_micro``, not a table estimate.
+
+    ``CallSnapshot`` used to drop ``usd_cost``, so ``price_snapshot`` always
+    re-estimated from the registry. A reported $0.0075 on a model whose table
+    price is wildly different must store 7500 micro-USD.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn()
+    request = ChatRequest(
+        model=ModelSpec(provider="openrouter", model_id="some/unpriced-sku"),
+        system_blocks=["persona", "tools", "env", "skills"],
+        messages=[Message(role="user", content=[TextContent(text="hi " * 50)])],
+    )
+    usage = Usage(
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        context_tokens=1_000_000,
+        usd_cost=0.0075,
+    )
+    asyncio.run(_drain(fn, request, [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    agg = store.aggregate()
+    assert agg.calls == 1
+    assert agg.cost_is_known is True
+    assert agg.cost_micro == 7500
+    rec.close()
+    store.close()

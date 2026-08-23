@@ -1431,6 +1431,28 @@ def wrap_transport_error(exc: BaseException) -> ProviderError:
     )
 
 
+def _stamp_serving_spec(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+    """Copy the on-the-wire serving spec onto a usage-bearing event.
+
+    ``stream_with_failover`` rewrites ``current_request.model`` to the fallback
+    that actually served, but the recorder used to read the ORIGINAL
+    ``ChatRequest`` and therefore stored every failover success under the
+    session primary. Stamping here is the honest channel: a primary success,
+    an isolated/naming call (``route_state`` is None), and a mid-turn failover
+    all carry the spec that went on the wire for THIS attempt. Events without
+    a ``usage`` pass through unchanged so the stream stays byte-for-byte for
+    everything the turn actually consumes.
+    """
+    usage = getattr(event, "usage", None)
+    if usage is None:
+        return event
+    try:
+        stamped = usage.model_copy(update={"provider": spec.provider, "model_id": spec.model_id})
+        return event.model_copy(update={"usage": stamped})
+    except Exception:  # noqa: BLE001 — a stamp failure must not drop the event
+        return event
+
+
 async def stream_with_failover(
     request: ChatRequest,
     auth: FailoverAuthStore,
@@ -1799,11 +1821,12 @@ async def stream_with_failover(
             buffered: list[StreamEvent] | None = [] if current_request.replayable else None
             try:
                 async for event in client.stream(current_request, key, oauth_access=access):
+                    stamped = _stamp_serving_spec(event, spec)
                     if buffered is not None:
-                        buffered.append(event)
+                        buffered.append(stamped)
                         continue
                     forwarded_any = True
-                    yield event
+                    yield stamped
                 if route_state is not None and target == primary_target:
                     # Settled, not silent: while a fallback was pinned the front
                     # end has been displaying THAT model, so the primary serving

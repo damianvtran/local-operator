@@ -1220,7 +1220,7 @@ def test_an_unshipped_xai_id_does_not_keep_the_unknown_placeholder_name(monkeypa
     from local_operator.model.discovery import DiscoveredModel
     from local_operator.model.registry import unknown_model_info, xai_models
 
-    model_id = "grok-4.6"
+    model_id = "grok-4.20"
     assert model_id not in xai_models, "the id this test treats as unshipped now ships"
 
     _stub_discovery(
@@ -1237,7 +1237,7 @@ def test_an_unshipped_xai_id_does_not_keep_the_unknown_placeholder_name(monkeypa
     assert info.name != "Unknown"
     assert info.context_window == 500_000
     # The id wearing a name's clothes is refused by the band (see naming.py),
-    # so the operator sees ``grok-4.6`` rather than the placeholder word.
+    # so the operator sees ``grok-4.20`` rather than the placeholder word.
     assert spec.display_name in ("", model_id)
     assert spec.display_name != "Unknown"
     assert spec.context_window == 500_000

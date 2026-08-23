@@ -240,6 +240,18 @@ class Usage(BaseModel):
     # the provider billed as free) — the same three-way split the TUI's
     # ``None``-vs-``$0.0000`` contract already draws.
     usd_cost: float | None = None
+    # Serving identity, stamped by the failover layer from the on-the-wire
+    # ``ChatRequest`` (the spec that actually went out). The analytics recorder
+    # used to read ``request.model`` off the ORIGINAL ChatRequest, which still
+    # names the session primary after ``stream_with_failover`` rewrites the
+    # request to a fallback — every Grok call then landed under
+    # ``anthropic/claude-opus-4-8`` and was priced at Opus rates. These fields
+    # are the honest channel: a primary success, an isolated/naming call
+    # (``route_state`` is None), and a mid-turn failover all carry the spec
+    # that served THIS attempt. ``None`` means "not stamped"; the recorder
+    # then falls back to ``request.model``.
+    provider: str | None = None
+    model_id: str | None = None
 
     @property
     def total_tokens(self) -> int:
