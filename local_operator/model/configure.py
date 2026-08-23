@@ -1538,6 +1538,19 @@ class SessionStreamFn:
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
+        # Quota is re-probed at EVERY user-message boundary, but the user only
+        # needs to hear about a CHANGE in quota standing — not the same "quota
+        # low"/"quota exhausted" line echoed on every message they send while
+        # the condition simply persists. This latch remembers, per
+        # ``provider/model_id`` selector, the last quota ``health.state`` we
+        # actually announced ("reserve" for low, "depleted" for exhausted) so a
+        # steady state stays silent and only a genuine transition
+        # (none->low, low->exhausted, or a recurrence after recovery) speaks.
+        # The key is cleared the moment the selector reads "healthy" again, so a
+        # later re-entry into low/exhausted counts as a real new transition and
+        # re-announces. Account ROTATION churn is not tracked here at all — it
+        # is suppressed outright as an internal implementation detail.
+        self._last_quota_state: dict[str, str] = {}
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
@@ -1735,6 +1748,33 @@ class SessionStreamFn:
         result = self._notice_handler(text, kind)
         if inspect.isawaitable(result):
             await result
+
+    async def _announce_quota_change(
+        self, selector: str, state: str, text: str, kind: str = "warning"
+    ) -> None:
+        """Emit a quota notice only on a genuine state TRANSITION for ``selector``.
+
+        The preflight runs on every user-message boundary, so a persistent
+        low/exhausted verdict recurs on every message the user sends — but the
+        user only needs to hear about the CHANGE, not the same line echoed
+        forever. ``self._last_quota_state`` remembers the ``health.state`` last
+        announced for this ``provider/model_id``; we speak only when the new
+        state differs (none->low, low->exhausted, or a recurrence after a
+        healthy edge cleared the latch), then record it. Steady state is silent.
+        """
+        if self._last_quota_state.get(selector) == state:
+            return
+        self._last_quota_state[selector] = state
+        await self._notice(text, kind)
+
+    def _clear_quota_latch(self, selector: str) -> None:
+        """Drop the last-announced quota state so a real recurrence re-announces.
+
+        Called on the healthy edge: once quota recovers, the next slide back into
+        low/exhausted is a genuinely new transition the user should hear about,
+        not a duplicate of a verdict we already announced before the recovery.
+        """
+        self._last_quota_state.pop(selector, None)
 
     async def _on_route_change(self, target: Any, reason: str) -> None:
         effort = f" ({target.effort} effort)" if target.effort else ""
@@ -2163,9 +2203,16 @@ class SessionStreamFn:
             if health.state == "healthy":
                 # Settled for the same reason as the auth-only path above: this
                 # clear is the moment a pinned fallback stops serving requests.
+                # Also drop the quota-notice latch: recovery means the next
+                # slide back to low/exhausted is a real new transition to
+                # announce, not a duplicate of what we said before recovery.
+                self._clear_quota_latch(selector)
                 await self._route_state.clear_settled("primary model recovered")
                 return
             if health.state == "unknown":
+                # Fail-open, indeterminate: NOT a transition. Leave the latch as
+                # it stands so an unreadable probe between two low readings does
+                # not reset the dedup and let the next low reading re-announce.
                 return
 
             shared_remaining, tier_binding = shared_tier_saturation(
@@ -2274,16 +2321,21 @@ class SessionStreamFn:
                         self._auth_store.deprioritize_credential(
                             model.provider, access.credential_id
                         )
-                    await self._notice(
-                        f"{model.provider} {condition}{remaining} for {model.model_id} "
-                        f"— trying another {model.provider} account before provider fallback"
-                    )
+                    # Rotating to another same-provider account is an internal
+                    # implementation detail — the user's request is still being
+                    # served on this provider, just on a different login. It
+                    # used to emit a notice per rotation, which spammed the
+                    # transcript on every boundary. Rotate silently.
                     continue
                 if health.state == "reserve":
                     # Last account, still holding this model's quota. Same
                     # rule as the account-scope path: reserve is not a
-                    # licence to leave the provider.
-                    await self._notice(
+                    # licence to leave the provider. Deduped by state: "quota
+                    # low, continuing" is worth one line on the transition, not
+                    # one per message for as long as the account stays low.
+                    await self._announce_quota_change(
+                        selector,
+                        health.state,
                         f"{model.provider} {condition}{remaining} for {model.model_id} "
                         f"— continuing until {model.provider} quota is exhausted",
                         "info",
@@ -2295,9 +2347,15 @@ class SessionStreamFn:
                     reserve_percent=retry.usage_reserve_percent,
                 )
                 if fallback is None:
-                    await self._notice(
+                    # Deduped by state: the quota is spent and nothing can take
+                    # over, but the user only needs that told once per
+                    # transition — not on every message while the condition
+                    # holds and no fallback appears.
+                    await self._announce_quota_change(
+                        selector,
+                        health.state,
                         f"{model.provider} {condition}{remaining} for {model.model_id}; "
-                        "no configured model fallback is available"
+                        "no configured model fallback is available",
                     )
                     return
                 await self._route_state.activate(
@@ -2351,6 +2409,11 @@ class SessionStreamFn:
         """
         from local_operator.providers.failover import parse_selector
 
+        # Same dedup key the boundary check uses: quota notices out of this
+        # method latch on ``provider/model_id`` so a persistent verdict is
+        # announced once per transition, not once per message (see
+        # ``_announce_quota_change``).
+        selector = f"{model.provider}/{model.model_id}"
         threshold = min(100.0, max(0.0, float(retry.usage_reserve_percent))) / 100.0
         # ``None`` means no shared window carried a number — indeterminate, not
         # headroom, so the tier-cap guard stays off and the cautious rotate /
@@ -2397,7 +2460,9 @@ class SessionStreamFn:
                         quota=True,
                     )
                     return False
-            await self._notice(
+            await self._announce_quota_change(
+                selector,
+                health.state,
                 f"{model.provider} {condition}{remaining} — continuing until "
                 f"{model.provider} quota is exhausted",
                 "info",
@@ -2467,8 +2532,13 @@ class SessionStreamFn:
                 )
 
         if not siblings and fallback is None:
-            await self._notice(
-                f"{model.provider} {condition}{remaining}; no configured fallback is available"
+            # Deduped by state: spent with nowhere to fall back is worth one
+            # line on the transition, not a repeat on every subsequent message
+            # while the account stays spent.
+            await self._announce_quota_change(
+                selector,
+                health.state,
+                f"{model.provider} {condition}{remaining}; no configured fallback is available",
             )
             return False
 
@@ -2529,10 +2599,10 @@ class SessionStreamFn:
 
         if siblings:
             take_out_of_rotation(access.credential_id)
-            await self._notice(
-                f"{model.provider} {condition}{remaining} — trying another "
-                f"{model.provider} account before provider fallback"
-            )
+            # Silent: rotating to another same-provider account is an internal
+            # implementation detail. The request is still served on the same
+            # provider, so the per-rotation notice this used to emit was pure
+            # churn on the transcript (once per boundary while quota was low).
             return True
 
         assert fallback is not None
@@ -2657,6 +2727,11 @@ class SessionStreamFn:
                 reserve_percent=retry.usage_reserve_percent,
             )
             if health.state == "healthy":
+                # A recovered account is a healthy edge like the boundary
+                # probe's: drop the quota latch so a later re-entry into
+                # low/exhausted announces afresh rather than being deduped
+                # against the pre-recovery verdict.
+                self._clear_quota_latch(f"{model.provider}/{model.model_id}")
                 await self._notice(
                     f"{model.provider} account quota recovered — resuming {model.provider}",
                     "info",

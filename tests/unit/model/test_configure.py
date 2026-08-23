@@ -405,7 +405,9 @@ async def test_usage_preflight_rotates_accounts_before_providers(tmp_path) -> No
         selected = await store.get_oauth_access("anthropic", "session-a")
         assert selected is not None and selected.credential_id == second.id
         assert stream._route_state.active is None
-        assert any("trying another anthropic account" in notice for notice in notices)
+        # Rotating to a sibling account is an internal detail and is now silent:
+        # the user still gets served on anthropic, so no notice should fire.
+        assert not any("trying another anthropic account" in notice for notice in notices)
     finally:
         await stream.close()
         store.close()
@@ -913,7 +915,8 @@ async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_p
         opus = await store.get_oauth_access("anthropic", session, model_id="claude-opus-4-8")
         assert opus is not None  # the family-blocked account still serves opus
         assert stream._route_state.active is None
-        assert any("trying another anthropic account" in notice for notice in notices)
+        # Sibling rotation is silent now — an internal detail, not a transcript event.
+        assert not any("trying another anthropic account" in notice for notice in notices)
     finally:
         await stream.close()
         store.close()
@@ -965,6 +968,87 @@ async def test_last_account_in_reserve_stays_on_the_provider(tmp_path) -> None:
         selected = await store.get_oauth_access("anthropic", "session-a")
         assert selected is not None and selected.credential_id == account.id
         assert any("continuing until anthropic quota is exhausted" in n for n in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_notice_is_deduped_to_one_per_state_transition(tmp_path) -> None:
+    """The user hears about a quota CHANGE, not the same line every message.
+
+    Preflight runs on every user-message boundary, so a persistent low/exhausted
+    verdict recurs on every message the user sends. Before the dedup latch that
+    echoed the identical "quota low"/"quota exhausted" line forever. The
+    contract now: announce once per state TRANSITION per provider/model —
+    silent while a state holds, a fresh line when it changes, and a fresh line
+    again after a recovery resets the latch. This is the real-execution evidence
+    for that behaviour, driving successive boundaries through the account-scope
+    ``_apply_account_health`` path (single account, no configured fallback)."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    # A knob the mocked usage endpoint reads, so each boundary can present a
+    # different quota shape without re-patching.
+    used_percent = {"value": 95.0}
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(used_percent["value"])
+
+    async def boundary() -> None:
+        # Simulate a fresh user message far enough apart that the 60s TTL memo
+        # (which only dedupes the several requests ONE message makes) does not
+        # itself swallow the check — resetting the memo clock is what a real
+        # inter-message gap does.
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    reserve_line = "continuing until anthropic quota is exhausted"
+    depleted_line = "no configured fallback is available"
+    recovered_line = "account quota recovered"
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            # 1) First slide to low (reserve, 5% remaining): one notice.
+            used_percent["value"] = 95.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(reserve_line in n for n in notices) == 1
+
+            # 2) Still low on the next boundary: silent — no duplicate line.
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(reserve_line in n for n in notices) == 1
+
+            # 3) low -> exhausted is a real transition: a second, different line.
+            used_percent["value"] = 100.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(depleted_line in n for n in notices) == 1
+            assert store.is_blocked(account.id, "anthropic")
+
+            # 4) Recovery (healthy) clears the latch via the blocked-account
+            #    re-probe, so the exhausted verdict is no longer "already said".
+            used_percent["value"] = 0.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(recovered_line in n for n in notices) == 1
+            assert not store.is_blocked(account.id, "anthropic")
+
+            # 5) Sliding back to low AFTER recovery is a genuine new transition:
+            #    it re-announces rather than being deduped against step 1.
+            used_percent["value"] = 95.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(reserve_line in n for n in notices) == 2
     finally:
         await stream.close()
         store.close()
