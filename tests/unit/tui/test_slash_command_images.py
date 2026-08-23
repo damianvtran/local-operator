@@ -161,13 +161,15 @@ async def test_team_without_a_request_sends_nothing(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_team_request_carries_multiple_images_in_text_order(tmp_path) -> None:
-    """Two images, and the order/subset the REQUEST text cites is what is sent.
+    """Two images, but only the one the REQUEST text still cites is sent.
 
     Locks the resolve-from-text contract the fix leans on: markers are keys, not
     positions, so citing only ``#2`` (the user deleted ``#1`` before sending)
-    must send exactly one image — the ``#2`` pixels — and citing both in the
-    reverse order must send them in that order. Distinct sizes make each image
-    identifiable by its decoded dimensions.
+    must send exactly one image — the ``#2`` pixels, not ``#1`` and not both.
+    Distinct sizes make the surviving image identifiable by its decoded
+    dimensions. (Ordering across several surviving markers is already pinned by
+    ``resolve_markers``'s own tests in ``test_paste_images``; this guards the
+    slash-command seam that used to drop the pixels entirely.)
     """
     first = _png(tmp_path / "a.png", 40, 20)
     second = _png(tmp_path / "b.png", 80, 60)
