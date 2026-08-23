@@ -606,17 +606,18 @@ USAGE_WARM_INTERVAL_S = 60.0
 #: headroom under the worst draw while still refreshing only ~twice per TTL.
 USAGE_WARM_STALE_AFTER_S = 150.0
 
-#: Minimum seconds between two re-title CHECKS on one conversation. The check
-#: is a provider call (the model, not a keyword rule, judges whether the
-#: subject moved — see :meth:`OperatorApp._maybe_retitle_conversation`), so
-#: unthrottled it would bill once per follow-up. Measured against
-#: anthropic/claude-opus-5 at its lowest effort, one check is 167 input + 18
-#: output tokens — real money at Opus rates on a chatty session, but the
-#: sharper cost is CHURN: a tab label that can change every twenty seconds is
-#: one nobody can read. Two minutes is longer than a burst of follow-ups on
-#: one subject (which then costs exactly one check) and much shorter than the
-#: time it takes a session to genuinely move on to something else.
-RETITLE_MIN_GAP_S = 120.0
+#: Minimum seconds between two re-title CHECKS on one conversation — now a
+#: SECONDARY churn guard behind the growth gate (:func:`naming.should_refresh_theme`),
+#: not the whole throttle. The growth gate bounds re-titles to a handful over the
+#: life of a session and concentrates them early; this floor only stops a rapid
+#: burst of substantive messages from spending two checks within seconds of each
+#: other, since transcript growth alone would let the second through the instant
+#: it crossed the threshold. Kept because the check is a provider call (measured
+#: against anthropic/claude-opus-5 at its lowest effort, ~167 input + 18 output
+#: tokens) and because a tab label that changes twice in one breath is one nobody
+#: can read. Shorter than the old 120 s: the growth gate does the real work of
+#: keeping the schedule finite, so this only has to smooth a same-second burst.
+RETITLE_MIN_GAP_S = 30.0
 
 #: TUI diagnostics go to the log FILE, never the terminal — stderr belongs to
 #: the rendered app (see ``local_operator.logger.file_logging``).
@@ -1400,9 +1401,24 @@ class OperatorApp(App[None]):
         self._name_generation: int = 0
         # Monotonic stamp of the last moment a title was DECIDED — either
         # stored, or checked against a new message and left alone. The re-title
-        # throttle measures its gap from here; see
+        # throttle's SECONDARY time floor measures its gap from here; see
         # :meth:`_maybe_retitle_conversation` for why the gap exists.
         self._retitle_checked_at: float = 0.0
+        # The growth-gated re-title schedule's two counters, mirroring omp's
+        # `lastTitledTurnCount`/`refreshCount`. `_last_titled_turn_count` is the
+        # transcript turn-count at the moment the title in force was set (0 until
+        # the first title lands); `_theme_refresh_count` is how many automatic
+        # RE-titles have been spent. Together they feed
+        # `naming.should_refresh_theme`, which is the PRIMARY gate that replaced
+        # the wall-time-only throttle: a long session used to keep re-titling
+        # indefinitely because 120 s between checks was the only bound, so every
+        # in-goal follow-up an hour in was still eligible to pivot the name.
+        # Held here on the host, beside `_retitle_checked_at`, because the title
+        # holder (`ConversationName`) is shared with the session and persisted,
+        # while these are display-schedule bookkeeping for the live host — the
+        # same split `_provisional_name` already makes.
+        self._last_titled_turn_count: int = 0
+        self._theme_refresh_count: int = 0
         # A turn holds this for its whole provider round trip, and `_dispose`
         # waits on it so a session is never torn down under a live request.
         # Naming does NOT take it: the title call is `isolated` (see
@@ -2702,6 +2718,14 @@ class OperatorApp(App[None]):
         # inside the window would make the new conversation's first follow-up
         # unable to correct a title generated from an opener it never had.
         self._retitle_checked_at = 0.0
+        # The growth-gate counters describe the dead conversation's title
+        # schedule too. Reset so the replacement session starts from the
+        # never-titled floor rather than inheriting a spend budget or a turn
+        # baseline it never earned — the same argument as `_retitle_checked_at`,
+        # one gate over. A `/reload` onto the same conversation re-derives them
+        # from the first title it lands, so nothing is lost that mattered.
+        self._last_titled_turn_count = 0
+        self._theme_refresh_count = 0
         # The spend ledger is the dead conversation's — unless the reload lands
         # back on the SAME conversation, which `/reload` now does. Reset it here
         # so `/new` and `/resume` cannot inherit a figure they did not spend,
@@ -6865,14 +6889,26 @@ class OperatorApp(App[None]):
         """
         return time.monotonic()
 
+    def _theme_turn_count(self, session: SessionProtocol) -> int:
+        """User/assistant turns in the transcript, the unit the growth gate counts.
+
+        Tool results and host-authored custom entries carry no ``role`` in the
+        ("user", "assistant") set and are noise for a THEME judgement, so the
+        count matches exactly what :func:`naming.build_theme_context` samples
+        from. Mirrors omp's ``#titleTurnCount``.
+        """
+        history = session.history() if hasattr(session, "history") else []
+        return sum(1 for turn in history if getattr(turn, "role", "") in ("user", "assistant"))
+
     def _maybe_retitle_conversation(self, text: str) -> None:
-        """Ask whether ``text`` has moved the subject, at most once per window.
+        """Ask whether ``text`` has moved the THEME, on a growth-gated schedule.
 
         A long session drifts. It opens as "Fix the login redirect loop" and an
         hour later it is about the billing importer, and a tab still naming the
         first subject actively misidentifies the session rather than merely
         under-describing it. So a named conversation keeps asking — but the
-        asking has to stay cheap, and three gates do that:
+        asking has to stay cheap AND the answer has to track the whole body of
+        work, not the newest message. Four gates do that:
 
         * **The user renamed it.** ``user_set`` outranks everything, forever.
           Checked HERE as well as at the store, so an explicitly named
@@ -6880,24 +6916,44 @@ class OperatorApp(App[None]):
         * **Low signal.** Already filtered by the caller; "ok", "thanks" and
           "continue" are most follow-ups in a long session and none of them
           can have moved a subject.
-        * **A minimum gap.** ``RETITLE_MIN_GAP_S`` since the title in force was
-          last decided — stamped when a check is DISPATCHED (below) and again
-          by :meth:`_store_title` when a title actually lands. Unthrottled, a
-          40-message session would spend 40 checks; measured on
-          anthropic/claude-opus-5, one check is 167 input + 18 output tokens.
-          The cap is as much about CHURN as money — a tab label that can
-          change every twenty seconds is one nobody can read. A burst of
-          follow-ups on one subject costs exactly one check.
+        * **Growth gating (the PRIMARY gate).** ``naming.should_refresh_theme``
+          allows a re-title only once the transcript has grown substantially
+          since the last title (geometric: eligible at turn >=6, >=16, >=36,
+          >=76, >=156) and at most five times per session. This is what replaced
+          the wall-time-only throttle, which let a long session re-title
+          indefinitely: every in-goal follow-up an hour in was still eligible to
+          pivot the name, and shown only that one message the model read the
+          in-goal step as a new subject. Growth gating concentrates re-titles
+          early, when the subject is still settling, and stops them once the
+          session has an established identity.
+        * **A minimum time floor (a SECONDARY churn guard).**
+          ``RETITLE_MIN_GAP_S`` since the title in force was last decided —
+          stamped when a check is DISPATCHED (below) and again by
+          :meth:`_store_title` when one lands. The growth gate does the heavy
+          lifting; this only stops a rapid burst of substantive messages from
+          spending two checks within seconds of each other, since transcript
+          growth alone would admit the second the instant it crossed a
+          threshold. A tab label that changes twice in one breath is unreadable.
 
-        The decision itself is the MODEL's (see ``naming.generate_retitle``):
-        "the subject has materially changed" is a judgement about meaning, and
-        any keyword rule here would fire on "actually, forget the parser" and
-        miss "right, now the same thing for invoices".
+        The decision itself is the MODEL's (see ``naming.generate_retitle``),
+        and it now judges the WHOLE trajectory: the worker hands it
+        ``session.history()``, from which the theme sampler keeps the opening
+        turns (which state the subject) plus a recent tail, anchored on the
+        current title. "The subject has materially changed" is a judgement about
+        meaning that any keyword rule here would get wrong.
         """
         session = self._session
         if session is None or self._status is None:
             return
         if session.conversation_name_state.user_set:
+            return
+        # The primary gate: has the transcript grown enough since the last
+        # title, and are there refreshes left? Counted from history so an
+        # in-goal follow-up on a settled session never even reaches the call.
+        turn_count = self._theme_turn_count(session)
+        if not naming.should_refresh_theme(
+            turn_count, self._last_titled_turn_count, self._theme_refresh_count
+        ):
             return
         now = self._clock()
         if now - self._retitle_checked_at < RETITLE_MIN_GAP_S:
@@ -6908,14 +6964,28 @@ class OperatorApp(App[None]):
         self._retitle_checked_at = now
         self._name_generation += 1
         generation = self._name_generation
+        # A snapshot of the trajectory taken NOW, on the UI thread, so the
+        # worker titles the conversation as it stood when the message was
+        # submitted rather than as it may look after the turn it kicked off has
+        # written more history. `history()` returns the live list; a shallow
+        # copy is enough because the sampler only reads role/text off each entry.
+        turns = list(session.history()) if hasattr(session, "history") else []
         self.run_worker(
-            self._retitle_conversation_worker(session, session.conversation_name, text, generation),
+            self._retitle_conversation_worker(
+                session, session.conversation_name, text, generation, turns, turn_count
+            ),
             thread=False,
             group="naming",
         )
 
     async def _retitle_conversation_worker(
-        self, session: SessionProtocol, current: str, text: str, generation: int
+        self,
+        session: SessionProtocol,
+        current: str,
+        text: str,
+        generation: int,
+        turns: list[AgentMessage],
+        turn_count: int,
     ) -> None:
         """One isolated re-title call; ``None`` from it means "leave it alone".
 
@@ -6924,21 +6994,44 @@ class OperatorApp(App[None]):
         resolves to "no change" rather than to a notice. The band therefore
         never flickers on a failed check — nothing repaints unless a genuinely
         different title came back.
+
+        ``turns`` is the trajectory snapshot the theme sampler titles from; the
+        model sees the whole body of work anchored on ``current``, not just the
+        newest message. ``turn_count`` is the transcript length at DISPATCH,
+        carried through so a landed title stamps the growth gate's baseline from
+        the same count the gate measured — see :meth:`_store_title`.
+
+        A re-title check is charged against the growth budget whether or not it
+        produces a new name (mirroring omp's ``#refreshSessionTheme``): the
+        budget bounds MODEL CALLS, not renames, and re-asking the same question
+        on the next follow-up would put the drift back on a faster clock. The
+        charge is applied at the store when a title lands, and here when the
+        model answered "no change" — both spend one refresh.
         """
         try:
-            title = await naming.generate_retitle(current, text, session.complete_once)
+            title = await naming.generate_retitle(current, text, session.complete_once, turns=turns)
         except asyncio.CancelledError:
             return
-        if not title:
-            return  # unchanged subject, or the call failed: same instruction
+        # A generation/session mismatch means this attempt was superseded (a
+        # reload) or belongs to a session no longer on screen: it must touch
+        # neither the title nor the shared growth budget.
         if generation != self._name_generation or session is not self._session:
+            return
+        if not title:
+            # Unchanged subject, or the call failed: leave the title alone, but
+            # STILL spend a refresh on a genuine "no change" answer so the
+            # growth schedule advances. A failed call is indistinguishable here
+            # from "no change" (both are None), and charging it is the safe
+            # direction — it slows re-titling, never speeds it — while leaving
+            # the never-titled baseline untouched.
+            self._charge_theme_refresh(session, turn_count)
             return
         # Re-read rather than trusting `current`: a rename or a reload may have
         # landed during the call, and both outrank a check made against a title
         # that is no longer in force.
         if session.conversation_name != current:
             return
-        self._store_title(session, title)
+        self._store_title(session, title, turn_count=turn_count)
 
     async def _name_conversation_worker(
         self, session: SessionProtocol, text: str, generation: int
@@ -6996,7 +7089,28 @@ class OperatorApp(App[None]):
             return
         self._store_title(session, title)
 
-    def _store_title(self, session: SessionProtocol, title: str) -> str:
+    def _charge_theme_refresh(self, session: SessionProtocol, turn_count: int) -> None:
+        """Spend one growth-budget refresh without changing the title.
+
+        The "no change" (and, indistinguishably, the failed-call) branch of a
+        re-title check. The budget bounds MODEL CALLS, not renames: a check that
+        answered "same subject" has done its job and must advance the schedule,
+        or the next substantive message re-asks the identical question the
+        instant transcript growth crosses the threshold again — putting the
+        drift the growth gate exists to slow back on a faster clock. Advancing
+        the baseline to ``turn_count`` pushes the next eligibility out by another
+        doubling; incrementing the count walks toward the per-session cap.
+        Stamped from the same DISPATCH count the gate measured so the schedule
+        stays geometric regardless of how much history the concurrent turn wrote
+        while the call was in flight.
+        """
+        self._last_titled_turn_count = turn_count
+        self._theme_refresh_count += 1
+        self._retitle_checked_at = self._clock()
+
+    def _store_title(
+        self, session: SessionProtocol, title: str, *, turn_count: int | None = None
+    ) -> str:
         """Store a generated title and put it on both surfaces.
 
         One writer for the first title and for every later re-title, so the
@@ -7004,8 +7118,35 @@ class OperatorApp(App[None]):
         store itself owns precedence: ``user_set=False`` means an explicit
         rename always wins, including one that landed while this call was in
         flight, so this may store nothing and return the name already there.
+
+        ``turn_count`` distinguishes the two callers and drives the growth
+        gate's counters. ``None`` is the FIRST title (the naming path): the
+        session's identity starts here, so the baseline is seeded from the
+        transcript's current turn count and the refresh budget is (re)set to
+        zero — this is where omp's ``lastTitledTurnCount``/``refreshCount`` are
+        initialised. An int is a RE-title: the baseline moves to the count the
+        check was dispatched at and one refresh is spent, so the next re-title
+        needs another doubling of the transcript.
         """
         stored = session.set_conversation_name(title, user_set=False)
+        if turn_count is None:
+            # First title: this conversation's identity — and therefore its
+            # refresh schedule — begins now. Seed the baseline from the live
+            # transcript so the first re-title is gated on growth from HERE, and
+            # reset the spend so a resumed-then-reopened conversation does not
+            # inherit a budget it never had. Floor at 1: the first title fires
+            # at SUBMIT, before the opener is in history, so a raw count of 0
+            # would make the next refresh eligible at four turns instead of the
+            # documented "titled at 1, refresh at >=6" schedule.
+            self._last_titled_turn_count = max(1, self._theme_turn_count(session))
+            self._theme_refresh_count = 0
+        else:
+            # A re-title landed: advance the baseline to the dispatch count and
+            # spend one refresh, exactly as `_charge_theme_refresh` does for the
+            # no-change branch — a rename and a "same subject" answer cost the
+            # same one call against the budget.
+            self._last_titled_turn_count = turn_count
+            self._theme_refresh_count += 1
         # A title just took effect, so the re-title window restarts from here
         # rather than from whenever the last CHECK was dispatched. Without
         # this, a title landing at the tail of an open window would be eligible
