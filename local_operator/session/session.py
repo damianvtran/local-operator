@@ -4610,7 +4610,11 @@ class Session:
         Prefers the operator's ``lo`` tier (``values.subagents.models.lo``),
         which is the same ladder a scout subagent runs on — an operator who has
         already said "this is my cheap model" should not have to say it twice.
-        With no tier configured it falls back to the session's own model.
+        With no tier configured it uses the model ACTUALLY serving requests
+        (the pinned fallback while one is in force, else the selected model).
+        A naming call that stayed on the selected primary after a quota
+        fallback would 429 on the dead route and leave the session untitled
+        while the turn already answered on the fallback.
 
         The clamp is applied to WHICHEVER of the two this returns, and it is not
         only a cost argument. ``ERRAND_MAX_TOKENS`` becomes
@@ -4627,7 +4631,7 @@ class Session:
         unaffected.
         """
         tier = self._resolve_subagent_model("task", "lo")
-        return self._lowest_effort(tier if tier is not None else self._model)
+        return self._lowest_effort(tier if tier is not None else self.effective_model)
 
     @staticmethod
     def _lowest_effort(spec: ModelSpec) -> ModelSpec:

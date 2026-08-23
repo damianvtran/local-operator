@@ -64,7 +64,7 @@ class TuiSessionHandle(SessionHandle):
             kind="tui",
             conversation_name=getattr(session, "conversation_name", "") or "",
             cwd=_session_cwd(session),
-            model_label=session.model_label,
+            model_label=_effective_label(session),
             model_selector=_selector(session),
             effort=_current_effort(session),
             effort_ladder=_ladder(session),
@@ -419,6 +419,18 @@ class TuiSessionHandle(SessionHandle):
         questions = getattr(card, "_questions", None)
         return len(questions) if questions else 1
 
+    def note_title(self, name: str) -> None:
+        """Push a title that landed off the event stream.
+
+        Generated titles and provisional stand-ins never emit an AgentEvent,
+        so the per-event refresh never sees them. The TUI calls this the
+        moment the band updates so the phone's header and list follow.
+        """
+        label = (name or "").strip()
+        self._fold.set_state(conversation_name=label or None)
+        if self._on_projection is not None:
+            self._on_projection()
+
     def note_ask_settled(self, card: Any) -> None:
         """Clear the phone card for a TUI ask picker that just came down.
 
@@ -466,7 +478,7 @@ class TuiSessionHandle(SessionHandle):
     def _refresh_state(self) -> None:
         session = self._session()
         self._fold.set_state(
-            model_label=session.model_label,
+            model_label=_effective_label(session),
             model_selector=_selector(session),
             effort=_current_effort(session),
             effort_ladder=_ladder(session),
@@ -537,6 +549,17 @@ def _session_cwd(session: Any) -> str:
     return os.getcwd()
 
 
+def _effective_label(session: Any) -> str:
+    """``provider/model`` of the model actually serving requests.
+
+    A display that reads ``session.model_label`` (the selection) during a
+    provider fallback names a model that is not answering — the stale
+    composer chip the phone showed after a quota failover.
+    """
+    label = str(getattr(session, "effective_model_label", "") or "")
+    return label or str(getattr(session, "model_label", "") or "")
+
+
 def _selector(session: Any) -> str:
     try:
         spec = session.model
@@ -547,7 +570,8 @@ def _selector(session: Any) -> str:
 
 def _current_effort(session: Any) -> str:
     try:
-        return session.model.reasoning_effort or ""
+        spec = getattr(session, "effective_model", None) or session.model
+        return spec.reasoning_effort or ""
     except Exception:  # noqa: BLE001
         return ""
 

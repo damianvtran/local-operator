@@ -39,6 +39,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModelChangeEvent,
     NoticeEvent,
     RetryEndEvent,
     RetryStartEvent,
@@ -482,6 +483,14 @@ class ProjectionFold:
             self._append(TranscriptEntry(id=f"rt-{time.time_ns()}", kind="notice", text=note))
         elif isinstance(event, RetryEndEvent):
             pass  # the retry row already reads; success is the next assistant row
+        elif isinstance(event, ModelChangeEvent):
+            # The composer chip and the session-list model must name the
+            # model ACTUALLY answering. A display that kept the selected
+            # primary after a quota fallback is the stale chip the phone
+            # showed while Grok was serving.
+            p.model_label = f"{event.provider}/{event.model_id}"
+            if event.effort:
+                p.effort = event.effort
         # Unknown events are dropped by design: the fold renders a SUBSET of
         # the harness taxonomy (the phone has no use for wake/loop internals),
         # and ``extra="allow"`` on AgentEvent means matching must stay

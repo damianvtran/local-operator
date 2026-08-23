@@ -13,6 +13,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModelChangeEvent,
     NoticeEvent,
     SubagentEndEvent,
     SubagentProgressEvent,
@@ -39,6 +40,23 @@ from local_operator.mobile.types import (
 
 def make_fold() -> ProjectionFold:
     return ProjectionFold(SessionProjection(session_id="s1", pid=1))
+
+
+def test_model_change_repaints_the_composer_chip() -> None:
+    """A fallback must rename the chip the phone shows, not just the notice."""
+    fold = make_fold()
+    fold.projection.model_label = "anthropic/claude-opus-4-8"
+    fold.fold_event(
+        ModelChangeEvent(
+            provider="xai",
+            model_id="grok-4.6",
+            effort="high",
+            is_fallback=True,
+            reason="quota exhausted",
+        )
+    )
+    assert fold.projection.model_label == "xai/grok-4.6"
+    assert fold.projection.effort == "high"
 
 
 def test_streaming_assistant_row_updates_in_place() -> None:

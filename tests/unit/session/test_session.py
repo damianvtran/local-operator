@@ -2543,6 +2543,26 @@ async def test_the_errand_model_is_effort_clamped_on_both_routes(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_the_errand_model_follows_a_pinned_fallback(tmp_path, monkeypatch):
+    """Naming must not stay on a quota-exhausted primary.
+
+    Isolated naming has no fallback chain of its own. After the turn pins a
+    rescue route, the errand has to use THAT model or the title 429s forever
+    and the phone stays untitled.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    _config_dir_with(tmp_path, monkeypatch, None)
+    primary = build_model_spec("anthropic", "claude-opus-5")
+    rescue = ModelSpec(provider="xai", model_id="grok-4.6", context_window=100_000)
+    session = make_session(tmp_path, ScriptedStream([]), model=primary)
+    session._active_fallback = rescue
+    errand = session._errand_model()
+    assert (errand.provider, errand.model_id) == ("xai", "grok-4.6")
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_mid_turn_flush_never_persists_a_compaction_marker(tmp_path):
     """F1: the mid-turn flush must not write the compaction summary marker.
 

@@ -38,7 +38,7 @@ from local_operator.tui.app import RETITLE_MIN_GAP_S, OperatorApp
 from local_operator.tui.terminal_title import TerminalTitle
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 
 
 class _GatedSession(FakeSession):
@@ -375,6 +375,97 @@ async def test_a_low_signal_opener_names_nothing_at_all() -> None:
         assert app._provisional_name == ""
         assert app._status is not None
         assert app._status._conversation_name == ""
+
+
+@pytest.mark.asyncio
+async def test_a_dead_naming_call_retries_when_a_fallback_pins() -> None:
+    """Isolated naming 429s on the dead primary; the route edge re-fires it.
+
+    The first turn's naming call races the fallback pin and loses. Without a
+    retry on ``EffectiveModelChanged`` the conversation stays untitled for
+    the whole session — the phone list and header never update.
+    """
+    from local_operator.tui.events import EffectiveModelChanged
+
+    app, session = await _boot(title="")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._submit_prompt("review what regressed in mobile titles")
+        session.gate.set()
+        await _settle()
+        assert session.conversation_name == ""
+        assert app._pending_name_text == "review what regressed in mobile titles"
+
+        session.title = "<title>Mobile title sync</title>"
+        app.on_effective_model_changed(
+            EffectiveModelChanged(
+                provider="xai",
+                model_id="grok-4.6",
+                effort=None,
+                reason="quota exhausted",
+                is_fallback=True,
+            )
+        )
+        await _settle()
+        assert session.conversation_name == "Mobile title sync"
+        assert app._pending_name_text == ""
+        assert app._status is not None
+        assert app._status._conversation_name == "Mobile title sync"
+
+
+@pytest.mark.asyncio
+async def test_resume_of_a_live_session_does_not_open_a_second_writer(
+    tmp_path, monkeypatch
+) -> None:
+    """A phone-started session is already live; /resume must not fork it.
+
+    Two writers on one transcript is how a TUI resume of a mobile session
+    painted the splash: the second process claimed the directory and
+    replayed a mid-write journal.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    live = tmp_path / "sessions" / "live00000001"
+    live.mkdir(parents=True)
+    (live / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    (live / ".session.pid").write_text("4242", encoding="utf-8")
+    monkeypatch.setattr("os.kill", lambda pid, sig: None)
+
+    rebuilt = {"called": False}
+
+    async def resume_factory(_resume_id: str | None):
+        rebuilt["called"] = True
+        return FakeSession()
+
+    app, session = await _boot()
+    app._resume_factory = resume_factory
+    notices: list[str] = []
+
+    def notice(body: str, kind: str = "info") -> None:
+        notices.append(body)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._resume_session("live00000001", notice)
+        await _settle()
+        assert rebuilt["called"] is False
+        # The refuse is a system notice (splash stays), not the slash
+        # receipt callback — look at the transcript, not ``notices``.
+        text = _transcript_text(app)
+        assert "already open" in text
+        assert "pid 4242" in text
+        assert "second writer" not in text
+        assert app._session is session
+        # Splash survives a refused navigation (D1).
+        from local_operator.tui.widgets.welcome import WelcomeView
+
+        assert app.query_one(WelcomeView).display is True
+
+        # F1: ``@latest`` must resolve then refuse, not skip the owner check.
+        rebuilt["called"] = False
+        app._resume_session("@latest", notice)
+        await _settle()
+        assert rebuilt["called"] is False
+        assert app._session is session
 
 
 # -- re-titling a conversation that has drifted -------------------------------

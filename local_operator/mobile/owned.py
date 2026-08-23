@@ -25,7 +25,7 @@ import logging
 import secrets
 from typing import TYPE_CHECKING, Any, Callable
 
-from local_operator.harness.types import AgentEvent
+from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
@@ -84,7 +84,7 @@ class OwnedSessionHandle(SessionHandle):
             # the real title lands, instead of a placeholder that never moves.
             conversation_name=getattr(session, "conversation_name", "") or "",
             cwd=cwd,
-            model_label=session.model_label,
+            model_label=_effective_label(session),
             model_selector=_selector(session),
             effort=_current_effort(session),
             effort_ladder=_ladder(session),
@@ -97,6 +97,10 @@ class OwnedSessionHandle(SessionHandle):
         # OperatorApp._name_requested: the first substantive prompt fires ONE
         # background naming call, alongside the turn it decorates.
         self._name_requested = False
+        # Opener of a naming attempt that returned nothing. Isolated naming
+        # often 429s on a dead primary BEFORE the turn pins a fallback; the
+        # route edge re-fires this opener once a serving model exists.
+        self._pending_name_text = ""
         # Strong references to detached background tasks (the naming errand),
         # so the event loop cannot garbage-collect one mid-flight and drop the
         # title silently. Each task removes itself on completion.
@@ -231,6 +235,8 @@ class OwnedSessionHandle(SessionHandle):
             self._fold.fold_event(event)
             self._refresh_state()
             self._refresh_todos()
+            if isinstance(event, ModelChangeEvent):
+                self._retry_naming_after_route_change()
             self._notify()
 
         unsubscribe = self._session.subscribe(handler)
@@ -277,6 +283,13 @@ class OwnedSessionHandle(SessionHandle):
             # Already named (a restored session, or a prior prompt named it).
             self._name_requested = True
             return
+        # Wear the opener on the phone immediately — same stand-in the TUI
+        # band shows — so the list/header are not "untitled" for the whole
+        # first turn (or forever, if the isolated naming call 429s).
+        label = naming.provisional_title(text)
+        if label:
+            self._fold.set_state(conversation_name=label)
+            self._notify()
         self._name_requested = True
         # Hold a strong reference until the task settles: a bare ensure_future
         # is only weakly held by the loop and can be collected before it runs.
@@ -305,7 +318,9 @@ class OwnedSessionHandle(SessionHandle):
             # allow a later substantive prompt to retry only when still unnamed.
             if not getattr(self._session, "conversation_name", ""):
                 self._name_requested = False
+                self._pending_name_text = text
             return
+        self._pending_name_text = ""
         self._session.set_conversation_name(title, user_set=False)
         self._refresh_state()
         self._notify()
@@ -439,7 +454,7 @@ class OwnedSessionHandle(SessionHandle):
 
     def _refresh_state(self) -> None:
         self._fold.set_state(
-            model_label=self._session.model_label,
+            model_label=_effective_label(self._session),
             model_selector=_selector(self._session),
             effort=_current_effort(self._session),
             effort_ladder=_ladder(self._session),
@@ -463,6 +478,19 @@ class OwnedSessionHandle(SessionHandle):
         there."""
         self._fold.reconcile_streaming(bool(getattr(self._session, "is_streaming", False)))
 
+    def _retry_naming_after_route_change(self) -> None:
+        """Re-fire a failed naming attempt once a fallback is actually serving.
+
+        Isolated naming has no fallback chain, so a quota 429 on the primary
+        returns None while the turn is still pinning the rescue route. The
+        opener is stashed; this spends it the moment the serving model exists.
+        """
+        pending = self._pending_name_text
+        if not pending or getattr(self._session, "conversation_name", ""):
+            return
+        self._pending_name_text = ""
+        self._maybe_name_conversation(pending)
+
     def _refresh_todos(self) -> None:
         try:
             from local_operator.tools.builtin import TODO_STORE
@@ -470,6 +498,16 @@ class OwnedSessionHandle(SessionHandle):
             self._fold.set_todos(list(TODO_STORE.get(self._session.session_id, [])))
         except Exception:  # noqa: BLE001 — todos are a panel, never a failure
             logger.debug("todo refresh failed", exc_info=True)
+
+
+def _effective_label(session: Any) -> str:
+    """``provider/model`` of the model actually serving requests.
+
+    A display that reads ``session.model_label`` during a provider fallback
+    names a model that is not answering — the stale composer chip.
+    """
+    label = str(getattr(session, "effective_model_label", "") or "")
+    return label or str(getattr(session, "model_label", "") or "")
 
 
 def _selector(session: Any) -> str:
@@ -482,7 +520,8 @@ def _selector(session: Any) -> str:
 
 def _current_effort(session: Any) -> str:
     try:
-        return session.model.reasoning_effort or ""
+        spec = getattr(session, "effective_model", None) or session.model
+        return spec.reasoning_effort or ""
     except Exception:  # noqa: BLE001
         return ""
 
