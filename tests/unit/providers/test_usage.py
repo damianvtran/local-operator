@@ -209,6 +209,75 @@ def test_usage_health_depleted_reset_ignores_windows_merely_in_reserve() -> None
     assert health.reset_after_ms == 2 * 3_600_000
 
 
+def test_usage_health_depleted_reset_keys_to_soonest_spent_window() -> None:
+    """With SEVERAL fully-spent windows the block keys to the earliest reset.
+
+    A depleted account is usable again the moment ANY spent binding window
+    reopens (a request needs only one window with headroom), so the honest
+    "try again at" is the SOONEST reset among the fully-spent windows, not the
+    latest. Keying to the latest (the old ``max``) pinned a two-hour block to
+    the 7-day window's five-day reset. This is the new-behaviour twin of
+    ``test_usage_health_depleted_reset_ignores_windows_merely_in_reserve``:
+    that test keeps passing because its 7d window sits at 91% (not spent), so
+    its depleted horizon has one member and min==max; here BOTH windows are
+    spent, so the direction is observable."""
+    report = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used_fraction=1.0),
+                shared=True,
+                resets_at_ms=2 * 3_600_000,
+            ),
+            UsageLimit(
+                id="anthropic:7d",
+                label="7 day",
+                amount=UsageAmount(used_fraction=1.0),
+                shared=True,
+                resets_at_ms=5 * 86_400_000,
+            ),
+        ],
+    )
+    health = usage_health(report, "claude-opus-5", reserve_percent=10, now_ms=0)
+    assert health.state == "depleted"
+    # The SOONEST reset (5-hour window), not the weekly.
+    assert health.reset_after_ms == 2 * 3_600_000
+
+
+def test_usage_health_balance_only_depleted_keys_to_soonest() -> None:
+    """The balance-only (Kimi/DeepSeek) depleted path keys to the soonest reset.
+
+    Two zeroed balance windows with different resets: the account reopens at
+    the earliest of them, so ``reset_after_ms`` is the sooner reset. Covers the
+    ``max``->``min`` change on the balance-only branch, which is always a
+    depleted verdict."""
+    report = UsageReport(
+        provider="deepseek",
+        limits=[
+            UsageLimit(
+                id="deepseek:usd",
+                label="USD",
+                amount=UsageAmount(remaining=0.0, unit="usd"),
+                shared=True,
+                resets_at_ms=3 * 3_600_000,
+            ),
+            UsageLimit(
+                id="deepseek:cny",
+                label="CNY",
+                amount=UsageAmount(remaining=0.0, unit="cny"),
+                shared=True,
+                resets_at_ms=9 * 3_600_000,
+            ),
+        ],
+    )
+    health = usage_health(report, "deepseek-chat", reserve_percent=10, now_ms=0)
+    assert health.state == "depleted"
+    # The SOONEST reset (3-hour window), not the 9-hour one.
+    assert health.reset_after_ms == 3 * 3_600_000
+
+
 def test_usage_health_ignores_unrelated_model_tier() -> None:
     report = UsageReport(
         provider="anthropic",
