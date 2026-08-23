@@ -66,6 +66,14 @@ def test_record_and_aggregate_roundtrip(tmp_path):
     # Component split was apportioned against context at write time and sums
     # back to the context total.
     assert sum(agg.components.values()) == agg.context_tokens
+    # Images is a first-class component in the roundtrip: image chars apportion
+    # to it and read back non-zero.
+    store2 = AnalyticsStore(tmp_path / "img.db")
+    assert (
+        store2.record_batch([_snap(context=1000, chars={"conversation": 500, "images": 500})]) == 1
+    )
+    assert store2.aggregate().components["images"] > 0
+    store2.close()
     store.close()
 
 
@@ -168,6 +176,122 @@ def test_migration_adds_cost_columns_to_old_db(tmp_path):
     store.close()
 
 
+#: The eight component columns a pre-``images`` DB had, so a migration test can
+#: build a genuinely old schema (``_COMPONENT_COLUMNS`` now includes c_images and
+#: would not reproduce the missing-column case). Order matches the original
+#: COMPONENT_KEYS before ``images`` was appended.
+_PRE_IMAGES_COMPONENT_COLUMNS = ",\n  ".join(
+    f"c_{key} INTEGER NOT NULL DEFAULT 0"
+    for key in (
+        "system_prompt",
+        "custom_instructions",
+        "tool_inventory",
+        "tool_schemas",
+        "environment",
+        "knowledge",
+        "conversation",
+        "tool_results",
+    )
+)
+
+
+def test_migration_adds_images_column_to_old_db(tmp_path):
+    # A DB written before the images component existed has c_* columns for the
+    # original eight only. Opening it must ALTER c_images in, read old rows as
+    # images 0, and record new calls WITH an images estimate — never raise on a
+    # missing column.
+    import sqlite3
+
+    db = tmp_path / "preimages.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER,
+          cost_micro INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    # An old row: its image tokens (if any) stayed baked into the text-bucket
+    # estimates it was recorded with; it reads images 0 after migration.
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, context_tokens, c_conversation) "
+        "VALUES (1, 's', 'anthropic', 'm', 1, 100, 20, 120, 120)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    agg = store.aggregate()
+    assert agg.calls == 1
+    assert agg.components["images"] == 0  # old row forward-fills to images 0
+    # A new call carrying image chars records a non-zero images estimate into the
+    # migrated column.
+    assert (
+        store.record_batch([_snap(context=1000, chars={"conversation": 500, "images": 500})]) == 1
+    )
+    assert store.aggregate().components["images"] > 0
+    store.close()
+
+
+def test_recording_degrades_when_component_column_absent(tmp_path):
+    # Option A: a missing OPTIONAL component column (here c_images) must degrade
+    # the same way a missing cost column does — the column is dropped from the
+    # insert and read as 0 in the aggregate, never failing the write. Simulated
+    # by pretending the images migration failed while the rest is present.
+    import sqlite3
+
+    db = tmp_path / "noimages.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER,
+          cost_micro INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    store._connect()  # runs the migration, which would normally add c_images
+    # Drop the column the migration just added so the insert actually hits a
+    # table that lacks it. Flipping ``_present_optional`` alone left the
+    # column in place, so a broken insert plan that still named ``c_images``
+    # would still return record_batch == 1.
+    conn = store._connect()
+    assert conn is not None
+    conn.execute("ALTER TABLE calls DROP COLUMN c_images")
+    conn.commit()
+    from local_operator.analytics.store import _OPTIONAL_COLUMN_NAMES
+
+    store._present_optional = _OPTIONAL_COLUMN_NAMES - {"c_images"}
+    store._rebuild_insert_plan()
+    # A call with image chars still records — images just degrade to 0.
+    assert (
+        store.record_batch([_snap(context=1000, chars={"conversation": 500, "images": 500})]) == 1
+    )
+    agg = store.aggregate()
+    assert agg.calls == 1
+    assert agg.context_tokens == 1000  # token analytics survive
+    assert agg.components["images"] == 0  # images degraded to 0, not a crash
+    # Cost is unaffected: only the images column was dropped.
+    assert agg.cost_is_known is True
+    store.close()
+
+
 def test_recording_degrades_when_cost_columns_absent(tmp_path):
     # C2: if the cost columns cannot be added (simulated by forcing _has_cost
     # False against a table that lacks them), recording must NOT fail every
@@ -194,8 +318,20 @@ def test_recording_degrades_when_cost_columns_absent(tmp_path):
 
     store = AnalyticsStore(db)
     store._connect()  # runs the migration, which will add the columns
-    # Force the degraded path: pretend the migration failed.
+    # Drop the cost columns the migration just added so the insert actually
+    # hits a table that lacks them. Flipping ``_has_cost`` / ``_present_optional``
+    # alone left the columns in place, so a broken insert plan that still
+    # named them would still return record_batch == 1.
+    conn = store._connect()
+    assert conn is not None
+    conn.execute("ALTER TABLE calls DROP COLUMN cost_micro")
+    conn.execute("ALTER TABLE calls DROP COLUMN cost_known")
+    conn.commit()
+    from local_operator.analytics.store import _OPTIONAL_COLUMN_NAMES
+
     store._has_cost = False
+    store._present_optional = _OPTIONAL_COLUMN_NAMES - {"cost_micro", "cost_known"}
+    store._rebuild_insert_plan()
     assert store.record_batch([_snap(input_tokens=100, cost_micro=999, cost_known=True)]) == 1
     agg = store.aggregate()
     assert agg.calls == 1

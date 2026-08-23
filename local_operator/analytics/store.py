@@ -187,33 +187,43 @@ _CALL_COLUMNS = (
     *(f"c_{key}" for key in COMPONENT_KEYS),
 )
 
-#: Columns added AFTER the first shipped schema (which had no cost columns).
-#: A database created by the token-only release is missing these, and
-#: ``CREATE TABLE IF NOT EXISTS`` will not add a column to an existing table —
-#: so ``_connect`` runs an idempotent ``ALTER TABLE ADD COLUMN`` for each on
-#: open. ``(name, definition)``; the definition carries the default so old rows
-#: read as cost 0 / unknown rather than NULL.
+#: Columns added AFTER the first shipped schema. A database created by an older
+#: release is missing these, and ``CREATE TABLE IF NOT EXISTS`` will not add a
+#: column to an existing table — so ``_connect`` runs an idempotent
+#: ``ALTER TABLE ADD COLUMN`` for each on open. ``(name, definition)``; the
+#: definition carries the default so old rows read as 0 rather than NULL.
+#:
+#: This is the SINGLE registry of optional columns (review C2, Option A): the
+#: first release had cost absent, and now ``c_images`` (the 9th component) is
+#: absent on any DB written before it. Rather than a bespoke ``_NO_COST`` insert
+#: variant per absent column — which multiplies combinatorially with the next
+#: component added — ``_migrate`` records which of THESE are actually present and
+#: the insert/aggregate paths are driven by that set. A column that is in this
+#: tuple but missing from the table is simply dropped from the insert and read
+#: as 0 in the aggregate, giving every optional column the same "analytics must
+#: never break a turn" guarantee the cost columns already had.
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("cost_micro", "INTEGER NOT NULL DEFAULT 0"),
     ("cost_known", "INTEGER NOT NULL DEFAULT 0"),
+    # Old rows keep their image tokens baked into the conversation/tool_results
+    # estimates they were recorded with (forward-fill, same philosophy as the
+    # rollup tables). After this ALTER they read ``c_images=0`` rather than
+    # being re-apportioned — we cannot honestly unbake a historical estimate.
+    ("c_images", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+#: The names in ``_MIGRATION_COLUMNS`` as a set, for the "is this column optional
+#: (i.e. possibly absent on an old DB)?" test. A column NOT in here — the base
+#: token columns and the original eight ``c_*`` components — is present on every
+#: DB that has ever existed and is never dropped from a query.
+_OPTIONAL_COLUMN_NAMES: frozenset[str] = frozenset(name for name, _ in _MIGRATION_COLUMNS)
+
+#: The all-columns insert, used when the DB has every optional column (a fresh DB
+#: always does). ``_migrate`` narrows this to the present columns per DB.
 _INSERT_SQL = (
     f"INSERT INTO calls ({', '.join(_CALL_COLUMNS)}) "
     f"VALUES ({', '.join('?' for _ in _CALL_COLUMNS)})"
 )
-
-#: The insert WITHOUT the cost columns, for a database where the migration to
-#: add them failed (review C2). The two cost values are dropped from both the
-#: column list and each row tuple so a missing column cannot fail every write.
-_CALL_COLUMNS_NO_COST = tuple(c for c in _CALL_COLUMNS if c not in ("cost_micro", "cost_known"))
-_INSERT_SQL_NO_COST = (
-    f"INSERT INTO calls ({', '.join(_CALL_COLUMNS_NO_COST)}) "
-    f"VALUES ({', '.join('?' for _ in _CALL_COLUMNS_NO_COST)})"
-)
-#: Positions of the two cost values in ``_row_values`` output, so the cost-less
-#: path can drop exactly them. They sit right after ``context_tokens``.
-_COST_VALUE_INDICES = (11, 12)
 
 #: The measure columns a rollup row accumulates. Every one is summed on
 #: conflict, so an upsert is a pure ``x = x + excluded.x`` accumulate and N
@@ -398,14 +408,26 @@ class AnalyticsStore:
         #: first connections at once do not race on ``executescript``.
         self._init_lock = threading.Lock()
         self._initialized = False
-        #: Whether the cost columns exist on THIS database. A fresh DB always
-        #: has them (the ``CREATE TABLE`` includes them); an old one gets them
-        #: from ``_migrate``. If a migration ALTER genuinely fails (a locked or
-        #: corrupt DB), this stays False and both the insert and the aggregate
-        #: silently drop the cost columns rather than referencing a column that
-        #: does not exist — which would otherwise fail EVERY write and blank the
-        #: whole screen (review C2). Token analytics keep working; cost reads 0.
+        #: Whether the cost columns exist on THIS database, scoped EXPLICITLY to
+        #: ``cost_micro``/``cost_known`` (not "all optional columns present"):
+        #: once ``c_images`` joined ``_MIGRATION_COLUMNS`` a blanket check would
+        #: conflate "cost present" with "images present" and mislabel a
+        #: cost-capable DB. The report reads this to choose ``$—`` vs a real sum.
         self._has_cost = True
+        #: Which OPTIONAL columns (``_MIGRATION_COLUMNS``) actually exist on this
+        #: DB. A fresh DB has all of them (the ``CREATE TABLE`` includes them); an
+        #: old one gets them from ``_migrate``. If a migration ALTER genuinely
+        #: fails (a locked/corrupt DB), the absent column is dropped from every
+        #: insert and read as 0 in the aggregate rather than being referenced and
+        #: failing EVERY write — the generalised C2 "never break a turn" path.
+        #: Defaults to all-present; ``_migrate`` narrows it to the truth per DB.
+        self._present_optional: frozenset[str] = _OPTIONAL_COLUMN_NAMES
+        #: The insert column list + SQL for THIS DB, derived from
+        #: ``_present_optional`` in ``_migrate``. ``_insert_indices`` selects the
+        #: matching values out of ``_row_values``' full (``_CALL_COLUMNS``-order)
+        #: tuple so a missing column is dropped from both the SQL and the row.
+        self._insert_indices: tuple[int, ...] = tuple(range(len(_CALL_COLUMNS)))
+        self._insert_sql: str = _INSERT_SQL
 
     # -- connection ----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection | None:
@@ -480,14 +502,21 @@ class AnalyticsStore:
         ``_init_lock`` on open; a failure here degrades to the pre-migration
         shape rather than raising, because analytics is never a hard dependency.
 
-        Sets ``self._has_cost`` from what is ACTUALLY present afterward: if an
-        ALTER failed, cost is dropped from the insert and the aggregate so a
-        missing column cannot fail every write and blank the screen (review C2).
+        Records which OPTIONAL columns are ACTUALLY present afterward
+        (``self._present_optional``) and rebuilds the per-DB insert plan from it:
+        if an ALTER failed, that column is dropped from the insert AND read as 0
+        in the aggregate, so a missing column cannot fail every write and blank
+        the screen (review C2, generalised to every optional column via Option A).
+        ``self._has_cost`` is scoped EXPLICITLY to the two cost columns so adding
+        ``c_images`` to ``_MIGRATION_COLUMNS`` does not conflate "cost present"
+        with "images present".
         """
         try:
             existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(calls)").fetchall()}
         except Exception:  # noqa: BLE001 — an unreadable schema is a no-op migration
             self._has_cost = False
+            self._present_optional = frozenset()
+            self._rebuild_insert_plan()
             return
         for name, definition in _MIGRATION_COLUMNS:
             if name in existing:
@@ -497,7 +526,37 @@ class AnalyticsStore:
                 existing.add(name)
             except Exception:  # noqa: BLE001 — a failed add leaves the older shape
                 logger.debug("analytics: could not add column %s", name, exc_info=True)
-        self._has_cost = all(name in existing for name, _ in _MIGRATION_COLUMNS)
+        # Scope cost to the cost columns only (NOT "all optional present"): with
+        # c_images now in _MIGRATION_COLUMNS an all-present check would flip cost
+        # off on a cost-capable DB that merely lacks images.
+        self._has_cost = all(n in existing for n in ("cost_micro", "cost_known"))
+        self._present_optional = frozenset(
+            name for name, _ in _MIGRATION_COLUMNS if name in existing
+        )
+        self._rebuild_insert_plan()
+
+    def _rebuild_insert_plan(self) -> None:
+        """Recompute the insert SQL + value selector from ``_present_optional``.
+
+        The insert columns are ``_CALL_COLUMNS`` minus any optional column absent
+        on this DB, in the SAME order; ``_insert_indices`` picks the matching
+        values out of ``_row_values``' full tuple so the row and the column list
+        stay aligned. One selector drives the general degraded path — no bespoke
+        ``_NO_COST``/``_NO_IMAGES`` variant per column, which is the whole point
+        of Option A.
+        """
+
+        # A column is KEPT when it is not optional (always present) or it is an
+        # optional column that this DB actually has.
+        def _keep(col: str) -> bool:
+            return col not in _OPTIONAL_COLUMN_NAMES or col in self._present_optional
+
+        self._insert_indices = tuple(i for i, c in enumerate(_CALL_COLUMNS) if _keep(c))
+        columns = [_CALL_COLUMNS[i] for i in self._insert_indices]
+        self._insert_sql = (
+            f"INSERT INTO calls ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})"
+        )
 
     @staticmethod
     def _now_ms() -> int:
@@ -544,15 +603,14 @@ class AnalyticsStore:
             day, month = _local_day_month(int(snap.ts_ms))
             daily_rows.append(_rollup_row_values(snap, day, cm, ck))
             monthly_rows.append(_rollup_row_values(snap, month, cm, ck))
-        if self._has_cost:
-            insert_sql = _INSERT_SQL
-        else:
-            # Migration to add the cost columns failed: drop the two cost values
-            # so the insert matches the older table shape (review C2).
-            insert_sql = _INSERT_SQL_NO_COST
-            rows = [
-                tuple(v for i, v in enumerate(row) if i not in _COST_VALUE_INDICES) for row in rows
-            ]
+        # Option A: the insert SQL and the value selector were computed once in
+        # ``_migrate`` from the columns this DB actually has. Select exactly the
+        # present columns' values out of each full row tuple, so an absent
+        # optional column (failed cost or images migration) is dropped from both
+        # the SQL and the row rather than referenced and failing every write.
+        insert_sql = self._insert_sql
+        if len(self._insert_indices) != len(_CALL_COLUMNS):
+            rows = [tuple(row[i] for i in self._insert_indices) for row in rows]
         for attempt in range(_WRITE_RETRIES):
             try:
                 conn.executemany(insert_sql, rows)
@@ -740,7 +798,17 @@ class AnalyticsStore:
             params.append(session_id)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
 
-        component_sum = ", ".join(f"SUM(c_{key})" for key in COMPONENT_KEYS)
+        # Substitute a constant 0 for any optional component column this DB lacks
+        # (a failed/old-DB migration, review C2 generalised): an absent ``c_*``
+        # reads as 0 rather than failing the whole query on a missing column. The
+        # base ``c_*`` columns (the original eight) are not optional and always
+        # summed. Positions stay a contract with ``_aggregate_from_row``.
+        def _component_expr(key: str) -> str:
+            col = f"c_{key}"
+            present = col not in _OPTIONAL_COLUMN_NAMES or col in self._present_optional
+            return f"SUM({col})" if present else "0"
+
+        component_sum = ", ".join(_component_expr(key) for key in COMPONENT_KEYS)
         # Order is a contract with ``_aggregate_from_row``, which indexes this
         # tuple positionally: cost_micro and cost_known_calls come after the
         # token sums and before the component sums. When the cost columns are

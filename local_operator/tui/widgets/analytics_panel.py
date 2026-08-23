@@ -467,10 +467,15 @@ def build_report(
     calls_meta += " · measured"
     lines.append(_section_header("Totals", calls_meta))
 
+    # Value cells share a gutter so notes line up even when compact figures
+    # differ in width (``3M`` vs ``387k``). 11 cells matches the existing
+    # ``3.7M tokens`` / ``$18.40`` slot; a longer value just grows the cell.
+    _VALUE_CELL = 11
+
     def kv(name: str, value: str, note: str = "") -> Text:
         row = Text()
         row.append(f"  {name:<22}", style=dim)
-        row.append(value, style=fg)
+        row.append(f"{value:<{_VALUE_CELL}}", style=fg)
         if note:
             # ``dim`` not ``faint`` (D2): the note carries the actual cache and
             # thinking/generation breakdown — the substance a diagnostics reader
@@ -478,13 +483,63 @@ def build_report(
             row.append(f"  {note}", style=dim)
         return row
 
-    lines.append(kv("Total billed", format_tokens(aggregate.total_tokens) + " tokens"))
     lines.append(
         kv(
-            "Input",
-            format_tokens(aggregate.input_tokens),
-            f"+{format_tokens(aggregate.cache_read_tokens)} cache read, "
-            f"{format_tokens(aggregate.cache_write_tokens)} cache write",
+            "Total billed",
+            format_tokens(aggregate.total_tokens) + " tokens",
+            f"{format_tokens(aggregate.context_tokens)} in · "
+            f"{format_tokens(aggregate.output_tokens)} out",
+        )
+    )
+    # NESTED input breakdown. The old flat "Input NNN" row read as "total input"
+    # and, at a 97% cache-hit rate, showed a tiny number (only the fresh/uncached
+    # slice) that looked like a bug. All three sub-values are AUTHORITATIVE
+    # provider counts (not estimates), so the tree makes explicit that the small
+    # "Fresh (uncached)" figure sits UNDER the full "Context read" total, with
+    # cache reads/writes as its siblings. The wording is deliberate: "Fresh
+    # (uncached)" is ALL uncached input (new user turns plus freshly-added tool
+    # results/reads/system content not yet cached), NOT "user input" — labelling
+    # it as user messages would be wrong. ``kv`` pads the name to 22 uniformly,
+    # so the leading space + tree glyph on the sub-rows indents them while the
+    # values stay column-aligned.
+    #
+    # Fresh is ``aggregate.fresh_tokens`` (context − cache_read − cache_write),
+    # not ``input_tokens``: providers disagree on whether input already includes
+    # cache, so binding Fresh to input would show the FULL context on OpenAI-
+    # shaped usage. The three children partition the parent on every provider.
+    # The Context-read note restates that composition so compact formatting
+    # (387k + 3M + 113k all printing as 3.5M / 3M) cannot hide the sum.
+    fresh = aggregate.fresh_tokens
+    cache_read = aggregate.cache_read_tokens
+    cache_write = aggregate.cache_write_tokens
+    lines.append(
+        kv(
+            "Context read",
+            format_tokens(aggregate.context_tokens),
+            f"{format_tokens(fresh)} fresh · "
+            f"{format_tokens(cache_read)} cached · "
+            f"{format_tokens(cache_write)} written",
+        )
+    )
+    lines.append(
+        kv(
+            " ├ Fresh (uncached)",
+            format_tokens(fresh),
+            "new input, billed at full rate",
+        )
+    )
+    lines.append(
+        kv(
+            " ├ Cache read",
+            format_tokens(cache_read),
+            "input served from cache",
+        )
+    )
+    lines.append(
+        kv(
+            " └ Cache write",
+            format_tokens(cache_write),
+            "new input written to cache",
         )
     )
     lines.append(
@@ -516,9 +571,14 @@ def build_report(
         cost_note = "no published price"
     # Built directly (not via ``kv``) so the lower-bound ``+`` is dimmed like the
     # table cells (review D1) — the figure reads as a number, the ``+`` as a flag.
+    # ``_append_cost`` right-aligns (table cells); here we pass the figure's own
+    # width so it left-aligns with the token values, then pad out to
+    # ``_VALUE_CELL`` so the cost note shares the gutter (D2).
+    cost_text = format_cost(aggregate)
     cost_row = Text()
     cost_row.append(f"  {'Est. cost':<22}", style=dim)
-    _append_cost(cost_row, aggregate, len(format_cost(aggregate)), fg, dim)
+    _append_cost(cost_row, aggregate, len(cost_text), fg, dim)
+    cost_row.append(" " * max(0, _VALUE_CELL - len(cost_text)))
     cost_row.append(f"  {cost_note}", style=dim)
     lines.append(cost_row)
     lines.append(Text())
