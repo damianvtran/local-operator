@@ -92,7 +92,9 @@ pip install local-operator     # pipx install local-operator on Linux (PEP 668)
 ```
 
 The install provides both `local-operator` and its short alias `lop` — the
-rest of this page uses `lop`.
+rest of this page uses `lop`. `lop update` upgrades that install from PyPI;
+`lop-update` (hyphen) is the developer script that rebuilds the global
+runtime from a local git checkout.
 
 Sign in to a provider (or skip this — on an interactive terminal `lop` opens
 in a setup state and walks you through `/login`; a headless or piped run prints
@@ -180,7 +182,8 @@ current session's cost live).
 | `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |
 | `/resume` | Pick a past conversation and continue it |
-| `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · reboot the session in place |
+| `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |
+| `/update` | Install the latest version from PyPI and relaunch |
 | `/goal`, `/loop` | Set an objective, then iterate autonomously toward it |
 | `/btw` | Ask a side question off the record — it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |

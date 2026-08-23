@@ -1412,8 +1412,14 @@ async def test_boot_failure_posts_error_and_reload_retries() -> None:
 
     app = OperatorApp(flaky_factory)
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        await pilot.pause()
+        for _ in range(40):
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            texts = "\n".join(
+                getattr(getattr(b, "renderable", None), "plain", "") for b in transcript.blocks()
+            )
+            if "provider is down" in texts:
+                break
         # Boot failure surfaces as an error notice + 'session error' status.
         transcript = app.query_one(TranscriptView)
         kinds = [type(b).__name__ for b in transcript.blocks()]
@@ -1430,14 +1436,18 @@ async def test_boot_failure_posts_error_and_reload_retries() -> None:
         # line over an empty screen.
         assert app.query_one(WelcomeView).display is True
         assert app.screen.has_class(BOOT_LAYOUT_CLASS)
-        # /reload re-runs boot and succeeds this time.
+        # /reload now re-execs (exit 75) rather than retrying in-process.
+        # A boot that never constructed still relaunches as a cold start.
         app.query_one(Editor).focus()
         await pilot.pause()
         await pilot.press("slash", "r", "e", "l", "o", "a", "d", "enter")
         await pilot.pause()
         await pilot.pause()
-        assert attempts["n"] == 2
-        assert app._session is session
+        from local_operator.reexec import REEXEC_CODE
+
+        assert app.return_code == REEXEC_CODE
+        assert attempts["n"] == 1
+        assert app._session is None
 
 
 # --- login/logout through the provider controller --------------------------

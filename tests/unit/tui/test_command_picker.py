@@ -829,7 +829,7 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
 @pytest.mark.parametrize(
     "query,expected",
     [
-        ("u", ["usage"]),
+        ("u", ["update", "usage"]),
         ("g", ["goal"]),
         ("s", ["search", "skills"]),
         ("c", ["clear", "context", "compact", "credential"]),

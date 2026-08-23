@@ -401,6 +401,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
     serve_mobile_parser.add_argument("--port", type=int, default=4098)
 
     # Exec command for single execution mode
+    # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
+    # ``main`` into the uv-tool env — opposite audience, never invoked here.
+    update_parser = subparsers.add_parser(
+        "update",
+        help=(
+            "Upgrade this install from PyPI. Not the lop-update script, "
+            "which rebuilds the global runtime from a local git checkout."
+        ),
+        parents=[parent_parser],
+    )
+    update_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Print installed vs PyPI; do not install",
+    )
+
     exec_parser = subparsers.add_parser(
         "exec",
         help="Execute a single command without starting interactive mode",
@@ -2086,6 +2102,12 @@ def main() -> int:
             if invalid is not None:
                 return invalid
             return mcp_command(args)
+        elif args.subcommand == "update":
+            # Lazy: ``update`` imports httpx. ``import local_operator.cli``
+            # must not (``tests/unit/test_import_graph.py``).
+            from local_operator.update import update_command
+
+            return update_command(check=bool(getattr(args, "check", False)))
         elif args.subcommand == "exec":
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
@@ -2350,13 +2372,23 @@ def main() -> int:
                 # which must keep its console output, so the wrapping goes on
                 # this call site rather than inside it.
                 with file_logging():
-                    return asyncio.run(
+                    tui_code = asyncio.run(
                         _run_with_scheduler(
                             tui_entry,
                             session_factory,
                             theme_name,
                         )
                     )
+                # 75: the TUI asked to be replaced after a clean teardown.
+                # ``replace_self`` does not return; a missing plan is a bug.
+                from local_operator.reexec import REEXEC_CODE, replace_self, take_plan
+
+                if tui_code == REEXEC_CODE:
+                    plan = take_plan()
+                    if plan is None:
+                        return 1
+                    replace_self(plan)
+                return tui_code
             finally:
                 try:
                     tui_controller.close()

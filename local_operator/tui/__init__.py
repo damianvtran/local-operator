@@ -55,7 +55,12 @@ async def run_tui(
             # user's scrollback where it can be copied — printing it from inside
             # the app would put it in a frame that is being torn down. In the
             # `finally` so it survives the exit paths as well as the clean one.
-            hint = app.resume_hint()
-            if hint:
-                print(f"\nsession ended — resume with:\n  {hint}\n")
+            from local_operator.reexec import REEXEC_CODE
+
+            # A relaunch is about to replace this process; the hint is for a
+            # human who is staying in the shell.
+            if app.return_code != REEXEC_CODE:
+                hint = app.resume_hint()
+                if hint:
+                    print(f"\nsession ended — resume with:\n  {hint}\n")
         return int(app.return_code or 0)

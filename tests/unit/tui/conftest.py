@@ -27,6 +27,14 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    # The splash starts a one-shot PyPI probe on mount. Unit tests must not
+    # pay a 5 s timeout (or a real GET) for news they are not asserting.
+    # Patch the worker, not ``check_latest``: ``/update`` needs the real
+    # function so its own mocks can drive newer/same/error.
+    monkeypatch.setattr(
+        "local_operator.tui.app.OperatorApp._check_for_update",
+        lambda self: None,
+    )
     # The caret used to be pinned here too: `TextArea.cursor_blink` was patched
     # off for the whole suite because a blinking caret made whether a captured
     # frame contained one a coin flip, and the boot snapshot failed against a
