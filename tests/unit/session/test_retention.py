@@ -311,3 +311,161 @@ def test_a_transcript_is_never_deleted_even_when_a_failure_cascade_hits(tmp_path
 
     assert (real / "transcript.jsonl").read_text() == "x" * 100
     assert result.evicted == 0
+
+
+# --- Claim marker: the startup race and the never-leak counterpart ----------
+#
+# The never-delete model reaps EMPTY directories, but every LIVE session is
+# empty for the instant between its ``mkdir`` and its first append. A claim
+# marker (:func:`claim_session`) is what lets a concurrent startup sweep tell
+# that live-but-empty directory from a dead run's leftover, so it does not
+# delete a session out from under its owner (the original FileNotFoundError
+# kill). The marker is LIVENESS, not content: a dead owner's marker must not
+# make its empty directory immortal, or the module would stop reaping.
+
+
+def test_a_live_claim_protects_an_empty_directory(tmp_path):
+    """The startup window: a directory a live process owns survives the reap
+    even while it holds nothing but the claim marker."""
+    import os
+
+    from local_operator.session.retention import claim_session
+
+    sessions = tmp_path / "sessions"
+    starting = sessions / "starting"
+    # Claim with THIS process's pid, which is provably alive.
+    claim_session(starting, pid=os.getpid())
+    assert (starting / ".session.pid").exists()
+
+    result = sweep_sessions(sessions)
+
+    assert starting.exists()
+    assert result.evicted == 0
+
+
+def test_a_dead_runs_leftover_marker_does_not_make_its_dir_immortal(tmp_path):
+    """A hard-killed session leaves its marker on an otherwise-empty
+    directory. Because the marker is liveness (not content) and its pid is
+    dead, that corpse is reaped — otherwise every crash would leak a directory
+    the sweep could never reclaim."""
+    sessions = tmp_path / "sessions"
+    corpse = sessions / "corpse"
+    corpse.mkdir(parents=True)
+    # A pid that does not belong to any live process.
+    (corpse / ".session.pid").write_text("2147483646")
+
+    result = sweep_sessions(sessions)
+
+    assert not corpse.exists()
+    assert result.evicted == 1
+
+
+def test_a_claim_landing_mid_sweep_is_honoured_before_the_rmtree(tmp_path):
+    """L2: scan and delete are one pass, and the claim is re-checked
+    immediately before each ``rmtree``. A claim written after the loop began
+    but before this directory's deletion must save it — the window a
+    concurrent session's startup claim lands in."""
+    import os
+
+    import local_operator.session.retention as retention
+
+    sessions = tmp_path / "sessions"
+    victim = sessions / "victim"
+    victim.mkdir(parents=True)  # empty, first in line to be reaped
+    other = _session(sessions, "other", size=100)
+
+    # A live session claims ``victim`` while the sweep is busy sizing ``other``.
+    original = retention._dir_size
+
+    def claim_mid_sweep(directory):
+        if directory.name == "other" and not (victim / ".session.pid").exists():
+            retention.claim_session(victim, pid=os.getpid())
+        return original(directory)
+
+    retention._dir_size = claim_mid_sweep
+    try:
+        sweep_sessions(sessions)
+    finally:
+        retention._dir_size = original
+
+    assert victim.exists(), "a claim that landed mid-sweep was ignored"
+    assert (other / "transcript.jsonl").exists()
+
+
+def test_the_liveness_marker_is_not_charged_as_bytes(tmp_path):
+    """The marker must not count toward a directory's size, or a dead run's
+    marker-only directory would read as non-empty and never be reaped."""
+    from local_operator.session.retention import _dir_size
+
+    directory = tmp_path / "sessions" / "sess"
+    directory.mkdir(parents=True)
+    (directory / ".session.pid").write_text("12345")
+
+    assert _dir_size(directory) == 0
+
+
+def test_origin_marker_is_still_charged_as_content(tmp_path):
+    """#154/#192 protect an aborted child stamped with only ``origin.json``.
+    That marker is content, not a sidecar, so it must still count — the claim
+    work does not narrow that protection."""
+    from local_operator.session.retention import _dir_size
+
+    directory = tmp_path / "sessions" / "child"
+    directory.mkdir(parents=True)
+    (directory / "origin.json").write_text('{"origin": "subagent"}')
+
+    assert _dir_size(directory) > 0
+    result = sweep_sessions(tmp_path / "sessions")
+    assert result.evicted == 0
+    assert directory.exists()
+
+
+def test_on_an_unverifiable_platform_a_stale_claim_expires(tmp_path, monkeypatch):
+    """Where liveness cannot be probed (Windows), a claim cannot be trusted
+    forever or a leaked marker would disable the reap one crash at a time. It
+    is bounded by ``CLAIM_TRUST_S`` measured from the later of the marker and
+    the last write. A marker older than the bound on an otherwise-empty
+    directory reads as abandoned and is reaped."""
+    import os
+
+    import local_operator.session.retention as retention
+
+    # Force the unverifiable branch and make every pid look alive, so ONLY the
+    # age bound can decide — this isolates the bound from the pid probe.
+    monkeypatch.setattr(retention, "_PLATFORM", "win32")
+    monkeypatch.setattr(retention, "_LIVENESS_IS_VERIFIABLE", False)
+
+    sessions = tmp_path / "sessions"
+    stale = sessions / "stale"
+    stale.mkdir(parents=True)
+    marker = stale / ".session.pid"
+    marker.write_text("12345")
+    # Age the marker well past the trust window.
+    old = time.time() - retention.CLAIM_TRUST_S - 3600
+    os.utime(marker, (old, old))
+
+    result = sweep_sessions(sessions)
+
+    assert not stale.exists()
+    assert result.evicted == 1
+
+
+def test_on_an_unverifiable_platform_a_fresh_claim_is_kept(tmp_path, monkeypatch):
+    """The counterpart: on the same unverifiable platform a claim written
+    within the trust window protects its empty directory, so a session that
+    just started (resume of an old transcript, marker fresh) is not reaped
+    before it writes its first turn."""
+    import local_operator.session.retention as retention
+
+    monkeypatch.setattr(retention, "_PLATFORM", "win32")
+    monkeypatch.setattr(retention, "_LIVENESS_IS_VERIFIABLE", False)
+
+    sessions = tmp_path / "sessions"
+    fresh = sessions / "fresh"
+    fresh.mkdir(parents=True)
+    (fresh / ".session.pid").write_text("12345")  # written now, inside the window
+
+    result = sweep_sessions(sessions)
+
+    assert fresh.exists()
+    assert result.evicted == 0

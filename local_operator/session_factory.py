@@ -1001,6 +1001,22 @@ async def _prepare(
     yolo = bool(getattr(args, "yolo", False))
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
+
+    from local_operator.session.retention import claim_session, sweep_from_config
+
+    # CLAIM BEFORE creating the directory, and in that order. The claim marker
+    # is what tells every OTHER session's startup sweep that this directory
+    # belongs to a live run; ``claim_session`` creates the directory itself and
+    # writes the marker in one step, so there is no instant at which this
+    # directory exists empty-and-unclaimed for a concurrent sweep to reap. A
+    # plain ``mkdir`` here followed by a later claim would reopen exactly that
+    # window — the FileNotFoundError kill this fix exists to close.
+    #
+    # ``claim_session`` refuses agent directories itself (the gate lives with
+    # the marker, not here), so the explicit ``mkdir`` below is what creates
+    # the directory in the ``--train``/named-agent case, which is deliberately
+    # never claimed and never swept.
+    claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
     # Reap EMPTY session directories left by runs that exited before writing
@@ -1010,8 +1026,6 @@ async def _prepare(
     # explicit user action. Best-effort by construction (see
     # retention.sweep_sessions): cleanup must never be the reason a session
     # fails to start.
-    from local_operator.session.retention import sweep_from_config
-
     sweep_from_config(config_manager, Path(agent_registry.config_dir), transcript_dir)
 
     # Stamp session directories that predate the origin marker, so the

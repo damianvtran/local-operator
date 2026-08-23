@@ -823,6 +823,20 @@ async def _build_child_session(
     session_dir = (
         resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
     )
+    # CLAIM FIRST, before anything else creates the directory. A child writes
+    # its own directory under the same ``sessions/`` store the retention sweep
+    # reclaims, and subagents routinely outlive the sweep another session's
+    # startup runs. ``origin.json`` (written just below) already counts as
+    # content and so protects the directory once it lands — but the claim is
+    # liveness rather than content: it closes the window BEFORE the stamp, and
+    # unlike content it lets the sweep still reclaim the directory of a child
+    # whose process has died. ``claim_session`` creates the directory and
+    # writes the marker in one step, so claiming here leaves no unclaimed-empty
+    # window. The pid is this process's — the process whose death makes the
+    # directory dead.
+    from local_operator.session.retention import claim_session
+
+    claim_session(session_dir)
     # Stamp the directory as the machine's BEFORE the transcript exists, so a
     # picker painted while this child is mid-run already knows what it is. A
     # child's directory is shape-identical to a user conversation, which is how
