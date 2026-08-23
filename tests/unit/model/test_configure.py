@@ -372,6 +372,50 @@ def _anthropic_tier_capped_usage(five_hour_used: float, fable_used: float) -> Us
     )
 
 
+def _anthropic_tier_spent_shared_remains(extra_used: float, shared_used: float) -> UsageReport:
+    """A spent per-tier cap that leaves the account under an ACCOUNT-scope
+    verdict while shared quota still remains.
+
+    ``usage_health`` reads the paid extra-usage window (non-shared, non-tier)
+    as an ACCOUNT-scope binding, so a high ``extra_used`` drives the account to
+    reserve/depleted; but ``shared_tier_saturation`` re-reads the report and
+    still sees the shared 5-hour window with headroom. That is the exact
+    combination that reaches the ``tier_binding and shared_above_reserve``
+    branch inside ``_apply_account_health`` — the "continuing until shared
+    windows are exhausted" notice this test exercises. The spent Fable tier
+    row supplies ``tier_binding``."""
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used=shared_used, limit=100.0, unit="percent"),
+                window="5h",
+                shared=True,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:5h:extra",
+                label="5 hour (extra)",
+                amount=UsageAmount(used=extra_used, limit=100.0, unit="percent"),
+                window="5h",
+                shared=False,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:7d:fable",
+                label="7 day (Fable)",
+                amount=UsageAmount(used=100.0, limit=100.0, unit="percent"),
+                window="7d",
+                shared=False,
+                tier="fable",
+                resets_at_ms=10**15,
+            ),
+        ],
+    )
+
+
 @pytest.mark.asyncio
 async def test_usage_preflight_rotates_accounts_before_providers(tmp_path) -> None:
     store = AuthStore(tmp_path / "auth.db")
@@ -1049,6 +1093,118 @@ async def test_quota_notice_is_deduped_to_one_per_state_transition(tmp_path) -> 
             await boundary()
             await stream.preflight_usage(model)
             assert sum(reserve_line in n for n in notices) == 2
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_tier_spent_shared_remains_notice_is_deduped_across_boundaries(tmp_path) -> None:
+    """The "continuing until shared windows are exhausted" line is announced
+    once, then silent while the condition holds.
+
+    ``_apply_account_health`` reaches this branch when a per-tier cap is spent
+    (Fable at 100%) but the shared window still has headroom. Preflight runs on
+    every message boundary, so before the dedup this notice recurred on every
+    message — the per-boundary spam this PR eliminates. Two same-provider
+    accounts skip the ``not siblings`` guards so the tier-spent branch is the
+    one that fires. Real execution: repeated boundaries, one notice."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def boundary() -> None:
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    tier_spent_line = "continuing until shared windows are exhausted"
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_a, **_k: _anthropic_tier_spent_shared_remains(95.0, 50.0),
+        ):
+            for _ in range(4):
+                await boundary()
+                await stream.preflight_usage(model)
+        # One line on the first boundary, silent on the three that follow.
+        assert sum(tier_spent_line in n for n in notices) == 1
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_distinct_quota_conditions_on_one_selector_do_not_alias(tmp_path) -> None:
+    """Two DIFFERENT quota conditions on the same provider/model each get their
+    own single announcement rather than masking each other.
+
+    The latch is keyed per selector, so before it was widened to a SET of
+    condition tokens a second condition would overwrite the first's remembered
+    state — one wrongly suppressing the other. Here the account first hits the
+    tier-cap-spent-but-shared-remains condition (``tier-spent:``), then, when
+    the shared window itself runs out, the plain account-exhausted condition
+    (``account:``). Both must be heard: distinct conditions, distinct tokens,
+    two lines. Two same-provider accounts skip the ``not siblings`` guards so
+    the tier-spent branch (which sits past them) is reachable, and with no
+    configured cross-provider fallback the exhausted path still lands on the
+    account-scope "no configured fallback" line."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    # A knob the mocked endpoint reads so each boundary presents a different
+    # quota shape: first tier-spent-with-shared-headroom, then shared spent.
+    phase = {"value": "tier-spent"}
+
+    def report_for_phase(*_a, **_k):
+        if phase["value"] == "tier-spent":
+            # Extra window in reserve (account-scope reserve) while the shared
+            # 5-hour window still holds headroom → tier-spent branch.
+            return _anthropic_tier_spent_shared_remains(95.0, 50.0)
+        # Shared 5-hour window itself exhausted → plain account-exhausted.
+        return _anthropic_tier_spent_shared_remains(100.0, 100.0)
+
+    async def boundary() -> None:
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    tier_spent_line = "continuing until shared windows are exhausted"
+    exhausted_line = "no configured fallback is available"
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=report_for_phase):
+            # 1) Tier-spent condition announces once and stays quiet.
+            phase["value"] = "tier-spent"
+            await boundary()
+            await stream.preflight_usage(model)
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(tier_spent_line in n for n in notices) == 1
+
+            # 2) A DIFFERENT condition (shared exhausted) on the same selector
+            #    is announced too — the widened latch keeps the two conditions
+            #    from aliasing on the shared selector key.
+            phase["value"] = "exhausted"
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(exhausted_line in n for n in notices) == 1
+            # The earlier condition's single announcement is untouched.
+            assert sum(tier_spent_line in n for n in notices) == 1
     finally:
         await stream.close()
         store.close()
