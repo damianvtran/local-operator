@@ -77,6 +77,16 @@ The rollup prunes key on the stored day/month strings (newest-N-that-exist),
 not a wall-clock cutoff, so an idle week does not drop a still-recent bucket.
 Best-effort and guarded so a missing table degrades rather than raises.
 
+**Forward-fill, not backfill (review C1).** On the release that ships this, the
+rollup tables are created empty and filled only by calls recorded from that
+point forward; the up-to-90 days of existing `calls` history is deliberately
+**not** rolled up. Re-bucketing stored `ts_ms` would require a `strftime` that
+exactly reproduces the local bucketing `_local_day_month` does, and any
+UTC/local mismatch there would silently misattribute a day's spend — the one
+error this store must never make — while the ledger prune bounds a backfill to
+90 days anyway. So the historical view starts near-empty at ship and fills in
+over the following days/weeks. This is intentional and user-visible.
+
 ### 2.4 Read API (`store.py`)
 
 `daily_series(days=30, *, by_model=False)`, `monthly_series(months=12, *,
@@ -91,14 +101,36 @@ raises; a degraded/empty store returns `[]` / a zeroed period.
 
 ### 2.5 View (`analytics_panel.py`)
 
-`build_report` gains optional `daily`/`monthly`/`metric` params and renders two
-titled horizontal bar charts ("Last N days", "Monthly") between the headline
-Totals and the input-attribution section, reusing `proportion_bar` /
-`_section_header` and column-measured alignment. Each bar's fill is that
-bucket's value / window max. A `t` key on `AnalyticsScreen` toggles the charted
-metric between **cost** (default — the historical view's purpose) and
-**tokens**; a `≥` floor mark prefixes a cost cell whose bucket included an
-unpriceable call (same lower-bound honesty as the aggregate's trailing `+`).
+`build_report` gains optional `daily`/`monthly`/`window_totals`/`metric` params
+and renders two titled horizontal bar charts (a daily "**N days with usage**"
+chart and a "**Monthly**" chart) between the headline Totals and the
+input-attribution section, reusing `proportion_bar` / `_section_header` and
+column-measured alignment. Each bar's fill is that bucket's value / window max.
+
+**Metric + toggle self-description (reviews U1/U2/U4/D5).** A `t` key on
+`AnalyticsScreen` toggles the charted metric between **cost** (default — the
+historical view's purpose) and **tokens**. The active metric is carried in the
+**pinned title** (`Usage analytics … bars: cost`/`bars: tokens`), so `t` gives
+on-screen feedback even when the charts are scrolled off; both chart section
+metas also self-describe (`cost · t → tokens`), so a reader parked on the
+Monthly chart still knows what its bars mean. The daily meta additionally leads
+with the window's grand total from `series_totals` (review C2 — the total and
+the bars describe the same 30-day window).
+
+**Floor mark (reviews D1/D2).** The `≥` mark prefixes a cost cell only when the
+bucket is a **genuine lower bound** — cost mode AND `cost_is_floor` AND
+`cost_is_known` (mixed priced + unpriced calls). A **fully-unpriced** bucket has
+no dollar figure to bound, so it renders a clean `$—` with **no `≥`** (a
+`≥ $—` would be "≥ unknown", a contradiction — the common case for a
+local-model-only run in the default cost view). Because `≥` is the single
+lower-bound signal in the chart, `format_cost`'s redundant trailing `+` is
+stripped from a marked cell (`≥ $0.700`, not `≥ $0.700+`).
+
+**Labels (reviews D3/D4).** The daily title counts DAYS WITH USAGE
+(`daily_series` skips idle days), so it says exactly that — `3 days with usage`,
+singularized to `1 day with usage` — rather than "Last N days", which read as a
+calendar window and misstated sparse usage.
+
 The screen reads the series from the store on open (via the existing
 `_open_analytics_worker`, off the event loop) and re-renders in place on `t` —
 no second store read, since the toggle only changes which number the same data

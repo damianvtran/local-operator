@@ -349,17 +349,59 @@ def _monthly() -> list[UsagePeriod]:
     ]
 
 
+def _fully_unpriced() -> list[UsagePeriod]:
+    # Every bucket has cost_known_calls == 0 → cost_is_known False everywhere.
+    # This is the local-model-only run (D1): cost mode must show clean $— rows
+    # with NO ≥ mark, never the self-contradictory ≥ $—.
+    return [
+        UsagePeriod(
+            period="2026-08-21",
+            model="",
+            context_tokens=900_000,
+            output_tokens=300_000,
+            cost_micro=0,
+            cost_known_calls=0,
+            calls=3,
+        ),
+        UsagePeriod(
+            period="2026-08-22",
+            model="",
+            context_tokens=300_000,
+            output_tokens=100_000,
+            cost_micro=0,
+            cost_known_calls=0,
+            calls=2,
+        ),
+    ]
+
+
 def test_daily_chart_renders_labels_and_bars():
     text = "\n".join(
         line.plain for line in build_report(_agg(), 90, daily=_daily(), monthly=_monthly())
     )
-    # Section headers and human bucket labels appear.
-    assert "Last 3 days" in text
+    # Section headers and human bucket labels appear. The daily title counts
+    # DAYS WITH USAGE, not a calendar window (D3).
+    assert "3 days with usage" in text
     assert "Monthly" in text
     assert "Aug 21" in text
     assert "Jul 2026" in text
     # Bars are drawn.
     assert "█" in text
+
+
+def test_daily_title_singularizes_one_day():
+    # D4: a single-day series reads "1 day with usage", not "1 days".
+    one = [_daily()[0]]
+    text = "\n".join(line.plain for line in build_report(_agg(), 90, daily=one))
+    assert "1 day with usage" in text
+    assert "1 days" not in text
+
+
+def test_monthly_meta_self_describes_metric():
+    # D5/U2: the Monthly section states its metric and the toggle too, so a
+    # reader parked on it is not left guessing $ vs tokens.
+    text = "\n".join(line.plain for line in build_report(_agg(), 90, monthly=_monthly()))
+    assert "by calendar month · cost · t → tokens" in text
 
 
 def test_daily_chart_default_metric_is_cost():
@@ -378,20 +420,67 @@ def test_chart_tokens_metric_shows_token_cells():
     assert "1.2M" in text
 
 
-def test_chart_floor_mark_on_partial_cost_bucket():
-    # Aug 22 mixed priced+unpriced → lower bound (≥ … +); Aug 23 fully unpriced
-    # → ≥ $—. The ≥ mark only appears in cost mode.
-    cost_lines = [
+def test_chart_floor_mark_only_on_mixed_priced_bucket():
+    # D1/D2: Aug 21 fully priced → plain $3.41 (no ≥). Aug 22 mixes priced +
+    # unpriced → a GENUINE lower bound, so ≥ $0.980 — with NO trailing + (the ≥
+    # is the single lower-bound signal). Aug 23 is fully unpriced → clean $—
+    # with NO ≥ (≥ $— would be "≥ unknown").
+    cost_text = "\n".join(
         line.plain for line in build_report(_agg(), 90, daily=_daily(), metric=METRIC_COST)
-    ]
-    cost_text = "\n".join(cost_lines)
-    assert "≥" in cost_text
-    assert "$—" in cost_text  # Aug 23 unpriced
+    )
+    assert "≥ $0.980" in cost_text  # mixed bucket: mark present, no +
+    assert "$0.980+" not in cost_text  # D2: trailing + stripped under the mark
+    assert "$3.41" in cost_text  # fully-priced bucket: no mark
+    assert "$—" in cost_text  # fully-unpriced bucket
+    assert "≥ $—" not in cost_text  # D1: the contradiction must NOT appear
     token_text = "\n".join(
         line.plain for line in build_report(_agg(), 90, daily=_daily(), metric=METRIC_TOKENS)
     )
     # No floor mark in tokens mode: tokens are always known.
     assert "≥" not in token_text
+
+
+def test_fully_unpriced_cost_chart_has_no_floor_mark():
+    # D1 (the MAJOR): the local-model-only default cost view. Every row is $—
+    # over an empty track — and crucially NOT a single ≥ anywhere, which would
+    # be the "≥ unknown" wall the finding called out.
+    cost_text = "\n".join(
+        line.plain for line in build_report(_agg(), 90, daily=_fully_unpriced(), metric=METRIC_COST)
+    )
+    assert "$—" in cost_text
+    assert "≥" not in cost_text
+    # In tokens mode the same buckets show real bars (tokens are known).
+    token_text = "\n".join(
+        line.plain
+        for line in build_report(_agg(), 90, daily=_fully_unpriced(), metric=METRIC_TOKENS)
+    )
+    assert "█" in token_text
+
+
+def test_daily_meta_shows_window_total():
+    # C2: series_totals surfaces as the daily section's window summary, ahead of
+    # the metric clause, in the active metric.
+    wt = UsagePeriod(
+        period="",
+        model="",
+        context_tokens=1_800_000,
+        output_tokens=600_000,
+        cost_micro=4_390_000,
+        cost_known_calls=6,
+        calls=9,
+    )
+    cost_text = "\n".join(
+        line.plain
+        for line in build_report(_agg(), 90, daily=_daily(), window_totals=wt, metric=METRIC_COST)
+    )
+    # $4.39+ (partial) · cost · t → tokens — the window total leads the meta.
+    assert "$4.39+ · cost · t → tokens" in cost_text
+    token_text = "\n".join(
+        line.plain
+        for line in build_report(_agg(), 90, daily=_daily(), window_totals=wt, metric=METRIC_TOKENS)
+    )
+    # In tokens mode the window summary is a token count.
+    assert "2.4M tokens · tokens · t → cost" in token_text
 
 
 def test_chart_empty_series_shows_note_not_bars():
@@ -425,6 +514,34 @@ def test_toggle_key_flips_metric_in_real_app():
             await pilot.pause()
             joined3 = "\n".join(screen.render_lines_for_test())
             assert "cost · t → tokens" in joined3  # flipped back
+
+    asyncio.run(run())
+
+
+def test_pinned_title_carries_active_metric_and_flips():
+    # U1/U4: the pinned title states the active metric so `t` gives visible
+    # feedback even when the charts are scrolled off. It flips with the toggle
+    # and is absent when there are no charts.
+    import asyncio
+
+    async def run():
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(110, 40)) as pilot:
+            screen = await _push(pilot, app, _agg(), daily=_daily(), monthly=_monthly())
+            title0 = screen._title_text().plain
+            assert "bars: cost" in title0
+            await pilot.press("t")
+            await pilot.pause()
+            title1 = screen._title_text().plain
+            assert "bars: tokens" in title1
+            # The actual pinned Static was repainted by the toggle handler, not
+            # just the recomputed text — read what the widget is rendering.
+            assert "bars: tokens" in screen._title.render().plain
+            await pilot.press("escape")
+            await pilot.pause()
+            # No charts → no metric suffix in the title (nothing to toggle).
+            screen2 = await _push(pilot, app, _agg())
+            assert "bars:" not in screen2._title_text().plain
 
     asyncio.run(run())
 

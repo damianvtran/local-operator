@@ -126,6 +126,17 @@ CREATE TABLE IF NOT EXISTS session_names (
 -- counts the priced calls so a bucket that used an unpriceable model renders as
 -- a lower bound rather than a confident understatement. The composite PK is the
 -- ON CONFLICT target the accumulate upsert needs and indexes every range scan.
+--
+-- FORWARD-FILL, not backfill (review C1): on upgrade these tables are created
+-- empty and populated only by calls recorded from that point on. The up-to-90
+-- days of pre-existing ``calls`` history is deliberately NOT rolled up. Two
+-- reasons: (1) re-bucketing stored ``ts_ms`` would need a strftime that exactly
+-- reproduces the LOCAL bucketing ``_local_day_month`` does, and a UTC/local
+-- mismatch there would silently misattribute a day's spend — the one thing this
+-- store must never do; (2) the ledger prune bounds any backfill to 90 days
+-- anyway. So the historical view starts near-empty on the release that ships it
+-- and fills in over the following days/weeks. A user-visible, intentional
+-- trade; see the design doc's "forward-fill" note.
 CREATE TABLE IF NOT EXISTS usage_daily (
   day TEXT NOT NULL,
   model TEXT NOT NULL,

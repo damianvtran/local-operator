@@ -9513,15 +9513,20 @@ class OperatorApp(App[None]):
             # together here (rather than lazily in the screen) keeps every
             # blocking SQLite touch off the event loop, so the overlay never
             # appears and then fills.
-            def _read() -> tuple[Any, list[Any], list[Any]]:
+            def _read() -> tuple[Any, list[Any], list[Any], Any]:
                 store = AnalyticsStore()
+                # ``series_totals`` sums the SAME 30-day daily window the chart
+                # draws (not the raw ledger), so the daily section's meta figure
+                # and its bars describe one span. Read here on the worker thread
+                # with the other blocking SQLite calls.
                 return (
                     store.aggregate(),
                     store.daily_series(30),
                     store.monthly_series(12),
+                    store.series_totals(daily_days=30),
                 )
 
-            aggregate, daily, monthly = await asyncio.to_thread(_read)
+            aggregate, daily, monthly, window_totals = await asyncio.to_thread(_read)
         except Exception as error:  # noqa: BLE001 — a report must never crash the app
             logger.debug("analytics: aggregate failed", exc_info=True)
             self._system_notice(f"analytics unavailable: {error}", "warning")
@@ -9529,7 +9534,9 @@ class OperatorApp(App[None]):
         # ``push_screen`` (not the awaiting variant): the screen dismisses
         # itself on Esc and returns nothing to reconcile, exactly like the
         # other read-only overlays.
-        self.push_screen(AnalyticsScreen(aggregate, daily=daily, monthly=monthly))
+        self.push_screen(
+            AnalyticsScreen(aggregate, daily=daily, monthly=monthly, window_totals=window_totals)
+        )
 
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""
