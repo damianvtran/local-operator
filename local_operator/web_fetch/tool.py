@@ -119,22 +119,66 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _header_line(result_like: dict[str, Any]) -> str:
-    """The single status line that leads a fetch preview.
+# Human-readable reason phrases for the statuses an agent most often hits on a
+# bot-walled or broken page. Not exhaustive — an unlisted code falls back to a
+# generic phrase — but the common blockers (403/429) and misses (404/5xx) get a
+# name so the lead line reads as prose, not just a number.
+_STATUS_REASONS: dict[int, str] = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    408: "Request Timeout",
+    410: "Gone",
+    429: "Too Many Requests",
+    451: "Unavailable For Legal Reasons",
+    500: "Internal Server Error",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+}
 
-    A non-2xx status leads the text so the agent is never misled into treating
-    an error page as content (design §14 case 11). The rendered body still
-    follows, flagged by this line.
+
+def _status_reason(status: int) -> str:
+    """A short reason phrase for ``status`` (``"Forbidden"``), or a class name."""
+    if status in _STATUS_REASONS:
+        return _STATUS_REASONS[status]
+    if 400 <= status < 500:
+        return "Client Error"
+    if 500 <= status < 600:
+        return "Server Error"
+    if 300 <= status < 400:
+        return "Redirect"
+    return "Unexpected Status"
+
+
+def _header_line(result_like: dict[str, Any]) -> str:
+    """The status line that leads a fetch preview.
+
+    A 2xx leads with a compact ``[200] url`` + metadata line. A NON-2xx leads
+    with an UNMISSABLE warning line (F1): live dogfooding showed bot-walled sites
+    (Reddit/TripAdvisor 403s) whose block-page body rendered as if it were the
+    requested content, and a benign ``[HTTP 403]`` lead was too easy for an agent
+    to skim past. The warning states plainly that this is an error/block page, not
+    the page content, so the agent's own judgement has a reliable signal. The
+    rendered body still follows (it can carry a useful message) but the lead makes
+    clear it is the error RESPONSE body, never the requested content.
     """
-    status = result_like["status"]
+    status = int(result_like["status"])
     final = result_like["final_url"]
     ctype = result_like["content_type"]
     method = result_like["render_method"]
     cache = result_like["cache"]
-    lead = f"[{status}] {final}" if 200 <= status < 300 else f"[HTTP {status}] {final}"
     tail = f"{method} · {ctype} · cache {cache}"
-    quality = " · sparse/JS-gated (try `browser`)" if result_like.get("low_quality") else ""
-    return f"{lead}\n{tail}{quality}"
+    if 200 <= status < 300:
+        quality = " · sparse/JS-gated (try `browser`)" if result_like.get("low_quality") else ""
+        return f"[{status}] {final}\n{tail}{quality}"
+    warn = (
+        f"⚠ HTTP {status} {_status_reason(status)} — this is an error/block page, "
+        f"not page content. {final}"
+    )
+    return f"{warn}\n{tail}\n(The body below is the error response, not the requested page.)"
 
 
 def _shape_from_content(
@@ -208,6 +252,10 @@ def _cache_hit_result(
     if read is None:
         return None
     content = "\n".join(read[0])
+    # Only 2xx responses are ever cached (M4), so a cache hit is always a
+    # success — but carry the explicit ok/http_error flags anyway so the card
+    # branches identically on cached and fresh results.
+    http_ok = 200 <= entry.status < 300
     result_like = {
         "url": entry.url,
         "final_url": entry.final_url,
@@ -218,6 +266,8 @@ def _cache_hit_result(
         "complete": entry.complete,
         "low_quality": entry.low_quality,
         "cache": "hit",
+        "ok": http_ok,
+        "http_error": not http_ok,
     }
     preview, details, _handle = _shape_from_content(result_like, content, tool_name, context)
     return preview, details
@@ -314,6 +364,11 @@ async def run_fetch(
     except Exception as error:  # pragma: no cover - defensive; unexpected transport bug
         return f"web_fetch failed for {normalized!r}: {error}", {"url": normalized}, True
 
+    # ``ok``/``http_error`` are the explicit success booleans the card and any
+    # downstream logic branch on without re-parsing the status int (F1). ``ok`` is
+    # the friendly form; ``http_error`` is its negation, both carried so a reader
+    # can use whichever reads better at the call site.
+    http_ok = 200 <= result.status < 300
     result_like: dict[str, Any] = {
         "url": result.url,
         "final_url": result.final_url,
@@ -324,6 +379,8 @@ async def run_fetch(
         "complete": result.complete,
         "low_quality": result.low_quality,
         "cache": "miss",
+        "ok": http_ok,
+        "http_error": not http_ok,
     }
     preview, details, handle = _shape_from_content(result_like, result.content, tool_name, context)
 
@@ -336,7 +393,7 @@ async def run_fetch(
     # cheap and the bytes were never stored), and a store write that failed
     # leaves ``handle`` None — skip caching rather than store a pointer to
     # nothing, which is exactly the dead-handle case test 9 guards against.
-    cacheable = 200 <= result.status < 300 and result.render_method != "binary"
+    cacheable = http_ok and result.render_method != "binary"
     if handle and settings.cache_ttl_seconds > 0 and cacheable:
         write_cache_entry(
             CacheEntry(
@@ -352,7 +409,12 @@ async def run_fetch(
             ),
             variant,
         )
-    return preview, details, False
+    # F1: a non-2xx fetch returns as an ERROR result so it is structurally
+    # distinct from a successful one — the model sees is_error and the card
+    # renders the error treatment, closing the "block page read as content" gap
+    # M4 only addressed for caching. The body still rides along (it can carry a
+    # useful message) but is never presented as the requested page.
+    return preview, details, not http_ok
 
 
 async def execute_web_fetch(

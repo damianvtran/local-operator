@@ -528,6 +528,44 @@ def test_read_file_card_not_treated_as_fetch() -> None:
     assert "file line one" in content
 
 
+def test_web_fetch_non_2xx_renders_error_treatment() -> None:
+    """F1: a non-2xx fetch card leads with a prominent ⚠ error row (danger ink)
+    and does not present the block-page body as normal content. The duplicated
+    model-facing header (lead + meta + note) is stripped, leaving one error row."""
+    card = ToolCard("t", "web_fetch", {"url": "https://walled.example/x"})
+    card.mark_done(
+        "⚠ HTTP 403 Forbidden — this is an error/block page, not page content. "
+        "https://walled.example/x\n"
+        "markdownify · text/html · cache miss\n"
+        "(The body below is the error response, not the requested page.)\n\n"
+        "Please enable JS and disable any ad blocker.",
+        {
+            "url": "https://walled.example/x",
+            "final_url": "https://walled.example/x",
+            "status": 403,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 200,
+            "lines": 1,
+            "ok": False,
+            "http_error": True,
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    # The prominent error row is present, exactly once.
+    assert content.count("⚠ HTTP 403 Forbidden") == 1
+    assert "error/block page, not page content" in content
+    # The duplicated model-facing header block is stripped from the body.
+    assert "(The body below is the error response" not in content
+    # The block-page body still shows, but under the error row, not as the lead.
+    assert "enable JS" in content
+    # The error row is painted in the danger colour (strongest treatment).
+    danger = theme_mod.semantic_color("danger")
+    assert _style_at(card._build_content(120), "⚠ HTTP 403").color == Color.parse(danger)
+
+
 def test_web_fetch_low_quality_note_surfaced_once() -> None:
     """The low-quality advisory appears, and (D4) only ONCE: the model-facing
     header carried a second `· sparse/JS-gated` copy that D1's header strip

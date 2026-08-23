@@ -565,7 +565,19 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         fetched += f"  (final: {final})"
     if meta:
         fetched += f"  ·  {meta}"
-    rows = [fetched]
+    rows: list[str] = []
+    # F1: a non-2xx leads with a prominent error row (painted in the danger
+    # treatment by the body painter) so a block/error page is visually distinct
+    # from successful content — the card equivalent of the tool result's
+    # is_error flag. The ``http_error`` boolean is authoritative; fall back to
+    # the status int for older cached shapes without the flag.
+    http_error = details.get("http_error")
+    if http_error is None and isinstance(status, int):
+        http_error = not (200 <= status < 300)
+    if http_error and isinstance(status, int):
+        reason = _HTTP_REASONS.get(status, "Error")
+        rows.append(f"⚠ HTTP {status} {reason} — error/block page, not page content.")
+    rows.append(fetched)
 
     render_bits = " · ".join(
         part
@@ -585,14 +597,39 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
     return rows
 
 
-#: Matches the model-facing preview header's lead line: ``[200] https://…`` or
-#: ``[HTTP 503] https://…`` (built by ``web_fetch/tool.py::_header_line``). Used
-#: to strip that block from the CARD body since the structured rows carry it (D1).
-_FETCH_HEADER_LEAD_RE = re.compile(r"^\[(?:HTTP )?\d{3}\] \S")
-#: The header's second line: ``method · ctype · cache …`` (a ``·``-joined meta
+#: Short reason phrases for the statuses a fetch card most often shows, kept in
+#: sync with ``web_fetch/tool.py::_STATUS_REASONS`` so the card's error row reads
+#: the same as the model-facing lead. A code not listed falls back to "Error".
+_HTTP_REASONS: dict[int, str] = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    408: "Request Timeout",
+    410: "Gone",
+    429: "Too Many Requests",
+    451: "Unavailable For Legal Reasons",
+    500: "Internal Server Error",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+}
+
+#: Matches the model-facing preview header's lead line for BOTH the 2xx compact
+#: form (``[200] https://…``) and the non-2xx warning form
+#: (``⚠ HTTP 403 Forbidden — … https://…``), built by
+#: ``web_fetch/tool.py::_header_line``. Used to strip that block from the CARD
+#: body since the structured rows carry it (D1).
+_FETCH_HEADER_LEAD_RE = re.compile(r"^(?:\[(?:HTTP )?\d{3}\] \S|⚠ HTTP \d{3}\b)")
+#: The header's metadata line: ``method · ctype · cache …`` (a ``·``-joined meta
 #: line). Recognised structurally so a change to the field set does not silently
 #: reintroduce the duplication.
 _FETCH_HEADER_META_RE = re.compile(r"^\S.* · .*cache ")
+#: The non-2xx header's third line — the parenthetical that labels the body as
+#: the error response. Stripped from the card body alongside the lead/meta lines
+#: (the structured error row already carries the "not page content" message).
+_FETCH_HEADER_NOTE_RE = re.compile(r"^\(The body below is the error response")
 
 
 def _humanize_bytes(count: int) -> str:
@@ -613,19 +650,24 @@ def _humanize_bytes(count: int) -> str:
 def _strip_fetch_header(lines: list[str]) -> list[str]:
     """Drop the model-facing header block from a fetch card body (D1).
 
-    The preview text the model sees leads with ``[status] url`` then a
-    ``method · ctype · cache`` line (see ``web_fetch/tool.py::_header_line``). The
-    card's structured ``Fetched:/Rendered:`` rows already carry those exact
-    fields, so painting the preview verbatim doubled them. This removes that
-    leading block — and only that block — leaving the real content. Defensive: if
-    the body does not start with the recognised header (a future shape change, a
-    binary notice), nothing is stripped and the body is returned unchanged.
+    The preview text the model sees leads with ``[status] url`` (or, for a
+    non-2xx, ``⚠ HTTP … — … url``) then a ``method · ctype · cache`` line, and —
+    for a non-2xx — a third ``(The body below is the error response…)`` note (see
+    ``web_fetch/tool.py::_header_line``). The card's structured
+    ``Fetched:/Rendered:`` rows and its own error row already carry those fields,
+    so painting the preview verbatim doubled them. This removes that leading
+    block — and only that block — leaving the real content. Defensive: if the body
+    does not start with the recognised header (a future shape change, a binary
+    notice), nothing is stripped and the body is returned unchanged.
     """
     if not lines or not _FETCH_HEADER_LEAD_RE.match(lines[0]):
         return lines
     start = 1
     # The meta line immediately follows the lead line; strip it only when present.
     if start < len(lines) and _FETCH_HEADER_META_RE.match(lines[start]):
+        start += 1
+    # The non-2xx header carries a third note line; strip it too when present.
+    if start < len(lines) and _FETCH_HEADER_NOTE_RE.match(lines[start]):
         start += 1
     # Collapse a single blank separator the header left behind so the body does
     # not open with an empty row under the structured rows.
@@ -1745,19 +1787,25 @@ class ToolCard(ExpandableActionBlock):
         signal = Style(color=theme_mod.semantic_color("signal"))
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
+        danger = Style(color=theme_mod.semantic_color("danger"), bold=True)
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         shown = self._output[:EXPAND_MAX_LINES]
         for line in shown:
             stripped = line.strip()
-            if stripped.startswith("Fetched:"):
+            if stripped.startswith("⚠ HTTP"):
+                # F1: the non-2xx error row rides `danger`, bold — the strongest
+                # treatment on the card, so a block/error page cannot be mistaken
+                # for successful content. Matches the tool result's is_error flag.
+                ink = danger
+            elif stripped.startswith("Fetched:"):
                 # D3: the final URL is the card's anchor, so it rides `signal`
                 # blue like web_search's URLs instead of receding into the dim
                 # metadata. The "Fetched:" label and the trailing `· status ·
                 # ctype · cache` metadata stay dim; only the URL(s) lift.
                 self._append_fetched_row(row, line, line_width, indent, dim, signal)
                 continue
-            if stripped.startswith("Rendered:"):
+            elif stripped.startswith("Rendered:"):
                 ink = dim
             elif stripped.startswith("sparse/JS-gated"):
                 # The one advisory row earns attention: it is the signal to reach

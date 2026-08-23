@@ -87,6 +87,39 @@ async def test_read_url_real_engine_end_to_end(
 
 
 @pytest.mark.asyncio
+async def test_read_url_non_2xx_is_error_and_keeps_details(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: ``read <url>`` of a 403 comes back is_error=True AND keeps the fetch
+    details (final_url/status/http_error) so the card can render the error
+    treatment — the sugar's error path must not drop the structured payload."""
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            403, text="<html><body>Forbidden</body></html>", headers={"content-type": "text/html"}
+        )
+    )
+    orig = tool.run_fetch
+
+    async def _run_with_transport(url: str, **kwargs):
+        kwargs.setdefault("transport", transport)
+        return await orig(url, **kwargs)
+
+    monkeypatch.setattr(tool, "run_fetch", _run_with_transport)
+    monkeypatch.setattr(
+        service,
+        "DEFAULT_WEB_FETCH_CONFIG",
+        {**service.DEFAULT_WEB_FETCH_CONFIG, "enrich": False},
+    )
+    result = await execute_read("t1", {"path": "https://walled.example/x"}, None, None, context)
+    assert result.is_error is True
+    assert result.text.startswith("⚠ HTTP 403 Forbidden")
+    # Details survive on the error result so the card renders the error treatment.
+    assert result.details is not None
+    assert result.details["http_error"] is True
+    assert result.details["status"] == 403
+
+
+@pytest.mark.asyncio
 async def test_read_file_still_works(context: ToolContext, tmp_path) -> None:
     """Regression guard: a plain file read is unaffected by the URL branch."""
     target = tmp_path / "note.txt"

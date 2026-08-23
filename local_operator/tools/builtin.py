@@ -2190,9 +2190,18 @@ async def execute_read(
         preview, details, is_error = await run_fetch(
             target, tool_name="read", context=context, signal=signal
         )
-        if is_error:
-            return _error(tool_call_id, "read", preview)
-        return _text(tool_call_id, "read", preview, details=details)
+        # A non-2xx fetch comes back is_error=True (F1). Carry ``details`` on the
+        # error result too — unlike a plain read error, a fetch error still has a
+        # final URL/status/http_error flag the card renders in its error
+        # treatment, so the error path must not drop the structured payload the
+        # success path keeps.
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="read",
+            content=[TextContent(text=preview)],
+            details=details,
+            is_error=is_error,
+        )
 
     # Internal URLs (skill://...) go through the session-installed resolver.
     if "://" in target and not target.startswith(("http://", "https://", "file://")):

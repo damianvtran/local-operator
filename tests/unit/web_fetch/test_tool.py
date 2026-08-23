@@ -198,16 +198,24 @@ async def test_raw_and_rendered_do_not_share_cache_entry(context: ToolContext) -
 
 @pytest.mark.asyncio
 async def test_non_2xx_not_cached_and_retried(context: ToolContext) -> None:
-    """M4: a 503 is returned to the caller but NOT cached, so the next request
-    re-hits the network instead of replaying the outage for the full TTL."""
+    """M4 + F1: a 503 is returned to the caller as an ERROR but NOT cached, so the
+    next request re-hits the network instead of replaying the outage for the full
+    TTL. The two paths (not-cached and not-successful-content) agree."""
     transport = _CountingTransport(
         lambda req: httpx.Response(503, text="<html><body>Service Unavailable</body></html>")
     )
-    _p1, d1, _e = await run_fetch(
+    p1, d1, e1 = await run_fetch(
         "https://example.com/down", tool_name="web_fetch", context=context, transport=transport
     )
     assert d1["status"] == 503
     assert d1["cache"] == "miss"
+    # F1: structurally an error, with the explicit flags the card branches on.
+    assert e1 is True
+    assert d1["http_error"] is True
+    assert d1["ok"] is False
+    # F1: the preview LEADS with the unmissable warning, not a benign status line.
+    assert p1.startswith("⚠ HTTP 503 Service Unavailable")
+    assert "not page content" in p1
     calls_after_first = transport.calls
 
     _p2, d2, _e = await run_fetch(
@@ -216,6 +224,67 @@ async def test_non_2xx_not_cached_and_retried(context: ToolContext) -> None:
     # Not served from cache: the network was hit again (a retry could now succeed).
     assert d2["cache"] == "miss"
     assert transport.calls > calls_after_first
+
+
+@pytest.mark.parametrize("status,reason", [(403, "Forbidden"), (404, "Not Found")])
+@pytest.mark.asyncio
+async def test_non_2xx_surfaced_as_error_not_content(
+    context: ToolContext, status: int, reason: str
+) -> None:
+    """F1: a bot-block (403) or miss (404) returns is_error=True, leads with the
+    prominent status line, and is NOT cached — so an agent doing research cannot
+    mistake a block/error page for the requested content."""
+    block_body = (
+        "<html><body>Please enable JS and disable any ad blocker to continue.</body></html>"
+    )
+    transport = _CountingTransport(
+        lambda req: httpx.Response(status, text=block_body, headers={"content-type": "text/html"})
+    )
+    preview, details, is_error = await run_fetch(
+        "https://walled.example/page",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+    )
+    # (a) structurally an error with explicit flags
+    assert is_error is True
+    assert details["http_error"] is True
+    assert details["ok"] is False
+    assert details["status"] == status
+    # (b) leads with the prominent, unmissable status line
+    assert preview.startswith(f"⚠ HTTP {status} {reason}")
+    assert "error/block page, not page content" in preview
+    assert "The body below is the error response" in preview
+    # (c) not cached: a second fetch hits the network again
+    calls = transport.calls
+    _p2, d2, _e2 = await run_fetch(
+        "https://walled.example/page",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+    )
+    assert d2["cache"] == "miss"
+    assert transport.calls > calls
+
+
+@pytest.mark.asyncio
+async def test_2xx_is_not_flagged_as_error(context: ToolContext) -> None:
+    """F1 boundary: a normal 200 keeps ok=True/http_error=False and is_error
+    False — the honest-failure signal must not fire on success."""
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            200,
+            text="<html><body><h1>Real</h1><p>Genuine page content here.</p></body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    preview, details, is_error = await run_fetch(
+        "https://ok.example/", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert is_error is False
+    assert details["ok"] is True
+    assert details["http_error"] is False
+    assert not preview.startswith("⚠")
 
 
 @pytest.mark.asyncio
