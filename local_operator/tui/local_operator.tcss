@@ -150,8 +150,32 @@ TranscriptView {
      * border a borderless design must not have. `edge` keeps it structurally
      * present; hover still lights it to `dim`. */
     scrollbar-color: $lo-edge;
-    scrollbar-color-hover: $lo-muted;
+    /* Rest -> hover -> grabbed is a two-step neutral escalation, no accent.
+     * `dim` for hover, not the old `muted`: `muted` is near-text brightness, a
+     * large jump that read louder than a *grabbed* bar should — hover brighter
+     * than the held state is backwards. `dim` hover -> `muted` grabbed is a
+     * clear, monotone rest<hover<grabbed ramp on the 1-cell thumb.
+     *
+     * The architect proposed `$lo-accent` (the one green) for grabbed; design
+     * review (round 1, D1) REJECTED it and settled on neutral `$lo-muted`. Line
+     * ~367 reserves the accent for "a turn is live" and nothing else, and a
+     * green thumb on a passive scroll gesture would fire that live-activity
+     * signal falsely and paint the highest-chroma colour on the reserved gutter
+     * (the "saturated column reads as a right border" failure D4 forbids). Keep
+     * this ramp neutral. */
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
 }
+
+/* Layer B (the open-hand hover cursor) is NOT declared here. A
+ * `TranscriptView > ScrollBar { pointer: grab; }` rule matches the selector but
+ * is dead at runtime: system scrollbars are styled through Textual's shared
+ * style-cache branch (`Stylesheet.update_nodes`), which never delivers this
+ * rule to the widget — the computed `pointer` stays `default` through compose,
+ * scroll and resize (verified in review round 1, M1). The pointer is instead
+ * set as an INLINE style in `TranscriptView.on_mount`, which bypasses that
+ * cache; see the comment there. The drawn colour ramp above is the real,
+ * everywhere-visible affordance regardless. */
 
 /* Blocks: zero outer margin, zero padding — no declarations here by design
  * (the minimalism defense asserts their absence; anything uniform here would
