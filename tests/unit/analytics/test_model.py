@@ -262,6 +262,33 @@ def test_aggregate_generation_never_negative():
     assert agg.generation_tokens == 0
 
 
+def test_fresh_tokens_independent_of_provider_input_shape():
+    # Anthropic: input already excludes cache, so fresh == input.
+    anthropic = UsageAggregate(
+        input_tokens=5_000,
+        cache_read_tokens=90_000,
+        cache_write_tokens=5_000,
+        context_tokens=100_000,
+    )
+    assert anthropic.fresh_tokens == 5_000
+    # OpenAI: input already includes cache, so fresh is the remainder.
+    openai = UsageAggregate(
+        input_tokens=100_000,
+        cache_read_tokens=80_000,
+        cache_write_tokens=0,
+        context_tokens=100_000,
+    )
+    assert openai.fresh_tokens == 20_000
+    # Never negative even if a provider over-reports cache against context.
+    over = UsageAggregate(
+        input_tokens=10,
+        cache_read_tokens=80,
+        cache_write_tokens=30,
+        context_tokens=100,
+    )
+    assert over.fresh_tokens == 0
+
+
 def test_callsnapshot_is_frozen_scalars():
     # The snapshot is handed to a background thread; it must be a plain value.
     snap = CallSnapshot(

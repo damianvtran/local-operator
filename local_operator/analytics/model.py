@@ -49,9 +49,11 @@ from typing import Any, Mapping
 #: region and splitting them further would be a guess. ``system_prompt`` is the
 #: packaged persona plus repo guidance (AGENTS.md/CLAUDE.md), which share block
 #: 0's stable head with the persona and carry no wire delimiter of their own.
-#: ``images`` is APPENDED, never inserted, so every existing ``c_*`` rollup
-#: column keeps its position — a stored DB indexes these by ordinal, so a mid-
-#: list insert would silently re-map old columns onto the wrong component.
+#: ``images`` is APPENDED, never inserted, so the CREATE TABLE / docs /
+#: ``_COMPONENT_COLUMNS`` order stays a stable contract. Inserts and the
+#: aggregate SELECT address named ``c_*`` columns, so a mid-list insert would
+#: not silently remap an existing DB — appending is still right, just not
+#: for the ordinal-remap reason an earlier comment claimed.
 COMPONENT_KEYS: tuple[str, ...] = (
     "system_prompt",
     "custom_instructions",
@@ -397,6 +399,20 @@ class UsageAggregate:
         not a zero-token turn, but it is the only number we can stand behind.
         """
         return self.context_tokens + self.output_tokens
+
+    @property
+    def fresh_tokens(self) -> int:
+        """Uncached input tokens, independent of how the provider reports input.
+
+        Providers disagree on whether ``input_tokens`` already includes cache:
+        Anthropic reports input EXCLUDING cache (so ``input == context - read
+        - write``), while OpenAI-shaped usage folds cache into input (so
+        ``context == input`` and a naive Fresh=input would show the FULL
+        context). Subtracting cache from the normalised ``context_tokens`` is
+        the one definition that is the uncached slice on every provider, and
+        it is linear so computing it on the aggregate equals summing per-call.
+        """
+        return max(0, self.context_tokens - self.cache_read_tokens - self.cache_write_tokens)
 
     @property
     def cache_hit_rate(self) -> float | None:

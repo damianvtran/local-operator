@@ -247,6 +247,78 @@ def test_thinking_generation_split_shown():
     assert "generation" in text and "thinking" in text
 
 
+def test_fresh_is_uncached_slice_on_openai_shaped_usage():
+    # OpenAI-shaped: cache is already folded into input, so context == input.
+    # Fresh must be context − cache_read − cache_write (20k), NOT input (100k).
+    agg = UsageAggregate(
+        calls=10,
+        ok_calls=10,
+        input_tokens=100_000,
+        output_tokens=5_000,
+        cache_read_tokens=80_000,
+        cache_write_tokens=0,
+        context_tokens=100_000,
+        cost_micro=1_000_000,
+        cost_known_calls=10,
+    )
+    assert agg.fresh_tokens == 20_000
+    text = _text(agg)
+    assert "20k" in text
+    # The Fresh row itself must not show the full 100k as its value.
+    fresh_line = next(line for line in text.splitlines() if "Fresh (uncached)" in line)
+    assert "20k" in fresh_line
+    assert "100k" not in fresh_line
+    # The three children partition Context read (20k + 80k + 0 == 100k).
+    assert agg.fresh_tokens + agg.cache_read_tokens + agg.cache_write_tokens == (agg.context_tokens)
+    context_line = next(line for line in text.splitlines() if "Context read" in line)
+    assert "20k fresh" in context_line
+    assert "80k cached" in context_line
+    assert "0 written" in context_line
+
+
+def test_fresh_equals_input_on_anthropic_shaped_usage():
+    # Anthropic: context = input + cache_read + cache_write, so fresh == input.
+    # The shared ``_agg()`` fixture is close but does not partition (500k + 3M
+    # + 80k ≠ 3.5M), so this case is built to actually sum.
+    agg = UsageAggregate(
+        calls=100,
+        ok_calls=100,
+        input_tokens=387_000,
+        output_tokens=210_000,
+        cache_read_tokens=3_000_000,
+        cache_write_tokens=113_000,
+        context_tokens=3_500_000,
+        cost_micro=1_000_000,
+        cost_known_calls=100,
+    )
+    assert agg.fresh_tokens == agg.input_tokens == 387_000
+    assert agg.fresh_tokens + agg.cache_read_tokens + agg.cache_write_tokens == agg.context_tokens
+    text = _text(agg)
+    fresh_line = next(line for line in text.splitlines() if "Fresh (uncached)" in line)
+    assert "387k" in fresh_line
+    context_line = next(line for line in text.splitlines() if "Context read" in line)
+    assert "387k fresh" in context_line
+    assert "3M cached" in context_line
+    assert "113k written" in context_line
+
+
+def test_totals_value_cells_share_a_note_gutter():
+    # D2: a short value (``3M``) must not pull its note left of a longer
+    # sibling (``387k`` / ``500k``). Notes share one column after the pad.
+    text = _text(_agg())
+    rows = [
+        next(line for line in text.splitlines() if needle in line)
+        for needle in ("Fresh (uncached)", "Cache read", "Cache write")
+    ]
+    notes = (
+        "new input, billed at full rate",
+        "input served from cache",
+        "new input written to cache",
+    )
+    starts = [row.index(note) for row, note in zip(rows, notes)]
+    assert len(set(starts)) == 1, rows
+
+
 async def _push(pilot, app, agg, *, daily=None, monthly=None):
     await pilot.pause()
     screen = AnalyticsScreen(agg, daily=daily, monthly=monthly)

@@ -267,8 +267,14 @@ def test_recording_degrades_when_component_column_absent(tmp_path):
 
     store = AnalyticsStore(db)
     store._connect()  # runs the migration, which would normally add c_images
-    # Force the degraded path: pretend the c_images ALTER failed. Rebuild the
-    # insert plan from the narrowed set, exactly as _migrate would on a failure.
+    # Drop the column the migration just added so the insert actually hits a
+    # table that lacks it. Flipping ``_present_optional`` alone left the
+    # column in place, so a broken insert plan that still named ``c_images``
+    # would still return record_batch == 1.
+    conn = store._connect()
+    assert conn is not None
+    conn.execute("ALTER TABLE calls DROP COLUMN c_images")
+    conn.commit()
     from local_operator.analytics.store import _OPTIONAL_COLUMN_NAMES
 
     store._present_optional = _OPTIONAL_COLUMN_NAMES - {"c_images"}
@@ -312,10 +318,15 @@ def test_recording_degrades_when_cost_columns_absent(tmp_path):
 
     store = AnalyticsStore(db)
     store._connect()  # runs the migration, which will add the columns
-    # Force the Option A degraded path: pretend the cost ALTERs failed. Rebuild
-    # the insert plan from the narrowed set so the write drops cost columns
-    # rather than referencing them (the old `_has_cost` flag only steers the
-    # aggregate's 0-substitute now).
+    # Drop the cost columns the migration just added so the insert actually
+    # hits a table that lacks them. Flipping ``_has_cost`` / ``_present_optional``
+    # alone left the columns in place, so a broken insert plan that still
+    # named them would still return record_batch == 1.
+    conn = store._connect()
+    assert conn is not None
+    conn.execute("ALTER TABLE calls DROP COLUMN cost_micro")
+    conn.execute("ALTER TABLE calls DROP COLUMN cost_known")
+    conn.commit()
     from local_operator.analytics.store import _OPTIONAL_COLUMN_NAMES
 
     store._has_cost = False
