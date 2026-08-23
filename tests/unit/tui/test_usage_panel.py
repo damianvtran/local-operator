@@ -22,7 +22,9 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
+    PANEL_MAX_WIDTH,
     PANEL_PADDING_ROWS,
+    PANEL_WIDTH_MARGIN,
     UsagePanel,
     binding_limit,
     build_usage_body,
@@ -1424,3 +1426,17 @@ async def test_the_title_row_truncates_instead_of_wrapping() -> None:
         )
         title = panel._compose_rows()[0]
         assert cell_len(title.plain) <= panel.panel_width(), title.plain
+
+
+@pytest.mark.asyncio
+async def test_panel_width_caps_on_a_laptop_and_holds_on_eighty_cols() -> None:
+    """Extra terminal width used to be thrown away at 76, so a laptop /usage
+    card sat as a skinny column with short bars. The cap is a measure (104),
+    not a fraction: 80-col stays ``80 - margin``, a 140-col laptop grows to
+    the cap rather than filling the sheet."""
+    async with _panel_app(size=(80, 24)) as panel:
+        assert panel.panel_width() == 80 - PANEL_WIDTH_MARGIN
+        assert panel.panel_width() == 76
+    async with _panel_app(size=(140, 34)) as panel:
+        assert panel.panel_width() == PANEL_MAX_WIDTH
+        assert panel.panel_width() == 104

@@ -49,7 +49,7 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 #: without losing information — a percentage is exact and a countdown is words —
 #: so it is what absorbs a small terminal, down to the floor where a bar stops
 #: being readable as a proportion at all and is dropped entirely.
-BAR_MAX_CELLS = 24
+BAR_MAX_CELLS = 40
 BAR_MIN_CELLS = 8
 
 #: Filled / empty cells, and the glyph for a window that reported no number.
@@ -102,10 +102,13 @@ SCROLLBAR_GRAB_PAD = 2
 SCROLLBAR_TRACK = "│"
 SCROLLBAR_THUMB = "█"
 
-#: Panel geometry. The width cap is a measure, not a fraction of the terminal:
-#: a label, a bar and two numbers need about seventy cells and gain nothing from
-#: two hundred. The width margin keeps the card off the screen's edge padding.
-PANEL_MAX_WIDTH = 76
+#: Panel geometry. The width cap is a measure, not a fraction of the terminal.
+#: Seventy cells was enough for one provider and one identity; four Anthropic
+#: logins plus long notes (``extra usage disabled — out of credits``, ``usage
+#: unavailable — last known 40m ago``) and ``7 day (Fable)`` labels need more
+#: air on a laptop, but a 200-col sheet still reads as a wall. 104 is the
+#: laptop measure. The width margin keeps the card off the screen's edge padding.
+PANEL_MAX_WIDTH = 104
 PANEL_MIN_WIDTH = 32
 PANEL_WIDTH_MARGIN = 4
 
