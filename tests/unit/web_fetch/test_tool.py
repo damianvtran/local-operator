@@ -155,6 +155,70 @@ async def test_cache_miss_when_spill_evicted(context: ToolContext) -> None:
 
 
 @pytest.mark.asyncio
+async def test_raw_and_rendered_do_not_share_cache_entry(context: ToolContext) -> None:
+    """M3: a raw fetch and a rendered fetch of the SAME URL must not collide in
+    the cache. The raw call stores verbatim source; the later rendered call must
+    NOT get that raw HTML from cache — it renders to markdown."""
+    html = "<html><body><h1>Heading</h1><p>Body paragraph with real content.</p></body></html>"
+    transport = _CountingTransport(
+        lambda req: httpx.Response(200, text=html, headers={"content-type": "text/html"})
+    )
+    # raw=True stores the verbatim source under a raw-keyed entry.
+    p_raw, d_raw, _e = await run_fetch(
+        "https://example.com/p",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+        raw=True,
+    )
+    assert "<html>" in p_raw  # verbatim source
+    assert d_raw["render_method"] == "text"
+
+    # raw=False for the same URL must NOT hit the raw entry: it renders markdown.
+    p_rendered, d_rendered, _e = await run_fetch(
+        "https://example.com/p",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+    )
+    assert d_rendered["cache"] == "miss"  # different variant → no collision
+    assert d_rendered["render_method"] == "markdownify"
+    assert "# Heading" in p_rendered
+    assert "<html>" not in p_rendered
+
+    # And a second rendered fetch DOES hit the rendered entry (variant is stable).
+    _p3, d3, _e = await run_fetch(
+        "https://example.com/p",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+    )
+    assert d3["cache"] == "hit"
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_not_cached_and_retried(context: ToolContext) -> None:
+    """M4: a 503 is returned to the caller but NOT cached, so the next request
+    re-hits the network instead of replaying the outage for the full TTL."""
+    transport = _CountingTransport(
+        lambda req: httpx.Response(503, text="<html><body>Service Unavailable</body></html>")
+    )
+    _p1, d1, _e = await run_fetch(
+        "https://example.com/down", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert d1["status"] == 503
+    assert d1["cache"] == "miss"
+    calls_after_first = transport.calls
+
+    _p2, d2, _e = await run_fetch(
+        "https://example.com/down", tool_name="web_fetch", context=context, transport=transport
+    )
+    # Not served from cache: the network was hit again (a retry could now succeed).
+    assert d2["cache"] == "miss"
+    assert transport.calls > calls_after_first
+
+
+@pytest.mark.asyncio
 async def test_json_body_pretty_printed(context: ToolContext) -> None:
     transport = httpx.MockTransport(
         lambda req: httpx.Response(
@@ -292,3 +356,77 @@ async def test_enrichment_falls_through_without_md(context: ToolContext, monkeyp
         transport=transport,
     )
     assert "Real Page" in preview
+
+
+@pytest.mark.asyncio
+async def test_llms_txt_not_substituted_for_subpage(context: ToolContext, monkeypatch) -> None:
+    """M2: for a SUBPAGE whose .md twin 404s, a substantial site-wide /llms.txt
+    must NOT be returned as the result. The subpage's own HTML is rendered
+    instead, so the agent never gets the site index attributed to a specific
+    page it did not ask about."""
+    monkeypatch.setattr(
+        service,
+        "DEFAULT_WEB_FETCH_CONFIG",
+        {**service.DEFAULT_WEB_FETCH_CONFIG, "enrich": True},
+    )
+    llms_index = (
+        "# Example Site Index\n\nThis is the site-wide llms.txt index listing "
+        "every section of the documentation, which is the WRONG content to return "
+        "for a specific subpage the agent requested by its own URL."
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(".md"):
+            return httpx.Response(404)  # no .md twin for this subpage
+        if request.url.path == "/llms.txt":
+            return httpx.Response(200, text=llms_index, headers={"content-type": "text/plain"})
+        return httpx.Response(
+            200,
+            text="<html><body><h1>The Guide</h1><p>The guide's own body content.</p></body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    preview, details, _e = await run_fetch(
+        "https://example.com/docs/guide",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+    )
+    # The guide's own HTML is rendered; the site index is NOT substituted.
+    assert "The Guide" in preview
+    assert "Example Site Index" not in preview
+    assert details["final_url"] == "https://example.com/docs/guide"
+
+
+@pytest.mark.asyncio
+async def test_llms_txt_used_for_site_root(context: ToolContext, monkeypatch) -> None:
+    """M2 boundary: /llms.txt IS a legitimate enrichment win when the REQUESTED
+    URL is the site root, where it genuinely represents the resource."""
+    monkeypatch.setattr(
+        service,
+        "DEFAULT_WEB_FETCH_CONFIG",
+        {**service.DEFAULT_WEB_FETCH_CONFIG, "enrich": True},
+    )
+    llms_index = (
+        "# Example Site\n\nThe llms.txt index is the right representation for the "
+        "site root, so it should be preferred over scraping the landing page HTML."
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/llms.txt":
+            return httpx.Response(200, text=llms_index, headers={"content-type": "text/plain"})
+        return httpx.Response(
+            200,
+            text="<html><body><h1>Landing</h1><p>Marketing splash.</p></body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    preview, _details, _e = await run_fetch(
+        "https://example.com/",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+    )
+    assert "Example Site" in preview

@@ -42,6 +42,7 @@ from local_operator.web_fetch.service import (
     CacheEntry,
     FetchError,
     WebFetchService,
+    cache_variant,
     coerce_fetch_settings,
     load_fetch_settings,
     normalize_url,
@@ -62,7 +63,8 @@ _DESCRIPTION = (
     "cache TTL reuses stored content with no network call. Use this (or "
     "`read <url>`) instead of `browser` for headless, subagent, and server "
     "contexts; use `browser` only when a page needs a real logged-in session or "
-    "JavaScript rendering."
+    "JavaScript rendering. Need several pages? Issue multiple web_fetch calls in "
+    "one turn — they run in parallel instead of one-at-a-time."
 )
 
 
@@ -276,10 +278,15 @@ async def run_fetch(
     except FetchError as error:
         return str(error), {"url": url, "cache": "miss"}, True
 
+    # The cache key folds in the render-affecting params (M3): a raw fetch and a
+    # rendered fetch of the same URL are different renditions and must not share
+    # an entry, and a byte-capped fetch must not satisfy a full-ceiling request.
+    variant = cache_variant(raw=raw, max_bytes=max_bytes)
+
     # Cache lookup first (unless refreshing). A hit that still stats against the
     # spill store returns with zero network calls (requirement #3 / test 8).
     if not refresh and settings.cache_ttl_seconds > 0:
-        entry = read_cache_entry(normalized)
+        entry = read_cache_entry(normalized, variant)
         if entry is not None:
             hit = _cache_hit_result(entry, settings.cache_ttl_seconds, tool_name, context)
             if hit is not None:
@@ -320,12 +327,17 @@ async def run_fetch(
     }
     preview, details, handle = _shape_from_content(result_like, result.content, tool_name, context)
 
-    # Record the cache entry pointing at the spill handle (metadata only). A
+    # Record the cache entry pointing at the spill handle (metadata only). Only
+    # 2xx responses are cached (M4): a 4xx/5xx cached for the full TTL would
+    # replay a transient outage for 15 minutes with no retry, poisoning the URL —
+    # a non-2xx result still returns to the caller (with its status leading the
+    # preview) but is never stored, so the next request re-hits the network. A
     # binary notice is not worth caching (re-fetching a HEAD-sized notice is
     # cheap and the bytes were never stored), and a store write that failed
     # leaves ``handle`` None — skip caching rather than store a pointer to
     # nothing, which is exactly the dead-handle case test 9 guards against.
-    if handle and settings.cache_ttl_seconds > 0 and result.render_method != "binary":
+    cacheable = 200 <= result.status < 300 and result.render_method != "binary"
+    if handle and settings.cache_ttl_seconds > 0 and cacheable:
         write_cache_entry(
             CacheEntry(
                 url=normalized,
@@ -337,7 +349,8 @@ async def run_fetch(
                 render_method=result.render_method,
                 complete=result.complete,
                 low_quality=result.low_quality,
-            )
+            ),
+            variant,
         )
     return preview, details, False
 

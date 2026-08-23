@@ -180,6 +180,38 @@ def normalize_url(raw: str) -> str:
     return urlunparse(parsed)
 
 
+def _pin_request(url: str, pinned_ip: str | None) -> tuple[str, dict[str, str], dict[str, object]]:
+    """Rewrite ``url`` to connect to ``pinned_ip`` while keeping the hostname.
+
+    Returns ``(request_url, headers, extensions)``. When ``pinned_ip`` is set the
+    URL host is swapped to the vetted IP literal so httpx opens the socket to that
+    exact address (M1 anti-rebinding), while:
+
+    - the ``Host`` header keeps the original hostname, so name-based virtual hosts
+      and the server's routing still see the site they expect; and
+    - the ``sni_hostname`` request extension keeps the original hostname, so the
+      TLS handshake sends the right SNI and the certificate is verified against
+      the hostname — verification is never turned off, we only redirect which IP
+      the bytes go to.
+
+    ``None`` (bypass or literal host) returns the URL untouched with empty
+    overrides, so the normal httpx resolution path is used.
+    """
+    if not pinned_ip:
+        return url, {}, {}
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    # httpx.URL.copy_with(host=...) brackets IPv6 literals automatically and
+    # preserves scheme/port/path/query, so the request targets the IP verbatim.
+    pinned_url = str(httpx.URL(url).copy_with(host=pinned_ip))
+    # Host carries the port when the original URL did, matching what the server
+    # would have seen without pinning.
+    host_header = hostname
+    if parsed.port is not None:
+        host_header = f"{hostname}:{parsed.port}"
+    return pinned_url, {"Host": host_header}, {"sni_hostname": hostname}
+
+
 def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Whether ``ip`` is a target SSRF must refuse unless ``allow_private``.
 
@@ -234,12 +266,24 @@ def _resolve_host_ips(hostname: str) -> list[str]:
     return list({str(info[4][0]) for info in infos})
 
 
-def validate_public_url(url: str, *, allow_private: bool) -> None:
-    """Raise :class:`FetchError` if ``url`` points at a non-public target.
+def validate_public_url(url: str, *, allow_private: bool) -> str | None:
+    """Validate ``url``'s target and return the vetted IP to PIN the connection to.
 
     Called on the initial URL AND after every redirect. ``allow_private`` is the
     single, deliberate escape hatch for local dev (``http://localhost:3000``);
     default-deny is the safe posture and the switch is flipped knowingly.
+
+    Returns the one vetted IP literal the caller MUST connect to (or ``None`` when
+    ``allow_private`` bypasses the check, or when the host is already an IP
+    literal that needs no pinning beyond itself). Returning the address — rather
+    than only raising — is what closes the DNS-rebinding / TOCTOU window (M1): the
+    validator resolves the hostname ONCE, judges EVERY returned address, and hands
+    back the specific vetted IP so the connection is pinned to it instead of
+    letting httpx re-resolve independently at connect time (where a short-TTL or
+    round-robin record could swap in an internal address that never passed this
+    gate). ALL resolved addresses are checked, so a mixed public/private record is
+    refused outright; the first address is the one returned to pin to, and since
+    every address passed, any of them is safe.
     """
     parsed = urlparse(url)
     if parsed.scheme.lower() not in ("http", "https"):
@@ -248,8 +292,13 @@ def validate_public_url(url: str, *, allow_private: bool) -> None:
     if not hostname:
         raise FetchError(f"refusing {url!r}: no host in URL")
     if allow_private:
-        return
-    for ip_str in _resolve_host_ips(hostname):
+        # The escape hatch turns off IP judgement entirely, so there is nothing
+        # to pin to and no rebinding threat model to defend (the operator opted
+        # into local targets knowingly). Let httpx resolve as usual.
+        return None
+    resolved = _resolve_host_ips(hostname)
+    vetted: str | None = None
+    for ip_str in resolved:
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
@@ -259,6 +308,9 @@ def validate_public_url(url: str, *, allow_private: bool) -> None:
                 f"refusing {url!r}: host resolves to a private/loopback/reserved "
                 f"address ({ip_str}). Set web_fetch.allow_private to fetch local targets."
             )
+        if vetted is None:
+            vetted = ip_str
+    return vetted
 
 
 # ---------------------------------------------------------------------------
@@ -286,17 +338,30 @@ def cache_dir() -> Path:
     return config_dir() / CACHE_DIRNAME
 
 
-def _url_hash(url: str) -> str:
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+def cache_variant(*, raw: bool, max_bytes: int | None) -> str:
+    """The render-shape discriminator folded into the cache key (M3).
+
+    Two requests for the same URL that would render DIFFERENTLY must not share a
+    cache entry: a ``raw=True`` fetch stores verbatim source, and a later default
+    (rendered) fetch of the same URL would otherwise get a hit and receive raw
+    HTML. ``max_bytes`` changes where the body is truncated, so a small-capped
+    entry must not satisfy a request for the full ceiling. Encoding both here
+    keeps the discriminator in one place both the read and the write agree on.
+    """
+    return f"raw={int(raw)}|max_bytes={max_bytes if max_bytes is not None else 'default'}"
 
 
-def _cache_path(url: str) -> Path:
-    return cache_dir() / f"{_url_hash(url)}.json"
+def _url_hash(url: str, variant: str = "") -> str:
+    return hashlib.sha256(f"{url}\x00{variant}".encode("utf-8")).hexdigest()[:32]
 
 
-def read_cache_entry(url: str) -> CacheEntry | None:
-    """Load the sidecar for ``url``, or ``None`` when absent/corrupt."""
-    path = _cache_path(url)
+def _cache_path(url: str, variant: str = "") -> Path:
+    return cache_dir() / f"{_url_hash(url, variant)}.json"
+
+
+def read_cache_entry(url: str, variant: str = "") -> CacheEntry | None:
+    """Load the sidecar for ``url`` + render ``variant``, or ``None`` if absent."""
+    path = _cache_path(url, variant)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -319,16 +384,18 @@ def read_cache_entry(url: str) -> CacheEntry | None:
         return None
 
 
-def write_cache_entry(entry: CacheEntry) -> None:
-    """Persist ``entry`` and prune the oldest sidecars past the count bound.
+def write_cache_entry(entry: CacheEntry, variant: str = "") -> None:
+    """Persist ``entry`` under ``url`` + render ``variant`` and prune the excess.
 
     Best-effort: a read-only or full config dir degrades to "no caching", never
-    a failed fetch — the same contract the spill store keeps for its writes.
+    a failed fetch — the same contract the spill store keeps for its writes. The
+    ``variant`` must match the one :func:`read_cache_entry` will look up, or the
+    write lands under a key no read reaches (M3).
     """
     directory = cache_dir()
     try:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path = _cache_path(entry.url)
+        path = _cache_path(entry.url, variant)
         payload = {
             "url": entry.url,
             "final_url": entry.final_url,
@@ -444,8 +511,15 @@ class WebFetchService:
         """
         current = start_url
         for _hop in range(self.settings.max_redirects + 1):
-            validate_public_url(current, allow_private=self.settings.allow_private)
-            status, headers, body, complete = await self._stream_once(client, current, ceiling)
+            # Validate returns the vetted IP to PIN this hop's connection to, so
+            # httpx cannot re-resolve to a different (internal) address between
+            # this check and the socket open (M1). Re-run on EVERY hop: each
+            # redirect target is validated AND pinned independently, or a 302 to
+            # a rebinding host would reopen the window.
+            pinned_ip = validate_public_url(current, allow_private=self.settings.allow_private)
+            status, headers, body, complete = await self._stream_once(
+                client, current, ceiling, pinned_ip
+            )
             location = headers.get("location")
             if status in (301, 302, 303, 307, 308) and location:
                 current = urljoin(current, location)
@@ -466,6 +540,15 @@ class WebFetchService:
         through so a site without these affordances pays nothing but the bounded,
         best-effort probe. Network errors on a probe are swallowed: enrichment is
         an optimization, never a reason to fail the real fetch.
+
+        Cost (m2): a fresh non-``raw`` fetch pays up to two extra requests (the
+        ``.md`` twin and, for a site root, ``/llms.txt``) before the real page.
+        Accepted for the common docs-site win because the loop SHORT-CIRCUITS on
+        the first substantial candidate (the ``return`` below), the candidate set
+        is now tightly path-scoped (M2), and every 2xx result is cached — so the
+        cost is paid once per URL+variant, not on every read. A per-call opt-out
+        beyond the global ``enrich`` switch was judged not worth the param surface
+        for a bounded two-probe cost.
         """
         for candidate in _enrichment_candidates(url):
             try:
@@ -491,18 +574,29 @@ class WebFetchService:
         return None
 
     async def _stream_once(
-        self, client: httpx.AsyncClient, url: str, ceiling: int
+        self, client: httpx.AsyncClient, url: str, ceiling: int, pinned_ip: str | None = None
     ) -> tuple[int, dict[str, str], bytes, bool]:
         """One request, reading at most ``ceiling`` bytes off the wire.
 
         The cap is enforced DURING streaming: we stop pulling chunks once the cap
         is reached and flag the body truncated, so a hostile or huge endpoint can
         never balloon memory (the ``resp.text`` trap the design calls out).
+
+        ``pinned_ip`` is the vetted address from :func:`validate_public_url`. When
+        set, the connection is forced to that exact IP while the ``Host`` header
+        and TLS SNI stay the ORIGINAL hostname — so the socket lands on the
+        address we validated (closing the rebinding window, M1) yet the
+        certificate is still verified against the real hostname (verification is
+        NEVER disabled). ``None`` means the check was bypassed (``allow_private``)
+        or the host was already an IP literal, and httpx connects normally.
         """
+        request_url, request_headers, extensions = _pin_request(url, pinned_ip)
         buffer = bytearray()
         complete = True
         try:
-            async with client.stream("GET", url) as response:
+            async with client.stream(
+                "GET", request_url, headers=request_headers, extensions=extensions
+            ) as response:
                 headers = {k.lower(): v for k, v in response.headers.items()}
                 status = response.status_code
                 # A redirect body is irrelevant — we only need the Location — so
@@ -581,12 +675,22 @@ class WebFetchService:
 def _enrichment_candidates(url: str) -> list[str]:
     """Cheap, high-value alternate URLs to try before scraping the HTML page.
 
-    A proportionate subset of omp's enrichment chain (design §6 step 3): the
-    ``.md`` suffix trick that GitHub and many docs generators honour, plus a
-    ``/llms.txt`` probe at the site root. Deliberately small — this is meant to
-    catch the common docs-site wins, not to become a scraper zoo. Query strings
-    and fragments are dropped from the candidate since a ``.md`` twin is a path
-    concept. Only http(s) with a path get a ``.md`` candidate.
+    A proportionate subset of omp's enrichment chain (design §6 step 3), each
+    candidate scoped to the EXACT requested resource so the result can never be
+    the wrong content for the URL the agent asked about:
+
+    - the ``.md`` suffix twin (``/docs/guide`` → ``/docs/guide.md``) that GitHub
+      and many docs generators honour — legitimately path-scoped: it is the same
+      page in a cleaner format;
+    - ``/llms.txt`` ONLY when the requested URL is the site ROOT (path empty or
+      ``/``). ``/llms.txt`` is a SITE-WIDE index, so substituting it for an
+      arbitrary subpage (``/docs/guide``) hands the model the whole site's index
+      attributed to a URL it did not request — the M2 defect. Restricting it to
+      the root means it is only ever returned when it genuinely IS the requested
+      resource's best representation.
+
+    Query strings and fragments are dropped from the ``.md`` candidate since a
+    ``.md`` twin is a path concept. Only http(s) URLs are enriched.
     """
     parsed = urlparse(url)
     if parsed.scheme.lower() not in ("http", "https"):
@@ -600,8 +704,10 @@ def _enrichment_candidates(url: str) -> list[str]:
         if "." not in last:
             candidates.append(urlunparse(parsed._replace(path=path + ".md", query="", fragment="")))
     # Site-root llms.txt — a growing convention for LLM-friendly docs indexes.
-    root = f"{parsed.scheme}://{parsed.netloc}"
-    candidates.append(urljoin(root, "/llms.txt"))
+    # Gated to the root: for a subpage it would be the wrong content (M2).
+    if path in ("", "/"):
+        root = f"{parsed.scheme}://{parsed.netloc}"
+        candidates.append(urljoin(root, "/llms.txt"))
     return candidates
 
 
@@ -625,16 +731,26 @@ def _looks_html(body: str, content_type: str) -> bool:
 def _is_binary(content_type: str, body: bytes) -> bool:
     """Whether the body is binary (PDF/image/other) and must not be inlined.
 
-    Header first, then a NUL-byte sniff of the head: a mislabeled octet-stream
-    that is really text still renders, and a text/* header that is really binary
-    (rare, but possible) is caught by the sniff.
+    Header first, then a NUL-byte sniff of the head: a mislabeled
+    ``application/octet-stream`` that is really text still renders, and a
+    ``text/*`` header that is really binary (rare, but possible) is caught by the
+    sniff.
+
+    ``octet-stream`` is deliberately NOT in the hard-binary set (m1): it is the
+    generic "bytes of unknown type" header that misconfigured servers slap on
+    plain-text and markdown responses, so treating it as unconditionally binary
+    would return a useless notice for a readable body. It falls through to the
+    NUL sniff, which classifies the ACTUAL content — the behaviour this
+    docstring has always promised. PDF/zip stay hard-binary because their headers
+    are specific and reliable.
     """
     primary = content_type.split(";", 1)[0].strip()
     if primary.startswith(("image/", "audio/", "video/", "font/")):
         return True
-    if primary in ("application/pdf", "application/octet-stream", "application/zip"):
+    if primary in ("application/pdf", "application/zip"):
         return True
     if primary.startswith("text/") or _matches(content_type, _JSON_TYPES):
         return False
-    # No decisive header: a NUL byte in the head is the classic binary tell.
+    # No decisive header (octet-stream, unknown, or empty): a NUL byte in the
+    # head is the classic binary tell; its absence means render it as text.
     return b"\x00" in body[:1024]

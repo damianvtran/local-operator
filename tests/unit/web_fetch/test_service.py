@@ -81,10 +81,15 @@ def test_file_scheme_refused_at_normalize() -> None:
 @pytest.mark.asyncio
 async def test_ssrf_via_redirect_is_refused_at_the_hop(monkeypatch: pytest.MonkeyPatch) -> None:
     """A public URL that 302s to the metadata endpoint must be refused, not
-    followed. The redirect target is re-validated at the hop."""
+    followed. The redirect target is re-validated at the hop.
+
+    The connection is now PINNED to the vetted IP (M1), so the request URL host
+    is the IP literal; the intended hostname rides in the ``Host`` header, which
+    is what the handler dispatches on.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "public.example":
+        if request.headers.get("host", "").startswith("public.example"):
             return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/"})
         return httpx.Response(200, text="SHOULD NOT REACH")
 
@@ -97,6 +102,59 @@ async def test_ssrf_via_redirect_is_refused_at_the_hop(monkeypatch: pytest.Monke
     svc = _service(httpx.MockTransport(handler))
     with pytest.raises(FetchError, match="private/loopback/reserved"):
         await svc.fetch("http://public.example/")
+
+
+@pytest.mark.asyncio
+async def test_connection_pinned_to_vetted_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M1: the socket must target the exact IP the validator vetted, not a
+    hostname httpx re-resolves. Simulates DNS rebinding by having the validator
+    see a public IP while asserting the connection carries THAT IP, never the
+    hostname — so a second (malicious) resolution can never be used.
+
+    The captured request URL host is the vetted IP literal; the ``Host`` header
+    and (for https) the SNI extension preserve the original hostname so TLS still
+    verifies against the name.
+    """
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url_host"] = request.url.host
+        captured["host_header"] = request.headers.get("host")
+        captured["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(handler))
+    await svc.fetch("https://rebind.example/path")
+
+    # The connection went to the vetted IP, NOT the hostname (rebinding closed).
+    assert captured["url_host"] == "93.184.216.34"
+    assert captured["host_header"] == "rebind.example"
+    assert captured["sni"] == "rebind.example"
+
+
+@pytest.mark.asyncio
+async def test_rebinding_second_resolution_never_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host that resolves public at validation but whose later lookups return a
+    private address is still safe: the connection is pinned to the FIRST vetted
+    address, so the private one is never reachable.
+
+    Concretely: the validator returns a public IP; the connection must carry that
+    IP. Even if httpx were to re-resolve (it cannot, because the URL is already an
+    IP literal), it would land on the vetted public address.
+    """
+    resolutions = iter([["93.184.216.34"], ["10.0.0.5"]])  # 2nd (private) never used
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: next(resolutions))
+
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url_host"] = request.url.host
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    svc = _service(httpx.MockTransport(handler))
+    await svc.fetch("https://rebind.example/")
+    assert captured["url_host"] == "93.184.216.34"
 
 
 # --- streaming byte cap ----------------------------------------------------
@@ -177,6 +235,43 @@ async def test_pdf_returns_binary_notice(monkeypatch: pytest.MonkeyPatch) -> Non
     result = await svc.fetch("https://example.com/doc.pdf")
     assert result.render_method == "binary"
     assert "application/pdf" in result.content
+
+
+@pytest.mark.asyncio
+async def test_octet_stream_text_body_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """m1: a text body mislabeled application/octet-stream renders as text (the
+    NUL sniff decides), matching the docstring — it is not a binary notice."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"# A markdown doc\n\nReal readable text, no NUL bytes here.",
+            headers={"content-type": "application/octet-stream"},
+        )
+
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(handler))
+    result = await svc.fetch("https://example.com/data")
+    assert result.render_method != "binary"
+    assert "readable text" in result.content
+
+
+@pytest.mark.asyncio
+async def test_octet_stream_binary_body_is_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """m1 boundary: octet-stream with a NUL-containing body is still a binary
+    notice — the sniff, not the header, is what classifies it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"\x00\x01\x02binary\x00payload",
+            headers={"content-type": "application/octet-stream"},
+        )
+
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(handler))
+    result = await svc.fetch("https://example.com/blob")
+    assert result.render_method == "binary"
 
 
 # --- config coercion & cache index -----------------------------------------
