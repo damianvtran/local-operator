@@ -372,6 +372,88 @@ def _anthropic_tier_capped_usage(five_hour_used: float, fable_used: float) -> Us
     )
 
 
+def _anthropic_tier_spent_shared_remains(extra_used: float, shared_used: float) -> UsageReport:
+    """A spent per-tier cap that leaves the account under an ACCOUNT-scope
+    verdict while shared quota still remains.
+
+    ``usage_health`` reads the paid extra-usage window (non-shared, non-tier)
+    as an ACCOUNT-scope binding, so a high ``extra_used`` drives the account to
+    reserve/depleted; but ``shared_tier_saturation`` re-reads the report and
+    still sees the shared 5-hour window with headroom. That is the exact
+    combination that reaches the ``tier_binding and shared_above_reserve``
+    branch inside ``_apply_account_health`` — the "continuing until shared
+    windows are exhausted" notice this test exercises. The spent Fable tier
+    row supplies ``tier_binding``."""
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used=shared_used, limit=100.0, unit="percent"),
+                window="5h",
+                shared=True,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:5h:extra",
+                label="5 hour (extra)",
+                amount=UsageAmount(used=extra_used, limit=100.0, unit="percent"),
+                window="5h",
+                shared=False,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:7d:fable",
+                label="7 day (Fable)",
+                amount=UsageAmount(used=100.0, limit=100.0, unit="percent"),
+                window="7d",
+                shared=False,
+                tier="fable",
+                resets_at_ms=10**15,
+            ),
+        ],
+    )
+
+
+def _anthropic_model_tier_reserve() -> UsageReport:
+    """A MODEL-scope reserve verdict: the tier cap that gates this exact model
+    is in reserve while the shared pool is healthy.
+
+    ``usage_health("claude-opus-5")`` keeps only the shared windows plus the
+    tier windows whose name appears in the model id, so the Opus weekly (5%
+    remaining, in reserve) is the binding limit and — being ``tier`` and not
+    ``shared`` — makes ``scope == "model"``. The shared 5-hour window sits at
+    10% used (healthy) so it never binds. Paired with
+    ``_anthropic_tier_spent_shared_remains`` this yields TWO ``reserve`` verdicts
+    on one selector that differ ONLY in scope (``model`` vs ``account``): the
+    exact same-state/different-scope case the scoped-token widening exists to
+    keep separate. A state-only latch token would collapse both to ``reserve``
+    and suppress the second."""
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used=10.0, limit=100.0, unit="percent"),
+                window="5h",
+                shared=True,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:7d:opus",
+                label="7 day (Opus)",
+                amount=UsageAmount(used=95.0, limit=100.0, unit="percent"),
+                window="7d",
+                shared=False,
+                tier="opus",
+                resets_at_ms=10**15,
+            ),
+        ],
+    )
+
+
 @pytest.mark.asyncio
 async def test_usage_preflight_rotates_accounts_before_providers(tmp_path) -> None:
     store = AuthStore(tmp_path / "auth.db")
@@ -405,7 +487,9 @@ async def test_usage_preflight_rotates_accounts_before_providers(tmp_path) -> No
         selected = await store.get_oauth_access("anthropic", "session-a")
         assert selected is not None and selected.credential_id == second.id
         assert stream._route_state.active is None
-        assert any("trying another anthropic account" in notice for notice in notices)
+        # Rotating to a sibling account is an internal detail and is now silent:
+        # the user still gets served on anthropic, so no notice should fire.
+        assert not any("trying another anthropic account" in notice for notice in notices)
     finally:
         await stream.close()
         store.close()
@@ -913,7 +997,8 @@ async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_p
         opus = await store.get_oauth_access("anthropic", session, model_id="claude-opus-4-8")
         assert opus is not None  # the family-blocked account still serves opus
         assert stream._route_state.active is None
-        assert any("trying another anthropic account" in notice for notice in notices)
+        # Sibling rotation is silent now — an internal detail, not a transcript event.
+        assert not any("trying another anthropic account" in notice for notice in notices)
     finally:
         await stream.close()
         store.close()
@@ -965,6 +1050,287 @@ async def test_last_account_in_reserve_stays_on_the_provider(tmp_path) -> None:
         selected = await store.get_oauth_access("anthropic", "session-a")
         assert selected is not None and selected.credential_id == account.id
         assert any("continuing until anthropic quota is exhausted" in n for n in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_notice_is_deduped_to_one_per_state_transition(tmp_path) -> None:
+    """The user hears about a quota CHANGE, not the same line every message.
+
+    Preflight runs on every user-message boundary, so a persistent low/exhausted
+    verdict recurs on every message the user sends. Before the dedup latch that
+    echoed the identical "quota low"/"quota exhausted" line forever. The
+    contract now: announce once per state TRANSITION per provider/model —
+    silent while a state holds, a fresh line when it changes, and a fresh line
+    again after a recovery resets the latch. This is the real-execution evidence
+    for that behaviour, driving successive boundaries through the account-scope
+    ``_apply_account_health`` path (single account, no configured fallback)."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    # A knob the mocked usage endpoint reads, so each boundary can present a
+    # different quota shape without re-patching.
+    used_percent = {"value": 95.0}
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(used_percent["value"])
+
+    async def boundary() -> None:
+        # Simulate a fresh user message far enough apart that the 60s TTL memo
+        # (which only dedupes the several requests ONE message makes) does not
+        # itself swallow the check — resetting the memo clock is what a real
+        # inter-message gap does.
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    reserve_line = "continuing until anthropic quota is exhausted"
+    depleted_line = "no configured fallback is available"
+    recovered_line = "account quota recovered"
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            # 1) First slide to low (reserve, 5% remaining): one notice.
+            used_percent["value"] = 95.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(reserve_line in n for n in notices) == 1
+
+            # 2) Still low on the next boundary: silent — no duplicate line.
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(reserve_line in n for n in notices) == 1
+
+            # 3) low -> exhausted is a real transition: a second, different line.
+            used_percent["value"] = 100.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(depleted_line in n for n in notices) == 1
+            assert store.is_blocked(account.id, "anthropic")
+
+            # 4) Recovery (healthy) clears the latch via the blocked-account
+            #    re-probe, so the exhausted verdict is no longer "already said".
+            used_percent["value"] = 0.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(recovered_line in n for n in notices) == 1
+            assert not store.is_blocked(account.id, "anthropic")
+
+            # 5) Sliding back to low AFTER recovery is a genuine new transition:
+            #    it re-announces rather than being deduped against step 1.
+            used_percent["value"] = 95.0
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(reserve_line in n for n in notices) == 2
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_tier_spent_shared_remains_notice_is_deduped_across_boundaries(tmp_path) -> None:
+    """The "continuing until shared windows are exhausted" line is announced
+    once, then silent while the condition holds.
+
+    ``_apply_account_health`` reaches this branch when a per-tier cap is spent
+    (Fable at 100%) but the shared window still has headroom. Preflight runs on
+    every message boundary, so before the dedup this notice recurred on every
+    message — the per-boundary spam this PR eliminates. Two same-provider
+    accounts skip the ``not siblings`` guards so the tier-spent branch is the
+    one that fires. Real execution: repeated boundaries, one notice."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def boundary() -> None:
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    tier_spent_line = "continuing until shared windows are exhausted"
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_a, **_k: _anthropic_tier_spent_shared_remains(95.0, 50.0),
+        ):
+            for _ in range(4):
+                await boundary()
+                await stream.preflight_usage(model)
+        # One line on the first boundary, silent on the three that follow.
+        assert sum(tier_spent_line in n for n in notices) == 1
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_distinct_quota_conditions_on_one_selector_do_not_alias(tmp_path) -> None:
+    """Two quota conditions that share a STATE but differ in SCOPE each get their
+    own single announcement rather than masking each other.
+
+    This is the guard for the scoped-token widening specifically, so the two
+    conditions are chosen to be indistinguishable to the PRE-fix state-only
+    latch: BOTH read ``health.state == "reserve"``, and differ ONLY in scope.
+
+    - Phase 1 (``tier-spent``): a spent extra-usage window drives an
+      ACCOUNT-scope reserve verdict while the shared 5-hour window still has
+      headroom → the ``tier-spent:reserve`` "continuing until shared windows are
+      exhausted" line.
+    - Phase 2 (``model-reserve``): the Opus weekly tier cap that gates this exact
+      model is in reserve while the shared pool is healthy → a MODEL-scope reserve
+      verdict and the ``model:reserve`` "for <model> — continuing until anthropic
+      quota is exhausted" line.
+
+    Under the fix both are announced once (tokens ``tier-spent:reserve`` and
+    ``model:reserve`` are distinct). Under the bug — a token that encoded only
+    ``health.state`` — both would collapse to a single ``"reserve"`` entry and the
+    SECOND would be wrongly suppressed. A regression guard whose two conditions
+    differed in state (as an earlier version of this test did) stays green even
+    against that bug, so it proved nothing; keeping the state fixed is the whole
+    point. See ``test_state_only_quota_token_would_alias_distinct_scopes`` for the
+    companion that pins the bug direction by forcing a state-only token.
+
+    Two same-provider accounts are configured so the walk rotates siblings
+    silently before the last account lands on the scoped reserve announce (the
+    model-tier branch), and so the account-scope tier-spent branch is reachable."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    # A knob the mocked endpoint reads so each boundary presents a different
+    # quota shape. Both shapes read ``reserve`` — only the SCOPE differs.
+    phase = {"value": "tier-spent"}
+
+    def report_for_phase(*_a, **_k):
+        if phase["value"] == "tier-spent":
+            # Extra window spent (account-scope reserve) while the shared 5-hour
+            # window still holds headroom → the account-scope tier-spent branch.
+            return _anthropic_tier_spent_shared_remains(95.0, 50.0)
+        # Opus weekly cap in reserve, shared pool healthy → model-scope reserve.
+        return _anthropic_model_tier_reserve()
+
+    async def boundary() -> None:
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    tier_spent_line = "continuing until shared windows are exhausted"
+    model_reserve_line = "for claude-opus-5 — continuing until anthropic quota is exhausted"
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=report_for_phase):
+            # 1) The account-scope (tier-spent) reserve condition announces once
+            #    and stays quiet across a second identical boundary.
+            phase["value"] = "tier-spent"
+            await boundary()
+            await stream.preflight_usage(model)
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(tier_spent_line in n for n in notices) == 1
+
+            # 2) A DIFFERENT-SCOPE reserve condition (model-tier) on the SAME
+            #    selector and the SAME state is announced too — the scoped tokens
+            #    keep the two conditions from aliasing where a state-only token
+            #    (``reserve``) would have suppressed this second line.
+            phase["value"] = "model-reserve"
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(model_reserve_line in n for n in notices) == 1
+            # The earlier condition's single announcement is untouched.
+            assert sum(tier_spent_line in n for n in notices) == 1
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_state_only_quota_token_would_alias_distinct_scopes(tmp_path) -> None:
+    """Pins the DIRECTION of the aliasing bug the scoped tokens fix.
+
+    Same two same-state/different-scope reserve conditions as
+    ``test_distinct_quota_conditions_on_one_selector_do_not_alias``, but the
+    latch's per-condition ``token`` is monkeypatched back to a bare
+    ``health.state`` — the PRE-fix behaviour. With that collapse the second
+    condition (model-scope reserve) shares the first's ``"reserve"`` entry and is
+    wrongly suppressed, so only ONE line is heard. This is the failure the
+    strengthened guard above must be able to catch: if the production code ever
+    regresses to a state-only token, the guard flips red instead of staying
+    green. Together the two tests bracket the bug — one proves the fix announces
+    both, this one proves the bug would silence the second."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    # Re-derive the state-only token from the announcement text so the shim needs
+    # no access to ``health`` here: both conditions in this scenario are reserve,
+    # so a state-only latch keys every one of them on the single token "reserve".
+    original = stream._announce_quota_change
+
+    async def state_only_token(selector, token, text, kind="warning"):
+        # The bug: collapse the scoped token (``tier-spent:reserve`` /
+        # ``model:reserve``) back to the state alone, so distinct conditions on
+        # one selector alias onto a single latch entry.
+        return await original(selector, "reserve", text, kind)
+
+    stream._announce_quota_change = state_only_token  # type: ignore[method-assign]
+
+    phase = {"value": "tier-spent"}
+
+    def report_for_phase(*_a, **_k):
+        if phase["value"] == "tier-spent":
+            return _anthropic_tier_spent_shared_remains(95.0, 50.0)
+        return _anthropic_model_tier_reserve()
+
+    async def boundary() -> None:
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    tier_spent_line = "continuing until shared windows are exhausted"
+    model_reserve_line = "for claude-opus-5 — continuing until anthropic quota is exhausted"
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=report_for_phase):
+            phase["value"] = "tier-spent"
+            await boundary()
+            await stream.preflight_usage(model)
+            assert sum(tier_spent_line in n for n in notices) == 1
+
+            phase["value"] = "model-reserve"
+            await boundary()
+            await stream.preflight_usage(model)
+            # The bug in action: same "reserve" token as phase 1, so the
+            # model-scope line is swallowed. This assertion documents the wrong
+            # behaviour the scoped tokens prevent.
+            assert sum(model_reserve_line in n for n in notices) == 0
     finally:
         await stream.close()
         store.close()
