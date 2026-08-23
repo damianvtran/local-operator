@@ -20,6 +20,7 @@ from local_operator.analytics.model import (
 from local_operator.harness.types import (
     AgentTool,
     ChatRequest,
+    ImageContent,
     Message,
     ModelSpec,
     TextContent,
@@ -126,6 +127,49 @@ def test_snapshot_component_chars_separates_regions():
     assert chars["tool_results"] == len("command output")
     # Tool schema is name + description + compact params JSON, and is nonzero.
     assert chars["tool_schemas"] > len("bash") + len("run a shell command")
+    # No image blocks here, so the images bucket is empty.
+    assert chars["images"] == 0
+
+
+def test_snapshot_component_chars_splits_images_from_text():
+    # An image block in a message must attribute to ``images``, NOT to the text
+    # bucket the message sits in — and the text chars beside it must stay in
+    # that text bucket. This is the double-counting guard: apportionment splits
+    # a fixed total by chars, so an image counted in both would over-weight its
+    # text bucket. Images come from BOTH conversation and tool messages.
+    request = ChatRequest(
+        model=ModelSpec(provider="anthropic", model_id="m"),
+        system_blocks=["", "", "", ""],
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look at this"),
+                    ImageContent(data="deadbeef", mime_type="image/png"),
+                ],
+            ),
+            Message(
+                role="tool",
+                tool_call_id="t1",
+                tool_name="screenshot",
+                content=[
+                    TextContent(text="captured"),
+                    ImageContent(data="cafe", mime_type="image/png"),
+                ],
+            ),
+        ],
+        tools=[],
+    )
+    chars = snapshot_component_chars(request)
+    # Text chars stay in their own buckets, unaffected by the images beside them.
+    assert chars["conversation"] == len("look at this")
+    assert chars["tool_results"] == len("captured")
+    # Two image blocks (one conversation, one tool) sum into ``images`` and
+    # nowhere else — the flat char proxy per image, so a positive multiple of 2.
+    assert chars["images"] > 0
+    assert chars["images"] % 2 == 0
+    # The image chars are NOT also folded into the text buckets (the guard).
+    assert chars["conversation"] + chars["tool_results"] == len("look at this") + len("captured")
 
 
 def test_aggregate_generation_and_cache_rate():
@@ -216,6 +260,33 @@ def test_aggregate_generation_never_negative():
     # math must stay non-negative rather than showing a negative generation).
     agg = UsageAggregate(output_tokens=100, reasoning_tokens=150)
     assert agg.generation_tokens == 0
+
+
+def test_fresh_tokens_independent_of_provider_input_shape():
+    # Anthropic: input already excludes cache, so fresh == input.
+    anthropic = UsageAggregate(
+        input_tokens=5_000,
+        cache_read_tokens=90_000,
+        cache_write_tokens=5_000,
+        context_tokens=100_000,
+    )
+    assert anthropic.fresh_tokens == 5_000
+    # OpenAI: input already includes cache, so fresh is the remainder.
+    openai = UsageAggregate(
+        input_tokens=100_000,
+        cache_read_tokens=80_000,
+        cache_write_tokens=0,
+        context_tokens=100_000,
+    )
+    assert openai.fresh_tokens == 20_000
+    # Never negative even if a provider over-reports cache against context.
+    over = UsageAggregate(
+        input_tokens=10,
+        cache_read_tokens=80,
+        cache_write_tokens=30,
+        context_tokens=100,
+    )
+    assert over.fresh_tokens == 0
 
 
 def test_callsnapshot_is_frozen_scalars():

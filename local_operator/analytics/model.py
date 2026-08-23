@@ -49,6 +49,11 @@ from typing import Any, Mapping
 #: region and splitting them further would be a guess. ``system_prompt`` is the
 #: packaged persona plus repo guidance (AGENTS.md/CLAUDE.md), which share block
 #: 0's stable head with the persona and carry no wire delimiter of their own.
+#: ``images`` is APPENDED, never inserted, so the CREATE TABLE / docs /
+#: ``_COMPONENT_COLUMNS`` order stays a stable contract. Inserts and the
+#: aggregate SELECT address named ``c_*`` columns, so a mid-list insert would
+#: not silently remap an existing DB — appending is still right, just not
+#: for the ordinal-remap reason an earlier comment claimed.
 COMPONENT_KEYS: tuple[str, ...] = (
     "system_prompt",
     "custom_instructions",
@@ -58,6 +63,7 @@ COMPONENT_KEYS: tuple[str, ...] = (
     "knowledge",
     "conversation",
     "tool_results",
+    "images",
 )
 
 #: Human labels for each component key, for the ``/analytics /usage`` screen.
@@ -70,6 +76,9 @@ COMPONENT_LABELS: dict[str, str] = {
     "knowledge": "Knowledge / skills",
     "conversation": "Conversation",
     "tool_results": "Tool results",
+    # "(est.)" because image tokens are a flat char proxy, not a measured
+    # per-image count — the honesty label the rest of the split already carries.
+    "images": "Images (est.)",
 }
 
 #: Marks the operator's custom-instructions section inside system block 0. Kept
@@ -102,28 +111,35 @@ def split_system_prompt(block0: str) -> tuple[int, int]:
     return idx, len(block0) - idx
 
 
-def _content_chars(message: Any) -> int:
-    """Total character length of a message's text content.
+#: Flat per-image char proxy (~4 chars/token * IMAGE_TOKEN_ESTIMATE). Kept as a
+#: module constant, not an import, so the tokeniser module stays off this hot
+#: snapshot path; it matches ``compaction.tokens.IMAGE_TOKEN_ESTIMATE`` scaled
+#: back to chars so the two estimators tell the same story.
+_IMAGE_CHAR_PROXY = 4 * 1200
 
-    Images are counted as a flat proxy so an image-heavy turn does not read as
-    near-zero input: they cost real context tokens the provider billed, and
-    leaving them at zero would push their share onto text components. The proxy
-    matches ``compaction.tokens.IMAGE_TOKEN_ESTIMATE`` scaled back to chars so
-    the two estimators tell the same story.
+
+def _content_chars(message: Any) -> tuple[int, int]:
+    """A message's content length as ``(text_chars, image_chars)``.
+
+    The two are returned SEPARATELY so image consumption can be attributed to
+    its own ``images`` component instead of inflating whichever text bucket the
+    message happens to sit in (conversation or tool_results). Images still cost
+    real context tokens the provider billed, and leaving them at zero would push
+    their share onto text; but folding them INTO the text total would over-weight
+    that text bucket in the proportional apportionment (see
+    ``snapshot_component_chars``). Splitting here keeps both honest.
     """
-    total = 0
+    text_chars = 0
+    image_chars = 0
     content = getattr(message, "content", None) or []
     for part in content:
         text = getattr(part, "text", None)
         if isinstance(text, str):
-            total += len(text)
+            text_chars += len(text)
             continue
-        # Non-text (image) block: a flat char proxy (~4 chars/token *
-        # IMAGE_TOKEN_ESTIMATE). Kept local rather than imported to avoid
-        # pulling the tokeniser module onto this hot snapshot path.
         if getattr(part, "type", "") == "image":
-            total += 4 * 1200
-    return total
+            image_chars += _IMAGE_CHAR_PROXY
+    return text_chars, image_chars
 
 
 @dataclass(frozen=True)
@@ -244,13 +260,21 @@ def snapshot_component_chars(request: Any) -> dict[str, int]:
 
     conversation_chars = 0
     tool_result_chars = 0
+    image_chars = 0
     for message in getattr(request, "messages", []) or []:
         role = getattr(message, "role", "")
-        chars = _content_chars(message)
+        text_chars, msg_image_chars = _content_chars(message)
+        # CRITICAL: image chars are pulled OUT of the text buckets and summed
+        # into ``images``, NEVER added alongside. Apportionment splits the fixed
+        # ``context_tokens`` proportionally to total chars, so counting an
+        # image's chars in both its text bucket AND ``images`` would double its
+        # weight and over-attribute the shared total to conversation/tool_results.
+        # Images from BOTH conversation and tool messages accumulate here.
+        image_chars += msg_image_chars
         if role == "tool":
-            tool_result_chars += chars
+            tool_result_chars += text_chars
         else:
-            conversation_chars += chars
+            conversation_chars += text_chars
 
     return {
         "system_prompt": system_prompt_chars,
@@ -261,6 +285,7 @@ def snapshot_component_chars(request: Any) -> dict[str, int]:
         "knowledge": len(blocks[3]),
         "conversation": conversation_chars,
         "tool_results": tool_result_chars,
+        "images": image_chars,
     }
 
 
@@ -374,6 +399,20 @@ class UsageAggregate:
         not a zero-token turn, but it is the only number we can stand behind.
         """
         return self.context_tokens + self.output_tokens
+
+    @property
+    def fresh_tokens(self) -> int:
+        """Uncached input tokens, independent of how the provider reports input.
+
+        Providers disagree on whether ``input_tokens`` already includes cache:
+        Anthropic reports input EXCLUDING cache (so ``input == context - read
+        - write``), while OpenAI-shaped usage folds cache into input (so
+        ``context == input`` and a naive Fresh=input would show the FULL
+        context). Subtracting cache from the normalised ``context_tokens`` is
+        the one definition that is the uncached slice on every provider, and
+        it is linear so computing it on the aggregate equals summing per-call.
+        """
+        return max(0, self.context_tokens - self.cache_read_tokens - self.cache_write_tokens)
 
     @property
     def cache_hit_rate(self) -> float | None:

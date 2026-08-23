@@ -42,6 +42,7 @@ def _agg() -> UsageAggregate:
     agg.components["tool_results"] = 900_000
     agg.components["system_prompt"] = 500_000
     agg.components["tool_schemas"] = 300_000
+    agg.components["images"] = 400_000
     sub = UsageAggregate(
         calls=100,
         input_tokens=500_000,
@@ -195,11 +196,23 @@ def test_report_shows_totals_and_split():
     assert "(2 failed)" in text
     # authoritative headline numbers
     assert "Cache hit rate" in text
+    # NESTED input breakdown: the flat "Input" row is gone; the full context
+    # read is the parent and fresh/cache-read/cache-write are its sub-rows. The
+    # small "Fresh (uncached)" figure must be unmistakably the uncached slice,
+    # never labelled as "Input" (which read as a total) or "user input".
+    assert "Context read" in text
+    assert "Fresh (uncached)" in text
+    assert "Cache read" in text
+    assert "Cache write" in text
+    # The old flat label must not survive as a standalone Totals row.
+    assert not any(line.strip().startswith("Input ") for line in text.splitlines())
     # the estimated component split, largest first
     assert "Where input went" in text
     assert "estimated" in text
     assert "Conversation" in text
     assert "System prompt" in text
+    # image-vs-text split surfaces once image tokens are present
+    assert "Images (est.)" in text
     # per-provider and per-session tables
     assert "By provider" in text
     assert "anthropic" in text
@@ -232,6 +245,78 @@ def test_thinking_generation_split_shown():
     text = _text(_agg())
     # output 120k = 80k generation + 40k thinking
     assert "generation" in text and "thinking" in text
+
+
+def test_fresh_is_uncached_slice_on_openai_shaped_usage():
+    # OpenAI-shaped: cache is already folded into input, so context == input.
+    # Fresh must be context − cache_read − cache_write (20k), NOT input (100k).
+    agg = UsageAggregate(
+        calls=10,
+        ok_calls=10,
+        input_tokens=100_000,
+        output_tokens=5_000,
+        cache_read_tokens=80_000,
+        cache_write_tokens=0,
+        context_tokens=100_000,
+        cost_micro=1_000_000,
+        cost_known_calls=10,
+    )
+    assert agg.fresh_tokens == 20_000
+    text = _text(agg)
+    assert "20k" in text
+    # The Fresh row itself must not show the full 100k as its value.
+    fresh_line = next(line for line in text.splitlines() if "Fresh (uncached)" in line)
+    assert "20k" in fresh_line
+    assert "100k" not in fresh_line
+    # The three children partition Context read (20k + 80k + 0 == 100k).
+    assert agg.fresh_tokens + agg.cache_read_tokens + agg.cache_write_tokens == (agg.context_tokens)
+    context_line = next(line for line in text.splitlines() if "Context read" in line)
+    assert "20k fresh" in context_line
+    assert "80k cached" in context_line
+    assert "0 written" in context_line
+
+
+def test_fresh_equals_input_on_anthropic_shaped_usage():
+    # Anthropic: context = input + cache_read + cache_write, so fresh == input.
+    # The shared ``_agg()`` fixture is close but does not partition (500k + 3M
+    # + 80k ≠ 3.5M), so this case is built to actually sum.
+    agg = UsageAggregate(
+        calls=100,
+        ok_calls=100,
+        input_tokens=387_000,
+        output_tokens=210_000,
+        cache_read_tokens=3_000_000,
+        cache_write_tokens=113_000,
+        context_tokens=3_500_000,
+        cost_micro=1_000_000,
+        cost_known_calls=100,
+    )
+    assert agg.fresh_tokens == agg.input_tokens == 387_000
+    assert agg.fresh_tokens + agg.cache_read_tokens + agg.cache_write_tokens == agg.context_tokens
+    text = _text(agg)
+    fresh_line = next(line for line in text.splitlines() if "Fresh (uncached)" in line)
+    assert "387k" in fresh_line
+    context_line = next(line for line in text.splitlines() if "Context read" in line)
+    assert "387k fresh" in context_line
+    assert "3M cached" in context_line
+    assert "113k written" in context_line
+
+
+def test_totals_value_cells_share_a_note_gutter():
+    # D2: a short value (``3M``) must not pull its note left of a longer
+    # sibling (``387k`` / ``500k``). Notes share one column after the pad.
+    text = _text(_agg())
+    rows = [
+        next(line for line in text.splitlines() if needle in line)
+        for needle in ("Fresh (uncached)", "Cache read", "Cache write")
+    ]
+    notes = (
+        "new input, billed at full rate",
+        "input served from cache",
+        "new input written to cache",
+    )
+    starts = [row.index(note) for row, note in zip(rows, notes)]
+    assert len(set(starts)) == 1, rows
 
 
 async def _push(pilot, app, agg, *, daily=None, monthly=None):
