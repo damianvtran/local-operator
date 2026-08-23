@@ -290,10 +290,10 @@ def test_the_unknown_placeholder_name_is_not_a_display_name() -> None:
     """``Unknown`` is the shipped fallback's identity, not a model. Promoting it
     is how a nameless xAI listing painted the status band ``Unknown`` for a
     running Grok 4.6 session."""
-    info = ModelInfo(id="grok-4.6", name="Unknown", description="Unknown model")
-    assert build_model_spec("xai", "grok-4.6", info).display_name == ""
-    assert model_label("xai", "grok-4.6", "Unknown").full == "xai/grok-4.6"
-    assert model_label("xai", "grok-4.6", "Unknown").compact == "grok-4.6"
+    info = ModelInfo(id="grok-4.20", name="Unknown", description="Unknown model")
+    assert build_model_spec("xai", "grok-4.20", info).display_name == ""
+    assert model_label("xai", "grok-4.20", "Unknown").full == "xai/grok-4.20"
+    assert model_label("xai", "grok-4.20", "Unknown").compact == "grok-4.20"
 
 
 def test_a_normalised_id_still_supplies_its_name() -> None:

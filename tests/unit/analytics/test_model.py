@@ -14,6 +14,7 @@ from local_operator.analytics.model import (
     CallSnapshot,
     UsageAggregate,
     apportion_components,
+    price_snapshot,
     snapshot_component_chars,
     split_system_prompt,
 )
@@ -313,3 +314,49 @@ def test_callsnapshot_is_frozen_scalars():
     except Exception:
         raised = True
     assert raised
+
+
+def test_price_snapshot_prefers_provider_reported_usd_cost():
+    """A snapshot with ``usd_cost`` stores that figure even when the table differs.
+
+    OpenRouter (and any compat provider that reports ``usage.cost``) used to be
+    silently re-estimated because ``CallSnapshot`` had no field for the reported
+    dollar and ``price_snapshot`` only consulted the registry. $0.0075 must
+    become 7500 micro-USD, not Opus-or-whatever list math on 2M tokens.
+    """
+    snap = CallSnapshot(
+        ts_ms=1,
+        session_id="s",
+        provider="openrouter",
+        model_id="anthropic/claude-opus-4-8",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        reasoning_tokens=0,
+        context_tokens=1_000_000,
+        usd_cost=0.0075,
+    )
+    cost_micro, known = price_snapshot(snap)
+    assert known is True
+    assert cost_micro == 7500
+
+
+def test_price_snapshot_reported_zero_is_known_free():
+    """A real billed-as-free ``0.0`` must not collapse into ``$—``."""
+    snap = CallSnapshot(
+        ts_ms=1,
+        session_id="s",
+        provider="openrouter",
+        model_id="free/sku",
+        input_tokens=10,
+        output_tokens=10,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        reasoning_tokens=0,
+        context_tokens=10,
+        usd_cost=0.0,
+    )
+    cost_micro, known = price_snapshot(snap)
+    assert known is True
+    assert cost_micro == 0

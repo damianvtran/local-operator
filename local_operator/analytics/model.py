@@ -27,6 +27,7 @@ tokeniser touch — happens on the recorder's background thread.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -189,6 +190,13 @@ class CallSnapshot:
     # a future caller that priced off-thread itself). The normal recording path
     # leaves this False so the store prices from the model + token counts.
     priced: bool = False
+    # Provider-reported dollar cost for this call (OpenRouter ``usage.cost``,
+    # any compat provider that precomputes billing). Copied off ``Usage.usd_cost``
+    # at record time so ``price_snapshot`` can prefer it over the registry table
+    # — without this field the ledger silently re-estimated every reported bill.
+    # ``None`` is "not reported"; a real ``0.0`` is billed-as-free and must
+    # survive as a known $0, not collapse into ``$—``.
+    usd_cost: float | None = None
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
@@ -213,6 +221,23 @@ def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
         from local_operator.model.configure import cost_for_usage, resolve_model_info
 
         info = resolve_model_info(snapshot.provider, snapshot.model_id)
+        # A provider-reported dollar is ground truth even when the registry has
+        # no row for this id (OpenRouter, a brand-new SKU). Asking the table
+        # first used to drop that figure and store the call as unpriced.
+        # Malformed reports (negative, non-finite) are "not reported" — the
+        # same rule ``cost_for_usage`` uses — so we fall through to the table
+        # rather than marking a garbage figure as known.
+        reported = snapshot.usd_cost
+        if reported is not None:
+            try:
+                cost = float(reported)
+            except (TypeError, ValueError):
+                cost = None
+            else:
+                if not (math.isfinite(cost) and cost >= 0):
+                    cost = None
+            if cost is not None:
+                return int(round(cost * 1_000_000)), True
         if not (info.input_price or info.output_price):
             return 0, False
         # ``cost_for_usage`` duck-types its usage arg, so a plain object with the

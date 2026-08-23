@@ -3052,12 +3052,29 @@ class SessionStreamFn:
             # deliberately takes off-thread. It is still the SAME
             # ``cost_for_usage`` the status band uses, so the analytics dollar
             # total cannot disagree with the live band.
+            # Serving identity comes off the usage event the failover layer
+            # stamped from the on-the-wire request. Falling back to
+            # ``request.model`` would reintroduce the bug this exists to
+            # close: after a primary→fallback walk the original ChatRequest
+            # still names the session primary, so every Grok call was stored
+            # as anthropic and priced at Opus rates. Isolated/naming calls
+            # disable ``route_state``, so that pin is not an honest source
+            # either. Unstamped usage (a test drain, a client that never
+            # went through failover) still has ``request.model``.
+            serving_provider = getattr(usage, "provider", None) or request.model.provider
+            serving_model = getattr(usage, "model_id", None) or request.model.model_id
+            from local_operator.providers.registry import credential_provider_id
+
+            # Login flavours (``xai-oauth``, ``openai-device``) are the same
+            # billable provider as their storage id. Canonicalize at record
+            # time so By-provider does not split one vendor into two rows.
+            serving_provider = credential_provider_id(serving_provider)
             record_call(
                 CallSnapshot(
                     ts_ms=int(_time.time() * 1000),
                     session_id=self._session_id or "",
-                    provider=request.model.provider,
-                    model_id=request.model.model_id,
+                    provider=serving_provider,
+                    model_id=serving_model,
                     input_tokens=int(usage.input_tokens),
                     output_tokens=int(usage.output_tokens),
                     cache_read_tokens=int(usage.cache_read_tokens),
@@ -3066,6 +3083,7 @@ class SessionStreamFn:
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,
                     ok=ok,
+                    usd_cost=getattr(usage, "usd_cost", None),
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort

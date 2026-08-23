@@ -116,6 +116,36 @@ def test_get_model_info() -> None:
         get_model_info("unknown", "any")
 
 
+def test_current_fallback_chain_models_have_first_class_prices() -> None:
+    """The operator's default fallback chain must price without discovery.
+
+    ``price_snapshot`` returns ``(0, False)`` — rendered ``$—`` — when both
+    input and output prices are missing. After the serving-model fix, an xAI
+    row that still had no registry price would appear in By provider with
+    tokens and no dollars. These are the ids on the live default chain
+    (plus grok-4.6, the one the operator is on right now).
+    """
+    grok = get_model_info("xai", "grok-4.6")
+    assert grok.input_price == 2.00
+    assert grok.output_price == 6.00
+    assert grok.cache_reads_price == 0.50
+    assert grok.context_window == 500_000
+
+    k3 = get_model_info("kimi", "k3")
+    assert k3.input_price == 3.00
+    assert k3.output_price == 15.00
+    assert k3.cache_reads_price == 0.30
+
+    sol = get_model_info("openai", "gpt-5.6-sol")
+    assert sol.input_price == 4.0
+    assert sol.output_price == 20.0
+    assert sol.cache_reads_price == 0.40
+
+    glm = get_model_info("zai", "glm-5.3")
+    assert glm.input_price == 1.4
+    assert glm.output_price == 4.4
+
+
 # -- QwenCloud Token Plan -----------------------------------------------------
 #
 # The Token Plan gateway's `/models` listing carries ONLY ids (checked live,

@@ -915,6 +915,27 @@ def anthropic_family_model_info(model_id: str) -> Optional[ModelInfo]:
 
 
 openai_models: Dict[str, ModelInfo] = {
+    # GPT-5.6 Sol. Official list from
+    # https://developers.openai.com/api/docs/models/gpt-5.6-sol (read
+    # 2026-08-23): $4 / $0.40 cached / $20 per million, 1,050,000 context,
+    # 128k max output. Promotional rate through at least 2026-11-21; the
+    # page also notes a 2x/1.5x long-context surcharge above 272k input,
+    # which we do not invent a blended rate for (same convention as grok-4.6).
+    "gpt-5.6-sol": ModelInfo(
+        id="gpt-5.6-sol",
+        name="GPT-5.6 Sol",
+        input_price=4.0,
+        output_price=20.0,
+        cache_writes_price=5.0,  # 1.25x uncached input, per the same page
+        cache_reads_price=0.40,
+        max_tokens=128_000,
+        context_window=1_050_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        supports_responses_api=True,
+        description="OpenAI GPT-5.6 Sol: frontier model for complex professional work.",
+        recommended=True,
+    ),
     "gpt-4o": ModelInfo(
         id="gpt-4o",
         name="GPT-4o",
@@ -1863,10 +1884,80 @@ kimi_models: Dict[str, ModelInfo] = {
         description="Multimodal model with 128K context",
         recommended=False,
     ),
+    # Kimi K3. Official list price from
+    # https://platform.kimi.ai/docs/pricing/chat-k3 (read 2026-08-23):
+    # $3.00 cache-miss / $0.30 cache-hit / $15.00 output per million tokens,
+    # 1,048,576 context, flat (no long-context surcharge). The coding-plan
+    # host serves this as the bare id ``k3`` (and ``k3-256k``); the mainland
+    # listing uses ``kimi-k3``. Both spellings must resolve or a failover
+    # onto ``kimi/k3`` prices as unknown.
+    "k3": ModelInfo(
+        id="k3",
+        name="Kimi K3",
+        max_tokens=131_072,
+        context_window=1_048_576,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=3.00,
+        output_price=15.00,
+        cache_writes_price=3.00,
+        cache_reads_price=0.30,
+        description="Moonshot Kimi K3 flagship: 1M context, flat per-token pricing.",
+        recommended=True,
+    ),
 }
 
 # X.AI Grok models and pricing
 xai_models: Dict[str, ModelInfo] = {
+    # Current-generation Grok 4 family. Prices and windows transcribed from
+    # https://docs.x.ai/developers/models (read 2026-08-23). The page quotes
+    # two tiers per id: the <200k-prompt rate and a 2x long-context surcharge
+    # once the prompt reaches 200k. We carry the <200k rate because that is
+    # the list price of a typical agent turn; a 200k+ prompt is still billed
+    # (and still appears in By provider) but the estimate understates it
+    # rather than inventing a blended rate the table cannot express.
+    "grok-4.6": ModelInfo(
+        id="grok-4.6",
+        name="Grok 4.6",
+        max_tokens=131_072,
+        context_window=500_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=2.00,  # $2 / MTok (<200k prompt); $4 ≥200k
+        output_price=6.00,  # $6 / MTok (<200k prompt); $12 ≥200k
+        cache_writes_price=2.00,
+        cache_reads_price=0.50,  # $0.50 / MTok (<200k); $1.00 ≥200k
+        description="xAI Grok 4.6: frontier coding/agent model, 500k context.",
+        recommended=True,
+    ),
+    "grok-4.5": ModelInfo(
+        id="grok-4.5",
+        name="Grok 4.5",
+        max_tokens=131_072,
+        context_window=500_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=2.00,
+        output_price=6.00,
+        cache_writes_price=2.00,
+        cache_reads_price=0.30,
+        description="xAI Grok 4.5: previous-generation frontier, 500k context.",
+        recommended=False,
+    ),
+    "grok-4.3": ModelInfo(
+        id="grok-4.3",
+        name="Grok 4.3",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=1.25,
+        output_price=2.50,
+        cache_writes_price=1.25,
+        cache_reads_price=0.20,
+        description="xAI Grok 4.3: 1M-context Grok 4 family model.",
+        recommended=False,
+    ),
     # grok-3-beta, grok-3, grok-3-latest
     "grok-3-beta": ModelInfo(
         id="grok-3-beta",
