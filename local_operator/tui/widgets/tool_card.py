@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -571,7 +572,9 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         for part in (
             method,
             f"{lines_n} lines" if isinstance(lines_n, int) else "",
-            f"{byte_n} B" if isinstance(byte_n, int) else "",
+            # D2: humanise (KB/MB) so the structured row agrees with the binary
+            # notice body two lines below, which already prints e.g. "2.4 MB".
+            _humanize_bytes(byte_n) if isinstance(byte_n, int) else "",
         )
         if part
     )
@@ -580,6 +583,55 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
     if details.get("low_quality"):
         rows.append("sparse/JS-gated — try `browser` for the full page.")
     return rows
+
+
+#: Matches the model-facing preview header's lead line: ``[200] https://…`` or
+#: ``[HTTP 503] https://…`` (built by ``web_fetch/tool.py::_header_line``). Used
+#: to strip that block from the CARD body since the structured rows carry it (D1).
+_FETCH_HEADER_LEAD_RE = re.compile(r"^\[(?:HTTP )?\d{3}\] \S")
+#: The header's second line: ``method · ctype · cache …`` (a ``·``-joined meta
+#: line). Recognised structurally so a change to the field set does not silently
+#: reintroduce the duplication.
+_FETCH_HEADER_META_RE = re.compile(r"^\S.* · .*cache ")
+
+
+def _humanize_bytes(count: int) -> str:
+    """``2517000`` → ``2.4 MB``. Matches ``web_fetch/render.py::_human_bytes`` so
+    the structured card row and the binary-notice body agree (D2). Kept local
+    rather than imported to avoid a UI→service-package dependency for one format.
+    """
+    if count < 0:
+        return f"{count} B"
+    value = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{count} B"
+
+
+def _strip_fetch_header(lines: list[str]) -> list[str]:
+    """Drop the model-facing header block from a fetch card body (D1).
+
+    The preview text the model sees leads with ``[status] url`` then a
+    ``method · ctype · cache`` line (see ``web_fetch/tool.py::_header_line``). The
+    card's structured ``Fetched:/Rendered:`` rows already carry those exact
+    fields, so painting the preview verbatim doubled them. This removes that
+    leading block — and only that block — leaving the real content. Defensive: if
+    the body does not start with the recognised header (a future shape change, a
+    binary notice), nothing is stripped and the body is returned unchanged.
+    """
+    if not lines or not _FETCH_HEADER_LEAD_RE.match(lines[0]):
+        return lines
+    start = 1
+    # The meta line immediately follows the lead line; strip it only when present.
+    if start < len(lines) and _FETCH_HEADER_META_RE.match(lines[start]):
+        start += 1
+    # Collapse a single blank separator the header left behind so the body does
+    # not open with an empty row under the structured rows.
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    return lines[start:]
 
 
 def _clamp_runs(runs: list[tuple[str, Style]], limit: int) -> list[tuple[str, Style]]:
@@ -1259,7 +1311,15 @@ class ToolCard(ExpandableActionBlock):
         if not search_output and _is_fetch_details(name, details):
             fetch_header = _fetch_result_output(details)
             if fetch_header:
-                fetch_output = fetch_header + [""] + self._clean_output(result_text)
+                # D1: the structured rows above OWN the metadata (status, final
+                # URL, method, ctype, cache), so strip the model-facing preview's
+                # own leading header block before showing the body — otherwise the
+                # card prints the same four fields twice. The model-facing text
+                # keeps its header (the model benefits from the status line); this
+                # is purely the CARD's presentation, mirroring how web_search lets
+                # its structured rows replace, not duplicate, the model text.
+                body = _strip_fetch_header(self._clean_output(result_text))
+                fetch_output = fetch_header + [""] + body
         # Remembered so the body painter and the rest-visibility rule can select
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
@@ -1690,7 +1750,14 @@ class ToolCard(ExpandableActionBlock):
         shown = self._output[:EXPAND_MAX_LINES]
         for line in shown:
             stripped = line.strip()
-            if stripped.startswith(("Fetched:", "Rendered:")):
+            if stripped.startswith("Fetched:"):
+                # D3: the final URL is the card's anchor, so it rides `signal`
+                # blue like web_search's URLs instead of receding into the dim
+                # metadata. The "Fetched:" label and the trailing `· status ·
+                # ctype · cache` metadata stay dim; only the URL(s) lift.
+                self._append_fetched_row(row, line, line_width, indent, dim, signal)
+                continue
+            if stripped.startswith("Rendered:"):
                 ink = dim
             elif stripped.startswith("sparse/JS-gated"):
                 # The one advisory row earns attention: it is the signal to reach
@@ -1705,6 +1772,38 @@ class ToolCard(ExpandableActionBlock):
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
+
+    def _append_fetched_row(
+        self,
+        row: Text,
+        line: str,
+        line_width: int,
+        indent: str,
+        dim: Style,
+        signal: Style,
+    ) -> None:
+        """Paint the ``Fetched:`` row with its URL(s) in ``signal``, rest dim (D3).
+
+        The row is ``Fetched: <url>[  (final: <url>)][  ·  <meta>]``. URLs are
+        lifted to the anchor colour; the ``Fetched:``/``(final: )`` labels and the
+        ``·``-joined status/ctype/cache metadata stay dim. Tokens are measured
+        against the shared ``line_width`` budget so this row obeys the same width
+        law as every other painted line — once the budget is spent the rest of the
+        row is dropped rather than wrapped, matching the card's one-pass model.
+        """
+        row.append("\n" + indent, style=dim)
+        remaining = line_width
+        # Split on spaces but keep them, so reconstructed spacing matches the
+        # source line exactly; a URL token is any run starting with a scheme.
+        for token in re.split(r"(\s+)", line):
+            if remaining <= 0 or not token:
+                break
+            painted = truncate_cells(token, remaining)
+            if not painted:
+                break
+            ink = signal if token.startswith(("http://", "https://")) else dim
+            row.append(painted, style=ink)
+            remaining -= cell_len(painted)
 
     def _append_diff_body(self, row: Text, width: int) -> None:
         """The write/edit expansion: the unified diff, coloured by hunk line.

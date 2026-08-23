@@ -353,7 +353,8 @@ def build_web_search_tool(context: ToolContext | None = None) -> AgentTool | Non
             "Search the public web with load balancing and automatic fallback. "
             "Results include bounded snippets and source URLs; use `web_fetch` (or "
             "`read <url>`) to read a result's full page. Use provider only for a "
-            "specific enabled source."
+            "specific enabled source. Running several independent searches? Issue "
+            "the calls in one turn — they run in parallel."
         ),
         parameters=WebSearchParams.model_json_schema(),
         approval_tier="read",
