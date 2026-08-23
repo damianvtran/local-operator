@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.25.4"
+version = "0.26.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -106,7 +106,14 @@ tokenizer = ["tiktoken"]
 # install, spawn or babysit, which is why it can be an opt-in extra at all
 # rather than a base dependency.
 lsp = ["jedi>=0.19"]
-all = ["local-operator[server,mcp,images,tokenizer]"]
+# Clean HTML→markdown rendering for web_fetch. markdownify and its transitive
+# deps (beautifulsoup4, soupsieve) are ALL pure Python with no compiled wheels,
+# so this is safe to fold into `all` without the Windows sdist-build fragility
+# the other extras are kept lean to avoid. web_fetch degrades SILENTLY to a
+# stdlib html.parser renderer when this extra is absent, so a bare install stays
+# fully functional — the extra only upgrades render quality.
+fetch = ["markdownify"]
+all = ["local-operator[server,mcp,images,tokenizer,fetch]"]
 dev = [
     "local-operator[all]",
     "ruff",

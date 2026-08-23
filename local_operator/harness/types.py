@@ -607,6 +607,11 @@ class ToolContext(BaseModel):
     # rebuilding the session; the master on/off switch removes the advertised
     # tool on reload.
     web_search_settings: dict[str, Any] | None = None
+    # Startup snapshot used only by the web_fetch createIf gate, mirroring
+    # web_search: execution re-reads config so knobs (TTL, allow_private) apply
+    # to the next call without rebuilding the session, while the master on/off
+    # switch removes the advertised tool on reload.
+    web_fetch_settings: dict[str, Any] | None = None
     # Session-owned capability tools that built-ins may delegate to. This is
     # deliberately a mapping rather than a second MCP client: OAuth transports
     # and reconnect state must remain owned by the one session MCP manager.

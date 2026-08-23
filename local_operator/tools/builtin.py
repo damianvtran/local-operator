@@ -2176,6 +2176,33 @@ async def execute_read(
     if target.startswith(SPILL_SCHEME):
         return _read_spill(tool_call_id, target, params.range)
 
+    # ``read https://…`` is sugar for a web fetch: it delegates to the SAME
+    # engine web_fetch uses, returning the same bounded preview + spill handle,
+    # so a URL becomes just another internal-ish URL that ``read`` resolves. Kept
+    # BEFORE the internal-URL branch (which excludes http/https) and after the
+    # spill branch, so it cannot shadow ``read spill://`` / ``read skill://`` /
+    # ``read <file>`` — the regression guard those three keep working is exactly
+    # what this ordering protects. Imported lazily to avoid a module cycle
+    # (web_fetch.tool imports helpers from this module).
+    if target.startswith(("http://", "https://")):
+        from local_operator.web_fetch.tool import run_fetch
+
+        preview, details, is_error = await run_fetch(
+            target, tool_name="read", context=context, signal=signal
+        )
+        # A non-2xx fetch comes back is_error=True (F1). Carry ``details`` on the
+        # error result too — unlike a plain read error, a fetch error still has a
+        # final URL/status/http_error flag the card renders in its error
+        # treatment, so the error path must not drop the structured payload the
+        # success path keeps.
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="read",
+            content=[TextContent(text=preview)],
+            details=details,
+            is_error=is_error,
+        )
+
     # Internal URLs (skill://...) go through the session-installed resolver.
     if "://" in target and not target.startswith(("http://", "https://", "file://")):
         resolver = getattr(context, "resolve_internal_url", None) if context else None
