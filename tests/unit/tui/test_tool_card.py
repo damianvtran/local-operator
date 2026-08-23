@@ -425,11 +425,172 @@ def test_web_search_expansion_uses_structured_page_metadata() -> None:
     assert "Python 3.13 release" in content.plain
     assert "https://python.org/downloads/release/python-3130/" in content.plain
     assert "Release notes and downloads for Python 3.13." in content.plain
-    assert "Ask Operator to open result N with browser" in content.plain
+    assert "Ask Operator to web_fetch result N" in content.plain
     assert _style_at(content, "Python 3.13 release").bold is True
     assert (
         _style_at(content, "https://python.org").color != _style_at(content, "Release notes").color
     )
+
+
+def test_web_fetch_card_shows_fetch_metadata_and_preview() -> None:
+    """A web_fetch card renders the structured header rows plus the preview,
+    and keeps its disclosure visible at rest like a search card."""
+    card = ToolCard("t", "web_fetch", {"url": "https://example.com/docs"})
+    card.mark_done(
+        "[200] https://example.com/docs\n\n# Docs\n\nBody content here.",
+        {
+            "url": "https://example.com/docs",
+            "final_url": "https://example.com/docs/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 1234,
+            "lines": 40,
+        },
+    )
+    # Disclosure visible without hover: a fetch is a primary result.
+    assert EXPAND_HINT in card._build_row(120).plain
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "Fetched: https://example.com/docs" in content
+    assert "final: https://example.com/docs/" in content
+    assert "markdownify" in content
+    assert "# Docs" in content  # the preview body is shown too
+    # D1: the model-facing header block must NOT be duplicated in the card body.
+    # The structured rows own the metadata; the "[200] url" lead line and its
+    # "method · ctype · cache" line are stripped from the preview.
+    assert "[200] https://example.com/docs" not in content
+    # And the status/ctype/cache fields appear once (in the structured rows).
+    assert content.count("cache miss") == 1
+
+
+def test_web_fetch_card_humanizes_bytes_and_strips_duplicate_header() -> None:
+    """D1 + D2: a large fetch shows humanised bytes in the structured row and does
+    not repeat the model-facing header block in the body."""
+    body = "[200] https://ex.example\nmarkdownify · text/html · cache miss\n\n" + (
+        "\n".join(f"line {i}" for i in range(60))
+    )
+    card = ToolCard("t", "web_fetch", {"url": "https://ex.example"})
+    card.mark_done(
+        body,
+        {
+            "url": "https://ex.example",
+            "final_url": "https://ex.example",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 2517000,
+            "lines": 60,
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    # D2: raw 7-digit bytes are humanised.
+    assert "2.4 MB" in content
+    assert "2517000 B" not in content
+    # D1: no duplicated header line in the body.
+    assert "[200] https://ex.example" not in content
+    assert content.count("cache miss") == 1
+
+
+def test_read_url_card_uses_fetch_presentation() -> None:
+    """A ``read <url>`` records tool_name 'read' but carries fetch details, so it
+    must select the fetch card, not the plain file-read presentation."""
+    card = ToolCard("t", "read", {"path": "https://example.com"})
+    card.mark_done(
+        "[200] https://example.com\n\nExample body.",
+        {
+            "url": "https://example.com",
+            "final_url": "https://example.com",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "hit",
+            "bytes": 500,
+            "lines": 7,
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "Fetched: https://example.com" in content
+
+
+def test_read_file_card_not_treated_as_fetch() -> None:
+    """A plain file read (no render_method/final_url) keeps the ordinary output
+    presentation — the fetch branch must not capture it."""
+    card = ToolCard("t", "read", {"path": "/tmp/note.txt"})
+    card.mark_done("file line one\nfile line two", {"path": "/tmp/note.txt"})
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "Fetched:" not in content
+    assert "file line one" in content
+
+
+def test_web_fetch_non_2xx_renders_error_treatment() -> None:
+    """F1: a non-2xx fetch card leads with a prominent ⚠ error row (danger ink)
+    and does not present the block-page body as normal content. The duplicated
+    model-facing header (lead + meta + note) is stripped, leaving one error row."""
+    card = ToolCard("t", "web_fetch", {"url": "https://walled.example/x"})
+    card.mark_done(
+        "⚠ HTTP 403 Forbidden — this is an error/block page, not page content. "
+        "https://walled.example/x\n"
+        "markdownify · text/html · cache miss\n"
+        "(The body below is the error response, not the requested page.)\n\n"
+        "Please enable JS and disable any ad blocker.",
+        {
+            "url": "https://walled.example/x",
+            "final_url": "https://walled.example/x",
+            "status": 403,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 200,
+            "lines": 1,
+            "ok": False,
+            "http_error": True,
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    # The prominent error row is present, exactly once.
+    assert content.count("⚠ HTTP 403 Forbidden") == 1
+    assert "error/block page, not page content" in content
+    # The duplicated model-facing header block is stripped from the body.
+    assert "(The body below is the error response" not in content
+    # The block-page body still shows, but under the error row, not as the lead.
+    assert "enable JS" in content
+    # The error row is painted in the danger colour (strongest treatment).
+    danger = theme_mod.semantic_color("danger")
+    assert _style_at(card._build_content(120), "⚠ HTTP 403").color == Color.parse(danger)
+
+
+def test_web_fetch_low_quality_note_surfaced_once() -> None:
+    """The low-quality advisory appears, and (D4) only ONCE: the model-facing
+    header carried a second `· sparse/JS-gated` copy that D1's header strip
+    removes, leaving just the structured advisory row."""
+    card = ToolCard("t", "web_fetch", {"url": "https://spa.example"})
+    card.mark_done(
+        "[200] https://spa.example\nmarkdownify · text/html · cache miss · "
+        "sparse/JS-gated (try `browser`)\n\nenable javascript",
+        {
+            "url": "https://spa.example",
+            "final_url": "https://spa.example",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 100,
+            "lines": 1,
+            "low_quality": True,
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "browser" in content
+    # D4: exactly one advisory, not the structured row plus the body-header copy.
+    assert content.count("sparse/JS-gated") == 1
 
 
 # --- the one-line guarantee ------------------------------------------------

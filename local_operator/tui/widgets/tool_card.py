@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -508,8 +509,171 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
             if len(snippet) > SEARCH_EXPANDED_SNIPPET_CHARS:
                 snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
             lines.append(f"   {snippet}")
-    lines.append("Ask Operator to open result N with browser for the full page.")
+    lines.append("Ask Operator to web_fetch result N (or `read <url>`) for the full page.")
     return lines
+
+
+def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
+    """Whether this result is a web fetch (the tool, or a ``read <url>`` sugar).
+
+    ``read`` serves both files and URLs, so the tool name alone cannot tell them
+    apart. A fetch's details carry ``render_method`` and ``final_url`` (a file
+    read carries neither), so the presence of those keys is what selects the
+    fetch card without a fragile name check on every ``read``.
+    """
+    if tool_name == "web_fetch":
+        return True
+    if tool_name != "read" or not isinstance(details, dict):
+        return False
+    return "render_method" in details and "final_url" in details
+
+
+def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
+    """Structured web-fetch rows: the request/final URL, status, and render meta.
+
+    Rendered from ``details`` (which never reaches the provider) rather than the
+    model-facing preview, so the card can always show the final URL, status,
+    content-type, render method, byte/line counts, cache state, and \u2014 when the
+    render looked sparse \u2014 a one-line nudge toward ``browser``. The preview body
+    itself is appended by the body painter from the result text; this helper owns
+    only the header rows, mirroring ``_search_result_output``'s split of duties.
+    """
+    if not isinstance(details, dict):
+        return []
+    url = _strip_control_sequences(str(details.get("url") or ""))
+    final = _strip_control_sequences(str(details.get("final_url") or url))
+    if not url and not final:
+        return []
+    status = details.get("status")
+    ctype = _strip_control_sequences(str(details.get("content_type") or ""))
+    method = _strip_control_sequences(str(details.get("render_method") or ""))
+    cache = _strip_control_sequences(str(details.get("cache") or "miss"))
+    lines_n = details.get("lines")
+    byte_n = details.get("bytes")
+
+    meta = " · ".join(
+        part
+        for part in (
+            f"{status}" if status is not None else "",
+            ctype,
+            f"cache {cache}",
+        )
+        if part
+    )
+    fetched = f"Fetched: {url}"
+    if final and final != url:
+        fetched += f"  (final: {final})"
+    if meta:
+        fetched += f"  ·  {meta}"
+    rows: list[str] = []
+    # F1: a non-2xx leads with a prominent error row (painted in the danger
+    # treatment by the body painter) so a block/error page is visually distinct
+    # from successful content — the card equivalent of the tool result's
+    # is_error flag. The ``http_error`` boolean is authoritative; fall back to
+    # the status int for older cached shapes without the flag.
+    http_error = details.get("http_error")
+    if http_error is None and isinstance(status, int):
+        http_error = not (200 <= status < 300)
+    if http_error and isinstance(status, int):
+        reason = _HTTP_REASONS.get(status, "Error")
+        rows.append(f"⚠ HTTP {status} {reason} — error/block page, not page content.")
+    rows.append(fetched)
+
+    render_bits = " · ".join(
+        part
+        for part in (
+            method,
+            f"{lines_n} lines" if isinstance(lines_n, int) else "",
+            # D2: humanise (KB/MB) so the structured row agrees with the binary
+            # notice body two lines below, which already prints e.g. "2.4 MB".
+            _humanize_bytes(byte_n) if isinstance(byte_n, int) else "",
+        )
+        if part
+    )
+    if render_bits:
+        rows.append(f"Rendered: {render_bits}")
+    if details.get("low_quality"):
+        rows.append("sparse/JS-gated — try `browser` for the full page.")
+    return rows
+
+
+#: Short reason phrases for the statuses a fetch card most often shows, kept in
+#: sync with ``web_fetch/tool.py::_STATUS_REASONS`` so the card's error row reads
+#: the same as the model-facing lead. A code not listed falls back to "Error".
+_HTTP_REASONS: dict[int, str] = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    408: "Request Timeout",
+    410: "Gone",
+    429: "Too Many Requests",
+    451: "Unavailable For Legal Reasons",
+    500: "Internal Server Error",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+}
+
+#: Matches the model-facing preview header's lead line for BOTH the 2xx compact
+#: form (``[200] https://…``) and the non-2xx warning form
+#: (``⚠ HTTP 403 Forbidden — … https://…``), built by
+#: ``web_fetch/tool.py::_header_line``. Used to strip that block from the CARD
+#: body since the structured rows carry it (D1).
+_FETCH_HEADER_LEAD_RE = re.compile(r"^(?:\[(?:HTTP )?\d{3}\] \S|⚠ HTTP \d{3}\b)")
+#: The header's metadata line: ``method · ctype · cache …`` (a ``·``-joined meta
+#: line). Recognised structurally so a change to the field set does not silently
+#: reintroduce the duplication.
+_FETCH_HEADER_META_RE = re.compile(r"^\S.* · .*cache ")
+#: The non-2xx header's third line — the parenthetical that labels the body as
+#: the error response. Stripped from the card body alongside the lead/meta lines
+#: (the structured error row already carries the "not page content" message).
+_FETCH_HEADER_NOTE_RE = re.compile(r"^\(The body below is the error response")
+
+
+def _humanize_bytes(count: int) -> str:
+    """``2517000`` → ``2.4 MB``. Matches ``web_fetch/render.py::_human_bytes`` so
+    the structured card row and the binary-notice body agree (D2). Kept local
+    rather than imported to avoid a UI→service-package dependency for one format.
+    """
+    if count < 0:
+        return f"{count} B"
+    value = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{count} B"
+
+
+def _strip_fetch_header(lines: list[str]) -> list[str]:
+    """Drop the model-facing header block from a fetch card body (D1).
+
+    The preview text the model sees leads with ``[status] url`` (or, for a
+    non-2xx, ``⚠ HTTP … — … url``) then a ``method · ctype · cache`` line, and —
+    for a non-2xx — a third ``(The body below is the error response…)`` note (see
+    ``web_fetch/tool.py::_header_line``). The card's structured
+    ``Fetched:/Rendered:`` rows and its own error row already carry those fields,
+    so painting the preview verbatim doubled them. This removes that leading
+    block — and only that block — leaving the real content. Defensive: if the body
+    does not start with the recognised header (a future shape change, a binary
+    notice), nothing is stripped and the body is returned unchanged.
+    """
+    if not lines or not _FETCH_HEADER_LEAD_RE.match(lines[0]):
+        return lines
+    start = 1
+    # The meta line immediately follows the lead line; strip it only when present.
+    if start < len(lines) and _FETCH_HEADER_META_RE.match(lines[start]):
+        start += 1
+    # The non-2xx header carries a third note line; strip it too when present.
+    if start < len(lines) and _FETCH_HEADER_NOTE_RE.match(lines[start]):
+        start += 1
+    # Collapse a single blank separator the header left behind so the body does
+    # not open with an empty row under the structured rows.
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    return lines[start:]
 
 
 def _clamp_runs(runs: list[tuple[str, Style]], limit: int) -> list[tuple[str, Style]]:
@@ -708,6 +872,10 @@ class ToolCard(ExpandableActionBlock):
         #: colourised at render time. ``None`` (not []) when the tool reported
         #: no diff — a read or bash card expands to its raw output instead.
         self._diff: list[str] | None = None
+        #: True when this card holds a web_fetch (or a ``read <url>`` sugar)
+        #: result, so the body painter and the rest-visibility rule can select
+        #: the fetch presentation. Set in :meth:`_absorb_result`.
+        self._is_fetch_card = False
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -1175,10 +1343,29 @@ class ToolCard(ExpandableActionBlock):
         cleaned result text.
         """
         self._added, self._removed = _diff_counts(details)
-        search_output = (
-            _search_result_output(details) if self.tool_name.lower() == "web_search" else []
-        )
-        self._output = search_output or self._clean_output(result_text)
+        name = self.tool_name.lower()
+        search_output = _search_result_output(details) if name == "web_search" else []
+        # A web_fetch (and a `read <url>`, which records tool_name "read" but
+        # carries a fetch's details shape) leads with structured header rows and
+        # then the rendered preview body, so the card shows what was fetched and
+        # a slice of the content, with the spill footer already inside the text.
+        fetch_output: list[str] = []
+        if not search_output and _is_fetch_details(name, details):
+            fetch_header = _fetch_result_output(details)
+            if fetch_header:
+                # D1: the structured rows above OWN the metadata (status, final
+                # URL, method, ctype, cache), so strip the model-facing preview's
+                # own leading header block before showing the body — otherwise the
+                # card prints the same four fields twice. The model-facing text
+                # keeps its header (the model benefits from the status line); this
+                # is purely the CARD's presentation, mirroring how web_search lets
+                # its structured rows replace, not duplicate, the model text.
+                body = _strip_fetch_header(self._clean_output(result_text))
+                fetch_output = fetch_header + [""] + body
+        # Remembered so the body painter and the rest-visibility rule can select
+        # the fetch presentation without re-inspecting details every repaint.
+        self._is_fetch_card = bool(fetch_output)
+        self._output = search_output or fetch_output or self._clean_output(result_text)
         diff = details.get("diff") if isinstance(details, dict) else None
         if isinstance(diff, list) and diff:
             self._diff = [str(line) for line in diff]
@@ -1424,6 +1611,9 @@ class ToolCard(ExpandableActionBlock):
         elif self.tool_name.lower() == "web_search" and self._output:
             self._append_input_body(row, width)
             self._append_search_body(row, width)
+        elif self._is_fetch_card and self._output:
+            self._append_input_body(row, width)
+            self._append_fetch_body(row, width)
         elif self._output:
             self._append_input_body(row, width)
             self._append_output_body(row, width)
@@ -1586,6 +1776,83 @@ class ToolCard(ExpandableActionBlock):
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
+    def _append_fetch_body(self, row: Text, width: int) -> None:
+        """Fetch expansion: the header rows read as metadata, the body as content.
+
+        The header rows (Fetched:/Rendered:/the low-quality nudge) recede to dim
+        so the rendered preview beneath them \u2014 the actual page content \u2014 reads at
+        normal contrast, the same hierarchy the search card uses to keep its
+        structural rows from competing with the result.
+        """
+        signal = Style(color=theme_mod.semantic_color("signal"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        danger = Style(color=theme_mod.semantic_color("danger"), bold=True)
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        shown = self._output[:EXPAND_MAX_LINES]
+        for line in shown:
+            stripped = line.strip()
+            if stripped.startswith("⚠ HTTP"):
+                # F1: the non-2xx error row rides `danger`, bold — the strongest
+                # treatment on the card, so a block/error page cannot be mistaken
+                # for successful content. Matches the tool result's is_error flag.
+                ink = danger
+            elif stripped.startswith("Fetched:"):
+                # D3: the final URL is the card's anchor, so it rides `signal`
+                # blue like web_search's URLs instead of receding into the dim
+                # metadata. The "Fetched:" label and the trailing `· status ·
+                # ctype · cache` metadata stay dim; only the URL(s) lift.
+                self._append_fetched_row(row, line, line_width, indent, dim, signal)
+                continue
+            elif stripped.startswith("Rendered:"):
+                ink = dim
+            elif stripped.startswith("sparse/JS-gated"):
+                # The one advisory row earns attention: it is the signal to reach
+                # for browser, not structural chrome.
+                ink = signal
+            else:
+                ink = muted
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(line, line_width), style=ink)
+        hidden = len(self._output) - len(shown)
+        if hidden > 0:
+            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+
+    def _append_fetched_row(
+        self,
+        row: Text,
+        line: str,
+        line_width: int,
+        indent: str,
+        dim: Style,
+        signal: Style,
+    ) -> None:
+        """Paint the ``Fetched:`` row with its URL(s) in ``signal``, rest dim (D3).
+
+        The row is ``Fetched: <url>[  (final: <url>)][  ·  <meta>]``. URLs are
+        lifted to the anchor colour; the ``Fetched:``/``(final: )`` labels and the
+        ``·``-joined status/ctype/cache metadata stay dim. Tokens are measured
+        against the shared ``line_width`` budget so this row obeys the same width
+        law as every other painted line — once the budget is spent the rest of the
+        row is dropped rather than wrapped, matching the card's one-pass model.
+        """
+        row.append("\n" + indent, style=dim)
+        remaining = line_width
+        # Split on spaces but keep them, so reconstructed spacing matches the
+        # source line exactly; a URL token is any run starting with a scheme.
+        for token in re.split(r"(\s+)", line):
+            if remaining <= 0 or not token:
+                break
+            painted = truncate_cells(token, remaining)
+            if not painted:
+                break
+            ink = signal if token.startswith(("http://", "https://")) else dim
+            row.append(painted, style=ink)
+            remaining -= cell_len(painted)
+
     def _append_diff_body(self, row: Text, width: int) -> None:
         """The write/edit expansion: the unified diff, coloured by hunk line.
 
@@ -1728,7 +1995,12 @@ class ToolCard(ExpandableActionBlock):
             # Generic tool output stays quiet until the row is targeted. Search
             # sources are the primary result, not diagnostics, so their
             # disclosure remains visible at rest and in colorless terminals.
-            if self.tool_name.lower() == "web_search" or self._hovered or self._focused:
+            if (
+                self.tool_name.lower() == "web_search"
+                or self._is_fetch_card
+                or self._hovered
+                or self._focused
+            ):
                 offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
                 if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
                     slot = offer

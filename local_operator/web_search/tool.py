@@ -35,7 +35,8 @@ MODEL_SNIPPET_MAX_CHARS = 320
 MODEL_TITLE_MAX_CHARS = 240
 MODEL_URL_MAX_CHARS = 2_048
 _SOURCE_FOOTER = (
-    "Snippets are intentionally capped. To read one result in full, call " "`browser` with its URL."
+    "Snippets are intentionally capped. To read one result in full, use "
+    "`web_fetch` (or `read <url>`) on its URL."
 )
 
 
@@ -350,8 +351,10 @@ def build_web_search_tool(context: ToolContext | None = None) -> AgentTool | Non
         label="Web Search",
         description=(
             "Search the public web with load balancing and automatic fallback. "
-            "Results include bounded snippets and source URLs; call browser on a URL "
-            "when the full page is needed. Use provider only for a specific enabled source."
+            "Results include bounded snippets and source URLs; use `web_fetch` (or "
+            "`read <url>`) to read a result's full page. Use provider only for a "
+            "specific enabled source. Running several independent searches? Issue "
+            "the calls in one turn — they run in parallel."
         ),
         parameters=WebSearchParams.model_json_schema(),
         approval_tier="read",

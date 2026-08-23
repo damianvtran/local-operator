@@ -20,6 +20,7 @@ from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
+from local_operator.web_fetch.tool import build_web_fetch_tool
 from local_operator.web_search.tool import build_web_search_tool
 
 #: Factory table: tool name -> builder (createIf convention). ``wake`` takes
@@ -37,6 +38,7 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "lsp": lambda _context: build_lsp_tool(),
     "todo": lambda _context: builtin.build_todo_tool(),
     "web_search": lambda context: build_web_search_tool(context),
+    "web_fetch": lambda context: build_web_fetch_tool(context),
     "wake": lambda context: builtin.build_wake_tool(context),
     "task": lambda context: builtin.build_task_tool(context),
     "wait": lambda context: builtin.build_wait_tool(context),
@@ -66,6 +68,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "lsp",
     "todo",
     "web_search",
+    "web_fetch",
     "wake",
     "task",
     "wait",

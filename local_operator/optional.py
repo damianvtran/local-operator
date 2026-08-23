@@ -31,6 +31,7 @@ EXTRAS: dict[str, str] = {
     "images": "HEIC/HEIF image attachment decoding",
     "tokenizer": "exact BPE token counting for context management",
     "lsp": "Python symbol-aware navigation and rename previews (jedi)",
+    "fetch": "clean HTML→markdown rendering for web_fetch (markdownify)",
     "all": "every optional feature",
 }
 

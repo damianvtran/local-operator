@@ -14,6 +14,7 @@ from typing import Any, Dict
 
 import yaml
 
+from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
 from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
 
 
@@ -171,6 +172,10 @@ DEFAULT_CONFIG = Config(
             # and Tavily keyless are both bounded fallbacks, so the default
             # rotates between them rather than depending on one free service.
             "web_search": dict(DEFAULT_WEB_SEARCH_CONFIG),
+            # Web fetch is on by default and useful on a bare install: HTML falls
+            # back to a stdlib renderer when the [fetch] extra is absent, so the
+            # tool never depends on an optional dependency being present.
+            "web_fetch": dict(DEFAULT_WEB_FETCH_CONFIG),
             # Subagent controls. ``models`` maps the lo/med/hi effort tiers to
             # "provider/model" selectors; ``max_running`` caps how many
             # background jobs (subagents AND backgrounded bash, which share one

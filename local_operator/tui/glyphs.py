@@ -70,6 +70,7 @@ NERD_TOOL_ICONS: dict[str, str] = {
     "read_variable": "\uf02b",  # nf-fa-tag
     "browser": "\uf0ac",  # nf-fa-globe
     "web_search": "\uf0ac",  # nf-fa-globe
+    "web_fetch": "\uf019",  # nf-fa-download — a page pulled down over the wire
     "task": "\uf0c0",  # nf-fa-users — work handed to another agent
     "agent": "\uf0c0",
 }
@@ -96,6 +97,7 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     "read_variable": "x",
     "browser": "@",  # the URL sigil
     "web_search": "?",  # a search query, in the verified ASCII fallback repertoire
+    "web_fetch": "\u2193",  # a downward arrow: content pulled down from a URL
     "task": "»",  # work passed onward
     "agent": "»",
 }

@@ -75,7 +75,7 @@ def test_model_search_context_is_bounded_and_points_to_full_page_fetch() -> None
     assert len(rendered) <= MODEL_CONTEXT_MAX_CHARS
     assert "https://example.com/result/0" in rendered
     assert "more results omitted" in rendered
-    assert "call `browser` with its URL" in rendered
+    assert "`web_fetch` (or `read <url>`) on its URL" in rendered
     # The count is returned, not re-derived from the prose: `details`
     # ["context_truncated"] used to be a `" omitted" in text` scan, which a
     # result snippet containing the word would have flipped on a full response.
