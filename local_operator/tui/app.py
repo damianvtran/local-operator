@@ -3114,6 +3114,29 @@ class OperatorApp(App[None]):
         rows.append(Text("Send: /team <name> <message>", style=body))
         return RichBlock(Group(*rows))
 
+    def _submit_command_prompt(
+        self, request: str, attachments: Mapping[int, Attachment] | None
+    ) -> None:
+        """Send a prompt-carrying slash command's argument as a real user turn.
+
+        The shared tail of ``/team <name> <request>`` and ``/agent <name>
+        <message>``: both attach something to the session and then hand the
+        argument to the model. The images the argument cites are resolved from
+        the text itself (``resolve_markers``) — the same authority the composer
+        uses, so a marker the request no longer cites drops its image and order
+        follows the text — and both the resolved list and the raw index→image
+        map go to ``_submit_prompt`` so a held draft (steer/compaction) can
+        rebuild its pixels exactly as a plain prompt would.
+
+        Extracted so the resolve-then-submit pair lives in ONE place: it was
+        copied into three call sites (``/team``, ``/agent`` with and without a
+        layered persona), and three copies of "which text resolves the markers"
+        is exactly the kind of drift the composer's single ``resolve_markers``
+        walk exists to prevent.
+        """
+        images = resolve_markers(request, attachments or {})
+        self._submit_prompt(request, images, attachments)
+
     def _cmd_team(
         self,
         arg: str,
@@ -3217,16 +3240,12 @@ class OperatorApp(App[None]):
         # second row restating `/team name …` would be the duplication
         # the echo policy exists to prevent.
         #
-        # ``resolve_markers`` against the REQUEST, not the whole slash line: the
-        # marker sits in the request tail the user typed around, and resolving
-        # from the text is the same authority the composer uses — a marker the
-        # request no longer cites (deleted before sending) drops its image, and
-        # order follows the text. Passing the map through both arguments lets
-        # ``_submit_prompt`` render the image blocks and hold the pixels across
-        # a steer/compaction exactly as a plain prompt does.
+        # ``_submit_command_prompt`` resolves the request's own image markers
+        # and sends them — the marker sits in the request tail the user typed
+        # around, so a pasted screenshot reaches the manager as pixels, not a
+        # dead ``[Image #N]`` marker.
         notice(f"sending to {team.name}. {team.manager} is coordinating.")
-        images = resolve_markers(request, attachments or {})
-        self._submit_prompt(request, images, attachments)
+        self._submit_command_prompt(request, attachments)
 
     def _cmd_team_chart(self, name: str, registry: Any, notice: NoticeFn) -> None:
         """``/team chart [name]`` — open the org-chart mode for a team.
@@ -3516,8 +3535,7 @@ class OperatorApp(App[None]):
                 # message's own image markers are resolved and sent, same as the
                 # instruction-carrying path below.
                 notice(f"agent {resolved} has no instructions; sending your message as-is.")
-                images = resolve_markers(request, attachments or {})
-                self._submit_prompt(request, images, attachments)
+                self._submit_command_prompt(request, attachments)
             else:
                 notice(
                     f"agent {resolved} resolved but carries no instructions, "
@@ -3542,8 +3560,7 @@ class OperatorApp(App[None]):
         # markers are resolved from the text, the same authority the composer
         # uses, so a cited screenshot reaches the persona as pixels.
         notice(f"agent {resolved} now governs this session's replies.")
-        images = resolve_markers(request, attachments or {})
-        self._submit_prompt(request, images, attachments)
+        self._submit_command_prompt(request, attachments)
 
     # -- MCP status ---------------------------------------------------------
     def _wire_mcp_status(self, session: SessionProtocol) -> None:

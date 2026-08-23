@@ -160,6 +160,82 @@ async def test_team_without_a_request_sends_nothing(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_team_request_carries_multiple_images_in_text_order(tmp_path) -> None:
+    """Two images, and the order/subset the REQUEST text cites is what is sent.
+
+    Locks the resolve-from-text contract the fix leans on: markers are keys, not
+    positions, so citing only ``#2`` (the user deleted ``#1`` before sending)
+    must send exactly one image — the ``#2`` pixels — and citing both in the
+    reverse order must send them in that order. Distinct sizes make each image
+    identifiable by its decoded dimensions.
+    """
+    first = _png(tmp_path / "a.png", 40, 20)
+    second = _png(tmp_path / "b.png", 80, 60)
+    session = FakeSession()
+    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg.create_team(
+        TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
+    )
+    session.team_registry = reg
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, first)
+        await _paste(app, pilot, second)
+        # Both markers are now in the composer, `#1` then `#2`.
+        assert editor.text == "[Image #1, 40x20] [Image #2, 80x60] "
+
+        # Cite ONLY #2 in the request — the user kept the second screenshot and
+        # dropped the first before routing it.
+        editor.load_text("/team ops just this one [Image #2, 80x60]")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        (sent,) = session.prompt_images[0]
+        kept = Image.open(io.BytesIO(base64.b64decode(sent.data)))
+        assert kept.size == (80, 60), "the wrong (or extra) image was sent"
+
+
+@pytest.mark.asyncio
+async def test_team_marker_in_the_name_position_is_not_an_image(tmp_path) -> None:
+    """F2: an image marker where the NAME goes resolves nothing and finds no team.
+
+    Pins the (correct, but silent) behaviour that only the request TAIL carries
+    images: ``/team [Image #1] …`` treats the bracketed marker as a team name,
+    which no team matches, so it is an error rather than a smuggled image. Keeps
+    a future refactor from quietly making the name position image-bearing.
+    """
+    path = _png(tmp_path / "shot.png")
+    session = FakeSession()
+    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg.create_team(
+        TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
+    )
+    session.team_registry = reg
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.strip()
+        # Marker in the NAME slot, not the request tail.
+        editor.load_text(f"/team {marker} describe it")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # No team matched a bracket-shaped name, so nothing was attached and no
+        # turn (and no image) was sent.
+        assert session.attached_teams == []
+        assert session.prompts == []
+        assert session.prompt_images == []
+
+
+@pytest.mark.asyncio
 async def test_agent_message_carries_the_pasted_image(tmp_path) -> None:
     """`/agent <name> <message>` sends the screenshot the message cites."""
     path = _png(tmp_path / "shot.png", 1568, 410)
