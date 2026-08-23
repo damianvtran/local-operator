@@ -8,13 +8,15 @@ miss by a column, and a miss used to land on selectable content: Textual's
 edge tripped selection auto-scroll — the reported "it scrolls while I drag but
 leaves a messy highlight" bug.
 
-``TranscriptScreen._forward_event`` now redirects a ``MouseDown`` that lands one
-cell left of the bar (inside the thumb's vertical extent) onto the scrollbar
-column BEFORE the base class can arm a selection, so the near-miss becomes a
-real thumb grab. These tests pin that behaviour directly against the real
-``OperatorApp`` — the redirect, the drag-scrolls-without-highlighting path, the
-untouched true-thumb grab, and the two guards that keep the pad from stealing
-ordinary content clicks or firing when there is no scrollbar.
+``TranscriptScreen._forward_event`` now redirects a ``MouseDown`` that lands
+within ``SCROLLBAR_GRAB_PAD`` (2) cells left of the bar, inside the scrollbar's
+vertical extent (the whole track, not just the thumb), onto the scrollbar column
+BEFORE the base class can arm a selection, so the near-miss becomes a real grab.
+These tests pin that behaviour directly against the real ``OperatorApp`` — the
+redirect, the drag-scrolls-without-highlighting path, the untouched true-thumb
+grab, and the guards that keep the pad from stealing ordinary content clicks
+(three cells in), firing when there is no scrollbar, skipping a hidden subagent
+transcript, or re-grabbing mid-drag.
 
 Why events are posted rather than driven through ``pilot.mouse_down``: the bar
 sits at ``x == screen.width`` (the gutter is the last column), which
@@ -28,12 +30,14 @@ short-circuits ``ScrollBar._on_mouse_move``.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from textual import events
 from textual.geometry import Offset
 from textual.scrollbar import ScrollBar
 
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import OperatorApp, TranscriptScreen
 from local_operator.tui.widgets.transcript import RichBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -197,12 +201,13 @@ async def test_true_thumb_click_still_grabs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_two_cells_left_still_selects_content() -> None:
-    """The pad is exactly one column: a mousedown two cells left of the bar is
-    ordinary content and still arms a text selection.
+async def test_two_cells_left_now_redirects_with_wider_pad() -> None:
+    """With ``SCROLLBAR_GRAB_PAD == 2`` a mousedown two cells left of the bar now
+    grabs the bar instead of selecting — the wider forgiving zone.
 
-    This is the guard that the forgiveness cannot swallow real clicks — raising
-    ``SCROLLBAR_GRAB_PAD`` without a fresh geometry check would break it.
+    This is the positive proof the pad was widened: at the old pad of 1 this
+    column armed a selection; at 2 it redirects onto the scrollbar and no
+    selection is armed.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(80, 24)) as pilot:
@@ -214,7 +219,37 @@ async def test_two_cells_left_still_selects_content() -> None:
         await pilot.pause()
 
         region = _scrollbar_region(app, view)
-        content_x = region.x - 2
+        near_miss_x = region.x - 2
+        thumb_y = region.y
+        app.mouse_position = Offset(near_miss_x, thumb_y)
+        app.screen._forward_event(_mouse_down(near_miss_x, thumb_y))
+        await pilot.pause()
+
+        assert app.screen._select_state is None
+        assert type(app.mouse_captured).__name__ == "ScrollBar"
+
+
+@pytest.mark.asyncio
+async def test_three_cells_left_still_selects_content() -> None:
+    """The pad stops at two columns: a mousedown three cells left of the bar is
+    ordinary content and still arms a text selection.
+
+    This is the boundary guard that the forgiveness cannot swallow real clicks —
+    raising ``SCROLLBAR_GRAB_PAD`` above 2 without a fresh geometry check would
+    break it. It is computed as ``region.x - (SCROLLBAR_GRAB_PAD + 1)`` so the
+    assertion tracks the constant rather than a hardcoded offset.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        _fill(view)
+        await pilot.pause()
+        view.scroll_y = 0
+        await pilot.pause()
+
+        region = _scrollbar_region(app, view)
+        content_x = region.x - (TranscriptScreen.SCROLLBAR_GRAB_PAD + 1)
         content_y = region.y
         app.mouse_position = Offset(content_x, content_y)
         app.screen._forward_event(_mouse_down(content_x, content_y))
@@ -249,3 +284,119 @@ async def test_short_transcript_passes_through() -> None:
         # No grab: the loop body was skipped and the event passed through
         # unchanged (no ScrollBar to capture).
         assert type(app.mouse_captured).__name__ != "ScrollBar"
+
+
+@pytest.mark.asyncio
+async def test_redirect_skips_hidden_subagent_transcript() -> None:
+    """A display:none transcript is not in the compositor, so the redirect skips
+    it rather than targeting an off-screen bar.
+
+    Reproduces the subagent-mode shape (the main transcript is hidden while the
+    child's page is up) without standing the whole mode up: hiding the view is
+    what removes it from the compositor. ``show_vertical_scrollbar`` can still
+    read True while hidden, so this pins that the compositor lookup — not that
+    flag — is the gate. A near-miss where the bar used to be must not grab.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        _fill(view)
+        await pilot.pause()
+        view.scroll_y = 0
+        await pilot.pause()
+
+        region = _scrollbar_region(app, view)
+        # Hide the view as subagent mode does to the main transcript.
+        view.display = False
+        await pilot.pause()
+
+        near_miss_x = region.x - 1
+        thumb_y = region.y
+        app.mouse_position = Offset(near_miss_x, thumb_y)
+        app.screen._forward_event(_mouse_down(near_miss_x, thumb_y))
+        await pilot.pause()
+
+        assert type(app.mouse_captured).__name__ != "ScrollBar"
+
+
+@pytest.mark.asyncio
+async def test_redirect_early_returns_while_a_drag_is_in_progress() -> None:
+    """Mid-gesture (the mouse already captured) the redirect never fires, so a
+    grab in progress is never re-grabbed onto a fresh event.
+
+    Captures the scrollbar directly to stand in for a live drag, then asserts
+    ``_forward_event`` does not even call ``_redirect_gutter_grab`` for a
+    subsequent near-miss ``MouseDown`` — the ``mouse_captured is None`` gate in
+    ``_forward_event`` short-circuits it.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        _fill(view)
+        await pilot.pause()
+        view.scroll_y = 0
+        await pilot.pause()
+
+        region = _scrollbar_region(app, view)
+        # A drag in progress: the scrollbar holds the mouse.
+        view.vertical_scrollbar.capture_mouse()
+        await pilot.pause()
+        assert isinstance(app.mouse_captured, ScrollBar)
+
+        screen = cast(TranscriptScreen, app.screen)
+        calls = 0
+        original = screen._redirect_gutter_grab
+
+        def _counting(event: events.MouseDown):
+            nonlocal calls
+            calls += 1
+            return original(event)
+
+        screen._redirect_gutter_grab = _counting  # type: ignore[method-assign]
+        screen._forward_event(_mouse_down(region.x - 1, region.y))
+        await pilot.pause()
+
+        assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_scrollbar_pointer_is_grab_and_sticks() -> None:
+    """Layer B: the system scrollbar's pointer is set to ``grab`` at mount and
+    stays that way through natural state changes.
+
+    The CSS rule form (`TranscriptView > ScrollBar { pointer: grab }`) is dead
+    at runtime (review round 1, M1): the computed pointer stays ``default``
+    because system scrollbars take Textual's shared style-cache branch.
+    ``TranscriptView.on_mount`` sets it as an inline style instead; this proves
+    the inline value is present after compose, after a scroll, and after a
+    resize — i.e. it is not silently reset by a re-application.
+
+    NOTE: this asserts the *style value* is set, which is all a headless pilot
+    can prove. Whether the terminal actually renders the OSC-22 cursor is a
+    live-surface question (the cmux probe under `lop`), out of scope for a unit
+    test — see the tcss/on_mount comments.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        scrollbar = view.vertical_scrollbar
+
+        # Set at mount, before any content.
+        assert scrollbar.styles.pointer == "grab"
+
+        _fill(view)
+        for _ in range(4):
+            await pilot.pause()
+        assert scrollbar.styles.pointer == "grab"
+
+        view.scroll_y = 20
+        await pilot.pause()
+        assert scrollbar.styles.pointer == "grab"
+
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        # Same scrollbar instance, value intact through the resize re-layout.
+        assert view.vertical_scrollbar.styles.pointer == "grab"

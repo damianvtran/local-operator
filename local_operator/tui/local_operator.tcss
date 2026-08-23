@@ -156,25 +156,26 @@ TranscriptView {
      * than the held state is backwards. `dim` hover -> `muted` grabbed is a
      * clear, monotone rest<hover<grabbed ramp on the 1-cell thumb.
      *
-     * The architect's proposal used `$lo-accent` (the one green) for grabbed,
-     * but line ~367 reserves the accent for "a turn is live" and nothing else;
-     * spending it on a scrollbar grab risks reading as agent activity. The
-     * accent option is DEFERRED to the design review, which makes the final
-     * call — this neutral ramp is the safe first pass. */
+     * The architect proposed `$lo-accent` (the one green) for grabbed; design
+     * review (round 1, D1) REJECTED it and settled on neutral `$lo-muted`. Line
+     * ~367 reserves the accent for "a turn is live" and nothing else, and a
+     * green thumb on a passive scroll gesture would fire that live-activity
+     * signal falsely and paint the highest-chroma colour on the reserved gutter
+     * (the "saturated column reads as a right border" failure D4 forbids). Keep
+     * this ramp neutral. */
     scrollbar-color-hover: $lo-dim;
     scrollbar-color-active: $lo-muted;
 }
 
-/* Layer B (progressive enhancement, Kitty pointer-shape / OSC 22 only): show
- * the open-hand cursor while hovering the 1-cell bar. Textual already flips
- * this to "grabbing" on capture and back on release (scrollbar.py
- * _on_mouse_capture / _on_mouse_release). It reaches ONLY terminals that speak
- * the Kitty pointer-shape protocol; elsewhere it is a silent no-op, which is
- * why the color ramp above — drawn text that works everywhere — is the real
- * affordance and this is a bonus, never the primary signal. */
-TranscriptView > ScrollBar {
-    pointer: grab;
-}
+/* Layer B (the open-hand hover cursor) is NOT declared here. A
+ * `TranscriptView > ScrollBar { pointer: grab; }` rule matches the selector but
+ * is dead at runtime: system scrollbars are styled through Textual's shared
+ * style-cache branch (`Stylesheet.update_nodes`), which never delivers this
+ * rule to the widget — the computed `pointer` stays `default` through compose,
+ * scroll and resize (verified in review round 1, M1). The pointer is instead
+ * set as an INLINE style in `TranscriptView.on_mount`, which bypasses that
+ * cache; see the comment there. The drawn colour ramp above is the real,
+ * everywhere-visible affordance regardless. */
 
 /* Blocks: zero outer margin, zero padding — no declarations here by design
  * (the minimalism defense asserts their absence; anything uniform here would
