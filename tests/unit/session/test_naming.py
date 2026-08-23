@@ -85,6 +85,49 @@ def test_thinking_preamble_without_a_title_is_rejected() -> None:
     assert naming.parse_title("Here's my reasoning:\nthis is about login") is None
 
 
+def test_unclosed_title_tag_is_not_kept_as_markup() -> None:
+    """Truncated ``<title>…`` must never store the tag characters (review M1).
+
+    The remainder can still name the session if it already looks like a
+    title; the literal ``<title>`` must not survive into the stored name.
+    """
+    assert naming.parse_title("<title>the login redirect loop") == ("The login redirect loop")
+    assert "<title>" not in (naming.parse_title("<title>the login redirect loop") or "")
+    assert naming.parse_title("<title>") is None
+
+
+def test_unclosed_think_without_a_visible_title_is_rejected() -> None:
+    assert naming.parse_title("<think>planning a name for the login loop") is None
+    assert naming.parse_title("<thinking>still reasoning about this") is None
+    assert naming.parse_title("<reasoning>drafting the title") is None
+    # A closed tag drafted *inside* the unclosed envelope is still thinking.
+    assert naming.parse_title("<think>planning\n<title>wrong title</title>") is None
+
+
+def test_unclosed_thinking_fence_is_rejected() -> None:
+    assert naming.parse_title("```thinking\nplanning the name") is None
+    assert naming.parse_title("```reasoning\nstill inside the envelope") is None
+
+
+def test_closed_think_then_untagged_short_title_still_works() -> None:
+    raw = "<think>I should name this after the login bug</think>\nthe login redirect loop"
+    assert naming.parse_title(raw) == "The login redirect loop"
+
+
+def test_fenced_json_unwraps_regardless_of_language_tag() -> None:
+    """A fence language is not a title (review m2). ``python`` used to win."""
+    raw = '```python\n{"title": "The login redirect loop"}\n```'
+    assert naming.parse_title(raw) == "The login redirect loop"
+    assert naming.parse_title(raw) != "Python"
+
+
+def test_chatty_preamble_then_a_later_short_title() -> None:
+    """First-line-only parse kept the preamble (review m1). Prefer the later line."""
+    raw = "Sure, I'll name this.\n\nThe login redirect loop"
+    assert naming.parse_title(raw) == "The login redirect loop"
+    assert naming.parse_title(raw) != "Sure, I'll name this"
+
+
 @pytest.mark.asyncio
 async def test_generate_title_returns_none_for_the_sentinel() -> None:
     async def answer(system: str, prompt: str) -> str:

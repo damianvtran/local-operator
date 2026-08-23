@@ -334,7 +334,7 @@ async def test_a_dead_naming_call_leaves_the_opener_on_the_band() -> None:
     naming attempt had been spent on a call that returned nothing. The excerpt
     is strictly better than `lo › tmp` and it is already on screen, so it stays.
     """
-    app, session = await _boot(title="")  # a reply with no <title> at all
+    app, session = await _boot(title="")  # empty reply: parse_title returns None
     async with app.run_test(size=(100, 30)) as pilot:
         await _ready(pilot, app)
         app._submit_prompt("fix the login redirect loop")
