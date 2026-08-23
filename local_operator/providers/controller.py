@@ -528,30 +528,37 @@ class ProviderController:
         The expected set for ``/usage`` is the logged-in rows, not the subset
         that happened to mint a bearer this cycle. A sibling enumerator
         (:meth:`AuthStore.list_oauth_identities`) is preferred because it
-        never calls ``_ensure_oauth_fresh``; falling back to
-        ``list_credentials`` keeps a store protocol that has not grown the
-        sibling from dropping the panel entirely.
+        never calls ``_ensure_oauth_fresh``. An empty return from that
+        sibling is authoritative — a runtime/config override short-circuits
+        to ``[]`` so stored identity does not apply, and falling through to
+        ``list_credentials`` (which does not honour overrides) would paint
+        those OAuth emails as last-known stubs and skip the API-key route
+        the session is actually using. ``list_credentials`` is only the
+        shim for a store protocol that has not grown the sibling.
         """
         storage = self._storage_id(provider)
         try:
             enumerator = self.auth_store.list_oauth_identities
-            accesses = enumerator(storage)
-        except Exception:  # noqa: BLE001 — identities are labels, never fatal
-            accesses = []
-        identities: list[str] = []
-        for access in accesses:
-            label = (
-                getattr(access, "email", None)
-                or getattr(access, "account_id", None)
-                or (
-                    f"cred:{getattr(access, 'credential_id', 0)}"
-                    if getattr(access, "credential_id", 0)
-                    else None
+        except AttributeError:
+            enumerator = None
+        if enumerator is not None:
+            try:
+                accesses = enumerator(storage)
+            except Exception:  # noqa: BLE001 — identities are labels, never fatal
+                return []
+            identities: list[str] = []
+            for access in accesses:
+                label = (
+                    getattr(access, "email", None)
+                    or getattr(access, "account_id", None)
+                    or (
+                        f"cred:{getattr(access, 'credential_id', 0)}"
+                        if getattr(access, "credential_id", 0)
+                        else None
+                    )
                 )
-            )
-            if label:
-                identities.append(str(label))
-        if identities:
+                if label:
+                    identities.append(str(label))
             return identities
         try:
             rows = self.auth_store.list_credentials(storage)

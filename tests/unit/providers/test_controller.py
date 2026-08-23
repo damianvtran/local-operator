@@ -35,6 +35,17 @@ class FakeAuthStore:
         #: Every OAuth account per provider, as the real store now enumerates
         #: them. Distinct from `oauth`, which is the cascade's single pick.
         self.oauth_accounts: dict[str, list[object]] = {}
+        #: Runtime/config override keys. When set, list_oauth_identities
+        #: returns [] — same contract as AuthStore, because an override
+        #: aims at a gateway and stored identity does not apply.
+        self._runtime_overrides: dict[str, str] = {}
+
+    def set_runtime_api_key(self, provider: str, api_key: str | None) -> None:
+        if api_key:
+            self._runtime_overrides[provider] = api_key
+            self.api_keys[provider] = api_key
+        else:
+            self._runtime_overrides.pop(provider, None)
 
     def list_credentials(self, provider=None):
         rows = (
@@ -65,10 +76,16 @@ class FakeAuthStore:
         return self.oauth.get(provider)
 
     async def list_oauth_accesses(self, provider):
+        if self._runtime_overrides.get(provider):
+            return []
         return list(self.oauth_accounts.get(provider, []))
 
     def list_oauth_identities(self, provider):
         # Reporting enumerator: stored identities, no bearer required.
+        # An override short-circuits to [] — same as AuthStore — so
+        # /usage takes the API-key route instead of naming stored logins.
+        if self._runtime_overrides.get(provider):
+            return []
         # Rows first (stable stored order), then any oauth_accounts the test
         # registered without also upserting a row. oauth_accounts is the
         # *bearer* list and may be a subset — using it alone would hide a
@@ -1131,3 +1148,54 @@ class TestPerAccountLastKnown:
         assert reports[0].limits == []
         assert reports[0].consecutive_failures == 1
         assert reports[1].limits[0].amount.used == 22.0
+
+    @pytest.mark.asyncio
+    async def test_an_override_fetches_the_api_key_not_stored_oauth_stubs(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """OAuth rows plus a runtime override must take the API-key route.
+
+        ``list_oauth_identities`` returns [] when an override is set — that
+        empty list is authoritative. Falling through to ``list_credentials``
+        would name the stored emails, skip ``_fetch_one(access=None)``, and
+        paint last-known / unavailable stubs for accounts the session is
+        not using.
+        """
+        self._four(store)
+        store.set_runtime_api_key("anthropic", "sk-ant-override")
+        seen: list[tuple[str | None, str | None]] = []
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            seen.append((api_key, account_id))
+            return UsageReport(
+                provider=provider,
+                identity=None,
+                limits=[
+                    UsageLimit(
+                        id="override:7d",
+                        label="7 day",
+                        amount=UsageAmount(
+                            used=9.0, limit=100.0, used_fraction=0.09, unit="percent"
+                        ),
+                        window="7 day",
+                        shared=True,
+                    )
+                ],
+            )
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+        assert seen == [("sk-ant-override", None)]
+        assert len(reports) == 1
+        assert reports[0].identity is None
+        assert reports[0].usage_unavailable is False
+        assert {r.identity for r in reports}.isdisjoint(
+            {
+                "damian@gominerva.com",
+                "damian@radienthq.com",
+                "damian@pergamonhq.com",
+                "damianvtran@gmail.com",
+            }
+        )
