@@ -114,7 +114,9 @@ class SessionHandle(Protocol):
     async def new_conversation(self) -> str: ...
     async def resume_session(self, session_id: str) -> str: ...
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str: ...
-    async def ask_answer(self, request_id: str, value: str) -> str: ...
+    async def ask_answer(  # noqa: E301
+        self, request_id: str, value: str, question_index: int | None = None
+    ) -> str: ...
 
     async def refresh(self) -> None:
         """Re-read session state into the projection (post-resume, rename,
@@ -385,7 +387,18 @@ class Registrant:
                 bool(frame.get("remember")),
             )
         if op == "ask_answer":
-            return await h.ask_answer(str(frame.get("request_id", "")), str(frame.get("value", "")))
+            # ``question_index`` is the question the phone was DISPLAYING when
+            # the user tapped (U8 guard): the handle rejects the answer if the
+            # picker has since advanced past it. Optional — an older client that
+            # omits it falls back to answering the current question, the
+            # pre-guard behaviour.
+            raw_index = frame.get("question_index")
+            question_index = int(raw_index) if isinstance(raw_index, (int, float)) else None
+            return await h.ask_answer(
+                str(frame.get("request_id", "")),
+                str(frame.get("value", "")),
+                question_index=question_index,
+            )
         raise ValueError(f"unknown op: {op!r}")
 
     # -- pushes ----------------------------------------------------------------

@@ -5220,6 +5220,10 @@ class OperatorApp(App[None]):
         self._ask_screen = card
         self._ask_pending = future
         self._mount_prompt(card)
+        # Project the question to the phone as an ANSWERABLE card. Guarded and
+        # best-effort, exactly like _mobile_adopted/_mobile_teardown: a phone
+        # bridge that is absent or throwing must never break the terminal ask.
+        self._notify_mobile_ask_pending(card)
         # The turn is parked on the user, and the working line and terminal
         # title say so — the same treatment an unanswered approval gets, for the
         # same reason: a spinner over a wait the agent is not responsible for is
@@ -5247,7 +5251,53 @@ class OperatorApp(App[None]):
             # first (above) so the focus guard does not bounce focus back onto
             # the card being removed.
             self._unmount_prompt(card)
+            # Clear the phone card by whatever route we left the ask — a
+            # terminal answer, Escape, a cancelled tool call, or teardown all
+            # pass through this finally. Card-scoped so it cannot clear a card
+            # a later ask already mounted.
+            self._notify_mobile_ask_settled(card)
             self._refresh_working_activity()
+
+    def _notify_mobile_ask_pending(self, card: AskPickerScreen) -> None:
+        """Tell the mobile bridge an ask picker went up, if one is attached.
+
+        Lazy (`_mobile_handle` is None until a phone bridge starts) and
+        swallow-all: a mobile-notify failure is logged and dropped so the
+        terminal ask proceeds regardless — the same contract
+        _mobile_adopted/_mobile_teardown keep.
+        """
+        handle = self._mobile_handle
+        if handle is None:
+            return
+        try:
+            handle.note_ask_pending(card)
+        except Exception:  # noqa: BLE001 - a phone bridge must never break the ask
+            logger.debug("mobile ask-pending notify failed", exc_info=True)
+
+    def _notify_mobile_ask_settled(self, card: AskPickerScreen) -> None:
+        """Tell the mobile bridge an ask picker came down; see the pending twin."""
+        handle = self._mobile_handle
+        if handle is None:
+            return
+        try:
+            handle.note_ask_settled(card)
+        except Exception:  # noqa: BLE001 - a phone bridge must never break the ask
+            logger.debug("mobile ask-settled notify failed", exc_info=True)
+
+    def _notify_mobile_ask_advanced(self, card: AskPickerScreen) -> None:
+        """Tell the mobile bridge an ask picker advanced to a new question.
+
+        Re-projects the current question so the phone follows a terminal-driven
+        advance (U8). Same lazy, swallow-all contract as the pending/settled
+        twins — the terminal ask proceeds regardless of the phone bridge.
+        """
+        handle = self._mobile_handle
+        if handle is None:
+            return
+        try:
+            handle.note_ask_advanced(card)
+        except Exception:  # noqa: BLE001 - a phone bridge must never break the ask
+            logger.debug("mobile ask-advanced notify failed", exc_info=True)
 
     def _settle_ask_picker(self) -> None:
         """Take down a live ``ask`` picker, answering with whatever was chosen.
@@ -5315,6 +5365,21 @@ class OperatorApp(App[None]):
         """
         message.stop()
         self._sync_prompt_host()
+
+    def on_ask_picker_screen_question_advanced(
+        self, message: AskPickerScreen.QuestionAdvanced
+    ) -> None:
+        """The ask card moved to a new question; re-project it to the phone.
+
+        Fires for a terminal Enter as well as a phone-routed answer, so the
+        phone always follows the terminal to Q2..Qn instead of being left on
+        the previous question — the cross-surface desync that let a phone tap
+        be recorded against the wrong question (U8). Guarded/best-effort like
+        the mount and settle notifications: a mobile-notify failure must never
+        break the terminal ask.
+        """
+        message.stop()
+        self._notify_mobile_ask_advanced(message.card)
 
     def _sync_prompt_host(self) -> None:
         """Hide the prompt host when what it holds cannot be drawn.

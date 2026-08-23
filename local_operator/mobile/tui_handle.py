@@ -15,23 +15,31 @@ Two rules shape everything here:
   so the terminal screen reflects everything the phone did — the user walking
   back to their desk sees the turn they started from the phone, mid-stream.
 
-Approval/ask prompts on the phone are v1-simple: when the TUI's own card is
-up, the projection carries it (via :meth:`note_pending`) so the phone shows
-"waiting in terminal"; phone-answering a TUI-mounted card is a later round,
-because racing two front ends over one modal needs a resolution protocol the
-TUI's card does not yet have. Daemon-owned sessions already answer from the
-phone; the terminal-first session degrades to "see it, go to the desk".
+Ask prompts are answerable from the phone. When the TUI mounts an ``ask``
+picker, the app calls :meth:`note_ask_pending`, which projects the first
+question as a ``kind="ask"`` :class:`PendingRequest` (mirroring the daemon's
+:mod:`owned` ask gate); the phone renders the card and can answer it via the
+``ask_answer`` control op. :meth:`ask_answer` resolves the LIVE picker through
+its own ``settle`` path on the Textual loop, so the terminal screen comes down
+too and exactly one answer wins whichever front end got there first. When the
+picker settles by any route, :meth:`note_ask_settled` clears the phone card.
+
+Approvals on a TUI session are NOT answerable from the phone: the TUI boots in
+auto-approve, so it never parks an approval card the phone would need to reach
+(:meth:`approval_answer` stays a terminal-only stub). Answering approvals over
+mobile is a daemon-owned-session capability today (see :mod:`owned`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle, image_blocks
-from local_operator.mobile.types import PendingRequest, SessionProjection
+from local_operator.mobile.types import SessionProjection, ask_pending_request
 
 if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
@@ -64,6 +72,18 @@ class TuiSessionHandle(SessionHandle):
         self._fold = ProjectionFold(self._projection)
         self._on_projection: Callable[[], None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        # request_id -> the live AskPickerScreen for every ask picker this
+        # handle has projected to the phone. Keyed by a token_hex request id
+        # (owned.py's scheme) because the phone answers by request id and never
+        # sees the widget. The current question (and thus the answer key) is
+        # read LIVE off ``card.question`` on each answer, because a
+        # multi-question picker advances between phone answers (U1) — a stashed
+        # id would resolve every answer under Q0's key. ``ask`` is ``exclusive``
+        # so this normally holds at most one entry, but a dict keeps pop-by-id
+        # honest. Mutated ONLY on the Textual loop (mount/settle) and read there
+        # too (``ask_answer`` hops onto it before touching this), so the
+        # single-winner race is decided by one owner, not by dict atomicity.
+        self._ask_pending: dict[str, Any] = {}
 
     def _session(self) -> Any:
         """The app's current session. A property method (not cached) because
@@ -91,6 +111,10 @@ class TuiSessionHandle(SessionHandle):
         self._projection.subagents.clear()
         self._projection.pending = None
         self._fold = ProjectionFold(self._projection)
+        # A /new or /resume mid-ask abandons the old picker; drop its mapping
+        # so a late phone answer for a question that no longer exists reports
+        # "no longer waiting" instead of settling into the new conversation.
+        self._ask_pending.clear()
         if self._on_projection is not None:
             self.subscribe(self._on_projection)
 
@@ -205,10 +229,87 @@ class TuiSessionHandle(SessionHandle):
         return f"resumed {session_id}"
 
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
+        # A TUI session boots in auto-approve (OperatorApp._load_approvals_default),
+        # so it never parks an approval card the phone could reach. Answering
+        # approvals over mobile is a daemon-owned-session capability (owned.py);
+        # keep the honest terminal-only stub rather than pretend otherwise.
         raise ValueError("this approval is on the terminal — answer it there")
 
-    async def ask_answer(self, request_id: str, value: str) -> str:
-        raise ValueError("this question is on the terminal — answer it there")
+    async def ask_answer(
+        self, request_id: str, value: str, question_index: int | None = None
+    ) -> str:
+        """Answer the CURRENT question of a live TUI ask picker from the phone.
+
+        Called on the registrant/daemon loop, so the whole resolve hops ONTO
+        the Textual loop via :meth:`_on_app`: the pending-map read, the
+        single-winner guard, and the picker advance/settle all run there,
+        against the one owner that also mounts and settles the card. That is
+        what makes the race safe without locking — by the time this callback
+        runs, either the picker is still live (answer it) or the terminal
+        already answered (``settled`` is set / the entry is gone).
+
+        Multi-question asks advance question-by-question (U1). A phone answer
+        drives the picker's own :meth:`AskPickerScreen.answer_current`, the
+        external-answer twin of the terminal's Enter: it records this question's
+        answer and either advances the SAME picker to the next question — in
+        which case we RE-PROJECT the new current question so the phone shows it
+        — or, on the last question, settles the whole card. Settling resolves
+        the very future ``request_user_choice`` awaits, so the terminal screen
+        also comes down and the tool call returns the full answer map.
+
+        ``question_index`` is the question the phone was DISPLAYING when the user
+        tapped. It is the U8 guard, mirroring the composer path's
+        ``_HeldAnswerKey.question_index``: a multi-question picker advances (and
+        the phone re-projects) between answers, so a tap already in flight when
+        a terminal advance lands must NOT be recorded against the question that
+        moved into its place. We refuse when it no longer matches the picker's
+        live index rather than misattribute the value; the phone then repaints
+        to the current question from the re-projection. ``None`` (an older
+        client) skips the check and answers the current question, the pre-guard
+        behaviour.
+
+        Race message (U4): if the terminal (or a stop/teardown) already settled
+        this card, report that it was "already answered on the terminal" — a
+        human, reconciling message rather than the developer-worded "no longer
+        waiting", so the phone user learns a different answer won rather than
+        seeing the card silently vanish.
+        """
+
+        def resolve() -> str:
+            card = self._ask_pending.get(request_id)
+            if card is None:
+                raise ValueError("that question was already answered on the terminal")
+            # The terminal may have settled this card in the window before its
+            # unmount cleared our mapping. ``settle`` is idempotent, but a
+            # second answer must not report success for a choice the terminal
+            # actually made — refuse and let the phone show the real outcome.
+            if getattr(card, "settled", False):
+                raise ValueError("that question was already answered on the terminal")
+            # U8 guard: the phone answered whatever question it was showing, but
+            # the terminal may have advanced the card since. Answering against a
+            # moved-on question would key the value to the WRONG question, so
+            # refuse and let the re-projection repaint the phone to the current
+            # one.
+            if question_index is not None:
+                live_index = int(getattr(card, "question_index", 0) or 0)
+                if live_index != question_index:
+                    raise ValueError("that question moved on — here is the current one")
+            # answer_current takes the chosen text for the CURRENT question:
+            # for options that is the tapped label, for free-text/secret the
+            # typed value. An empty value means "nothing chosen" (settles with
+            # None on Q0, keeps partials past it) — parity with owned.py.
+            settled = card.answer_current([value] if value else [])
+            if settled:
+                return "answered"
+            # The picker advanced to the next question; project it so the phone
+            # follows to Q2..Qn instead of thinking it is done. (The picker also
+            # posts QuestionAdvanced, which re-projects too — this is the
+            # immediate, deterministic path; the message is belt-and-suspenders
+            # for terminal-driven advances.)
+            self._project_ask_question(request_id, card)
+            return "answered"
+
+        return await self._on_app(resolve)
 
     async def refresh(self) -> None:
         """Re-seed identity fields after /new, /resume, /model, /rename."""
@@ -226,14 +327,120 @@ class TuiSessionHandle(SessionHandle):
         # path. See ``_reconcile_streaming``.
         self._reconcile_streaming()
 
-    # -- pending-prompt mirroring ----------------------------------------------------
+    # -- ask-picker mirroring ----------------------------------------------------
 
-    def note_pending(self, pending: PendingRequest | None) -> None:
-        """The TUI calls this when its own approval/ask card mounts or
-        resolves, so the phone shows the wait (and who must answer it)."""
-        self._fold.set_pending(pending)
+    def note_ask_pending(self, card: Any) -> None:
+        """Project a freshly mounted TUI ask picker to the phone as an
+        answerable card.
+
+        Called on the Textual loop from ``OperatorApp.request_user_choice``
+        immediately after the picker mounts, so the card sits on its first
+        question. Touching ``_fold`` here is safe: fold mutations are
+        synchronous and only ``_notify`` crosses threads (the registrant
+        coalesces the push onto its own loop).
+
+        A ``token_hex`` request id (owned.py's scheme); the card's CURRENT
+        question is what gets projected — with its options + descriptions (U3),
+        the ``secret`` flag (D1/U2, never the value), and the question position
+        for the "N of M" header (U1). A multi-question ask re-projects its next
+        question from :meth:`ask_answer` as the picker advances.
+        """
+        # Public property, not the private ``_questions`` list (UX minor-2): at
+        # mount ``card.question`` IS the first question, and reading through the
+        # property keeps this bridge off the widget's internals.
+        if getattr(card, "question", None) is None:
+            return
+        request_id = secrets.token_hex(8)
+        self._ask_pending[request_id] = card
+        # Parity with owned.py's gate: log when more than one question rides a
+        # single card, so the operator can see a multi-part ask went to the
+        # phone (UX minor-1).
+        total = self._question_total(card)
+        if total > 1:
+            logger.info("mobile tui ask: %d questions, projecting question-by-question", total)
+        self._push_current_question(request_id, card)
         if self._on_projection is not None:
             self._on_projection()
+
+    def note_ask_advanced(self, card: Any) -> None:
+        """Re-project a picker that advanced to its next question, by ANY route.
+
+        Called on the Textual loop from ``OperatorApp`` when the picker posts
+        ``QuestionAdvanced`` — a terminal Enter as well as a phone-routed
+        answer. Re-projecting on the TERMINAL advance is what closes U8: without
+        it the phone kept showing the previous question after the terminal
+        moved on, and a tap there resolved against the question the terminal had
+        advanced to. Card-scoped and idempotent: a card the handle never
+        projected (or one already settled/popped) is a no-op.
+        """
+        request_id = self._request_id_for_card(card)
+        if request_id is None:
+            return
+        self._project_ask_question(request_id, card)
+
+    def _project_ask_question(self, request_id: str, card: Any) -> None:
+        """Re-project the picker's now-current question after it advanced.
+
+        The push model is snapshot/repaint, so replacing the pending card with
+        the current question is all it takes for the phone to follow from Q1 to
+        Q2..Qn (U1/U8). Same-id push (``set_pending`` semantics via pop+push) so
+        the card updates in place rather than stacking, and a mid-ask reconnect
+        snapshots the CURRENT question because the fold now holds it."""
+        self._fold.pop_pending(request_id)
+        self._push_current_question(request_id, card)
+        if self._on_projection is not None:
+            self._on_projection()
+
+    def _push_current_question(self, request_id: str, card: Any) -> None:
+        """Push the card's CURRENT question onto the fold as the pending ask.
+
+        The one construction seam, shared by the mount and the advance, built
+        through :func:`ask_pending_request` so the TUI and owned projections
+        cannot drift."""
+        self._fold.push_pending(
+            ask_pending_request(
+                request_id,
+                card.question,
+                question_index=self._question_index(card),
+                question_total=self._question_total(card),
+            )
+        )
+
+    @staticmethod
+    def _question_index(card: Any) -> int:
+        return int(getattr(card, "question_index", 0) or 0)
+
+    @staticmethod
+    def _question_total(card: Any) -> int:
+        # ``_questions`` is the only source of the count; the public surface
+        # exposes the current index but not the total. Fall back to 1 so a
+        # duck-typed test stand-in still projects a coherent single-question
+        # header.
+        questions = getattr(card, "_questions", None)
+        return len(questions) if questions else 1
+
+    def note_ask_settled(self, card: Any) -> None:
+        """Clear the phone card for a TUI ask picker that just came down.
+
+        Called on the Textual loop from ``request_user_choice``'s finally block,
+        so it covers EVERY settle route — a terminal answer, Escape, a
+        cancelled tool call, and teardown — with one seam. Card-scoped and
+        idempotent: it pops exactly the request this card was projected under,
+        so a settle can never clear a sibling and a second call is a no-op.
+        """
+        request_id = self._request_id_for_card(card)
+        if request_id is None:
+            return
+        self._ask_pending.pop(request_id, None)
+        self._fold.pop_pending(request_id)
+        if self._on_projection is not None:
+            self._on_projection()
+
+    def _request_id_for_card(self, card: Any) -> str | None:
+        for request_id, pending_card in self._ask_pending.items():
+            if pending_card is card:
+                return request_id
+        return None
 
     # -- internals ---------------------------------------------------------------------
 

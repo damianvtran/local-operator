@@ -69,7 +69,7 @@ class FakeHandle:
     async def approval_answer(self, request_id, approved, remember):  # noqa: ANN001, ANN202
         return await self._record("approval_answer", request_id, approved, remember)
 
-    async def ask_answer(self, request_id, value):  # noqa: ANN001, ANN202
+    async def ask_answer(self, request_id, value, question_index=None):  # noqa: ANN001, ANN202
         return await self._record("ask_answer", request_id, value)
 
     async def refresh(self) -> None:
