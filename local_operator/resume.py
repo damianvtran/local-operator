@@ -346,13 +346,19 @@ def write_session_title(
     concurrent session rewrites it.
     """
     normalized = " ".join(text.split())
-    # Dedup while preserving first-seen order: ``dict.fromkeys`` is the stdlib
-    # ordered-set idiom. The in-force title is folded in as the newest name so a
-    # caller that passes only the prior history still gets a complete list.
+    # Whitespace-normalise every name the same way ``text`` is, so the sidecar's
+    # ``names`` and its ``text`` agree and the digest folds a name in exactly as
+    # the reader will match it. Dedup runs AFTER normalisation so two names that
+    # differ only in internal whitespace collapse to one. ``dict.fromkeys`` is
+    # the stdlib ordered-set idiom, preserving first-seen order; empties (a name
+    # that was all whitespace) are dropped. The in-force title is folded in as
+    # the newest name so a caller that passes only the prior history still gets
+    # a complete list.
+    normalized_past = [n for n in (" ".join(p.split()) for p in past_names) if n]
     names = (
-        list(dict.fromkeys([*past_names, normalized]))
+        list(dict.fromkeys([*normalized_past, normalized]))
         if normalized
-        else list(dict.fromkeys(past_names))
+        else list(dict.fromkeys(normalized_past))
     )
     payload = {"text": normalized, "user_set": user_set, "names": names}
     try:

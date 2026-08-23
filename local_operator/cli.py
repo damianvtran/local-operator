@@ -1904,7 +1904,10 @@ def main() -> int:
             # sweep, for the same reason: a session whose title sits in the
             # untouched middle of a large transcript is unfindable by its own
             # subject until this runs. Idempotent and stdlib-only, so it costs a
-            # bounded directory scan on the one path that opens the picker.
+            # bounded directory scan. session_factory._prepare backfills too (on
+            # ordinary session build); this branch runs it eagerly here because
+            # it answers `--resume` before any session is built, so the picker
+            # and `@latest` resolution above must see a stamped store first.
             backfill_session_titles(config_dir())
 
             try:

@@ -374,6 +374,27 @@ async def test_the_sidecar_retains_every_name_the_session_has_borne(tmp_path) ->
     assert names == ["First Subject", "Second Subject"]
 
 
+def test_written_names_are_whitespace_normalized_like_the_title(tmp_path) -> None:
+    """``names`` must be normalised on write the same way ``text`` is, so the
+    digest folds a name in exactly as the reader tokenises it and two names that
+    differ only in internal whitespace collapse to one. Otherwise a hand-edited
+    or foreign sidecar could fold ``Old   Name`` into the digest unnormalised."""
+    from local_operator.resume import read_title_names, write_session_title
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    write_session_title(
+        session,
+        "Final  Title",
+        user_set=False,
+        past_names=["Old   Name", "Old Name", "  Second\tName  "],
+    )
+
+    # Internal runs collapse; the duplicate that only differed by whitespace is
+    # deduped after normalisation; first-seen order and the in-force title last.
+    assert read_title_names(session) == ["Old Name", "Second Name", "Final Title"]
+
+
 @pytest.mark.asyncio
 async def test_a_resumed_session_findable_by_either_name_after_reindex(tmp_path) -> None:
     """End to end: create, auto-name, dispose, resume, rename, dispose; then a
