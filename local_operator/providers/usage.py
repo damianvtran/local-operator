@@ -372,7 +372,15 @@ def usage_health(
         ):
             return QuotaHealth("unknown")
         zero_balance = balances
-        reset_after = max(
+        # This branch is unconditionally a depleted verdict (every balance is
+        # zeroed), and a depleted account is usable again the moment ANY spent
+        # window reopens -- a request needs only one window with headroom -- so
+        # the honest "try again at" is the SOONEST reset among the zeroed
+        # windows, not the latest. A two-zeroed-window DeepSeek/Kimi account
+        # reopens at the earliest of its resets; keying to the latest would pin
+        # a days-long block to the slowest window. The cap in block_credential
+        # is the backstop; this is the estimate.
+        reset_after = min(
             (
                 value
                 for value in (limit.resets_in_ms(now_ms) for limit in zero_balance)
@@ -418,7 +426,19 @@ def usage_health(
     else:
         horizon = binding
     horizon_resets = [limit.resets_in_ms(now_ms) for limit in horizon]
-    reset_after = max((value for value in horizon_resets if value is not None), default=None)
+    present = [value for value in horizon_resets if value is not None]
+    if state == "depleted":
+        # The account is usable again the moment ANY spent window reopens -- a
+        # request needs only one window with headroom -- so the honest "try
+        # again at" is the SOONEST reset among fully-spent windows, not the
+        # latest. Keying to the latest (the old max) pinned a block to the
+        # 7-day window when the 5-hour window reopened first. The cap in
+        # block_credential is the backstop; this is the estimate. The reserve
+        # (else) branch keeps max: for a low-but-usable account the display
+        # wants "when does the binding window recover", i.e. the latest.
+        reset_after = min(present, default=None)
+    else:
+        reset_after = max(present, default=None)
     if not binding:
         scope: Literal["account", "model", "unknown"] = "unknown"
     elif all(limit.tier and not limit.shared for limit in binding):
