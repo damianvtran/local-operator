@@ -5663,6 +5663,20 @@ class Session:
                 await self._flush_shell_records()
             self._transcript.flush()
         finally:
+            # Drop the retention claim FIRST in the finally: everything in the
+            # try above can raise, and a dispose that blew up part way through
+            # must not leave the directory's liveness marker behind for the rest
+            # of the process's life. On POSIX a leaked marker heals when the pid
+            # dies, but releasing it promptly means an EMPTY session directory
+            # (a run that wrote nothing) becomes reapable the moment its run
+            # ends rather than when the OS happens to reuse the pid — and matters
+            # most for a host running several sessions in one long-lived process.
+            # A directory with real content is untouchable regardless, so this
+            # never risks the transcript itself. ``release_session`` is a no-op
+            # for agent directories (the gate lives inside it).
+            from local_operator.session.retention import release_session
+
+            release_session(self._transcript.directory)
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:
