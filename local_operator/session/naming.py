@@ -26,12 +26,22 @@ because the obvious implementation gets it wrong:
   :func:`provisional_title` names the conversation from the opener the instant
   it is submitted — no network at all — and the model's title now lands a
   second or two later, concurrently with the turn, rather than after it.
-- **A conversation drifts, so a title has to be allowed to.**
-  :func:`generate_retitle` gives the model the current title and a new message
-  and lets IT judge whether the subject or the goals have materially moved.
-  That judgement is not expressible as a keyword rule, and a title still
-  naming the first of five subjects misidentifies the session rather than
-  merely under-describing it.
+- **A conversation drifts, so a title has to be allowed to — toward the THEME,
+  not the newest message.** :func:`generate_retitle` gives the model a sampled
+  ``<chat>`` of the whole trajectory (the opening turns, which state the
+  subject, plus a recent tail) anchored on the CURRENT title, and lets IT judge
+  whether the body of work has genuinely moved on. That judgement is not
+  expressible as a keyword rule. The earlier design showed the model only the
+  single newest message, so an IN-GOAL step read as a brand-new subject: a
+  session building a web-fetch tool got renamed to "Find Port Credit
+  restaurants" the moment the user exercised the tool, then again on the next
+  follow-up, each pivot compounding because the next check anchored on the
+  already-drifted title. Titling the whole trajectory against the current-title
+  anchor is what keeps a drifting session named after what it is actually
+  about. The three parts that make this work — whole-trajectory context, the
+  current-title anchor, and the caller's growth-gated refresh schedule — each
+  fail alone; see :func:`build_theme_context`, :data:`THEME_SYSTEM_PROMPT`,
+  and :func:`should_refresh_theme`.
 
 The holder (:class:`ConversationName`) mirrors ``GoalState``: a small mutable
 object the session and its host share, so a name that lands asynchronously is
@@ -46,6 +56,18 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass
+from typing import Any, Sequence
+
+#: A history entry as the theme sampler reads it. Deliberately ``Any`` and
+#: duck-typed via ``getattr`` rather than a ``Protocol`` or an import of the
+#: harness ``AgentMessage`` union: the sampler only ever needs ``.role`` and
+#: ``.text``, and a ``CustomMessage`` in that union legitimately carries no
+#: ``role`` at all (it is filtered out here, not type-excluded). Typing this as
+#: the real union would either drag a harness dependency into what is meant to
+#: be a leaf module or fail to describe the role-less custom entries; reading
+#: the two attributes defensively is both honest and keeps naming standalone.
+_Turn = Any
+
 
 #: Hard caps on a stored title. Both are enforced as REJECTION, not
 #: truncation: see the module docstring.
@@ -99,20 +121,66 @@ TITLE_SYSTEM_PROMPT = (
     "No quotes, no trailing punctuation."
 )
 
-#: The system block for a RE-titling call. It carries the current title and
-#: asks the model — not a keyword heuristic here — whether the subject or the
-#: goals have materially moved. Keeping the sentinel as "no change" makes the
-#: common answer the cheapest one to produce and the cheapest one to parse:
-#: `parse_title` already reads `<title/>` as "no title from this call".
-RETITLE_SYSTEM_PROMPT = (
-    "A conversation is titled: {current}\n"
-    "Given the user's new message, decide if the SUBJECT or GOALS have "
-    "materially changed.\n"
-    "Unchanged, or a follow-up on the same subject: reply exactly <title/>.\n"
-    "Materially changed: reply with only <title>3 to 7 words</title> naming "
-    "the new subject.\n"
-    "No quotes, no trailing punctuation."
+#: The system block for a RE-titling call, ported from the omp coding-agent's
+#: proven ``title-theme-system`` prompt. It titles the WHOLE body of work rather
+#: than the newest message, which is the fix for the drift the old prompt
+#: caused: shown only the latest message, the model read every in-goal step as a
+#: new subject. The user message that rides beside this block is a sampled
+#: ``<chat>`` trajectory (see :func:`build_theme_context`) that already carries a
+#: ``<current-title>`` anchor, so the anchor lives in the DATA, not here — the
+#: system block only has to teach the model what the scaffolding means and to
+#: repeat the anchor verbatim unless the subject genuinely moved. Keeping the
+#: ``<title/>`` sentinel as "no change" makes the common answer the cheapest one
+#: to produce and to parse: `parse_title` already reads it as "no title from
+#: this call", and `generate_retitle` also folds a verbatim restatement of the
+#: current title back onto that sentinel.
+THEME_SYSTEM_PROMPT = (
+    "Write a 3 to 7 word title for the overall theme of the conversation in "
+    "<chat>. Title the whole body of work, not the most recent message.\n"
+    "<current-title> is the name this conversation already has. Repeat it "
+    "verbatim unless the work has moved to a different subject. A new step, "
+    "file, question, or tool call inside the same body of work is NOT a "
+    "different subject.\n"
+    "The earliest turns establish the subject; later turns only refine it. "
+    "<elided/> marks turns left out.\n"
+    "Never title one file, error, or tool call the conversation happened to "
+    "touch.\n"
+    "Reply with only <title>3 to 7 words</title>. No task, just small talk: "
+    "reply exactly <title/>.\n"
+    "Capitalize only the first word and names. No quotes, no trailing "
+    "punctuation."
 )
+
+#: How many turns to sample from each end of the trajectory for the theme
+#: context, ported from omp's ``THEME_CONTEXT_HEAD_TURNS`` / ``_TAIL_TURNS``.
+#: The HEAD is what states the subject — the opening request is the only turn
+#: that says what the session is FOR rather than a step inside it — so it is
+#: kept larger relative to the tail, which merely refines the theme or shows a
+#: genuine change of subject. A tail-only window is precisely why the old design
+#: chased the newest message: by turn 40 the opener had scrolled out entirely,
+#: leaving the model to name whatever the last message touched.
+THEME_HEAD_TURNS = 3
+THEME_TAIL_TURNS = 4
+
+#: Per-turn character budget inside the sampled ``<chat>``. The whole point of
+#: the retitle call staying cheap is that it never grows with the conversation:
+#: a handful of turns, each trimmed to a sentence or two, is enough to state a
+#: theme, and an unbounded sample would put a pasted log back into the call
+#: `MAX_PROMPT_CHARS` exists to keep out. Bounded PER TURN, not on the assembled
+#: envelope, so the head turns the sampler exists to preserve are never the ones
+#: cut (they are usually the long ones).
+THEME_TURN_CHARS = 240
+
+#: Longest ``<current-title>`` embedded in the context. A stored title is capped
+#: at `MAX_TITLE_CHARS` (80) but a `user_set` rename can reach it, so the anchor
+#: is bounded like any other body rather than trusted to be short.
+THEME_CURRENT_TITLE_CHARS = 120
+
+#: The self-closing marker standing in for the turns dropped between the head
+#: and the tail. Two disjoint fragments presented as adjacent read as an abrupt
+#: topic switch and invite exactly the drift this sampler exists to prevent, so
+#: the gap is always marked when anything falls between the two halves.
+_ELIDED_MARKER = "<elided/>"
 
 #: How much of a message the naming call sees. Was 2000, which made the cheap
 #: call the expensive one on exactly the input most likely to be pasted: a log.
@@ -418,6 +486,129 @@ def _errand_prompt(text: str) -> str:
     return " ".join((text or "").split())[:MAX_PROMPT_CHARS]
 
 
+#: Growth-gated refresh schedule, ported from omp's ``session-titling``. These
+#: three numbers together produce a geometric spacing: with the transcript
+#: turn-count stamped at each titling, a session is titled at turn 1, then
+#: eligible to refresh at >=6, >=16, >=36, >=76, >=156, then never. The spacing
+#: is deliberate — an early session is still deciding what it is about and
+#: should re-title cheaply, while a long-running one has an established identity
+#: and its name must stop tracking the cursor. See :func:`should_refresh_theme`.
+#:
+#: - MAX caps refreshes per session: past it the name is final, because the
+#:   growth gate alone would still permit a rename after a long enough run.
+#: - GROWTH_FACTOR requires the transcript to be a multiple of its length at the
+#:   last titling. Growth, not elapsed turns, is the signal: doubling the
+#:   conversation is roughly the point at which the earlier sample can no longer
+#:   represent it, which is exactly when a fresh sample is worth paying for.
+#: - MIN_TURNS is an absolute floor added to the growth requirement; it also
+#:   carries the never-titled case (``last_titled_turn_count`` 0), where the
+#:   gate reduces to four turns — enough for a request plus a reply to have
+#:   established a subject.
+THEME_REFRESH_MAX = 5
+THEME_REFRESH_GROWTH_FACTOR = 2
+THEME_REFRESH_MIN_TURNS = 4
+
+
+def should_refresh_theme(turn_count: int, last_titled_turn_count: int, refresh_count: int) -> bool:
+    """Whether the conversation's auto title may be regenerated now.
+
+    Pure and side-effect free so the caller stays dumb: it counts turns and
+    asks, rather than carrying its own idea of "enough has changed". This is
+    the PRIMARY gate that replaced the wall-time-only throttle — a long session
+    used to keep re-titling indefinitely because the only bound was 120 seconds
+    between checks, so every in-goal follow-up an hour in was still eligible to
+    pivot the name. Gating on transcript GROWTH instead bounds re-titles to a
+    handful over the life of a session and concentrates them early, when the
+    subject is still settling. A small time floor may still sit in front of this
+    in the caller as a churn guard, but growth is what makes the schedule finite.
+    """
+    if refresh_count >= THEME_REFRESH_MAX:
+        return False
+    return (
+        turn_count >= last_titled_turn_count * THEME_REFRESH_GROWTH_FACTOR + THEME_REFRESH_MIN_TURNS
+    )
+
+
+def _theme_turns(turns: Sequence[_Turn], newest: str) -> list[tuple[str, str]]:
+    """Collect ``(role, text)`` pairs the theme sampler titles from.
+
+    Only ``user``/``assistant`` turns with rendered text count: tool results
+    and host-authored custom entries (which carry no ``role``) are noise for a
+    THEME judgement, and a blank turn contributes nothing but scaffolding. The
+    newest message is appended as a trailing user turn when it is not already
+    the last one, because the retitle call fires at SUBMIT — before the turn has
+    run — so ``session.history()`` does not yet contain it, and the tail is
+    exactly where a genuine change of subject shows up.
+    """
+    collected: list[tuple[str, str]] = []
+    for turn in turns:
+        role = getattr(turn, "role", "")
+        if role not in ("user", "assistant"):
+            continue
+        text = " ".join((getattr(turn, "text", "") or "").split())
+        if not text:
+            continue
+        collected.append((role, text))
+    newest_clean = " ".join((newest or "").split())
+    if newest_clean and (not collected or collected[-1] != ("user", newest_clean)):
+        collected.append(("user", newest_clean))
+    return collected
+
+
+def build_theme_context(
+    turns: Sequence[_Turn], newest: str = "", *, current_title: str = ""
+) -> str:
+    """A sampled ``<chat>`` of the whole trajectory for the theme titling call.
+
+    Samples the head and the tail instead of the last N turns, which is the
+    heart of the drift fix: a tail-only window is precisely why the old design
+    chased the newest message, because by turn 40 the opening request — the one
+    turn that states what the session is FOR — had scrolled out of the window
+    entirely, leaving the model to name whatever the last message touched. The
+    head states the subject; the tail refines it or shows a genuine pivot.
+
+    The ``<current-title>`` anchor leads the envelope so the model reads the
+    name it is being asked to keep before it reads the turns. When turns fall
+    between the head and the tail the gap is marked with ``<elided/>``: two
+    disjoint fragments presented as adjacent read as an abrupt topic switch and
+    invite exactly the drift this sampler exists to prevent.
+
+    Returns ``""`` when there is nothing titleable, which the caller reads the
+    same way it reads a low-signal message: spend no call.
+    """
+    collected = _theme_turns(turns, newest)
+    if not collected:
+        return ""
+    head_end = min(THEME_HEAD_TURNS, len(collected))
+    tail_start = max(head_end, len(collected) - THEME_TAIL_TURNS)
+    sampled = collected[:head_end] + collected[tail_start:]
+    # Index into ``sampled`` where the tail begins; the marker is emitted once,
+    # immediately before it, and only when turns were actually dropped between
+    # the two halves. Placed before the following turn rather than after the
+    # preceding one so it never lands in the trailing position, where it would
+    # read as "the conversation continues" instead of "turns were skipped here".
+    elided_before = head_end if tail_start > head_end else None
+
+    parts: list[str] = []
+    header = ""
+    title_clean = " ".join((current_title or "").split())
+    if title_clean:
+        header = (
+            f"<current-title>\n{cut_on_a_word(title_clean, THEME_CURRENT_TITLE_CHARS)}\n"
+            "</current-title>\n\n"
+        )
+    for index, (role, text) in enumerate(sampled):
+        if elided_before is not None and index == elided_before:
+            parts.append(_ELIDED_MARKER)
+        # Bounded PER TURN, not on the assembled envelope: budgeting the whole
+        # string would spend its allowance on the long head turns the sampler
+        # exists to preserve and cut them mid-tag. `cut_on_a_word` keeps the cut
+        # legible, and the tag scaffolding it sits inside stays intact.
+        body = cut_on_a_word(text, THEME_TURN_CHARS)
+        parts.append(f"<{role}>\n{body}\n</{role}>")
+    return f"<chat>\n{header}" + "\n\n".join(parts) + "\n</chat>"
+
+
 async def generate_title(
     text: str,
     complete_fn,
@@ -443,32 +634,47 @@ async def generate_retitle(
     text: str,
     complete_fn,
     *,
+    turns: Sequence[_Turn] | None = None,
     timeout: float = TITLE_TIMEOUT_S,
 ) -> str | None:
-    """A REPLACEMENT title when ``text`` has moved the subject; else ``None``.
+    """A REPLACEMENT title when the THEME has moved; else ``None``.
 
     A long conversation drifts. It opens as "Fix the login redirect loop" and
     four messages later it is about the billing importer, and a title that
     still names the first thing is worse than one that names nothing — it
     actively misidentifies the session in a tab bar of five.
 
-    The DECISION belongs to the model, and that is deliberate rather than
+    But the earlier design over-corrected: given only ``current`` and the single
+    newest ``text``, the model read every IN-GOAL step as a new subject. A
+    session building a web-fetch tool got renamed the instant the user exercised
+    it ("find Port Credit restaurants"), then again on the next follow-up. The
+    fix is to title the WHOLE body of work: ``turns`` is the session's history
+    (``session.history()``), from which :func:`build_theme_context` samples a
+    ``<chat>`` of the opening turns (which state the subject) plus a recent tail,
+    anchored on ``current``. The model keeps the anchor verbatim unless the
+    subject genuinely moved — which a new step inside the same work is not.
+
+    The DECISION still belongs to the model, and that is deliberate rather than
     convenient. "The subject has materially changed" is a judgement about
     meaning: any keyword rule written here would fire on "actually, forget the
-    parser" and miss "right, and now the same thing for invoices". So the model
-    is given the current title and the new message and answers with the
-    sentinel to keep what it has. ``None`` therefore means BOTH "no change" and
-    "the call failed", which are the same instruction to the caller: leave the
-    title alone.
+    parser" and miss "right, and now the same thing for invoices". The model
+    answers with the ``<title/>`` sentinel to keep what it has, so ``None`` means
+    BOTH "no change" and "the call failed" — the same instruction to the caller:
+    leave the title alone.
 
     Same cost and the same isolation as :func:`generate_title` — one bounded,
     single-attempt, tools-free call. What keeps it cheap in aggregate is the
-    CALLER's throttle, not this function: see the TUI's re-title policy.
+    CALLER's growth-gated schedule (:func:`should_refresh_theme`), not this
+    function. ``turns`` defaults to ``None`` for callers with no history handy;
+    the newest ``text`` alone is then the whole trajectory, which is the old
+    behaviour and still correct for a two-message session.
     """
     if not current or is_low_signal(text):
         return None
-    system = RETITLE_SYSTEM_PROMPT.format(current=current)
-    title = await _ask_for_title(system, _errand_prompt(text), complete_fn, timeout)
+    context = build_theme_context(turns or (), text, current_title=current)
+    if not context:
+        return None
+    title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
     if title is None:
         return None
     # A model that "changes" the title to the one it already has has answered

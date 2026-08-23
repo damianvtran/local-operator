@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -74,6 +75,25 @@ class _GatedSession(FakeSession):
                 self.timeline.append("name:cancel")
                 raise
         return self.title
+
+    def grow_transcript(self, turns: int) -> None:
+        """Stand in for a conversation that has accumulated ``turns`` messages.
+
+        The growth-gated re-title schedule counts user/assistant turns off
+        ``session.history()``, so a test that wants the gate OPEN has to present
+        a transcript long enough to clear it. The real ``prompt`` on this fake
+        never builds history (it only records the text), so this seeds it
+        directly with alternating user/assistant entries carrying the role and
+        text the theme sampler reads — enough shape for both the turn count and
+        the ``<chat>`` sample, nothing more.
+        """
+        self._history = [
+            SimpleNamespace(
+                role="user" if index % 2 == 0 else "assistant",
+                text=f"message {index}",
+            )
+            for index in range(turns)
+        ]
 
 
 async def _settle() -> None:
@@ -407,9 +427,19 @@ async def _named(app: OperatorApp, session: _GatedSession, opener: str) -> list[
 
 
 async def _named_a_while_ago(app: OperatorApp, session: _GatedSession, opener: str) -> list[float]:
-    """:func:`_named`, then far enough past ``RETITLE_MIN_GAP_S`` to ask again."""
+    """:func:`_named`, then into a state where the next message may re-title.
+
+    Two gates guard the re-title now, and this opens both. It advances the fake
+    clock past ``RETITLE_MIN_GAP_S`` (the secondary churn floor) AND grows the
+    transcript past the growth gate: the first title seeds
+    ``_last_titled_turn_count`` from the transcript, which the fake leaves at 0,
+    so ``should_refresh_theme`` needs the history to reach ``THEME_REFRESH_MIN_TURNS``
+    (4) before a re-title is eligible. Six turns clears it with margin and is the
+    length the geometric schedule's first refresh lands at anyway.
+    """
     now = await _named(app, session, opener)
     now[0] += RETITLE_MIN_GAP_S + 1
+    session.grow_transcript(6)
     return now
 
 
@@ -440,7 +470,15 @@ async def test_a_material_change_of_subject_retitles_both_surfaces() -> None:
         await _settle()
 
         assert len(session.completions) == 2, "no re-title check was made"
-        assert session.completions[1][0].startswith("A conversation is titled: Fix the login flow")
+        # The re-title call now carries the theme prompt, and the current title
+        # rides the DATA as the `<current-title>` anchor rather than the system
+        # block — the whole point of titling the trajectory, not the message.
+        retitle_system, retitle_data = session.completions[1]
+        assert retitle_system == naming.THEME_SYSTEM_PROMPT
+        assert "<current-title>\nFix the login flow\n</current-title>" in retitle_data
+        assert retitle_data.startswith("<chat>")
+        # The newest message reaches the model as the tail of the trajectory.
+        assert "forget that, rewrite the billing importer instead" in retitle_data
         assert session.conversation_name == "Billing importer rewrite"
         assert app._status._conversation_name == "Billing importer rewrite"
         assert "Billing importer rewrite" in title.current
@@ -490,6 +528,62 @@ async def test_a_human_rename_is_never_overwritten_by_a_retitle() -> None:
 
         assert session.conversation_name == "Ledger reconciliation"
         assert len(session.completions) == 1, "a renamed conversation spent a re-title call"
+
+
+@pytest.mark.asyncio
+async def test_a_settled_session_does_not_even_spend_a_check_on_an_in_goal_step() -> None:
+    """The growth gate at the host level: an in-goal step on a long, settled
+    session spends NO provider call at all.
+
+    This is the drift the whole change exists to stop, defended one layer up
+    from the sampler. The conversation was named at turn 1 and has since grown —
+    but not doubled — so ``should_refresh_theme`` declines before any call is
+    dispatched. Under the old wall-time-only throttle this same message an hour
+    in would have spent a check and, shown only itself, pivoted the title.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        now = await _named(app, session, "fix the login redirect loop")
+        # Past the time floor, so only the growth gate can decline this. The
+        # title landed with the transcript at length 0, so the baseline is 0 and
+        # the floor is four turns; three turns is short of it.
+        now[0] += RETITLE_MIN_GAP_S + 1
+        session.grow_transcript(3)
+
+        session.title = "<title>Find Port Credit restaurants</title>"
+        app._submit_prompt("now find me some good Port Credit restaurants to try it out")
+        await _settle()
+
+        assert len(session.completions) == 1, "a settled session spent a re-title check"
+        assert session.conversation_name == "Fix the login flow"
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_budget_stops_re_titling_after_the_cap() -> None:
+    """Growth alone would keep re-titling a long session; the cap makes it stop.
+
+    Five automatic re-titles are the ceiling. Here the budget is driven to the
+    cap directly, then a transcript grown far past any growth threshold is shown
+    an unmistakable change of subject — and it is declined without a call,
+    because a session with an established identity must stop tracking the cursor.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        now = await _named(app, session, "fix the login redirect loop")
+        now[0] += RETITLE_MIN_GAP_S + 1
+        # The budget is spent: five refreshes already charged.
+        app._theme_refresh_count = 5
+        app._last_titled_turn_count = 1
+        session.grow_transcript(500)
+
+        session.title = "<title>Billing importer rewrite</title>"
+        app._submit_prompt("forget all that, rewrite the billing importer instead")
+        await _settle()
+
+        assert len(session.completions) == 1, "a capped session spent a re-title check"
+        assert session.conversation_name == "Fix the login flow"
 
 
 # -- `/rename`: the human's title ---------------------------------------------
@@ -646,7 +740,16 @@ async def test_a_chatty_follow_up_makes_no_call_at_all() -> None:
 
 @pytest.mark.asyncio
 async def test_a_burst_of_substantive_follow_ups_costs_exactly_one_check() -> None:
-    """The throttle. Unthrottled this is one provider call per message."""
+    """A burst on one subject costs exactly one check.
+
+    Two gates cooperate to make this so. The FIRST follow-up clears the growth
+    gate (the transcript grew to six turns) and the secondary time floor, so it
+    spends a check; the model answers "no change", which charges one refresh and
+    advances ``_last_titled_turn_count`` to six. The next two follow-ups arrive
+    against an unchanged transcript, so the growth gate now demands sixteen
+    turns and declines them without a call. Unthrottled this was one provider
+    call per message.
+    """
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
         await _ready(pilot, app)
@@ -665,19 +768,22 @@ async def test_a_burst_of_substantive_follow_ups_costs_exactly_one_check() -> No
 
 
 @pytest.mark.asyncio
-async def test_a_landed_title_starts_the_re_title_window() -> None:
-    """The window is measured from when the title took EFFECT.
+async def test_the_time_floor_defends_against_a_same_breath_burst() -> None:
+    """The SECONDARY churn guard, isolated with the growth gate held open.
 
-    The first title comes from the naming path, which stamps nothing on its way
-    out — only ``_store_title`` does, and only when a title actually lands.
-    Without that stamp the window is still sitting at its initial zero when the
-    conversation gets its name, so the very next message would be allowed to
-    replace a title the user has had on screen for one second.
+    With the transcript already past the growth threshold, growth alone would
+    admit a re-title the instant a message arrives. The time floor is what stops
+    two checks landing within seconds of each other: the first title stamps
+    ``_retitle_checked_at`` at the store, so a message one second later is
+    declined, and only once the clock crosses ``RETITLE_MIN_GAP_S`` does the
+    model get asked. A tab label that changes twice in one breath is unreadable.
     """
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
         await _ready(pilot, app)
         now = await _named(app, session, "fix the login redirect loop")
+        # Growth gate held OPEN so the only guard left is the time floor.
+        session.grow_transcript(6)
 
         session.title = "<title>Billing importer rewrite</title>"
         app._submit_prompt("forget that, rewrite the billing importer instead")
@@ -685,7 +791,7 @@ async def test_a_landed_title_starts_the_re_title_window() -> None:
         assert len(session.completions) == 1, "a one-second-old title was up for replacement"
         assert session.conversation_name == "Fix the login flow"
 
-        # Past the window the model does get asked, and its answer is taken.
+        # Past the floor the model does get asked, and its answer is taken.
         now[0] += RETITLE_MIN_GAP_S + 1
         app._submit_prompt("forget that, rewrite the billing importer instead")
         await _settle()
@@ -737,6 +843,120 @@ async def test_generate_retitle_swallows_a_provider_failure_as_no_change() -> No
         raise RuntimeError("429 rate limited")
 
     assert await naming.generate_retitle("Fix the login flow", "rewrite the importer", boom) is None
+
+
+# -- the theme sampler and the drift regression it fixes ----------------------
+
+
+def _turn(role: str, text: str) -> SimpleNamespace:
+    """A minimal history entry — the theme sampler only reads .role and .text."""
+    return SimpleNamespace(role=role, text=text)
+
+
+@pytest.mark.asyncio
+async def test_an_in_goal_step_does_not_pivot_the_title() -> None:
+    """THE regression: an in-goal step must not read as a new subject.
+
+    The reported failure — a "build a web fetch tool" session renamed to "Find
+    Port Credit restaurants" the moment the user exercised the tool — was caused
+    by the model seeing ONLY the newest message. Here a model that titles from
+    what it is shown keeps the theme, because the whole trajectory (opener plus
+    tail, anchored on the current title) is what it now receives: the in-goal
+    step is plainly a step inside the same body of work, not a pivot.
+    """
+    seen: list[str] = []
+
+    async def titles_from_context(system: str, prompt: str) -> str:
+        seen.append(prompt)
+        # The opener is in the trajectory, so the theme is obvious: keep it.
+        if "web fetch" in prompt.lower():
+            return "<title/>"
+        # Shown only the in-goal step, the same model would pivot — the bug.
+        return "<title>Find Port Credit restaurants</title>"
+
+    trajectory = [
+        _turn("user", "help me build a web fetch tool for the agent"),
+        _turn("assistant", "I'll add a fetch tool that GETs a URL."),
+        _turn("user", "wire it into the tool registry"),
+        _turn("assistant", "Done — registered and callable."),
+    ]
+    result = await naming.generate_retitle(
+        "Build a web fetch tool",
+        "now find me some good Port Credit restaurants to try it out",
+        titles_from_context,
+        turns=trajectory,
+    )
+    assert result is None, "an in-goal step pivoted the title"
+    # And the reason it held: the model saw the opener, not just the newest line.
+    assert "web fetch tool" in seen[0]
+
+
+def test_build_theme_context_samples_head_and_tail_with_an_elision_marker() -> None:
+    """The whole trajectory reaches the model: opener + tail, gap marked.
+
+    A tail-only window is why the old design chased the newest message; the
+    sampler keeps the opening turns (which state the subject) and a recent tail,
+    and marks the turns dropped between them so two fragments never read as an
+    abrupt switch.
+    """
+    turns = [_turn("user" if i % 2 == 0 else "assistant", f"turn {i}") for i in range(12)]
+    context = naming.build_theme_context(turns, "the newest thing", current_title="Old title")
+
+    # The anchor leads the envelope.
+    assert context.startswith("<chat>\n<current-title>\nOld title\n</current-title>")
+    # The opening turns are present (the head states the subject)...
+    assert "turn 0" in context and "turn 1" in context and "turn 2" in context
+    # ...a middle turn is dropped...
+    assert "turn 6" not in context
+    # ...the gap is marked...
+    assert "<elided/>" in context
+    # ...and the newest message rides the tail.
+    assert "the newest thing" in context.rsplit("<elided/>", 1)[-1]
+
+
+def test_build_theme_context_appends_the_newest_message_as_the_tail() -> None:
+    """The retitle fires at SUBMIT, so history lacks the newest message yet.
+
+    The sampler appends it as a trailing user turn — without it the tail, where
+    a genuine change of subject shows up, would be a message stale by one.
+    """
+    turns = [_turn("user", "opener"), _turn("assistant", "reply")]
+    context = naming.build_theme_context(turns, "brand new subject", current_title="T")
+    assert context.rstrip().endswith("brand new subject\n</user>\n</chat>")
+
+
+def test_build_theme_context_ignores_non_conversational_entries() -> None:
+    """Tool results and role-less custom entries are noise for a THEME."""
+    turns = [
+        _turn("user", "opener"),
+        _turn("tool", "a large tool result"),
+        SimpleNamespace(text="a custom entry with no role"),  # no .role
+        _turn("assistant", "reply"),
+    ]
+    context = naming.build_theme_context(turns, "", current_title="T")
+    assert "a large tool result" not in context
+    assert "a custom entry with no role" not in context
+    assert "opener" in context and "reply" in context
+
+
+def test_build_theme_context_is_empty_when_there_is_nothing_to_title() -> None:
+    """No turns and no newest message ⇒ no context ⇒ the caller spends no call."""
+    assert naming.build_theme_context([], "", current_title="T") == ""
+
+
+def test_should_refresh_theme_follows_the_geometric_schedule() -> None:
+    """Titled at turn 1, then eligible at >=6, >=16, >=36, capped at five."""
+    # Never titled (baseline 0): the gate reduces to the four-turn floor.
+    assert not naming.should_refresh_theme(3, last_titled_turn_count=0, refresh_count=0)
+    assert naming.should_refresh_theme(4, last_titled_turn_count=0, refresh_count=0)
+    # Titled at turn 1: next eligibility at 1*2 + 4 = 6.
+    assert not naming.should_refresh_theme(5, last_titled_turn_count=1, refresh_count=0)
+    assert naming.should_refresh_theme(6, last_titled_turn_count=1, refresh_count=0)
+    # Titled again at turn 6: next at 6*2 + 4 = 16.
+    assert not naming.should_refresh_theme(15, last_titled_turn_count=6, refresh_count=1)
+    assert naming.should_refresh_theme(16, last_titled_turn_count=6, refresh_count=1)
+    # The cap is final regardless of how much the transcript has grown.
+    assert not naming.should_refresh_theme(10_000, last_titled_turn_count=1, refresh_count=5)
 
 
 # -- the opener-derived label itself -----------------------------------------
