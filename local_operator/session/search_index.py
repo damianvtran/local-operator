@@ -80,11 +80,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from local_operator.resume import (
-    TITLE_SIDECAR_NAME,
-    TRANSCRIPT_NAME,
-    read_title_names,
-)
+from local_operator.resume import TITLE_SIDECAR_NAME, TRANSCRIPT_NAME, read_title_names
 
 #: Characters of prose kept per session. Enough to hold the subject matter of a
 #: long conversation's opening stretch — the part that says what the session was
