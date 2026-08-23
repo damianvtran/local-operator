@@ -63,6 +63,8 @@ if TYPE_CHECKING:
     from local_operator.env import EnvConfig
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.clients import WireClient
+    from local_operator.providers.usage import UsageReport
+    from local_operator.providers.usage_cache import UsageCacheStore
 
     #: Either provider's ``list_models()`` payload. The two schemas are
     #: structurally identical (``data`` of items with ``id``/``description``/
@@ -1564,6 +1566,14 @@ class SessionStreamFn:
         # healthy edge still resets all of them together (recovery is a fresh
         # start for every condition on that selector).
         self._last_quota_state: dict[str, set[str]] = {}
+        # Shared cross-process usage cache for preflight probes, built lazily on
+        # the first routing check and reused for the session's lifetime. Its
+        # sole job here is to collapse a concurrent PEER process's duplicate
+        # fetch of the same account (the per-source-IP 429 storm this fixes) —
+        # it never suppresses this process's own per-boundary re-probe. None
+        # until first use, and stays None whenever the cache cannot open (a
+        # permanent live-fetch miss, never an error). See ``_usage_cache_store``.
+        self._usage_cache: "UsageCacheStore | None" = None
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
@@ -1883,6 +1893,7 @@ class SessionStreamFn:
             usage_health,
             usage_supported,
         )
+        from local_operator.providers.usage_cache import fingerprint_secret
 
         if not usage_supported(provider):
             cache[cache_key] = "unknown"
@@ -1908,12 +1919,16 @@ class SessionStreamFn:
 
         for access in accesses:
             try:
-                report = await fetch_usage(
-                    self._http,
+                report = await self._cached_account_usage(
                     provider,
-                    access_token=access.access_token,
-                    account_id=access.account_id,
-                    oauth_creds=access.raw,
+                    access.email or access.account_id or f"cred:{access.credential_id}",
+                    lambda a=access: fetch_usage(
+                        self._http,
+                        provider,
+                        access_token=a.access_token,
+                        account_id=a.account_id,
+                        oauth_creds=a.raw,
+                    ),
                 )
             except Exception:
                 saw_unknown = True
@@ -1943,7 +1958,11 @@ class SessionStreamFn:
             saw_unknown = True
         if selected is not None and selected.kind == "api_key":
             try:
-                report = await fetch_usage(self._http, provider, api_key=selected.access_token)
+                report = await self._cached_account_usage(
+                    provider,
+                    fingerprint_secret(selected.access_token),
+                    lambda: fetch_usage(self._http, provider, api_key=selected.access_token),
+                )
             except Exception:
                 report = None
             if report is None:
@@ -2040,6 +2059,42 @@ class SessionStreamFn:
         from local_operator.providers.registry import credential_provider_id
 
         return credential_provider_id(provider)
+
+    def _usage_cache_store(self) -> "UsageCacheStore | None":
+        """The shared usage cache, built lazily. A cache that cannot open is a
+        permanent miss (live fetch), never an error — same contract as the warmer's."""
+        if self._usage_cache is None:
+            try:
+                from local_operator.providers.usage_cache import UsageCacheStore
+
+                self._usage_cache = UsageCacheStore()
+            except Exception:  # noqa: BLE001 — no cache = live fetch, never fatal
+                return None
+        return self._usage_cache
+
+    async def _cached_account_usage(
+        self,
+        provider: str,
+        account_identity: str,
+        fetch: "Callable[[], Awaitable[UsageReport | None]]",
+    ) -> "UsageReport | None":
+        """Route one preflight usage probe through the shared cross-process cache.
+
+        Collapses a concurrent peer's duplicate fetch of the SAME account (the 429
+        storm this fixes) while keeping every boundary free to re-probe live —
+        ``leased_account_usage`` never serves a fresh row on the fast path. Fails open
+        to a live fetch when the cache is unavailable, so routing can never be made
+        WORSE than the pre-cache behaviour. See docs/specs/preflight-usage-cache.md.
+        """
+        from local_operator.providers.usage_cache import (
+            account_preflight_key,
+            leased_account_usage,
+        )
+
+        storage = self._storage_provider(provider)
+        store = self._usage_cache_store()
+        key = account_preflight_key(storage, account_identity)
+        return await leased_account_usage(store, key, storage, fetch)
 
     async def _primary_has_auth(self, model: ModelSpec) -> bool:
         from local_operator.providers.failover import FallbackTarget
@@ -2216,11 +2271,15 @@ class SessionStreamFn:
                 usage_health,
             )
 
-            report = await fetch_usage(
-                self._http,
+            report = await self._cached_account_usage(
                 model.provider,
-                access_token=access.access_token,
-                account_id=access.account_id,
+                access.email or access.account_id or f"cred:{access.credential_id}",
+                lambda a=access: fetch_usage(
+                    self._http,
+                    model.provider,
+                    access_token=a.access_token,
+                    account_id=a.account_id,
+                ),
             )
             if report is None:
                 return
@@ -2744,11 +2803,15 @@ class SessionStreamFn:
             token = key_fn(creds) if key_fn else creds.get("access")
             if not token:
                 continue
-            report = await fetch_usage(
-                self._http,
+            report = await self._cached_account_usage(
                 model.provider,
-                access_token=token,
-                account_id=creds.get("account_id"),
+                creds.get("email") or creds.get("account_id") or f"cred:{row.id}",
+                lambda t=token, c=creds: fetch_usage(
+                    self._http,
+                    model.provider,
+                    access_token=t,
+                    account_id=c.get("account_id"),
+                ),
             )
             if report is None:
                 continue  # unreachable quota endpoint: keep the block, move on
@@ -3010,6 +3073,13 @@ class SessionStreamFn:
 
     async def close(self) -> None:
         await self._http.aclose()
+        if self._usage_cache is not None:
+            try:
+                self._usage_cache.close()
+            except Exception:  # noqa: BLE001 — teardown, never fatal
+                self._usage_cache = None
+            else:
+                self._usage_cache = None
 
 
 def create_stream_fn(
