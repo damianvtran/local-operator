@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -632,6 +633,49 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
     exit names the same id the user could pass back in.
     """
     return resume_dir(config_dir, requested).name
+
+
+def live_session_owner(config_dir: Path, session_id: str) -> int | None:
+    """Pid of the process currently hosting ``session_id``, or ``None``.
+
+    Two writers on one transcript is how a TUI ``/resume`` of a phone-started
+    session painted the splash: the second process claimed the directory,
+    replayed a mid-write journal, and left the first process as the only one
+    still appending. The live process already publishes to the phone, so a
+    second front end should attach to THAT process rather than open another
+    writer.
+
+    Consults the session directory's ``.session.pid`` liveness marker — the
+    same file the retention sweep uses. Stdlib-only and import-light: this
+    module must stay off the engine and the mobile package (see the module
+    docstring). A live TUI or phone-started child always writes that marker
+    when it claims the directory.
+    """
+    if session_id in ("", ".", "..") or Path(session_id).name != session_id:
+        return None
+    marker = config_dir / "sessions" / session_id / ".session.pid"
+    try:
+        raw = marker.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    # Windows has no signal 0 — ``os.kill`` there TERMINATES the target
+    # (see ``session.retention._process_alive``). A parseable marker is
+    # treated as live rather than probed, so a ``/resume`` cannot kill
+    # the phone-started child it is trying to share (F2).
+    if sys.platform == "win32":
+        return pid
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        return pid
+    except OSError:
+        return pid
+    return pid
 
 
 def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]]:
