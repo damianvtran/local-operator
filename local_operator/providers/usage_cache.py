@@ -27,7 +27,11 @@ same problem for the same providers):
   429 of its own.
 - **Fetch failure**: the winner writes the last good value back with a short
   cool-down instead of dropping the provider from the report. A transient
-  network blip must not make an account's quota unreadable.
+  network blip must not make an account's quota unreadable. For OAuth
+  providers the merge is per *account*: a 429 for one login keeps that
+  login's previous numbers and does not shrink the sibling set. After
+  :data:`USAGE_ACCOUNT_MAX_FAILURES` consecutive misses the account stays
+  on the panel as usage-unavailable and is not re-probed until ``r``.
 - **TTL jitter**: each entry's lifetime is spread ±25% around the base TTL so
   several accounts on one provider do not all expire into the same refresh
   window (the same per-IP burst, one cycle later).
@@ -71,10 +75,29 @@ logger = logging.getLogger("local_operator.providers.usage_cache")
 #: still visible while it matters. Jittered ±25% per entry (see module doc).
 USAGE_REPORT_TTL_MS = 5 * 60_000
 
-#: Cool-down written after a fetch failure, over the LAST GOOD value. The
-#: failure is remembered briefly so a dead endpoint is not re-probed on every
-#: keystroke, while the numbers themselves stay readable.
+#: Cool-down written after a *provider-level* fetch failure (the API-key
+#: route, where there is no per-account set to merge). The failure is
+#: remembered briefly so a dead endpoint is not re-probed on every keystroke,
+#: while the numbers themselves stay readable. OAuth accounts use
+#: :func:`account_backoff_ms` instead — a flat 10 s for the whole provider is
+#: what let one 429 erase a sibling's last-good on the next refresh.
 USAGE_FAILURE_BACKOFF_MS = 10_000
+
+#: First-failure cool-down for one OAuth account. Doubles each consecutive
+#: miss (10 s, 20 s, 40 s, 80 s, 160 s) up to
+#: :data:`USAGE_ACCOUNT_BACKOFF_CAP_MS`. While this window is open the
+#: account is served from last-good and its usage endpoint is not touched.
+USAGE_ACCOUNT_BACKOFF_BASE_MS = 10_000
+
+#: Ceiling on the per-account backoff (~5 min). Past this the account is
+#: still shown; it is just not re-probed more often than this until ``r``.
+USAGE_ACCOUNT_BACKOFF_CAP_MS = 5 * 60_000
+
+#: After this many consecutive failures the account is marked usage
+#: unavailable and probing stops until the user force-refreshes. Five keeps
+#: a transient 429 storm from flipping the row to unavailable, while still
+#: bounding how long we keep hitting an endpoint that will not answer.
+USAGE_ACCOUNT_MAX_FAILURES = 5
 
 #: How long a last-good row survives past its expiry, for stale serving and
 #: failure fallback. One day: longer than any rolling window the fetchers
@@ -150,12 +173,24 @@ def report_from_dict(data: Any) -> UsageReport | None:
             )
             for limit in data.get("limits", [])
         ]
+        raw_next = data.get("next_probe_at_ms")
+        try:
+            next_probe_at_ms = int(raw_next) if raw_next is not None else None
+        except (TypeError, ValueError):
+            next_probe_at_ms = None
+        try:
+            consecutive_failures = int(data.get("consecutive_failures") or 0)
+        except (TypeError, ValueError):
+            consecutive_failures = 0
         return UsageReport(
             provider=str(data["provider"]),
             fetched_at=int(data.get("fetched_at", 0)),
             limits=limits,
             notes=data.get("notes"),
             identity=data.get("identity"),
+            consecutive_failures=max(0, consecutive_failures),
+            usage_unavailable=bool(data.get("usage_unavailable", False)),
+            next_probe_at_ms=next_probe_at_ms,
         )
     except Exception:  # noqa: BLE001 — a bad row is a miss, not a failure
         logger.debug("usage cache: unparseable report row dropped", exc_info=True)
@@ -186,6 +221,29 @@ def fingerprint_accounts(identities: list[str]) -> str:
         return "none"
     joined = "\n".join(sorted(identities))
     return hashlib.sha256(joined.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def account_backoff_ms(consecutive_failures: int) -> int:
+    """Per-account cool-down after ``consecutive_failures`` misses.
+
+    10 s, 20 s, 40 s, 80 s, 160 s, then the 5-minute cap. Indexed from the
+    *new* failure count (1 after the first miss) so a single 429 does not
+    immediately re-hit the same endpoint on the next warmer tick.
+    """
+    if consecutive_failures <= 0:
+        return 0
+    shift = min(consecutive_failures - 1, 16)
+    return min(USAGE_ACCOUNT_BACKOFF_BASE_MS << shift, USAGE_ACCOUNT_BACKOFF_CAP_MS)
+
+
+def report_identity_key(report: UsageReport) -> str:
+    """Stable key for merging one account's last-good into the next payload.
+
+    Identity is what the panel groups on and what the stored OAuth row
+    already names; falling back to the provider keeps a lone API-key report
+    mergeable when it has no email.
+    """
+    return (report.identity or report.provider or "").strip() or report.provider
 
 
 def fingerprint_secret(secret: str) -> str:

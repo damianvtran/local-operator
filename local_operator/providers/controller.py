@@ -46,11 +46,14 @@ from local_operator.providers.usage import (
     usage_supported,
 )
 from local_operator.providers.usage_cache import (
+    USAGE_ACCOUNT_MAX_FAILURES,
     USAGE_REPORT_TTL_MS,
     UsageCacheStore,
+    account_backoff_ms,
     fingerprint_accounts,
     fingerprint_secret,
     provider_cache_key,
+    report_identity_key,
 )
 
 if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
@@ -124,6 +127,8 @@ class ControllerAuthStore(Protocol):
     async def list_oauth_accesses(
         self, provider: str
     ) -> list["OAuthAccess"]: ...  # pragma: no cover
+
+    def list_oauth_identities(self, provider: str) -> list["OAuthAccess"]: ...  # pragma: no cover
 
     async def get_api_key(self, provider: str) -> str | None: ...  # pragma: no cover
 
@@ -517,6 +522,181 @@ class ProviderController:
             parts.append(fingerprint_secret(env_key))
         return fingerprint_accounts(parts)
 
+    def _expected_oauth_identities(self, provider: str) -> list[str]:
+        """Stored OAuth identities for ``provider``, including refresh-failed.
+
+        The expected set for ``/usage`` is the logged-in rows, not the subset
+        that happened to mint a bearer this cycle. A sibling enumerator
+        (:meth:`AuthStore.list_oauth_identities`) is preferred because it
+        never calls ``_ensure_oauth_fresh``; falling back to
+        ``list_credentials`` keeps a store protocol that has not grown the
+        sibling from dropping the panel entirely.
+        """
+        storage = self._storage_id(provider)
+        try:
+            enumerator = self.auth_store.list_oauth_identities
+            accesses = enumerator(storage)
+        except Exception:  # noqa: BLE001 — identities are labels, never fatal
+            accesses = []
+        identities: list[str] = []
+        for access in accesses:
+            label = (
+                getattr(access, "email", None)
+                or getattr(access, "account_id", None)
+                or (
+                    f"cred:{getattr(access, 'credential_id', 0)}"
+                    if getattr(access, "credential_id", 0)
+                    else None
+                )
+            )
+            if label:
+                identities.append(str(label))
+        if identities:
+            return identities
+        try:
+            rows = self.auth_store.list_credentials(storage)
+        except Exception:  # noqa: BLE001
+            return []
+        labels: list[str] = []
+        for row in rows:
+            if getattr(row, "credential_type", None) != "oauth":
+                continue
+            data = getattr(row, "data", None) or {}
+            label = None
+            if isinstance(data, dict):
+                label = data.get("email") or data.get("account_id")
+            label = label or getattr(row, "identity_key", None) or f"cred:{getattr(row, 'id', 0)}"
+            if label and not str(label).startswith("oauth:"):
+                labels.append(str(label))
+            elif getattr(row, "id", 0):
+                labels.append(f"cred:{row.id}")
+        return labels
+
+    @staticmethod
+    def _account_in_backoff(previous: UsageReport | None, now_ms: int, *, force: bool) -> bool:
+        """Whether this account should be served from last-good, not re-probed.
+
+        ``r`` always retries. An unavailable account stays dark until then.
+        Otherwise the per-account ``next_probe_at_ms`` is the gate — siblings
+        that are fresh still refresh on the same provider lease.
+        """
+        if force or previous is None:
+            return False
+        if previous.usage_unavailable:
+            return True
+        # Only a FAILURE cool-down skips the probe. A successful account
+        # leaves next_probe_at_ms unset so a sibling's shorter backoff can
+        # expire the provider row without freezing the healthy logins.
+        if previous.consecutive_failures <= 0:
+            return False
+        nxt = previous.next_probe_at_ms
+        return nxt is not None and nxt > now_ms
+
+    def _reset_account_for_force(self, report: UsageReport) -> UsageReport:
+        """``r`` clears the failure streak so a maxed-out account is retried."""
+        report.consecutive_failures = 0
+        report.usage_unavailable = False
+        report.next_probe_at_ms = None
+        return report
+
+    def _mark_account_success(self, report: UsageReport, now_ms: int) -> UsageReport:
+        """A live 200: clear the failure streak and schedule the next probe."""
+        report.consecutive_failures = 0
+        report.usage_unavailable = False
+        report.next_probe_at_ms = None
+        return report
+
+    def _mark_account_failure(
+        self,
+        previous: UsageReport | None,
+        *,
+        provider: str,
+        identity: str,
+        now_ms: int,
+    ) -> UsageReport:
+        """Keep last-good (if any) and bump this account's consecutive misses.
+
+        After :data:`USAGE_ACCOUNT_MAX_FAILURES` the account stays on the
+        panel as usage-unavailable. Last-good numbers, when they exist, stay
+        on the report so the operator can still see they are logged in and
+        what the last successful check said.
+        """
+        failures = (previous.consecutive_failures if previous is not None else 0) + 1
+        unavailable = failures >= USAGE_ACCOUNT_MAX_FAILURES
+        if previous is not None:
+            report = previous
+        else:
+            report = UsageReport(provider=provider, fetched_at=now_ms, identity=identity)
+        report.consecutive_failures = failures
+        report.usage_unavailable = unavailable
+        report.next_probe_at_ms = None if unavailable else now_ms + account_backoff_ms(failures)
+        return report
+
+    def _payload_expires_at_ms(self, reports: list[UsageReport], now_ms: int) -> int:
+        """When the shared row should go stale so the next due account is probed.
+
+        A mixed payload used to inherit the full 5-minute success TTL, which
+        swallowed the 10 s / 20 s / … per-account backoff: the failed login
+        sat un-retried until the whole set expired. Expiry is the soonest
+        ``next_probe_at_ms`` still in the future; if every account is
+        unavailable (only ``r`` retries) the full jittered TTL keeps the
+        warmer from spinning.
+        """
+        soonest: int | None = None
+        for report in reports:
+            nxt = report.next_probe_at_ms
+            if nxt is None or nxt <= now_ms:
+                continue
+            if soonest is None or nxt < soonest:
+                soonest = nxt
+        return soonest if soonest is not None else now_ms + self._jittered_ttl_ms()
+
+    def _merge_account_reports(
+        self,
+        *,
+        provider: str,
+        expected: list[str],
+        live: dict[str, UsageReport],
+        previous: dict[str, UsageReport],
+        now_ms: int,
+        force: bool,
+    ) -> list[UsageReport]:
+        """Union of this fetch's successes and last-good for everyone else.
+
+        A provider-level ``cache.set`` of only the accounts that succeeded
+        this round is the #277 leftover that dropped a 429'd login from
+        ``/usage``: the next warm read served a 3-account payload over a
+        4-account login set. Expected order is the stored-row order so the
+        panel does not reshuffle under the reader.
+        """
+        merged: list[UsageReport] = []
+        seen: set[str] = set()
+        for identity in expected:
+            seen.add(identity)
+            if identity in live:
+                merged.append(self._mark_account_success(live[identity], now_ms))
+                continue
+            prior = previous.get(identity)
+            if self._account_in_backoff(prior, now_ms, force=force) and prior is not None:
+                # Still inside this account's cool-down (or already
+                # unavailable): serve last-good without incrementing. A
+                # force refresh never takes this branch.
+                merged.append(prior)
+                continue
+            merged.append(
+                self._mark_account_failure(
+                    prior, provider=provider, identity=identity, now_ms=now_ms
+                )
+            )
+        # An API-key report (or an identity the store no longer names) still
+        # belongs on the panel if it succeeded this fetch; do not invent
+        # stubs for leftovers that are no longer logged in.
+        for identity, report in live.items():
+            if identity in seen:
+                continue
+            merged.append(self._mark_account_success(report, now_ms))
+        return merged
+
     @staticmethod
     def _jittered_ttl_ms() -> int:
         """Base TTL spread ±25%, so several accounts/providers do not all expire
@@ -603,14 +783,23 @@ class ProviderController:
                 lease_held = True
         try:
             try:
-                reports = await self._fetch_provider(client, provider)
+                reports = await self._fetch_provider(
+                    client, provider, previous=stale or [], force_refresh=force_refresh
+                )
             except Exception:  # noqa: BLE001 — isolate a broken provider
                 reports = []
             if cache is not None and key:
                 if reports:
                     now_ms = int(time.time() * 1000)
+                    # The merged payload already carries last-good for
+                    # accounts that failed this round. Writing only the live
+                    # successes is the #277 leftover that shrank a 4-account
+                    # snapshot to 3 the next time one token 429'd.
                     cache.set(
-                        key, provider, reports, expires_at_ms=now_ms + self._jittered_ttl_ms()
+                        key,
+                        provider,
+                        reports,
+                        expires_at_ms=self._payload_expires_at_ms(reports, now_ms),
                     )
                 elif stale:
                     # Truthiness, not `is not None`: only a NON-EMPTY history
@@ -649,8 +838,15 @@ class ProviderController:
             return stale
         return []
 
-    async def _fetch_provider(self, client: httpx.AsyncClient, provider: str) -> list[UsageReport]:
-        """Every account's usage for one provider — not just the cascade's pick.
+    async def _fetch_provider(
+        self,
+        client: httpx.AsyncClient,
+        provider: str,
+        *,
+        previous: list[UsageReport] | None = None,
+        force_refresh: bool = False,
+    ) -> list[UsageReport]:
+        """Every logged-in account's usage for one provider.
 
         Quota is per ACCOUNT, so a provider with two logins has two answers.
         Asking :meth:`AuthStore.get_oauth_access` produced one of them, chosen
@@ -658,28 +854,87 @@ class ProviderController:
         Anthropic accounts saw a single block and could not tell which login it
         described, or that a second one was missing entirely.
 
+        The expected set is the *stored* OAuth rows (blocked included;
+        refresh-failed included). A live 200 replaces that account's last-good;
+        a 429 / ``None`` / exception keeps the previous numbers and increments
+        that account's failure count. The written cache payload is the union,
+        never "whoever answered this round" — that shrink is how one 429
+        dropped a fourth Anthropic login from ``/usage``.
+
         The API-key route stays a single report, and is only reached when no
-        OAuth credential produced one. An API key is not an identity — the
+        OAuth identity is stored. An API key is not an identity — the
         cascade's env/config tiers resolve one secret per provider — so fanning
         out there would report the same numbers twice.
         """
         if not usage_supported(provider):
             return []
-        reports: list[UsageReport] = []
-        for access in await self.auth_store.list_oauth_accesses(provider):
+        now_ms = int(time.time() * 1000)
+        expected = self._expected_oauth_identities(provider)
+        previous_by_id = {
+            report_identity_key(report): report
+            for report in (previous or [])
+            if report_identity_key(report)
+        }
+        if force_refresh:
+            # ``r`` retries every expected account, including ones that had
+            # already hit the unavailable ceiling. Reset first so the
+            # backoff gate does not skip them.
+            previous_by_id = {
+                key: self._reset_account_for_force(report) for key, report in previous_by_id.items()
+            }
+        live: dict[str, UsageReport] = {}
+        if expected:
+            # Bearer mint is still list_oauth_accesses (routing contract
+            # unchanged). Identities with no bearer this cycle stay in
+            # ``expected`` and fall through to last-good / unavailable.
+            accesses_by_id: dict[str, Any] = {}
             try:
-                report = await self._fetch_one(client, provider, access=access)
-            except Exception:  # noqa: BLE001 — one bad account, not the provider
-                continue
-            if report is not None:
-                reports.append(report)
-        if reports:
-            return reports
+                accesses = await self.auth_store.list_oauth_accesses(provider)
+            except Exception:  # noqa: BLE001 — no bearer is a per-account miss
+                accesses = []
+            for access in accesses:
+                label = (
+                    getattr(access, "email", None)
+                    or getattr(access, "account_id", None)
+                    or (
+                        f"cred:{getattr(access, 'credential_id', 0)}"
+                        if getattr(access, "credential_id", 0)
+                        else None
+                    )
+                )
+                if label:
+                    accesses_by_id[str(label)] = access
+            for identity in expected:
+                prior = previous_by_id.get(identity)
+                if self._account_in_backoff(prior, now_ms, force=force_refresh):
+                    continue
+                access = accesses_by_id.get(identity)
+                if access is None:
+                    continue
+                try:
+                    report = await self._fetch_one(client, provider, access=access)
+                except Exception:  # noqa: BLE001 — one bad account, not the provider
+                    continue
+                if report is None:
+                    continue
+                if not report.identity:
+                    report.identity = identity
+                live[report_identity_key(report) or identity] = report
+            return self._merge_account_reports(
+                provider=provider,
+                expected=expected,
+                live=live,
+                previous=previous_by_id,
+                now_ms=now_ms,
+                force=force_refresh,
+            )
         try:
             report = await self._fetch_one(client, provider, access=None)
         except Exception:  # noqa: BLE001
             return []
-        return [report] if report is not None else []
+        if report is None:
+            return []
+        return [self._mark_account_success(report, now_ms)]
 
     def _dedupe_targets(self, targets: list[str]) -> list[str]:
         """Keep one id per storage row so alias providers don't double-fetch."""

@@ -432,6 +432,31 @@ def _limit_row(limit, columns: _Columns, now_ms: float) -> Text:  # noqa: ANN001
     return row
 
 
+def _account_status_note(report, now_ms: float) -> str:  # noqa: ANN001
+    """Per-account stale / unavailable copy, or empty when the row is live.
+
+    Age already lives in the panel title for the *set*. A single 429 must
+    not drop the block, so the honesty sits on the account itself: last-known
+    numbers keep their meters and this note says they are last-known. An
+    exhausted 200 (100% weekly) is quota, not this path.
+    """
+    unavailable = bool(getattr(report, "usage_unavailable", False))
+    failures = int(getattr(report, "consecutive_failures", 0) or 0)
+    if not unavailable and failures <= 0:
+        return ""
+    age = ""
+    fetched_at = int(getattr(report, "fetched_at", 0) or 0)
+    if fetched_at and report.limits:
+        age = format_age(max(0.0, now_ms - fetched_at))
+    if unavailable:
+        if age:
+            return f"usage unavailable — last known {age}"
+        return "usage unavailable"
+    if age:
+        return f"last known {age}"
+    return "last known"
+
+
 def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     """``anthropic  (me@example.com)`` plus the window that binds.
 
@@ -447,6 +472,10 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     row.append(report.provider, style=heading)
     if report.identity:
         row.append(f"  {report.identity}", style=muted)
+    if getattr(report, "usage_unavailable", False):
+        # The login is still real; the probe is not. Named on the identity
+        # line so a 429'd account is not mistaken for a missing one.
+        row.append("  ·  usage unavailable", style=dim)
     binding = binding_limit(report)
     if binding is not None:
         fraction = binding.amount.fraction() or 0.0
@@ -504,6 +533,11 @@ def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: 
         # identity must lose its tail rather than widen or clip the whole card.
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
+        account_note = _account_status_note(report, now_ms)
+        if account_note:
+            note = Text(f"  {account_note}", style=dim)
+            note.truncate(max(1, width), overflow="ellipsis")
+            lines.append(note)
         if report.notes:
             note = Text(f"  {report.notes}", style=dim)
             note.truncate(max(1, width), overflow="ellipsis")

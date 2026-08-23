@@ -501,6 +501,48 @@ async def test_a_report_block_separates_its_heading_from_its_meters() -> None:
     assert "5 hour" in lines[3]
 
 
+def test_an_unavailable_account_keeps_its_identity_and_last_known_numbers() -> None:
+    """A maxed-out probe must not drop the block — the login is still real."""
+    report = _report(
+        _percent("a:5h", "5 hour", 72.0, shared=True),
+        identity="damian@gominerva.com",
+    )
+    report.usage_unavailable = True
+    report.consecutive_failures = 5
+    report.fetched_at = 0
+    lines = _lines([report], now=60_000)
+    assert any("damian@gominerva.com" in line for line in lines)
+    assert any("usage unavailable" in line for line in lines)
+    assert any("72%" in line for line in lines)
+
+
+def test_a_stale_account_keeps_its_numbers_and_says_last_known() -> None:
+    report = _report(
+        _percent("a:7d", "7 day", 40.0, shared=True),
+        identity="damian@radienthq.com",
+    )
+    report.consecutive_failures = 2
+    report.fetched_at = 0
+    lines = _lines([report], now=5 * 60_000)
+    assert any("damian@radienthq.com" in line for line in lines)
+    assert any("last known" in line for line in lines)
+    assert any("40%" in line for line in lines)
+
+
+def test_an_exhausted_200_is_not_labelled_unavailable() -> None:
+    """100% weekly from a live 200 is quota, not a fetch failure."""
+    report = _report(
+        _percent("a:7d", "7 day", 100.0, shared=True),
+        identity="damianvtran@gmail.com",
+    )
+    lines = _lines([report])
+    joined = "\n".join(lines)
+    assert "damianvtran@gmail.com" in joined
+    assert "100%" in joined
+    assert "usage unavailable" not in joined
+    assert "last known" not in joined
+
+
 @pytest.mark.asyncio
 async def test_the_footer_is_separated_from_the_last_meter() -> None:
     """The tally/keys footer is chrome. Flush against the last meter it reads
