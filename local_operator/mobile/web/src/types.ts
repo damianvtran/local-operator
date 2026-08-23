@@ -104,13 +104,28 @@ export interface SubagentRow {
 	error_text: string;
 }
 
+/** One selectable answer on an ask question. Carries the consequence line the
+    terminal shows under each option so the phone user decides with the same
+    information (U3). */
+export interface AskOption {
+	label: string;
+	description: string;
+}
+
 export interface PendingRequest {
 	request_id: string;
 	kind: "approval" | "ask";
 	title: string;
 	detail: string;
-	/** Ask pickers; empty means free text. */
-	options: string[];
+	/** Ask pickers; empty means a free-text / secret paste field. */
+	options: AskOption[];
+	/** True when this ask requests a credential: the paste field is masked and
+	    labelled as a secret (D1/U2). The value never rides the projection. */
+	secret: boolean;
+	/** Position of the current question within a multi-question ask, so the card
+	    can show "Question 1 of 2" and the user knows more follow (U1). */
+	question_index: number;
+	question_total: number;
 }
 
 export interface SessionProjection {
@@ -221,5 +236,14 @@ export type CommandOp =
 	| { op: "new_conversation" }
 	| { op: "resume_session"; session_id: string }
 	| { op: "approval_answer"; request_id: string; approved: boolean; remember: boolean }
-	| { op: "ask_answer"; request_id: string; value: string }
+	| {
+			op: "ask_answer";
+			request_id: string;
+			value: string;
+			/** The question the card was showing when the user answered. The
+			    daemon rejects the answer if the picker has advanced past it
+			    (U8), so a tap in flight during a terminal advance is never
+			    recorded against the wrong question. */
+			question_index: number;
+	  }
 	| { op: "snapshot" };
