@@ -906,6 +906,7 @@ async def _build_child_session(
         agent_registry=getattr(parent_session, "agent_registry", None),
         team_registry=getattr(parent_session, "team_registry", None),
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
+        web_fetch_settings=ConfigManager(config_dir()).get_config_value("web_fetch", None),
     )
     tools = create_tools(tool_context)
     # A role's tool allowlist is a capability boundary, not advice: a reviewer

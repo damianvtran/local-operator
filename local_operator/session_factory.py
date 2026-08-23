@@ -1124,6 +1124,7 @@ async def _prepare(
         agent_registry=agent_registry,
         team_registry=team_registry,
         web_search_settings=config_manager.get_config_value("web_search", None),
+        web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
     tools = create_tools(tool_context)
 

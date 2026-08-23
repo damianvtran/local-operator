@@ -508,8 +508,78 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
             if len(snippet) > SEARCH_EXPANDED_SNIPPET_CHARS:
                 snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
             lines.append(f"   {snippet}")
-    lines.append("Ask Operator to open result N with browser for the full page.")
+    lines.append("Ask Operator to web_fetch result N (or `read <url>`) for the full page.")
     return lines
+
+
+def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
+    """Whether this result is a web fetch (the tool, or a ``read <url>`` sugar).
+
+    ``read`` serves both files and URLs, so the tool name alone cannot tell them
+    apart. A fetch's details carry ``render_method`` and ``final_url`` (a file
+    read carries neither), so the presence of those keys is what selects the
+    fetch card without a fragile name check on every ``read``.
+    """
+    if tool_name == "web_fetch":
+        return True
+    if tool_name != "read" or not isinstance(details, dict):
+        return False
+    return "render_method" in details and "final_url" in details
+
+
+def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
+    """Structured web-fetch rows: the request/final URL, status, and render meta.
+
+    Rendered from ``details`` (which never reaches the provider) rather than the
+    model-facing preview, so the card can always show the final URL, status,
+    content-type, render method, byte/line counts, cache state, and \u2014 when the
+    render looked sparse \u2014 a one-line nudge toward ``browser``. The preview body
+    itself is appended by the body painter from the result text; this helper owns
+    only the header rows, mirroring ``_search_result_output``'s split of duties.
+    """
+    if not isinstance(details, dict):
+        return []
+    url = _strip_control_sequences(str(details.get("url") or ""))
+    final = _strip_control_sequences(str(details.get("final_url") or url))
+    if not url and not final:
+        return []
+    status = details.get("status")
+    ctype = _strip_control_sequences(str(details.get("content_type") or ""))
+    method = _strip_control_sequences(str(details.get("render_method") or ""))
+    cache = _strip_control_sequences(str(details.get("cache") or "miss"))
+    lines_n = details.get("lines")
+    byte_n = details.get("bytes")
+
+    meta = " · ".join(
+        part
+        for part in (
+            f"{status}" if status is not None else "",
+            ctype,
+            f"cache {cache}",
+        )
+        if part
+    )
+    fetched = f"Fetched: {url}"
+    if final and final != url:
+        fetched += f"  (final: {final})"
+    if meta:
+        fetched += f"  ·  {meta}"
+    rows = [fetched]
+
+    render_bits = " · ".join(
+        part
+        for part in (
+            method,
+            f"{lines_n} lines" if isinstance(lines_n, int) else "",
+            f"{byte_n} B" if isinstance(byte_n, int) else "",
+        )
+        if part
+    )
+    if render_bits:
+        rows.append(f"Rendered: {render_bits}")
+    if details.get("low_quality"):
+        rows.append("sparse/JS-gated — try `browser` for the full page.")
+    return rows
 
 
 def _clamp_runs(runs: list[tuple[str, Style]], limit: int) -> list[tuple[str, Style]]:
@@ -708,6 +778,10 @@ class ToolCard(ExpandableActionBlock):
         #: colourised at render time. ``None`` (not []) when the tool reported
         #: no diff — a read or bash card expands to its raw output instead.
         self._diff: list[str] | None = None
+        #: True when this card holds a web_fetch (or a ``read <url>`` sugar)
+        #: result, so the body painter and the rest-visibility rule can select
+        #: the fetch presentation. Set in :meth:`_absorb_result`.
+        self._is_fetch_card = False
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -1175,10 +1249,21 @@ class ToolCard(ExpandableActionBlock):
         cleaned result text.
         """
         self._added, self._removed = _diff_counts(details)
-        search_output = (
-            _search_result_output(details) if self.tool_name.lower() == "web_search" else []
-        )
-        self._output = search_output or self._clean_output(result_text)
+        name = self.tool_name.lower()
+        search_output = _search_result_output(details) if name == "web_search" else []
+        # A web_fetch (and a `read <url>`, which records tool_name "read" but
+        # carries a fetch's details shape) leads with structured header rows and
+        # then the rendered preview body, so the card shows what was fetched and
+        # a slice of the content, with the spill footer already inside the text.
+        fetch_output: list[str] = []
+        if not search_output and _is_fetch_details(name, details):
+            fetch_header = _fetch_result_output(details)
+            if fetch_header:
+                fetch_output = fetch_header + [""] + self._clean_output(result_text)
+        # Remembered so the body painter and the rest-visibility rule can select
+        # the fetch presentation without re-inspecting details every repaint.
+        self._is_fetch_card = bool(fetch_output)
+        self._output = search_output or fetch_output or self._clean_output(result_text)
         diff = details.get("diff") if isinstance(details, dict) else None
         if isinstance(diff, list) and diff:
             self._diff = [str(line) for line in diff]
@@ -1424,6 +1509,9 @@ class ToolCard(ExpandableActionBlock):
         elif self.tool_name.lower() == "web_search" and self._output:
             self._append_input_body(row, width)
             self._append_search_body(row, width)
+        elif self._is_fetch_card and self._output:
+            self._append_input_body(row, width)
+            self._append_fetch_body(row, width)
         elif self._output:
             self._append_input_body(row, width)
             self._append_output_body(row, width)
@@ -1586,6 +1674,38 @@ class ToolCard(ExpandableActionBlock):
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
+    def _append_fetch_body(self, row: Text, width: int) -> None:
+        """Fetch expansion: the header rows read as metadata, the body as content.
+
+        The header rows (Fetched:/Rendered:/the low-quality nudge) recede to dim
+        so the rendered preview beneath them \u2014 the actual page content \u2014 reads at
+        normal contrast, the same hierarchy the search card uses to keep its
+        structural rows from competing with the result.
+        """
+        signal = Style(color=theme_mod.semantic_color("signal"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        shown = self._output[:EXPAND_MAX_LINES]
+        for line in shown:
+            stripped = line.strip()
+            if stripped.startswith(("Fetched:", "Rendered:")):
+                ink = dim
+            elif stripped.startswith("sparse/JS-gated"):
+                # The one advisory row earns attention: it is the signal to reach
+                # for browser, not structural chrome.
+                ink = signal
+            else:
+                ink = muted
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(line, line_width), style=ink)
+        hidden = len(self._output) - len(shown)
+        if hidden > 0:
+            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+
     def _append_diff_body(self, row: Text, width: int) -> None:
         """The write/edit expansion: the unified diff, coloured by hunk line.
 
@@ -1728,7 +1848,12 @@ class ToolCard(ExpandableActionBlock):
             # Generic tool output stays quiet until the row is targeted. Search
             # sources are the primary result, not diagnostics, so their
             # disclosure remains visible at rest and in colorless terminals.
-            if self.tool_name.lower() == "web_search" or self._hovered or self._focused:
+            if (
+                self.tool_name.lower() == "web_search"
+                or self._is_fetch_card
+                or self._hovered
+                or self._focused
+            ):
                 offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
                 if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
                     slot = offer

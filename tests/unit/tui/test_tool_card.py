@@ -425,11 +425,92 @@ def test_web_search_expansion_uses_structured_page_metadata() -> None:
     assert "Python 3.13 release" in content.plain
     assert "https://python.org/downloads/release/python-3130/" in content.plain
     assert "Release notes and downloads for Python 3.13." in content.plain
-    assert "Ask Operator to open result N with browser" in content.plain
+    assert "Ask Operator to web_fetch result N" in content.plain
     assert _style_at(content, "Python 3.13 release").bold is True
     assert (
         _style_at(content, "https://python.org").color != _style_at(content, "Release notes").color
     )
+
+
+def test_web_fetch_card_shows_fetch_metadata_and_preview() -> None:
+    """A web_fetch card renders the structured header rows plus the preview,
+    and keeps its disclosure visible at rest like a search card."""
+    card = ToolCard("t", "web_fetch", {"url": "https://example.com/docs"})
+    card.mark_done(
+        "[200] https://example.com/docs\n\n# Docs\n\nBody content here.",
+        {
+            "url": "https://example.com/docs",
+            "final_url": "https://example.com/docs/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 1234,
+            "lines": 40,
+        },
+    )
+    # Disclosure visible without hover: a fetch is a primary result.
+    assert EXPAND_HINT in card._build_row(120).plain
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "Fetched: https://example.com/docs" in content
+    assert "final: https://example.com/docs/" in content
+    assert "markdownify" in content
+    assert "# Docs" in content  # the preview body is shown too
+
+
+def test_read_url_card_uses_fetch_presentation() -> None:
+    """A ``read <url>`` records tool_name 'read' but carries fetch details, so it
+    must select the fetch card, not the plain file-read presentation."""
+    card = ToolCard("t", "read", {"path": "https://example.com"})
+    card.mark_done(
+        "[200] https://example.com\n\nExample body.",
+        {
+            "url": "https://example.com",
+            "final_url": "https://example.com",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "hit",
+            "bytes": 500,
+            "lines": 7,
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "Fetched: https://example.com" in content
+
+
+def test_read_file_card_not_treated_as_fetch() -> None:
+    """A plain file read (no render_method/final_url) keeps the ordinary output
+    presentation — the fetch branch must not capture it."""
+    card = ToolCard("t", "read", {"path": "/tmp/note.txt"})
+    card.mark_done("file line one\nfile line two", {"path": "/tmp/note.txt"})
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "Fetched:" not in content
+    assert "file line one" in content
+
+
+def test_web_fetch_low_quality_note_surfaced() -> None:
+    card = ToolCard("t", "web_fetch", {"url": "https://spa.example"})
+    card.mark_done(
+        "[200] https://spa.example\n\nenable javascript",
+        {
+            "url": "https://spa.example",
+            "final_url": "https://spa.example",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 100,
+            "lines": 1,
+            "low_quality": True,
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+    assert "browser" in content
 
 
 # --- the one-line guarantee ------------------------------------------------

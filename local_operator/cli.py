@@ -548,9 +548,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     mcp_reauth_parser.add_argument("name", type=str, help="Server name to re-authenticate")
 
     # Built separately so provider transports stay off the CLI import path.
+    from local_operator.web_fetch.cli import add_fetch_subparser
     from local_operator.web_search.cli import add_search_subparser
 
     add_search_subparser(subparsers, parent_parser)
+    add_fetch_subparser(subparsers, parent_parser)
 
     # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
     # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
@@ -1962,6 +1964,10 @@ def main() -> int:
             from local_operator.web_search.cli import search_command
 
             return search_command(args)
+        elif args.subcommand == "fetch":
+            from local_operator.web_fetch.cli import fetch_command
+
+            return fetch_command(args)
         elif args.subcommand == "agents":
             from local_operator.agents import AgentRegistry  # lazy: heavy module
 
