@@ -293,6 +293,22 @@ class UsageReport:
     notes: str | None = None
     #: Pass-through identity so the TUI can annotate which account reported.
     identity: str | None = None
+    #: Consecutive usage-endpoint failures for THIS account. Cleared on a live
+    #: 200. Carried on the report so the shared per-provider cache payload can
+    #: merge at account grain without a second on-disk store: a 429 for one
+    #: login must not erase its siblings, and must not erase this login's last
+    #: good numbers. 0 after a successful fetch.
+    consecutive_failures: int = 0
+    #: True once :data:`USAGE_ACCOUNT_MAX_FAILURES` consecutive probes have
+    #: failed. The account stays on ``/usage`` (the login is still real) but
+    #: probing stops until the user hits ``r``. Distinct from an exhausted
+    #: window: a 200 with 100% weekly is quota, not unavailability.
+    usage_unavailable: bool = False
+    #: Earliest epoch-ms this account may be probed again. Set from the
+    #: per-account exponential backoff on failure, or from the jittered TTL on
+    #: success. ``None`` once unavailable (only ``r`` retries) or on a report
+    #: that has never been through the cache merge.
+    next_probe_at_ms: int | None = None
 
 
 @dataclass(frozen=True)

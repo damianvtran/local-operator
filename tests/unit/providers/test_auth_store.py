@@ -621,6 +621,29 @@ class TestListOauthAccesses:
         assert [a.email for a in accesses] == ["b@example.com"]
         assert store.is_blocked(row.id, "anthropic") is False
 
+    async def test_a_refresh_failed_account_is_still_named_for_usage(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reporting must still list the login even when no bearer can be minted.
+
+        ``list_oauth_accesses`` omits the row (and must not block it). The
+        sibling enumerator is what ``/usage`` uses to keep the identity on
+        the panel as last-known / unavailable.
+        """
+        row = store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+
+        async def explode(self_, credential_row, *, force=False):  # noqa: ANN001
+            if credential_row.id == row.id:
+                raise AuthStoreError("refresh failed")
+            return dict(credential_row.data)
+
+        monkeypatch.setattr(AuthStore, "_ensure_oauth_fresh", explode)
+        named = store.list_oauth_identities("anthropic")
+        assert [a.email for a in named] == ["a@example.com", "b@example.com"]
+        assert all(a.access_token == "" for a in named)
+        assert store.is_blocked(row.id, "anthropic") is False
+
 
 class TestProviderOutageDoesNotBlockHealthyAccounts:
     """A 529 is the provider failing, not the credential.

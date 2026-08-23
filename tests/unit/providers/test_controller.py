@@ -16,8 +16,12 @@ import pytest
 
 from local_operator.harness.types import ModelSpec
 from local_operator.providers.controller import ProviderController
-from local_operator.providers.usage import UsageReport
-from local_operator.providers.usage_cache import UsageCacheStore
+from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.providers.usage_cache import (
+    USAGE_ACCOUNT_MAX_FAILURES,
+    UsageCacheStore,
+    account_backoff_ms,
+)
 
 
 class FakeAuthStore:
@@ -31,6 +35,17 @@ class FakeAuthStore:
         #: Every OAuth account per provider, as the real store now enumerates
         #: them. Distinct from `oauth`, which is the cascade's single pick.
         self.oauth_accounts: dict[str, list[object]] = {}
+        #: Runtime/config override keys. When set, list_oauth_identities
+        #: returns [] — same contract as AuthStore, because an override
+        #: aims at a gateway and stored identity does not apply.
+        self._runtime_overrides: dict[str, str] = {}
+
+    def set_runtime_api_key(self, provider: str, api_key: str | None) -> None:
+        if api_key:
+            self._runtime_overrides[provider] = api_key
+            self.api_keys[provider] = api_key
+        else:
+            self._runtime_overrides.pop(provider, None)
 
     def list_credentials(self, provider=None):
         rows = (
@@ -61,7 +76,51 @@ class FakeAuthStore:
         return self.oauth.get(provider)
 
     async def list_oauth_accesses(self, provider):
+        if self._runtime_overrides.get(provider):
+            return []
         return list(self.oauth_accounts.get(provider, []))
+
+    def list_oauth_identities(self, provider):
+        # Reporting enumerator: stored identities, no bearer required.
+        # An override short-circuits to [] — same as AuthStore — so
+        # /usage takes the API-key route instead of naming stored logins.
+        if self._runtime_overrides.get(provider):
+            return []
+        # Rows first (stable stored order), then any oauth_accounts the test
+        # registered without also upserting a row. oauth_accounts is the
+        # *bearer* list and may be a subset — using it alone would hide a
+        # refresh-failed login, which is the defect under test.
+        seen: set[str] = set()
+        identities: list[object] = []
+        for row in self.list_credentials(provider):
+            if getattr(row, "credential_type", None) != "oauth":
+                continue
+            data = getattr(row, "data", None) or {}
+            email = data.get("email") or getattr(row, "identity_key", None)
+            account_id = data.get("account_id")
+            label = email or account_id
+            if label:
+                seen.add(str(label))
+            identities.append(
+                types.SimpleNamespace(
+                    access_token="",
+                    credential_id=getattr(row, "id", 0),
+                    account_id=account_id,
+                    email=email,
+                    org_id=data.get("org_id"),
+                    api_endpoint=None,
+                    kind="oauth",
+                    raw=data,
+                )
+            )
+        for access in self.oauth_accounts.get(provider, []):
+            label = getattr(access, "email", None) or getattr(access, "account_id", None)
+            if label and str(label) in seen:
+                continue
+            if label:
+                seen.add(str(label))
+            identities.append(access)
+        return identities
 
     async def get_api_key(self, provider):
         return self.api_keys.get(provider)
@@ -231,7 +290,13 @@ class TestUsageIsPerAccount:
 
         monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
         reports = await controller.fetch_usage(["anthropic"])
-        assert [r.identity for r in reports] == ["fine@example.com"]
+        # The broken account stays on the panel (no last-good yet, so an
+        # empty stub) — omitting it is how a 429 hid a logged-in login.
+        assert [r.identity for r in reports] == ["broken@example.com", "fine@example.com"]
+        broken = reports[0]
+        assert broken.consecutive_failures == 1
+        assert broken.limits == []
+        assert reports[1].consecutive_failures == 0
 
     @pytest.mark.asyncio
     async def test_api_key_route_reports_once(self, controller, store, monkeypatch) -> None:
@@ -722,9 +787,11 @@ class TestUsageCache:
     async def test_a_provider_with_no_data_history_is_negative_cached(
         self, controller, store, monkeypatch
     ) -> None:
-        """A provider that reports nothing (and never has) is cached as empty,
-        so the warmer stops re-hitting an endpoint with nothing to say."""
-        store.oauth_accounts["xai"] = [self._account("me@example.com", "acct-1")]
+        """An API-key provider that reports nothing (and never has) is cached
+        as empty, so the warmer stops re-hitting an endpoint with nothing to
+        say. OAuth logins take the per-account path instead — they must stay
+        on the panel even with no last-good."""
+        store.api_keys["openrouter"] = "sk-or-1"
         calls = 0
 
         async def fake_fetch(
@@ -736,12 +803,12 @@ class TestUsageCache:
 
         monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
 
-        assert await controller.fetch_usage(["xai"]) == []
-        assert await controller.fetch_usage(["xai"]) == []
+        assert await controller.fetch_usage(["openrouter"]) == []
+        assert await controller.fetch_usage(["openrouter"]) == []
         # The empty answer was cached: exactly one network round total.
         assert calls == 1
         # And the row is visible to the warmer's age probe.
-        assert controller.usage_cache_age_ms("xai") is not None
+        assert controller.usage_cache_age_ms("openrouter") is not None
 
     @pytest.mark.asyncio
     async def test_alias_providers_share_one_cache_row(
@@ -767,7 +834,7 @@ class TestUsageCache:
 
         from local_operator.providers.controller import EMPTY_OVER_DATA_ACCEPT_MS
 
-        store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-1")]
+        store.api_keys["openrouter"] = "sk-or-1"
 
         async def fake_fetch(
             client, provider, *, api_key, access_token, account_id, oauth_creds=None
@@ -777,17 +844,358 @@ class TestUsageCache:
         monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
 
         # Plant a last-good row whose data is OLDER than the acceptance window,
-        # already expired so the refresh path runs.
-        key = controller._usage_cache_key("anthropic")
+        # already expired so the refresh path runs. API-key route: no OAuth
+        # identity set, so the empty-over-data heuristic still applies.
+        key = controller._usage_cache_key("openrouter")
         cache = controller._usage_cache_store()
         assert cache is not None
         now_ms = int(_time.time() * 1000)
-        old = UsageReport(provider="anthropic", limits=[])
+        old = UsageReport(provider="openrouter", limits=[])
         old.fetched_at = now_ms - EMPTY_OVER_DATA_ACCEPT_MS - 60_000
-        old.identity = "me@example.com"
-        cache.set(key, "anthropic", [old], expires_at_ms=now_ms - 1000)
+        cache.set(key, "openrouter", [old], expires_at_ms=now_ms - 1000)
 
         # The empty answer is BELIEVED: no stale serve, and the row is now a
         # full-TTL negative entry (fresh, empty).
-        assert await controller.fetch_usage(["anthropic"]) == []
+        assert await controller.fetch_usage(["openrouter"]) == []
         assert cache.get(key) == []
+
+
+class TestPerAccountLastKnown:
+    """A 429 for one login must not erase that login — or its siblings.
+
+    #277 cached the *list of reports that succeeded this fetch*. A partial
+    success (3 of 4 Anthropic tokens 200, one 429) overwrote the last-good
+    4-account snapshot with a 3-account payload, which is how
+    damian@gominerva.com vanished from ``/usage`` while still logged in.
+    """
+
+    @staticmethod
+    def _account(email: str, account_id: str):
+        return types.SimpleNamespace(
+            access_token=f"tok-{account_id}",
+            credential_id=0,
+            account_id=account_id,
+            email=email,
+            org_id=None,
+            api_endpoint=None,
+            kind="oauth",
+            raw=None,
+        )
+
+    @staticmethod
+    def _report(identity: str, percent: float, fetched_at: int | None = None) -> UsageReport:
+        import time as _time
+
+        return UsageReport(
+            provider="anthropic",
+            fetched_at=fetched_at if fetched_at is not None else int(_time.time() * 1000),
+            identity=identity,
+            limits=[
+                UsageLimit(
+                    id=f"{identity}:7d",
+                    label="7 day",
+                    amount=UsageAmount(
+                        used=percent,
+                        limit=100.0,
+                        used_fraction=percent / 100.0,
+                        unit="percent",
+                    ),
+                    window="7 day",
+                    shared=True,
+                )
+            ],
+        )
+
+    def _four(self, store: FakeAuthStore) -> list[tuple[str, str]]:
+        accounts = [
+            ("damian@gominerva.com", "acct-gominerva"),
+            ("damian@radienthq.com", "acct-radient"),
+            ("damian@pergamonhq.com", "acct-pergamon"),
+            ("damianvtran@gmail.com", "acct-gmail"),
+        ]
+        store.oauth_accounts["anthropic"] = [
+            self._account(email, account_id) for email, account_id in accounts
+        ]
+        for email, _account_id in accounts:
+            store.upsert_credential("anthropic", {"refresh": "r", "access": "a", "email": email})
+        return accounts
+
+    @pytest.mark.asyncio
+    async def test_a_partial_fetch_keeps_the_failed_accounts_last_known(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """4 accounts; one fetch returns None for gominerva → still 4 identities,
+        and that one keeps the previous weekly number."""
+        self._four(store)
+        fail_gominerva = False
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            if fail_gominerva and account_id == "acct-gominerva":
+                return None
+            percent = {"acct-gominerva": 12.0, "acct-radient": 34.0}.get(account_id, 56.0)
+            identity = {
+                "acct-gominerva": "damian@gominerva.com",
+                "acct-radient": "damian@radienthq.com",
+                "acct-pergamon": "damian@pergamonhq.com",
+                "acct-gmail": "damianvtran@gmail.com",
+            }[account_id]
+            return self._report(identity, percent)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        warm = await controller.fetch_usage(["anthropic"])
+        assert [r.identity for r in warm] == [
+            "damian@gominerva.com",
+            "damian@radienthq.com",
+            "damian@pergamonhq.com",
+            "damianvtran@gmail.com",
+        ]
+        assert warm[0].limits[0].amount.used == 12.0
+
+        key = controller._usage_cache_key("anthropic")
+        cache = controller._usage_cache_store()
+        assert cache is not None
+        import time as _time
+
+        cache.set(key, "anthropic", warm, expires_at_ms=int(_time.time() * 1000) - 1000)
+
+        fail_gominerva = True
+        recovered = await controller.fetch_usage(["anthropic"])
+        assert [r.identity for r in recovered] == [
+            "damian@gominerva.com",
+            "damian@radienthq.com",
+            "damian@pergamonhq.com",
+            "damianvtran@gmail.com",
+        ]
+        gominerva = recovered[0]
+        assert gominerva.limits[0].amount.used == 12.0
+        assert gominerva.consecutive_failures == 1
+        assert gominerva.usage_unavailable is False
+        # Partial success must NOT shrink the cached anthropic payload.
+        cached = cache.get(key, include_expired=True)
+        assert cached is not None
+        assert [r.identity for r in cached] == [r.identity for r in recovered]
+
+    @pytest.mark.asyncio
+    async def test_max_failures_with_no_last_good_still_lists_the_account(
+        self, controller, store, monkeypatch
+    ) -> None:
+        store.oauth_accounts["anthropic"] = [self._account("new@example.com", "acct-new")]
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            return None
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        reports = None
+        for _ in range(USAGE_ACCOUNT_MAX_FAILURES):
+            key = controller._usage_cache_key("anthropic")
+            cache = controller._usage_cache_store()
+            assert cache is not None
+            import time as _time
+
+            existing = cache.get(key, include_expired=True)
+            if existing:
+                now_ms = int(_time.time() * 1000)
+                for report in existing:
+                    report.next_probe_at_ms = now_ms - 1
+                cache.set(key, "anthropic", existing, expires_at_ms=now_ms - 1000)
+            reports = await controller.fetch_usage(["anthropic"])
+        assert reports is not None
+        assert len(reports) == 1
+        assert reports[0].identity == "new@example.com"
+        assert reports[0].usage_unavailable is True
+        assert reports[0].limits == []
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_retries_a_maxed_out_account(
+        self, controller, store, monkeypatch
+    ) -> None:
+        store.oauth_accounts["anthropic"] = [self._account("new@example.com", "acct-new")]
+        calls = 0
+        succeed = False
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            nonlocal calls
+            calls += 1
+            if succeed:
+                return self._report("new@example.com", 7.0)
+            return None
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        for _ in range(USAGE_ACCOUNT_MAX_FAILURES):
+            key = controller._usage_cache_key("anthropic")
+            cache = controller._usage_cache_store()
+            assert cache is not None
+            import time as _time
+
+            existing = cache.get(key, include_expired=True)
+            if existing:
+                now_ms = int(_time.time() * 1000)
+                for report in existing:
+                    report.next_probe_at_ms = now_ms - 1
+                cache.set(key, "anthropic", existing, expires_at_ms=now_ms - 1000)
+            await controller.fetch_usage(["anthropic"])
+
+        calls_before = calls
+        succeed = True
+        # Without force, the unavailable account is not re-probed.
+        idle = await controller.fetch_usage(["anthropic"])
+        assert calls == calls_before
+        assert idle[0].usage_unavailable is True
+
+        recovered = await controller.fetch_usage(["anthropic"], force_refresh=True)
+        assert calls == calls_before + 1
+        assert recovered[0].usage_unavailable is False
+        assert recovered[0].consecutive_failures == 0
+        assert recovered[0].limits[0].amount.used == 7.0
+
+    @pytest.mark.asyncio
+    async def test_backoff_skips_only_the_failed_account(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """A failed account is not re-fetched until its backoff elapses;
+        siblings that are fresh still refresh."""
+        store.oauth_accounts["anthropic"] = [
+            self._account("fail@example.com", "acct-fail"),
+            self._account("ok@example.com", "acct-ok"),
+        ]
+        seen: list[str] = []
+        fail = False
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            seen.append(account_id)
+            if fail and account_id == "acct-fail":
+                return None
+            identity = "fail@example.com" if account_id == "acct-fail" else "ok@example.com"
+            return self._report(identity, 10.0)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        await controller.fetch_usage(["anthropic"])
+        key = controller._usage_cache_key("anthropic")
+        cache = controller._usage_cache_store()
+        assert cache is not None
+        import time as _time
+
+        cache.set(
+            key,
+            "anthropic",
+            cache.get(key, include_expired=True) or [],
+            expires_at_ms=int(_time.time() * 1000) - 1000,
+        )
+        fail = True
+        seen.clear()
+        first_fail = await controller.fetch_usage(["anthropic"])
+        assert "acct-fail" in seen and "acct-ok" in seen
+        assert first_fail[0].consecutive_failures == 1
+        backoff = account_backoff_ms(1)
+        assert backoff > 0
+
+        # Expire the *provider* row so the lease/refresh path runs again, but
+        # the failed account's next_probe_at is still in the future.
+        cache.set(
+            key,
+            "anthropic",
+            first_fail,
+            expires_at_ms=int(_time.time() * 1000) - 1000,
+        )
+        seen.clear()
+        second = await controller.fetch_usage(["anthropic"])
+        assert "acct-fail" not in seen
+        assert "acct-ok" in seen
+        assert second[0].consecutive_failures == 1
+        assert second[0].limits[0].amount.used == 10.0
+
+    @pytest.mark.asyncio
+    async def test_a_refresh_failed_identity_is_still_listed(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """list_oauth_accesses omitted the unrefreshable row; /usage must not."""
+        store.upsert_credential(
+            "anthropic",
+            {
+                "refresh": "r",
+                "access": "a",
+                "email": "stale@example.com",
+                "account_id": "acct-stale",
+            },
+        )
+        store.upsert_credential(
+            "anthropic",
+            {"refresh": "r", "access": "b", "email": "live@example.com", "account_id": "acct-live"},
+        )
+        # Only the live account can mint a bearer this cycle.
+        store.oauth_accounts["anthropic"] = [self._account("live@example.com", "acct-live")]
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            return self._report("live@example.com", 22.0)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+        assert [r.identity for r in reports] == ["stale@example.com", "live@example.com"]
+        assert reports[0].limits == []
+        assert reports[0].consecutive_failures == 1
+        assert reports[1].limits[0].amount.used == 22.0
+
+    @pytest.mark.asyncio
+    async def test_an_override_fetches_the_api_key_not_stored_oauth_stubs(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """OAuth rows plus a runtime override must take the API-key route.
+
+        ``list_oauth_identities`` returns [] when an override is set — that
+        empty list is authoritative. Falling through to ``list_credentials``
+        would name the stored emails, skip ``_fetch_one(access=None)``, and
+        paint last-known / unavailable stubs for accounts the session is
+        not using.
+        """
+        self._four(store)
+        store.set_runtime_api_key("anthropic", "sk-ant-override")
+        seen: list[tuple[str | None, str | None]] = []
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            seen.append((api_key, account_id))
+            return UsageReport(
+                provider=provider,
+                identity=None,
+                limits=[
+                    UsageLimit(
+                        id="override:7d",
+                        label="7 day",
+                        amount=UsageAmount(
+                            used=9.0, limit=100.0, used_fraction=0.09, unit="percent"
+                        ),
+                        window="7 day",
+                        shared=True,
+                    )
+                ],
+            )
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+        assert seen == [("sk-ant-override", None)]
+        assert len(reports) == 1
+        assert reports[0].identity is None
+        assert reports[0].usage_unavailable is False
+        assert {r.identity for r in reports}.isdisjoint(
+            {
+                "damian@gominerva.com",
+                "damian@radienthq.com",
+                "damian@pergamonhq.com",
+                "damianvtran@gmail.com",
+            }
+        )
