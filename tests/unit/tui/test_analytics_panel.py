@@ -536,7 +536,13 @@ def test_pinned_title_carries_active_metric_and_flips():
             assert "bars: tokens" in title1
             # The actual pinned Static was repainted by the toggle handler, not
             # just the recomputed text — read what the widget is rendering.
-            assert "bars: tokens" in screen._title.render().plain
+            # ``Static.render`` returns a RenderableType union (rich ``Text``,
+            # Textual ``Content``, ``str``, …) whose members do not share a
+            # ``.plain`` attribute pyright can narrow. ``str(...)`` is defined
+            # on every member and yields the plain rendered text, so it type-
+            # checks against the whole union while still asserting what the
+            # widget actually paints.
+            assert "bars: tokens" in str(screen._title.render())
             await pilot.press("escape")
             await pilot.pause()
             # No charts → no metric suffix in the title (nothing to toggle).
