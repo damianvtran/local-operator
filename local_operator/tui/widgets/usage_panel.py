@@ -37,6 +37,7 @@ from typing import Any
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
@@ -73,6 +74,23 @@ TIER_INDENT = "  "
 #: right-aligned numbers one column left the instant the bar appeared, which is
 #: exactly the reflow the transcript avoids with ``scrollbar-gutter: stable``.
 SCROLLBAR_GUTTER_CELLS = 1
+
+#: How many cells LEFT of the bar column can still count as a grab. The bar is a
+#: single hand-painted column, and a 1-cell mouse target is easy to miss; a miss
+#: lands on the selectable ``Static`` and arms a text selection whose drag reads
+#: as the messy highlight the user reported. Widening the HIT test (not the
+#: painted bar — see :meth:`UsagePanel._paint_scrollbar`) leftward closes that
+#: miss. Unlike the transcript (``TranscriptScreen.SCROLLBAR_GRAB_PAD`` in
+#: ``app.py``), whose pad eats the view's own EMPTY right padding, this panel
+#: composes rows flush to ``_body_content_width`` and appends the bar there, so
+#: the pad columns CAN hold real right-aligned data (a "10%", a "resets in 5h"
+#: countdown, a truncated identity). The forgiveness is therefore CONTENT-AWARE:
+#: :meth:`UsagePanel._scrollbar_hit` grabs in the pad band only when those cells
+#: are blank in that row, so a near-miss over the common blank tail grabs while
+#: a press on a visible character still selects. Raising this only widens the
+#: blank-tail target; it never begins stealing content, because the blank-tail
+#: gate holds regardless of the pad's width.
+SCROLLBAR_GRAB_PAD = 2
 
 #: Track vs thumb glyphs. The track is a hairline so the reserved column reads
 #: as a place to aim a drag rather than a right-hand border (the same reason the
@@ -777,6 +795,18 @@ class UsagePanel(Static):
         hit = self._scrollbar_hit(event)
         if hit is None:
             return
+        # Base ``Screen._forward_event`` arms a text selection on this MouseDown
+        # BEFORE this handler runs, because the panel is a selectable ``Static``;
+        # its base mouse-move handler would then extend that selection in parallel
+        # with the drag (the messy highlight, on both a near-miss and an exact
+        # hit). A scrollbar grab is not a selection, so clear whatever it armed as
+        # the grab takes hold. Guarded because the CSS-less test host and any
+        # pre-mount call have no screen to clear.
+        if self.is_mounted:
+            try:
+                self.screen.clear_selection()
+            except NoScreen:
+                pass
         event.stop()
         row_in_body, thumb_top, thumb_len = hit
         if thumb_top <= row_in_body < thumb_top + thumb_len:
@@ -823,12 +853,14 @@ class UsagePanel(Static):
         return self._content_offset(event).y
 
     def _scrollbar_hit(self, event) -> tuple[int, int, int] | None:  # noqa: ANN001
-        """``(row_in_body, thumb_top, thumb_len)`` if the press is on the bar.
+        """``(row_in_body, thumb_top, thumb_len)`` if the press is on the bar, or
+        within :data:`SCROLLBAR_GRAB_PAD` cells left of it OVER A BLANK TAIL.
 
         ``None`` when the body is not scrollable, when the press is left of the
-        reserved gutter column, or when it is above/below the track. Sharing the
-        region and thumb maths with the painter is what keeps the grab target
-        exactly under the glyph the user sees.
+        pad band, when the pad cells for that row hold real content, or when it
+        is above/below the track. Sharing the region and thumb maths with the
+        painter is what keeps the grab target exactly under the glyph the user
+        sees.
         """
         body = self._body()
         budget = self._body_budget()
@@ -838,14 +870,43 @@ class UsagePanel(Static):
         offset = self._content_offset(event)
         # The bar is the single content column just past the body's composed
         # width (the reserved gutter). Content x, so no padding term is needed.
-        if offset.x != self._body_content_width():
+        bar = self._body_content_width()
+        if not (bar - SCROLLBAR_GRAB_PAD <= offset.x <= bar):
             return None
         first_row, count = self._body_region(budget)
         row_in_body = offset.y - first_row
         if not 0 <= row_in_body < count:
             return None
+        # The exact bar column always grabs. A near-miss in the pad band grabs
+        # ONLY when the cells from the press up to the bar are blank in THIS row.
+        # Unlike the transcript (whose rows leave empty right padding the pad can
+        # safely eat), this panel composes rows flush to `bar` and appends the
+        # bar at that column, so the pad columns (`bar-1`, `bar-2`) can hold real
+        # right-aligned data — a meter's "10%", a "resets in 5h" countdown, a
+        # truncated identity. Grabbing over a visible character would steal a
+        # legitimate click/selection, so forgiveness is gated on a blank tail:
+        # it kicks in on the common blank-tail rows and never over a glyph.
+        if offset.x < bar and not self._pad_tail_blank(row_in_body, offset.x, bar, budget):
+            return None
         thumb_top, thumb_len = self._scrollbar_thumb(total, budget)
         return row_in_body, thumb_top, thumb_len
+
+    def _pad_tail_blank(self, row_in_body: int, x: int, bar: int, budget: int) -> bool:
+        """Whether composed columns ``[x, bar)`` are all whitespace in this row.
+
+        Reads the same composed viewport row the painter overlays the bar onto
+        (``_window_rows``), padded conceptually to ``bar`` exactly as
+        :meth:`_paint_scrollbar` pads it — a line shorter than ``x`` therefore
+        reads as an all-blank tail. The give-back blank rows below a short block
+        (``row_in_body >= len(window)``) carry no data, so they are blank by
+        construction. Indexing is by code point rather than cell because the
+        panel's rows are single-width text (labels, numbers, bar glyphs); the
+        painter and ``render_lines_for_test`` treat the two as equivalent here.
+        """
+        window, _ = self._window_rows(self._body(), budget)
+        if row_in_body >= len(window):
+            return True
+        return window[row_in_body].plain[x:bar].strip() == ""
 
     def _apply_thumb_top(self, thumb_top: int) -> None:
         """Move the offset so the thumb's top lands at ``thumb_top`` and repaint."""
