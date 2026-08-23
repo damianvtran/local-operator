@@ -31,6 +31,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -38,6 +39,7 @@ from local_operator.analytics.model import (
     COMPONENT_KEYS,
     CallSnapshot,
     UsageAggregate,
+    UsagePeriod,
     apportion_components,
     price_snapshot,
 )
@@ -49,6 +51,16 @@ logger = logging.getLogger("local_operator.analytics.store")
 #: ("where did usage go this month"), short enough to bound the file. Pruning
 #: runs opportunistically on write, not on a timer.
 DEFAULT_RETENTION_DAYS = 90
+
+#: Retention for the calendar ROLLUP tables, independent of the raw ledger's
+#: 90-day window. The rollups exist precisely so history survives the ledger's
+#: prune: a daily bar can look back a full year and a monthly bar much further,
+#: without keeping a year of per-call rows on disk. Daily is capped at the most
+#: recent 365 DISTINCT days (many more physical rows, since each day holds one
+#: row per model used); monthly is effectively unbounded with a 120-month
+#: (10-year) safety cap so a decade-old machine cannot grow it without limit.
+DAILY_ROLLUP_RETENTION_DAYS = 365
+MONTHLY_ROLLUP_RETENTION_MONTHS = 120
 
 #: Bounded retry for a write that loses the lock race past ``busy_timeout``.
 #: Runs on the background writer thread, so waiting a moment is free to the
@@ -94,6 +106,56 @@ CREATE TABLE IF NOT EXISTS session_names (
   session_id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
   updated_at_ms INTEGER NOT NULL
+);
+
+-- Calendar ROLLUP tables. These are NOT a second source of truth: every row is
+-- maintained by the same ``record_batch`` write that appends to ``calls`` (in
+-- the SAME transaction), so a call is counted exactly once and there is no
+-- separate recording hook to double-count against. They exist because the raw
+-- ledger is pruned at 90 days while the operator wants a daily view back a year
+-- and a monthly view further still, and because a per-(day, model) /
+-- (month, model) grain answers "which model did my spend go to over time" — a
+-- question a flat GROUP BY over a pruned ledger cannot, once the rows are gone.
+--
+-- ``day`` is the LOCAL calendar date (YYYY-MM-DD) the call's ts_ms falls on and
+-- ``month`` the local YYYY-MM; local rather than UTC because this is a
+-- single-machine tool and "today's spend" means the user's wall-clock day (a
+-- turn spanning midnight records under its end day, which is acceptable and
+-- documented). Both are TEXT so they sort lexically and read correctly in a
+-- range query. ``cost_micro`` accumulates micro-USD (exact SUM); ``cost_known``
+-- counts the priced calls so a bucket that used an unpriceable model renders as
+-- a lower bound rather than a confident understatement. The composite PK is the
+-- ON CONFLICT target the accumulate upsert needs and indexes every range scan.
+CREATE TABLE IF NOT EXISTS usage_daily (
+  day TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  context_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_micro INTEGER NOT NULL DEFAULT 0,
+  cost_known INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, model)
+);
+
+CREATE TABLE IF NOT EXISTS usage_monthly (
+  month TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  context_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_micro INTEGER NOT NULL DEFAULT 0,
+  cost_known INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (month, model)
 );
 """
 
@@ -142,25 +204,83 @@ _INSERT_SQL_NO_COST = (
 #: path can drop exactly them. They sit right after ``context_tokens``.
 _COST_VALUE_INDICES = (11, 12)
 
+#: The measure columns a rollup row accumulates. Every one is summed on
+#: conflict, so an upsert is a pure ``x = x + excluded.x`` accumulate and N
+#: processes incrementing the same (day, model) never lose an update — the
+#: multi-``lop`` reality this store is built for. ``calls`` and ``cost_known``
+#: are counts (1 per row here); the token/cost fields carry the call's amounts.
+_ROLLUP_MEASURE_COLUMNS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "context_tokens",
+    "cost_micro",
+    "cost_known",
+    "calls",
+)
+
+
+def _rollup_upsert_sql(table: str, key: str) -> str:
+    """The accumulate-upsert for one rollup table, keyed on ``(key, model)``.
+
+    ``INSERT ... ON CONFLICT DO UPDATE SET x = x + excluded.x`` so concurrent
+    writers merge losslessly without application locking (WAL + busy_timeout
+    serialise the physical write; the accumulate makes the logical result
+    order-independent). ``updated_at_ms`` takes the newest writer's clock so a
+    reader can tell a live bucket from a stale one. Built from
+    ``_ROLLUP_MEASURE_COLUMNS`` so the daily and monthly statements cannot
+    drift apart.
+    """
+    cols = (key, "model", *_ROLLUP_MEASURE_COLUMNS, "updated_at_ms")
+    placeholders = ", ".join("?" for _ in cols)
+    accumulate = ", ".join(f"{c} = {c} + excluded.{c}" for c in _ROLLUP_MEASURE_COLUMNS)
+    return (
+        f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT({key}, model) DO UPDATE SET {accumulate}, "
+        "updated_at_ms = excluded.updated_at_ms"
+    )
+
+
+_DAILY_UPSERT_SQL = _rollup_upsert_sql("usage_daily", "day")
+_MONTHLY_UPSERT_SQL = _rollup_upsert_sql("usage_monthly", "month")
+
+#: The rollup measure columns selected/summed by the read API, in the order
+#: :class:`UsagePeriod` consumes them. One list so the SELECT projection and the
+#: dataclass construction cannot fall out of step.
+_ROLLUP_READ_COLUMNS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "context_tokens",
+    "cost_micro",
+    "cost_known",
+    "calls",
+)
+
 
 def default_db_path() -> Path:
     """The shared analytics database, next to the other per-user stores."""
     return config_dir() / "analytics.db"
 
 
-def _row_values(snapshot: CallSnapshot) -> tuple[Any, ...]:
+def _row_values(snapshot: CallSnapshot, cost_micro: int, cost_known: bool) -> tuple[Any, ...]:
     """A snapshot as the positional tuple ``_INSERT_SQL`` expects.
 
     The estimated component split is computed HERE, in the writer, against the
     authoritative ``context_tokens`` — never on the event loop. A call the
     provider gave no context total for stores 0s for every component, which
     reads as "unknown" rather than a fabricated breakdown.
+
+    ``cost_micro``/``cost_known`` are passed in already priced (once per
+    snapshot in ``record_batch``) rather than priced here, so the same figure
+    feeds this ledger row AND the rollup rows without calling the potentially
+    cold ``resolve_model_info`` twice for one call.
     """
     components = apportion_components(snapshot.component_chars, snapshot.context_tokens)
-    # Price on THIS (writer) thread — never the event loop (review C1). See
-    # ``price_snapshot``: a cold ``resolve_model_info`` can block for seconds,
-    # which is fine on the background writer and unacceptable on the turn's loop.
-    cost_micro, cost_known = price_snapshot(snapshot)
     return (
         snapshot.ts_ms,
         snapshot.session_id,
@@ -176,6 +296,65 @@ def _row_values(snapshot: CallSnapshot) -> tuple[Any, ...]:
         int(cost_micro),
         1 if cost_known else 0,
         *(components[key] for key in COMPONENT_KEYS),
+    )
+
+
+def _rollup_model_key(snapshot: CallSnapshot) -> str:
+    """The (day/month, model) dimension for a snapshot's rollup rows.
+
+    The FINEST model identity the snapshot carries — ``provider/model_id`` —
+    because cost depends entirely on it, a session can switch models mid-life,
+    and subagents routinely run on a different model from the parent, so
+    collapsing to the provider would throw away exactly the per-model
+    attribution the time-series view exists to show. Falls back to the bare
+    provider when a model id is absent (never expected on a real call, but a
+    rollup key must not be empty), matching the ``calls`` ledger which stores
+    both fields separately.
+    """
+    provider = (snapshot.provider or "").strip()
+    model_id = (snapshot.model_id or "").strip()
+    if provider and model_id:
+        return f"{provider}/{model_id}"
+    return model_id or provider
+
+
+def _local_day_month(ts_ms: int) -> tuple[str, str]:
+    """``(local YYYY-MM-DD, local YYYY-MM)`` for an epoch-ms timestamp.
+
+    LOCAL time, not UTC: a single-machine tool's "today" is the user's
+    wall-clock day (see the schema comment). ``datetime.fromtimestamp`` with no
+    tz argument converts using the system local zone, which is the same clock
+    ``ts_ms`` was stamped from.
+    """
+    moment = datetime.fromtimestamp(ts_ms / 1000.0)
+    return moment.strftime("%Y-%m-%d"), moment.strftime("%Y-%m")
+
+
+def _rollup_row_values(
+    snapshot: CallSnapshot, bucket: str, cost_micro: int, cost_known: bool
+) -> tuple[Any, ...]:
+    """A snapshot as the positional tuple a rollup upsert expects.
+
+    ``bucket`` is the day or month string. The tuple order matches
+    ``_rollup_upsert_sql``'s column list (bucket, model, then the measures,
+    then ``updated_at_ms``). Uses the SAME ``cost_micro``/``cost_known`` the
+    ledger row got so the rollup and the raw ledger can never disagree on a
+    call's cost; ``cost_known`` is 1/0 so its SUM is the count of priceable
+    calls in the bucket.
+    """
+    return (
+        bucket,
+        _rollup_model_key(snapshot),
+        snapshot.input_tokens,
+        snapshot.output_tokens,
+        snapshot.cache_read_tokens,
+        snapshot.cache_write_tokens,
+        snapshot.reasoning_tokens,
+        snapshot.context_tokens,
+        int(cost_micro),
+        1 if cost_known else 0,
+        1,
+        int(snapshot.ts_ms),
     )
 
 
@@ -336,7 +515,24 @@ class AnalyticsStore:
         conn = self._connect()
         if conn is None:
             return 0
-        rows = [_row_values(s) for s in snapshots]
+        # Price each snapshot ONCE here (writer thread), then feed that figure
+        # to both the ledger row and the two rollup rows. Pricing on the event
+        # loop is forbidden (a cold ``resolve_model_info`` blocks for seconds,
+        # review C1); doing it once rather than per-row also keeps a batch cheap.
+        priced = [price_snapshot(s) for s in snapshots]
+        rows = [_row_values(s, cm, ck) for s, (cm, ck) in zip(snapshots, priced)]
+        # Rollup rows for the SAME calls, keyed by the LOCAL day/month of each
+        # call's ts_ms. Written in the same transaction as the ledger insert
+        # (below) so a call lands in the ledger and both rollups together or not
+        # at all — a turn is never half-recorded. This is why there is no
+        # double-count: the rollups are fed by the ledger's ONE write path, not
+        # by a separate app-level hook that could also observe the same spend.
+        daily_rows: list[tuple[Any, ...]] = []
+        monthly_rows: list[tuple[Any, ...]] = []
+        for snap, (cm, ck) in zip(snapshots, priced):
+            day, month = _local_day_month(int(snap.ts_ms))
+            daily_rows.append(_rollup_row_values(snap, day, cm, ck))
+            monthly_rows.append(_rollup_row_values(snap, month, cm, ck))
         if self._has_cost:
             insert_sql = _INSERT_SQL
         else:
@@ -349,6 +545,16 @@ class AnalyticsStore:
         for attempt in range(_WRITE_RETRIES):
             try:
                 conn.executemany(insert_sql, rows)
+                # The rollups accumulate in the same transaction. A failure to
+                # write them must not lose the ledger row, but SQLite gives us
+                # atomicity for free here: both executemany calls commit
+                # together, so either all three tables advance or the whole
+                # attempt rolls back and retries. The rollup tables always carry
+                # the cost columns (they are created with them and never shed
+                # them the way the ledger's C2 path does), so no cost-less
+                # variant is needed.
+                conn.executemany(_DAILY_UPSERT_SQL, daily_rows)
+                conn.executemany(_MONTHLY_UPSERT_SQL, monthly_rows)
                 conn.commit()
                 return len(snapshots)
             except sqlite3.OperationalError as exc:
@@ -395,18 +601,65 @@ class AnalyticsStore:
             logger.debug("analytics: session name upsert failed", exc_info=True)
 
     def prune(self, *, now_ms: int | None = None) -> int:
-        """Delete rows older than the retention window. Returns rows removed."""
+        """Delete rows past their retention window. Returns raw-ledger rows removed.
+
+        Three independent windows are enforced in one call, none affecting the
+        others:
+
+        - The raw ``calls`` ledger keeps ``retention_days`` (default 90) by
+          ``ts_ms`` — unchanged; its row count is the return value, preserving
+          the original contract.
+        - ``usage_daily`` keeps the most recent 365 DISTINCT ``day`` values
+          (not 365 rows — each day holds one row per model), so the daily bar
+          can look back a year regardless of how many models ran. The subquery
+          finds the 365th-newest distinct day and deletes everything older.
+        - ``usage_monthly`` keeps the most recent 120 DISTINCT months — a
+          10-year safety cap on an effectively-unbounded table (12 rows/year ×
+          models is negligible), so the monthly arc survives far beyond the
+          daily window without growing without limit.
+
+        The rollup prunes are keyed on the stored ``day``/``month`` STRINGS, not
+        on ``now_ms``: they keep the newest N buckets that exist rather than a
+        window relative to the wall clock, so a machine idle for a week does not
+        silently drop a still-recent bucket. ``now_ms`` is still injected for
+        the ledger cutoff (and for tests). Each statement is guarded on its own
+        so a missing rollup table (a very old DB mid-migration) degrades to
+        pruning what it can rather than raising.
+        """
         conn = self._connect()
         if conn is None:
             return 0
         cutoff = (now_ms if now_ms is not None else self._now_ms()) - self._retention_ms
+        removed = 0
         try:
             cur = conn.execute("DELETE FROM calls WHERE ts_ms < ?", (cutoff,))
+            removed = cur.rowcount or 0
             conn.commit()
-            return cur.rowcount or 0
         except Exception:  # noqa: BLE001
             logger.debug("analytics: prune failed", exc_info=True)
-            return 0
+        # Rollup prunes are best-effort and independent of the ledger prune
+        # above: a failure here must not undo the ledger delete or raise.
+        try:
+            conn.execute(
+                "DELETE FROM usage_daily WHERE day < ("
+                "  SELECT MIN(day) FROM ("
+                "    SELECT DISTINCT day FROM usage_daily ORDER BY day DESC LIMIT ?"
+                "  )"
+                ")",
+                (DAILY_ROLLUP_RETENTION_DAYS,),
+            )
+            conn.execute(
+                "DELETE FROM usage_monthly WHERE month < ("
+                "  SELECT MIN(month) FROM ("
+                "    SELECT DISTINCT month FROM usage_monthly ORDER BY month DESC LIMIT ?"
+                "  )"
+                ")",
+                (MONTHLY_ROLLUP_RETENTION_MONTHS,),
+            )
+            conn.commit()
+        except Exception:  # noqa: BLE001 — a rollup prune failure is non-fatal
+            logger.debug("analytics: rollup prune failed", exc_info=True)
+        return removed
 
     def _read_connection(self) -> sqlite3.Connection | None:
         """A FRESH, short-lived connection for a read, or None when unavailable.
@@ -533,6 +786,122 @@ class AnalyticsStore:
         }
         setattr(result, "session_names", result_session_names)
         return result
+
+    # -- rollup reads (calendar time series) ---------------------------------
+    def _series(self, table: str, key: str, buckets: int, *, by_model: bool) -> list[UsagePeriod]:
+        """The most recent ``buckets`` calendar buckets from a rollup table.
+
+        Shared by :meth:`daily_series` and :meth:`monthly_series` — the only
+        difference is the table and its key column. Two shapes:
+
+        - ``by_model=False``: one :class:`UsagePeriod` per bucket, SUMMED across
+          models in SQL (``GROUP BY key``), ``model=""``. This is the primary
+          series the bar chart draws.
+        - ``by_model=True``: one row per ``(bucket, model)``, so the view can
+          break a period down by which model spent it.
+
+        Returned oldest-LAST (``key`` ascending) so the caller can render newest
+        at the bottom to match the transcript's reading order, or reverse it
+        cheaply. The window is "the newest N DISTINCT buckets that exist", found
+        with a subquery, not a wall-clock cutoff — a gap of idle days does not
+        cost a bar. Never raises: a degraded or empty store returns ``[]``.
+        """
+        conn = self._read_connection()
+        if conn is None:
+            return []
+        limit = max(1, int(buckets))
+        measures = ", ".join(f"SUM({c})" for c in _ROLLUP_READ_COLUMNS)
+        # The N newest distinct buckets, oldest-first for rendering. An inner
+        # DESC LIMIT picks the window; the outer ASC orders it for the reader.
+        window = f"SELECT DISTINCT {key} AS b FROM {table} ORDER BY {key} DESC LIMIT {limit}"
+        try:
+            if by_model:
+                sql = (
+                    f"SELECT {key}, model, {measures} FROM {table} "
+                    f"WHERE {key} IN ({window}) "
+                    f"GROUP BY {key}, model ORDER BY {key} ASC, model ASC"
+                )
+                rows = conn.execute(sql).fetchall()
+                return [_period_from_row(str(r[0]), str(r[1]), r[2:]) for r in rows]
+            sql = (
+                f"SELECT {key}, {measures} FROM {table} "
+                f"WHERE {key} IN ({window}) "
+                f"GROUP BY {key} ORDER BY {key} ASC"
+            )
+            rows = conn.execute(sql).fetchall()
+            return [_period_from_row(str(r[0]), "", r[1:]) for r in rows]
+        except Exception:  # noqa: BLE001 — a report read must never raise
+            logger.debug("analytics: %s series query failed", table, exc_info=True)
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def daily_series(self, days: int = 30, *, by_model: bool = False) -> list[UsagePeriod]:
+        """The most recent ``days`` distinct days of usage, oldest-first."""
+        return self._series("usage_daily", "day", days, by_model=by_model)
+
+    def monthly_series(self, months: int = 12, *, by_model: bool = False) -> list[UsagePeriod]:
+        """The most recent ``months`` distinct months of usage, oldest-first."""
+        return self._series("usage_monthly", "month", months, by_model=by_model)
+
+    def series_totals(self, *, daily_days: int = 30) -> UsagePeriod:
+        """Grand totals over the most recent ``daily_days`` daily buckets.
+
+        A single summed :class:`UsagePeriod` (``period=""``, ``model=""``) over
+        the same window the daily chart draws, so the header figure and the bars
+        describe the same span. Reads the daily rollup rather than the raw
+        ledger so it survives the ledger's 90-day prune, and sums the same
+        ``by_model=False`` series the chart uses so the two cannot disagree.
+        """
+        rows = self.daily_series(daily_days, by_model=False)
+        if not rows:
+            return UsagePeriod(period="", model="")
+        return UsagePeriod(
+            period="",
+            model="",
+            input_tokens=sum(r.input_tokens for r in rows),
+            output_tokens=sum(r.output_tokens for r in rows),
+            cache_read_tokens=sum(r.cache_read_tokens for r in rows),
+            cache_write_tokens=sum(r.cache_write_tokens for r in rows),
+            reasoning_tokens=sum(r.reasoning_tokens for r in rows),
+            context_tokens=sum(r.context_tokens for r in rows),
+            cost_micro=sum(r.cost_micro for r in rows),
+            cost_known_calls=sum(r.cost_known_calls for r in rows),
+            calls=sum(r.calls for r in rows),
+        )
+
+
+def _period_from_row(period: str, model: str, measures: Iterable[Any]) -> UsagePeriod:
+    """Build a :class:`UsagePeriod` from a SUM row's measure columns.
+
+    ``measures`` is the projection of ``_ROLLUP_READ_COLUMNS`` in order; a NULL
+    (an empty SUM) reads as 0 so an all-empty bucket is a zeroed period rather
+    than a crash.
+    """
+    values = list(measures)
+
+    def _n(idx: int) -> int:
+        try:
+            return int(values[idx] or 0)
+        except (TypeError, ValueError, IndexError):
+            return 0
+
+    return UsagePeriod(
+        period=period,
+        model=model,
+        input_tokens=_n(0),
+        output_tokens=_n(1),
+        cache_read_tokens=_n(2),
+        cache_write_tokens=_n(3),
+        reasoning_tokens=_n(4),
+        context_tokens=_n(5),
+        cost_micro=_n(6),
+        cost_known_calls=_n(7),
+        calls=_n(8),
+    )
 
 
 def _aggregate_from_row(row: Iterable[Any] | None) -> UsageAggregate:

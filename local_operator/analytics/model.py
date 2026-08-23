@@ -390,6 +390,81 @@ class UsageAggregate:
         return min(1.0, self.cache_read_tokens / self.context_tokens)
 
 
+@dataclass(frozen=True)
+class UsagePeriod:
+    """One row of the daily/monthly rollup: a calendar bucket's summed spend.
+
+    Produced by :meth:`AnalyticsStore.daily_series` / ``monthly_series`` /
+    ``series_totals`` from the ``usage_daily`` / ``usage_monthly`` rollup
+    tables (which the ledger's own ``record_batch`` maintains — see the store
+    module docstring). ``period`` is the bucket key: a local ``YYYY-MM-DD`` for
+    a daily row, ``YYYY-MM`` for a monthly row, or ``""`` for a totals row that
+    sums a whole window. ``model`` is ``provider/model_id`` for a per-model row
+    and ``""`` for the across-models aggregate a ``by_model=False`` query
+    returns (summed in SQL, not Python, so the view stays cheap).
+
+    The cost fields mirror :class:`UsageAggregate` exactly so the time-series
+    view reuses the screen's existing money vocabulary: micro-USD integers for
+    an exact ``SUM``, plus a count of the priced calls so a bucket that
+    included an unpriceable model renders as a lower bound (``$X+`` / the ``≥``
+    floor) rather than a confident understatement. ``cost_is_floor`` is the
+    name the chart reads; it is the same condition as ``cost_is_partial`` but
+    stated positively for the bar renderer.
+    """
+
+    period: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    context_tokens: int = 0
+    cost_micro: int = 0
+    cost_known_calls: int = 0
+    calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        """Every token the providers billed in this bucket: input + output.
+
+        ``context_tokens`` (the normalised, cache-inclusive input) plus
+        ``output_tokens`` — the same definition :meth:`UsageAggregate.total_tokens`
+        uses, so a daily bar and the headline totals cannot tell two different
+        stories about "how many tokens".
+        """
+        return self.context_tokens + self.output_tokens
+
+    @property
+    def cost_usd(self) -> float:
+        """The bucket's summed cost in whole dollars (from micro-USD)."""
+        return self.cost_micro / 1_000_000.0
+
+    @property
+    def cost_is_known(self) -> bool:
+        """True when at least one call in this bucket had a published price."""
+        return self.cost_known_calls > 0
+
+    @property
+    def cost_is_partial(self) -> bool:
+        """True when some calls in this bucket could not be priced.
+
+        The dollar figure is then a LOWER BOUND: it counts every priceable
+        call and silently omits the rest, so the chart marks it (``$X+`` / the
+        ``≥`` floor) rather than presenting a partial sum as complete — the
+        same "unknown ≠ free" honesty the aggregate carries.
+        """
+        return self.cost_known_calls < self.calls
+
+    #: Positive-sense alias for :attr:`cost_is_partial`, named for the bar
+    #: renderer that draws a ``≥`` floor mark when a bucket's cost is a lower
+    #: bound. One concept, two names, so the store and the view each read the
+    #: one that states their intent.
+    @property
+    def cost_is_floor(self) -> bool:
+        return self.cost_is_partial
+
+
 def usage_component_chars_json(chars: Mapping[str, int]) -> str:
     """Serialise a component-char map compactly (for a per-call debug row)."""
     return json.dumps({k: int(chars.get(k, 0)) for k in COMPONENT_KEYS}, separators=(",", ":"))
