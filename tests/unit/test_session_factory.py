@@ -1011,6 +1011,7 @@ async def test_a_layer_failure_keys_on_the_layer_not_on_a_filename(monkeypatch) 
 @pytest.mark.asyncio
 async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
     tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The startup claim race, pinned at the CALLER, not on ``claim_session``
     in isolation.
@@ -1025,11 +1026,25 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
     ``_prepare`` with ``sweep_from_config`` patched to behave like the
     aggressive concurrent sweep, and assert the directory survives.
 
-    Concretely the patched sweep reaps every EMPTY, UNCLAIMED directory under
-    ``sessions/`` (exactly what the real sweep does to a co-resident session's
-    empty startup dir). If ``_prepare`` has already claimed its own directory,
-    the marker makes it survive; if the claim came after, the directory is gone
-    and the assertion fails.
+    Two co-resident reaps are modelled, because they pin two different
+    regression shapes:
+
+    * ``reaping_sweep`` (patched onto ``sweep_from_config``) fires at the sweep
+      point ``_prepare`` reaches AFTER both its claim and its ``mkdir``. It
+      catches the claim removed ENTIRELY — with no marker written the sweep
+      reaps the empty dir — but by then a claim-after-``mkdir`` dir is already
+      claimed, so this reap alone cannot see an ordering defect.
+    * ``mkdir_with_concurrent_reap`` (patched onto ``Path.mkdir``) fires a reap
+      at the instant a directory is about to be (re)created, which is the ONLY
+      moment that distinguishes claim-first from claim-after. In the defect
+      shape ``_prepare``'s own ``mkdir`` creates the dir empty-and-unclaimed,
+      and the reap that runs on ``claim_session``'s later ``mkdir`` deletes it
+      out from under the starting run — the round-6 **L1** window. Claim-first
+      never exposes it: the directory only ever appears already carrying its
+      marker, so the reap spares it every time.
+
+    Both reaps reap only EMPTY, UNCLAIMED directories under ``sessions/``,
+    mirroring the real sweep's guard so a claimed dir is always left alone.
     """
     from local_operator.session.retention import _is_claimed, sweep_sessions
     from local_operator.session_factory import _prepare
@@ -1073,10 +1088,45 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
         # Also run the genuine sweep so the test exercises the real signature.
         return sweep_sessions(sessions_dir, live_dir=live_dir)
 
+    sessions_dir = tmp_config_dir / "sessions"
+
+    def _reap_empty_unclaimed(now: float) -> bool:
+        """Reap every empty, unclaimed dir under ``sessions/``, mirroring a
+        co-resident session's sweep guard, and report whether it took one."""
+        import shutil
+
+        reaped = False
+        if sessions_dir.is_dir():
+            for child in sessions_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                if any(p.name != ".session.pid" for p in child.iterdir()):
+                    continue
+                if _is_claimed(child, now):
+                    continue
+                shutil.rmtree(child, ignore_errors=True)
+                reaped = True
+        return reaped
+
+    original_mkdir = Path.mkdir
+
+    def mkdir_with_concurrent_reap(self: Path, *args: Any, **kwargs: Any) -> None:
+        # A co-resident sweep landing in the ORDERING window: it reaps at the
+        # instant a directory is (about to be) created. A claim-after-mkdir
+        # regression leaves ``_prepare``'s freshly ``mkdir``'d dir empty and
+        # unclaimed, so the reap fired here — on ``claim_session``'s own later
+        # ``mkdir`` — deletes it, and we record that. Claim-first writes the
+        # marker as part of the same ``mkdir``, so the dir is never seen
+        # empty-and-unclaimed and this never trips.
+        if _reap_empty_unclaimed(time.time()):
+            captured["reaped_at_mkdir"] = True
+        return original_mkdir(self, *args, **kwargs)
+
     from local_operator.session import retention as retention_mod
 
     original = retention_mod.sweep_from_config
     retention_mod.sweep_from_config = reaping_sweep
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_concurrent_reap)
     try:
         await _prepare(
             _args(hosting="test", model="test-model"),
@@ -1096,6 +1146,14 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
     assert captured.get("survived_the_sweep") is True, (
         "_prepare's session directory was reaped by a concurrent sweep before "
         "it was claimed: the claim must be written before the directory exists"
+    )
+    # Ordering, not just presence (round-7 R7-1): a claim written AFTER the
+    # ``mkdir`` leaves an empty-and-unclaimed window that the mkdir-time reap
+    # deletes, and this trips. It stays clean only when the marker is written
+    # as part of the directory's creation — i.e. the claim came first.
+    assert captured.get("reaped_at_mkdir") is not True, (
+        "_prepare's session directory was reaped in the mkdir-time window: the "
+        "claim must be written BEFORE the directory exists empty, not after"
     )
     assert cast(Path, transcript_dir).exists()
     assert (cast(Path, transcript_dir) / ".session.pid").exists()
