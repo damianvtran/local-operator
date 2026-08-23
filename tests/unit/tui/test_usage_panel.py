@@ -326,6 +326,37 @@ def _many_reports(count: int = 12):
     ]
 
 
+def _wide_reports(count: int = 12):
+    """Reports whose composed rows FILL the rightmost columns — long labels,
+    reset countdowns, and long identities, unlike ``_many_reports``' short
+    blank-tailed rows.
+
+    This is the fixture M1's regression turns on: the content-aware pad can only
+    be exercised by rows that actually put a character in cols ``w-1``/``w-2``,
+    which the short-label fixture never does. Anthropic/OpenAI reports carry both
+    a countdown and an identity, so this is the realistic shape, not a corner.
+    """
+    return [
+        _report(
+            _percent(
+                f"p{index}:5h",
+                "5-hour session window",
+                95.0,
+                resets_at_ms=5 * 3600 * 1000,
+            ),
+            _percent(
+                f"p{index}:7d",
+                "7-day rolling window",
+                60.0,
+                resets_at_ms=48 * 3600 * 1000,
+            ),
+            provider=f"provider-with-a-long-name-{index}",
+            identity=f"someone-with-a-long-email-{index}@example.com",
+        )
+        for index in range(count)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_a_long_report_scrolls_instead_of_being_truncated() -> None:
     """A quota view that hid the provider you were looking for would send the
@@ -852,27 +883,129 @@ async def test_a_scrollbar_grab_never_leaks_a_selection(dx: int) -> None:
     assert off1 > off0, (dx, off0, off1)  # the drag actually scrolled
 
 
+def _pad_rows(panel: UsagePanel) -> tuple[int | None, int | None, str]:
+    """``(a body row whose pad cells hold CONTENT, a row whose pad is BLANK, the
+    content row's tail)`` for the current window, or ``None`` where absent.
+
+    Reads the same composed window rows the painter overlays the bar onto, so a
+    test can aim a press at a row that provably fills cols ``w-1``/``w-2`` rather
+    than trusting a fixture to do so — the exact gap M1/m1 flag.
+    """
+    from local_operator.tui.widgets.usage_panel import SCROLLBAR_GRAB_PAD
+
+    budget = panel._body_budget()
+    window, _ = panel._window_rows(panel._body(), budget)
+    bar = panel._body_content_width()
+    content = blank = None
+    tail = ""
+    for row, line in enumerate(window):
+        cells = line.plain[bar - SCROLLBAR_GRAB_PAD : bar]
+        if cells.strip():
+            if content is None:
+                content, tail = row, cells
+        elif blank is None:
+            blank = row
+    return content, blank, tail
+
+
+@pytest.mark.asyncio
+async def test_the_pad_is_content_aware_over_the_unsafe_geometry() -> None:
+    """M1: this panel composes rows flush to the bar with NO empty gutter, so the
+    pad columns can hold real data. A near-miss must grab only over a BLANK tail;
+    over a row that fills those columns it must fall through and select, so the
+    forgiveness never steals a visible character.
+
+    Uses ``_wide_reports`` (long labels + reset countdowns + identities) so the
+    unsafe geometry actually exists, and ASSERTS a row with content in the pad
+    band is present — the fixture cannot silently regress to blank tails.
+    """
+    from textual import events
+
+    from local_operator.tui.widgets.usage_panel import SCROLLBAR_GRAB_PAD
+
+    # A narrow terminal packs the meters flush to the bar (M1 reproduced at 40-44
+    # cols); the wide fixture keeps content there at any width.
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(44, 20)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_wide_reports())
+        await pilot.pause()
+
+        content_row, blank_row, tail = _pad_rows(panel)
+        # The fixture MUST exercise the unsafe geometry or the test is vacuous.
+        assert content_row is not None, "fixture has no content in the pad band"
+        assert tail.strip(), tail
+
+        first_row, _ = panel._body_region(panel._body_budget())
+        bar_x = _bar_screen_x(panel)
+        y0 = _body_screen_y0(panel)
+
+        async def press(sx: int, sy: int) -> tuple[bool, bool]:
+            panel.set_view_offset(0)
+            app.screen.clear_selection()
+            panel._dragging = False
+            app.screen._forward_event(_screen_mouse(events.MouseDown, sx, sy))
+            await pilot.pause()
+            grabbed = panel._dragging
+            armed = app.screen._select_state is not None
+            app.screen._forward_event(_screen_mouse(events.MouseUp, sx, sy))
+            await pilot.pause()
+            return grabbed, armed
+
+        # Near-miss (both pad cells) over a CONTENT row: no grab, selection arms —
+        # the visible character is NOT stolen.
+        for dx in (-1, -SCROLLBAR_GRAB_PAD):
+            grabbed, armed = await press(bar_x + dx, y0 + first_row + content_row)
+            assert not grabbed, (dx, "grabbed over content")
+            assert armed, (dx, "content press did not arm a selection")
+
+        # The EXACT bar column always grabs, even on a content row.
+        grabbed, armed = await press(bar_x, y0 + first_row + content_row)
+        assert grabbed and not armed
+
+        # Near-miss over a BLANK tail: forgiveness still works — grab, no select.
+        if blank_row is not None:
+            for dx in (-1, -SCROLLBAR_GRAB_PAD):
+                grabbed, armed = await press(bar_x + dx, y0 + first_row + blank_row)
+                assert grabbed, (dx, "blank-tail near-miss did not grab")
+                assert not armed, (dx, "blank-tail grab armed a selection")
+
+
 @pytest.mark.asyncio
 async def test_a_content_click_left_of_the_pad_still_selects() -> None:
     """The pad is a narrow band: a press ``SCROLLBAR_GRAB_PAD + 1`` cells left of
     the bar is ordinary content and must still arm a selection, so widening the
-    grab target cannot swallow a real text drag."""
+    grab target cannot swallow a real text drag.
+
+    Driven with ``_wide_reports`` so cols at and left of the boundary actually
+    hold content (m1: the short-label fixture left them blank, making the
+    boundary assertion vacuous). Asserts the pressed cell is non-blank first.
+    """
     from textual import events
 
     from local_operator.tui.widgets.usage_panel import SCROLLBAR_GRAB_PAD
 
     app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(44, 20)) as pilot:
         await pilot.pause()
         panel = app.query_one(UsagePanel)
-        panel.show_reports(_many_reports())
+        panel.show_reports(_wide_reports())
         await pilot.pause()
+
+        content_row, _, _ = _pad_rows(panel)
+        assert content_row is not None, "fixture has no content in the pad band"
 
         panel.set_view_offset(0)
         app.screen.clear_selection()
         first_row, _ = panel._body_region(panel._body_budget())
+        window, _ = panel._window_rows(panel._body(), panel._body_budget())
+        bar = panel._body_content_width()
+        col = bar - (SCROLLBAR_GRAB_PAD + 1)
+        # The boundary is only meaningful if the pressed cell holds a character.
+        assert window[content_row].plain[col : col + 1].strip(), "boundary cell is blank"
         sx = _bar_screen_x(panel) - (SCROLLBAR_GRAB_PAD + 1)
-        sy = _body_screen_y0(panel) + first_row + 1
+        sy = _body_screen_y0(panel) + first_row + content_row
         app.screen._forward_event(_screen_mouse(events.MouseDown, sx, sy))
         await pilot.pause()
         grabbed = panel._dragging
