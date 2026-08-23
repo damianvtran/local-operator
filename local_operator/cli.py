@@ -1885,6 +1885,7 @@ def main() -> int:
             from local_operator.resume import (
                 ResumeNotFound,
                 backfill_session_origins,
+                backfill_session_titles,
                 format_age,
                 recent_sessions,
                 resolve_resume_id,
@@ -1899,6 +1900,12 @@ def main() -> int:
             # costs a directory scan on the one path that cannot afford to be
             # wrong about which sessions are the user's.
             backfill_session_origins(config_dir())
+            # Stamp the title sidecar for pre-existing sessions in the same
+            # sweep, for the same reason: a session whose title sits in the
+            # untouched middle of a large transcript is unfindable by its own
+            # subject until this runs. Idempotent and stdlib-only, so it costs a
+            # bounded directory scan on the one path that opens the picker.
+            backfill_session_titles(config_dir())
 
             try:
                 args.resume = resolve_resume_id(config_dir(), str(args.resume))

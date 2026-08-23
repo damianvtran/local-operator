@@ -36,29 +36,55 @@ normal picker open therefore re-reads only the handful of sessions that have
 actually changed since the last one, which is why the index can be built
 synchronously without the picker stalling.
 
-**Search is substring, not semantic.** No embedding model, no vector store: a
-provider call to open a picker would be slower than the thing it is searching,
-would fail offline, and would spend money per keystroke. Substring over the
-conversation body already answers the reported case — "retention" now finds the
-session — and it never returns a confident wrong answer, which a similarity
-score over 200 short digests very much does.
+**Search is lexical — substring plus BOUNDED soft matching, not semantic.** No
+embedding model, no vector store: a provider call to open a picker would be
+slower than the thing it is searching, would fail offline, and would spend
+money per keystroke, and a local embedding model is the heaviest dependency
+this offline-capable, ``pip install``-light project could add. Two lexical
+tiers instead:
+
+* **Substring** (:func:`search_digests`) — exact, case-insensitive, the
+  precise-query path that never returns a confident wrong answer.
+* **Bounded soft matching** (:func:`soft_search_digests`) — prefix,
+  order-independent token-AND, and edit-distance-<=2 for tokens of 4+ chars, so
+  ``classifer`` finds ``classifier`` and ``throughput classifier`` finds
+  "Improve ADM Classifier Throughput". The earlier design warned that fuzzy
+  matching produces confident nonsense; that was right about UNBOUNDED fuzzy,
+  and the bound here — a small distance cap gated on token length — is exactly
+  what keeps a soft match from dragging in everything. A similarity score over
+  200 short digests would rank a best match for every query including nonsense;
+  the AND-of-bounded-tokens rule excludes rather than ranks, so a query that
+  matches nothing still matches nothing.
+
+The digest also PREPENDS the session's title and every past name it has borne
+(from the ``title.json`` sidecar), so a topic-pivot session — one whose subject
+changed partway through and was re-titled — is findable by the subject it ended
+on, which is the human's own summary of what it became. This is how "find by
+meaning" is served honestly without a vector model.
 
 **What this does NOT do.** It is not a full-text index. :data:`SCAN_BYTES`
-bounds how much of each conversation is represented, so a phrase that appears
-only deep inside a long session may not be found; see that constant for the
-measured recall and why the bound is where it is. The guarantee offered here
-is "findable by what the conversation was about", not "findable by any word
-ever typed in it".
+bounds how much of each conversation's BODY is represented, so a phrase that
+appears only deep inside a long session and never in its title may not be
+found; see that constant for the measured recall and why the bound is where it
+is. Full-text recall past the scan window, and true vector semantics, are both
+deferred follow-ups behind a dependency-approval gate. The guarantee offered
+here is "findable by what the conversation was about", not "findable by any
+word ever typed in it".
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
-from local_operator.resume import TRANSCRIPT_NAME
+from local_operator.resume import (
+    TITLE_SIDECAR_NAME,
+    TRANSCRIPT_NAME,
+    read_title_names,
+)
 
 #: Characters of prose kept per session. Enough to hold the subject matter of a
 #: long conversation's opening stretch — the part that says what the session was
@@ -95,7 +121,23 @@ INDEX_FILENAME = "session_search_index.json"
 #: is discarded wholesale rather than migrated — it is a derived artifact whose
 #: rebuild costs about a second, and a migration path for a cache is code that
 #: exists to be wrong.
-INDEX_VERSION = 1
+#:
+#: 1 -> 2: the digest now PREPENDS the session's title and every past name it
+#: has borne (from the ``title.json`` sidecar), and the cache signature gains
+#: the sidecar's mtime so a rename re-folds the digest even when the transcript
+#: is byte-identical. Bumping discards every v1 entry once so the whole store
+#: rebuilds with the new shape; ``_load`` already drops on version mismatch, so
+#: this needs no migration code.
+INDEX_VERSION = 2
+
+#: Extra characters the title-fold may add on top of :data:`DIGEST_CHARS`. The
+#: title and past names are the human's own summary of what the session became,
+#: so they must survive the cap that a long opening stretch would otherwise
+#: consume — folding them in and THEN slicing at ``DIGEST_CHARS`` could clip the
+#: very title the fold exists to make searchable. A session accrues few names
+#: (a rename is rare), so a small fixed headroom holds all of them without
+#: letting the digest grow unbounded.
+TITLE_HEADROOM = 512
 
 #: Roles whose text enters the digest. Tool results are excluded on purpose:
 #: they are machine output — directory listings, file dumps, HTTP bodies — and
@@ -238,15 +280,26 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
     entries: dict[str, Any] = {}
     digests: dict[str, str] = {}
     for session_id in session_ids:
-        transcript = config_dir / "sessions" / session_id / TRANSCRIPT_NAME
+        session_dir = config_dir / "sessions" / session_id
+        transcript = session_dir / TRANSCRIPT_NAME
         try:
             stat = transcript.stat()
-            signature = [stat.st_size, stat.st_mtime]
         except OSError:
             # Vanished mid-scan (retention sweeps run concurrently). Skip it
             # rather than caching an empty digest that would then be treated as
             # valid if the file came back.
             continue
+        # The title sidecar's mtime joins the signature so a RENAME re-folds the
+        # digest even when the transcript is byte-identical (a rename appends to
+        # the transcript too, but the sidecar is the authoritative source of the
+        # names folded below, and keying on it makes the invalidation explicit).
+        # ``0`` when there is no sidecar yet, so a pre-sidecar session keys the
+        # same way it did under v1 until its backfill or next rename writes one.
+        try:
+            title_mtime = (session_dir / TITLE_SIDECAR_NAME).stat().st_mtime
+        except OSError:
+            title_mtime = 0
+        signature = [stat.st_size, stat.st_mtime, title_mtime]
         previous = cached.get(session_id)
         if (
             isinstance(previous, dict)
@@ -255,7 +308,17 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
         ):
             digest = previous["digest"]
         else:
-            digest = digest_transcript(transcript)
+            # Prepend the human's own summary of what the session became — its
+            # title and every past name — to the body digest. This is what makes
+            # a topic-pivot session findable by the subject it ended on rather
+            # than only the one it opened with, WITHOUT enlarging the 256 KB scan
+            # window (see SCAN_BYTES: full-transcript recall is a deferred
+            # follow-up, not this change). Sliced with headroom so the folded
+            # names always survive the DIGEST_CHARS cap the opening stretch would
+            # otherwise fill.
+            names = read_title_names(session_dir)
+            body = digest_transcript(transcript)
+            digest = " ".join([*names, body]).strip()[: DIGEST_CHARS + TITLE_HEADROOM]
         entries[session_id] = {"signature": signature, "digest": digest}
         digests[session_id] = digest
     if entries != cached:
@@ -275,3 +338,125 @@ def search_digests(digests: dict[str, str], query: str) -> set[str]:
     if not needle:
         return set()
     return {sid for sid, digest in digests.items() if needle in digest.lower()}
+
+
+#: Minimum token length for edit-distance matching. Short tokens (``adm``,
+#: ``svc``) are within distance 2 of far too many words, so allowing a fuzzy
+#: match on them is exactly the "confident nonsense" the substring-only design
+#: warned about; a prefix or exact match still handles them. Four is where the
+#: false-match rate drops to something a search can trust.
+_SOFT_MIN_TOKEN = 4
+
+#: Maximum edit distance a token may be from a haystack token and still match.
+#: Two covers the ordinary typo (a swap, a doubled or dropped letter,
+#: ``classifer`` -> ``classifier``) without letting unrelated words of similar
+#: length collide. Kept small on purpose: the bound is what makes soft matching
+#: safe here, per the module docstring.
+_SOFT_MAX_DISTANCE = 2
+
+#: Splits a string into lowercase alphanumeric tokens for soft matching. Word
+#: boundaries only — punctuation and whitespace separate tokens — so a query
+#: matches on whole words the way a reader thinks of them.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase alphanumeric tokens of ``text``, in order."""
+    return _TOKEN_RE.findall(text.lower())
+
+
+def _within_edit_distance(a: str, b: str, max_distance: int) -> bool:
+    """True when ``a`` and ``b`` are at most ``max_distance`` edits apart.
+
+    A bounded Levenshtein: the length gap alone can exceed the cap (a cheap
+    reject before any work), and the row-by-row DP short-circuits as soon as
+    every cell in a row exceeds the cap, so the cost is O(len * max_distance)
+    rather than O(len^2). Pure Python and dependency-free on purpose —
+    ``rapidfuzz`` is a compiled wheel this project deliberately does not add
+    (see the module docstring); over the ~200 short digest tokens this runs
+    against, the bounded DP is microseconds.
+    """
+    if abs(len(a) - len(b)) > max_distance:
+        return False
+    if a == b:
+        return True
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current = [i]
+        row_min = i
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            value = min(
+                previous[j] + 1,  # deletion
+                current[j - 1] + 1,  # insertion
+                previous[j - 1] + cost,  # substitution
+            )
+            current.append(value)
+            row_min = min(row_min, value)
+        # Every cell in this row already exceeds the cap, so no later row can
+        # bring the final cell back under it — the distance only grows.
+        if row_min > max_distance:
+            return False
+        previous = current
+    return previous[-1] <= max_distance
+
+
+def _token_soft_matches(needle_token: str, haystack_tokens: set[str]) -> bool:
+    """True when ``needle_token`` softly matches any token in the haystack.
+
+    Two tiers beyond exact equality, both bounded:
+
+    * **Prefix** — ``class`` matches ``classifier``. Handles a partial word a
+      user types before they finish it, which substring already caught inside a
+      token but this states explicitly against the tokenized haystack.
+    * **Edit distance <= 2, tokens >= 4 chars** — ``classifer`` (a typo)
+      matches ``classifier``. The length floor is what keeps short tokens from
+      matching everything; below it, only the exact/prefix tiers apply.
+    """
+    for token in haystack_tokens:
+        if token == needle_token or token.startswith(needle_token):
+            return True
+        if (
+            len(needle_token) >= _SOFT_MIN_TOKEN
+            and len(token) >= _SOFT_MIN_TOKEN
+            and _within_edit_distance(needle_token, token, _SOFT_MAX_DISTANCE)
+        ):
+            return True
+    return False
+
+
+def soft_search_digests(digests: dict[str, str], query: str) -> set[str]:
+    """Ids whose body SOFTLY matches ``query`` — prefix, typo, or word-order.
+
+    The bounded soft tier that sits beside :func:`search_digests`. A query
+    matches a digest when EVERY query token softly matches some token in the
+    digest (order-independent AND), where "softly" is exact, prefix, or a
+    bounded edit-distance typo (see :func:`_token_soft_matches`). Order-
+    independent AND is what makes ``throughput classifier`` find a session
+    titled "Improve ADM Classifier Throughput" — word order and exact substring
+    contiguity both stop mattering.
+
+    Returned as a SET, like :func:`search_digests`: the caller
+    (:class:`SessionPickerScreen.visible_rows`) owns row order, and ranking is
+    applied there only when a query is active. This function answers only
+    "which ones match".
+
+    Bounded and dependency-free by design. The old substring-only filter warned
+    that fuzzy matching over free text produces confident nonsense; that was
+    right about UNBOUNDED fuzzy. This is bounded — a distance cap of 2 for
+    tokens of 4+ chars, plus prefix and token-AND — and the bound is precisely
+    what keeps a soft match from being confident nonsense: a nonsense token
+    close to nothing in the digest excludes the row rather than dragging in
+    everything.
+    """
+    needle_tokens = _tokenize(query)
+    if not needle_tokens:
+        return set()
+    matched: set[str] = set()
+    for sid, digest in digests.items():
+        haystack = set(_tokenize(digest))
+        if not haystack:
+            continue
+        if all(_token_soft_matches(token, haystack) for token in needle_tokens):
+            matched.add(sid)
+    return matched

@@ -15,8 +15,13 @@ from local_operator.harness.types import Message, TextContent
 from local_operator.resume import (
     _TITLE_CUSTOM_TYPE,
     TITLE_SCAN_BYTES,
+    TITLE_SIDECAR_NAME,
+    _read_title_sidecar,
+    backfill_session_titles,
+    read_title_names,
     session_name,
     stored_session_title,
+    write_session_title,
 )
 from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
 from local_operator.session.transcript import Transcript
@@ -221,3 +226,140 @@ def test_a_band_sized_transcript_whose_title_is_only_at_the_head(tmp_path: Path)
     size = session.joinpath("transcript.jsonl").stat().st_size
     assert TITLE_SCAN_BYTES < size <= TITLE_SCAN_BYTES * 2, size
     assert stored_session_title(session) == "Auto Named At Turn 2"
+
+
+# ---------------------------------------------------------------------------
+# Title sidecar (title.json): the O(1) fast path that closes the window-scan
+# gap TITLE_SCAN_BYTES documents. See resume.write_session_title.
+# ---------------------------------------------------------------------------
+
+
+def test_the_sidecar_round_trips_text_and_names(tmp_path: Path):
+    """write_session_title then _read_title_sidecar returns what went in."""
+    session = tmp_path / "sessions" / "roundtrip"
+    session.mkdir(parents=True)
+    write_session_title(session, "Second Name", user_set=True, past_names=["First Name"])
+    sidecar = _read_title_sidecar(session)
+    assert sidecar is not None
+    assert sidecar.text == "Second Name"
+    assert sidecar.user_set is True
+    # The in-force title is accumulated into names, first-seen order preserved.
+    assert sidecar.names == ("First Name", "Second Name")
+    assert read_title_names(session) == ["First Name", "Second Name"]
+
+
+def test_the_sidecar_dedupes_names_keeping_first_seen_order(tmp_path: Path):
+    """A re-title back to a former name does not duplicate it in the list."""
+    session = tmp_path / "sessions" / "dedup"
+    session.mkdir(parents=True)
+    write_session_title(session, "Alpha", user_set=False, past_names=["Alpha", "Beta"])
+    assert read_title_names(session) == ["Alpha", "Beta"]
+
+
+def test_the_sidecar_wins_over_a_title_in_an_unscanned_window(tmp_path: Path):
+    """THE NAMED REGRESSION, distilled: a title in the middle of a large
+    transcript — invisible to both scan windows — is found via the sidecar.
+
+    This is the topic-pivot / ADM shape: > 2x TITLE_SCAN_BYTES with the only
+    conversation_name entries buried strictly between the head and tail
+    windows. The window scan returns "" for it; the sidecar returns the title.
+    """
+    session = tmp_path / "sessions" / "middletitle"
+
+    async def build() -> None:
+        transcript = Transcript(session)
+        await transcript.append_message(
+            Message(role="user", content=[TextContent(text="an unrelated opening topic")])
+        )
+        # Bulk before the title, pushing it past the head window.
+        for index in range(20):
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text=f"pre {index} " + "z" * 8_000)])
+            )
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE,
+            {"text": "Buried In The Middle", "user_set": False},
+        )
+        # Bulk after the title, so it sits strictly between the two windows.
+        for index in range(40):
+            body = f"post {index} " + "w" * 8_000
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text=body)])
+            )
+
+    asyncio.run(build())
+    size = session.joinpath("transcript.jsonl").stat().st_size
+    assert size > TITLE_SCAN_BYTES * 2, size
+    # Precondition of the regression: the window scan alone cannot find it.
+    assert not (session / TITLE_SIDECAR_NAME).exists()
+    assert stored_session_title(session) == ""
+    # The fix: the backfill writes the sidecar, and now it is found.
+    assert backfill_session_titles(tmp_path) == 1
+    assert stored_session_title(session) == "Buried In The Middle"
+
+
+def test_a_corrupt_sidecar_falls_back_to_the_scan_rather_than_raising(tmp_path: Path):
+    """A truncated sidecar (mid multi-byte char) must never take the picker
+    down, mirroring session_origin's errors='replace' tolerance."""
+    session = _session(tmp_path, "opening", ("Scannable Title", False))
+    # A byte sequence that is invalid UTF-8 and not JSON.
+    (session / TITLE_SIDECAR_NAME).write_bytes(b'{"text": "\xff\xfe truncated')
+    # _read returns None (unparseable), so stored_session_title uses the scan.
+    assert _read_title_sidecar(session) is None
+    assert stored_session_title(session) == "Scannable Title"
+
+
+def test_a_sidecar_with_no_text_falls_back_to_the_scan(tmp_path: Path):
+    """An empty in-force title in the sidecar must not shadow a scannable one:
+    stored_session_title only takes the sidecar when it carries real text."""
+    session = _session(tmp_path, "opening", ("Scannable Title", False))
+    write_session_title(session, "", user_set=False, past_names=[])
+    assert stored_session_title(session) == "Scannable Title"
+
+
+def test_the_sidecar_write_preserves_directory_mtime(tmp_path: Path):
+    """Journalling a title is bookkeeping ABOUT a session, never activity IN
+    it, so it must not move the mtime retention and listings read."""
+    session = tmp_path / "sessions" / "mtime"
+    session.mkdir(parents=True)
+    before = session.stat().st_mtime
+    import os
+    import time
+
+    # Backdate so a preserved mtime is distinguishable from a fresh one.
+    os.utime(session, (before - 10_000, before - 10_000))
+    expected = session.stat().st_mtime
+    time.sleep(0.01)
+    write_session_title(session, "A Title", user_set=True, past_names=[])
+    assert session.stat().st_mtime == expected
+
+
+def test_backfill_never_restamps_an_existing_sidecar(tmp_path: Path):
+    """A second sweep is a no-op: the sidecar is event-sourced from its first
+    write on, so re-stamping risks clobbering a newer name with an old scan."""
+    session = _session(tmp_path, "opening", ("Only Title", False))
+    assert backfill_session_titles(tmp_path) == 1
+    # Rename after backfill: the sidecar now leads the transcript.
+    write_session_title(session, "Renamed After", user_set=True, past_names=["Only Title"])
+    assert backfill_session_titles(tmp_path) == 0
+    assert stored_session_title(session) == "Renamed After"
+
+
+def test_backfill_limit_caps_work_done(tmp_path: Path):
+    """limit bounds sidecars written per run, like backfill_session_origins."""
+    for i in range(3):
+        session = tmp_path / "sessions" / f"sess{i}"
+
+        async def build(s=session) -> None:
+            transcript = Transcript(s)
+            await transcript.append_message(
+                Message(role="user", content=[TextContent(text="opening")])
+            )
+            await transcript.append_custom(
+                CONVERSATION_NAME_CUSTOM_TYPE, {"text": "A Name", "user_set": False}
+            )
+
+        asyncio.run(build())
+    assert backfill_session_titles(tmp_path, limit=2) == 2
+    # The remaining one is stamped on a later run — nothing is skipped forever.
+    assert backfill_session_titles(tmp_path, limit=2) == 1

@@ -18,16 +18,24 @@ session.
 
 The list is filterable by typing because the ids are unmemorable and the names
 are not: with a hundred sessions, "asteroids" finds the one you mean faster
-than paging can. Filtering narrows; it never reorders, so a row does not move
-under the cursor as the query grows.
+than paging can. Filtering narrows without reordering FOR A FIXED QUERY; a new
+query re-ranks by relevance (best match first) and re-homes the cursor to the
+top match, matching this app's command and ask pickers. That preserves the "a
+row must not move under the cursor" invariant, because the only event that
+reorders — a query change — is the same one that moves the cursor to the new
+rank-0 row; a fixed query's order is byte-for-byte stable across repaints.
 
 **The filter also searches what was SAID in each conversation**, not only its
 name — see ``session/search_index.py``. Matching on the name alone meant a
 session could only be found by the words in its title, so a user who could not
 recall how a conversation was named could not reach it at all, however
-distinctive the work inside it was. A row matched on its body rather than its
-name is marked, because otherwise it looks like a result the filter had no
-reason to return.
+distinctive the work inside it was. The body digest also carries the session's
+title and every PAST name it was renamed away from, so a topic-pivot session is
+findable by the subject it ended on. **Matching is substring plus bounded soft
+matching** (prefix, word-order-independent, small-typo-tolerant), not only
+exact substring — see ``search_index.soft_search_digests``. A row matched on
+its body, a past name, or a soft match rather than its visible name is marked,
+because otherwise it looks like a result the filter had no reason to return.
 
 **The card measures the terminal.** Every column here is a cell count derived
 from the screen, not a constant: the first cut shipped a fixed 78-cell card
@@ -55,7 +63,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from local_operator.resume import SessionRow, format_age
-from local_operator.session.search_index import search_digests
+from local_operator.session.search_index import search_digests, soft_search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -150,18 +158,27 @@ def filter_rows(
     query: str,
     body_matches: AbstractSet[str] | None = None,
 ) -> list[SessionRow]:
-    """Rows whose name, id, or conversation BODY contains ``query``.
+    """Rows whose name or id contains ``query``, or whose id is in ``body_matches``.
 
-    Substring rather than fuzzy on purpose: the fields are sentences the user
-    wrote and a hex id, and fuzzy matching over free text produces confident
-    nonsense ("asteroids" matching a row about "assets ordering").
-    Order is preserved — filtering must never move a row under the cursor.
+    A pure MEMBERSHIP filter: it decides which rows are shown and preserves the
+    order it was handed, so on its own it never moves a row under the cursor.
+    Relevance ORDERING lives in :func:`rank_rows`, applied by the screen only
+    when a query is active — keeping the "filtering never reorders" property
+    literally true of this function while the query-scoped ranking sits in the
+    one place that also re-homes the cursor.
 
-    ``body_matches`` is the set of ids whose conversation text matched, decided
-    by :func:`local_operator.session.search_index.search_digests`. Passed in
-    rather than computed here so this function stays pure and cheap enough to
-    run per keystroke, and so a caller with no index (a test, an embedder)
-    keeps exactly the old name-and-id behaviour.
+    The name/id test stays exact substring: those fields are a sentence the user
+    wrote and a hex id, where an exact match is what a precise query expects.
+    Soft matching (prefix, word-order, bounded typo) is not done here; it is
+    folded into ``body_matches`` by the caller via
+    :func:`local_operator.session.search_index.soft_search_digests`, so a soft
+    hit on the conversation surfaces the row exactly as an exact body hit does.
+
+    ``body_matches`` is the set of ids admitted on their conversation text —
+    exact body, a past name, or a bounded soft match — decided by the caller
+    and passed in rather than computed here, so this function stays pure and
+    cheap enough to run per keystroke, and a caller with no index (a test, an
+    embedder) keeps exactly the old name-and-id behaviour.
     """
     needle = query.strip().lower()
     if not needle:
@@ -188,6 +205,73 @@ def matched_in_body(row: SessionRow, query: str, body_matches: AbstractSet[str])
     if needle in row.name.lower() or needle in row.id.lower():
         return False
     return row.id in body_matches
+
+
+#: Relevance tiers, best (lowest) first, used to sort a FILTERED subset when a
+#: query is active. A tier is a property of ``(query, row)`` alone — it does not
+#: depend on the previous query or on the order rows arrived — which is what
+#: lets ranking coexist with the "no reorder under the cursor" invariant: the
+#: order changes only when the query changes, and a query change already
+#: re-homes the cursor to the top match (see ``set_query``).
+_RANK_NAME = 0  # exact substring in the visible name — the strongest signal
+_RANK_ID = 1  # exact substring in the id
+_RANK_BODY = 2  # exact substring in the body/past-name digest
+_RANK_SOFT = 3  # soft (prefix / token-AND / edit-distance) match only
+
+
+def rank_rows(
+    rows: Sequence[SessionRow],
+    query: str,
+    body_matches: AbstractSet[str] | None = None,
+) -> list[SessionRow]:
+    """``rows`` ordered by relevance to ``query``; recency order when empty.
+
+    Kept SEPARATE from :func:`filter_rows`, which stays a pure membership
+    filter, because the module's invariant is stated about filtering: "filtering
+    narrows; it never reorders". Ordering is a property of the QUERY, not of a
+    keystroke within a query's growth — so it is applied here, in the one place
+    that recomputes per query and re-homes the cursor, and only when a query is
+    active.
+
+    * **Empty query** -> ``rows`` unchanged (recency order, newest first,
+      exactly as today). A fixed query likewise never reorders: the key is a
+      pure function of ``(query, row)``, so repeated repaints and resizes
+      produce byte-for-byte the same order.
+    * **Non-empty query** -> a single deterministic ordering: the tier the row
+      matched in (name > id > body > soft), with recency (mtime desc) as the
+      stable tie-break WITHIN every tier. ``sorted`` is stable, so passing rows
+      already in recency order makes the tie-break free.
+
+    ``body_matches`` is the EXACT-body match set (from ``search_digests``),
+    passed in for the same reason :func:`filter_rows` takes it — this stays pure
+    and cheap, and a caller with no index gets name/id ranking unchanged. It is
+    only the exact-body set, not the soft set: a row in ``rows`` that matched
+    none of name, id, or exact body was admitted by the soft set and so takes
+    the soft tier, which needs no separate membership check.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return list(rows)
+    body = body_matches or frozenset()
+
+    def tier(row: SessionRow) -> int:
+        if needle in row.name.lower():
+            return _RANK_NAME
+        if needle in row.id.lower():
+            return _RANK_ID
+        # Exact body hit outranks a soft-only hit: an exact substring in the
+        # conversation is a stronger signal than a typo/prefix/word-order match.
+        if row.id in body:
+            return _RANK_BODY
+        # Admitted by the soft set (it is in the already-filtered ``rows`` yet
+        # matched neither name, id, nor exact body), so it ranks below every
+        # exact tier.
+        return _RANK_SOFT
+
+    # Stable sort on the tier alone: ``rows`` arrives newest-first, so equal
+    # tiers keep recency order without a second sort key. Sorting the tier as
+    # the only key is what preserves the recency tie-break for free.
+    return sorted(rows, key=tier)
 
 
 def _pad_cells(text: str, width: int) -> str:
@@ -424,7 +508,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # cost this cache exists to avoid.
         self._filtered: list[SessionRow] = list(rows)
         self._filtered_for = ""
+        # ``_body_matches`` is the EXACT-body match set; ``_admitted`` is the
+        # union of exact-body and bounded-soft matches that ``filter_rows``
+        # admits a row on. Two sets rather than one because they answer
+        # different questions: ``_admitted`` decides whether a row is SHOWN,
+        # while ``_body_matches`` (exact only) decides its ranking TIER and
+        # feeds the body-match marker. Cached on the same key as the filter,
+        # because the same keystroke recomputes all three.
         self._body_matches: set[str] = set()
+        self._admitted: set[str] = set()
         self._body: Static
 
     # -- state ---------------------------------------------------------------
@@ -435,10 +527,26 @@ class SessionPickerScreen(ModalScreen[str | None]):
     # own focus, query and paint paths from inside the screen.
     @property
     def visible_rows(self) -> list[SessionRow]:
-        """The rows the current filter admits, in their original order."""
+        """The rows the current filter admits, ranked by relevance to the query.
+
+        Empty query -> recency order, unchanged. A non-empty query re-ranks the
+        admitted subset by :func:`rank_rows` (name > id > body > soft, recency
+        tie-break) and, in the same step that ``set_query`` re-homes the cursor
+        to index 0, so the cursor tracks the best match rather than a row that
+        ranking then slides away from. Ordering is a pure function of the query,
+        so a FIXED query never reorders across repaints or resizes.
+        """
         if self._filtered_for != self._query:
+            # Exact-body hits and bounded-soft hits are computed separately: the
+            # union decides which rows are shown, the exact set decides ranking
+            # tier and the body-match marker. Both are recomputed only on a
+            # query change, never per repaint — scanning 200 digests per paint
+            # is the cost this cache exists to avoid.
             self._body_matches = search_digests(self._digests, self._query)
-            self._filtered = filter_rows(self._all, self._query, self._body_matches)
+            soft = soft_search_digests(self._digests, self._query)
+            self._admitted = self._body_matches | soft
+            admitted = filter_rows(self._all, self._query, self._admitted)
+            self._filtered = rank_rows(admitted, self._query, self._body_matches)
             self._filtered_for = self._query
         return self._filtered
 
@@ -448,9 +556,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
         Reads through :attr:`visible_rows` rather than the cached set directly,
         so the two can never answer for different queries.
+
+        Keyed on ``_admitted`` (exact-body OR soft), not the exact-body set: a
+        row surfaced only because a PAST name or a typo/prefix matched is just
+        as much "found on something other than the visible name" as an exact
+        body hit, and the marker means exactly that — otherwise a soft or
+        past-name hit reads as the filter returning an arbitrary row.
         """
         rows = self.visible_rows
-        return {row.id for row in rows if matched_in_body(row, self._query, self._body_matches)}
+        return {row.id for row in rows if matched_in_body(row, self._query, self._admitted)}
 
     @property
     def filter_query(self) -> str:

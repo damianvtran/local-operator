@@ -323,3 +323,92 @@ async def test_a_fresh_session_is_nameless_and_journals_nothing(tmp_path) -> Non
     assert session.conversation_name == ""
     await session.dispose()
     assert _name_entries(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_the_title_sidecar_is_written_on_the_same_event_as_the_transcript(
+    tmp_path,
+) -> None:
+    """The picker's O(1) title fast path: journalling a title also writes
+    title.json beside the transcript, so a title buried in a large transcript
+    is still found without a full read on the picker's synchronous path.
+    """
+    from local_operator.resume import stored_session_title
+
+    session = _session(tmp_path)
+    await session.async_init()
+    session.set_conversation_name("Auto Generated Name", user_set=False)
+    session.set_conversation_name("What The User Renamed It To", user_set=True)
+    await session.dispose()
+
+    session_dir = tmp_path / "sess"
+    assert (session_dir / "title.json").is_file()
+    # The in-force title is the newest, read straight from the sidecar.
+    assert stored_session_title(session_dir) == "What The User Renamed It To"
+
+
+@pytest.mark.asyncio
+async def test_the_sidecar_retains_every_name_the_session_has_borne(tmp_path) -> None:
+    """A search must reach a session by a name it was renamed AWAY from, so the
+    sidecar accumulates every distinct title across renames, first-seen order
+    preserved.
+
+    Each rename is disposed before the next so it is a distinct persist event:
+    two renames within one persist window coalesce into a single journalled row
+    (only the final name is written), which is the writer's existing contract —
+    accumulation is over names actually journalled, not every transient value.
+    """
+    from local_operator.resume import read_title_names
+
+    session = _session(tmp_path)
+    await session.async_init()
+    session.set_conversation_name("First Subject", user_set=False)
+    await session.dispose()
+
+    resumed = _session(tmp_path)
+    await resumed.async_init()
+    resumed.set_conversation_name("Second Subject", user_set=True)
+    await resumed.dispose()
+
+    names = read_title_names(tmp_path / "sess")
+    assert names == ["First Subject", "Second Subject"]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_session_findable_by_either_name_after_reindex(tmp_path) -> None:
+    """End to end: create, auto-name, dispose, resume, rename, dispose; then a
+    fresh recent_session_rows + build_index makes it findable by BOTH names."""
+    from local_operator.resume import recent_session_rows
+    from local_operator.session.search_index import build_index, search_digests
+
+    # Build under config_dir/sessions/<id>, where recent_session_rows scans.
+    session_id = "abcd1234beef"
+    session_dir = tmp_path / "sessions" / session_id
+
+    def _at(directory: Path) -> Session:
+        return Session(
+            model=MODEL,
+            stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+            tools=[],
+            transcript=Transcript(directory),
+            system_blocks_provider=lambda: [],
+        )
+
+    session = _at(session_dir)
+    await session.async_init()
+    session.set_conversation_name("Load Test Review", user_set=False)
+    await session.dispose()
+
+    resumed = _at(session_dir)
+    await resumed.async_init()
+    resumed.set_conversation_name("Improve ADM Classifier Throughput", user_set=True)
+    await resumed.dispose()
+
+    # The row shows the CURRENT title.
+    rows = recent_session_rows(tmp_path, limit=10)
+    assert rows and rows[0].name == "Improve ADM Classifier Throughput"
+
+    # The index folds both names in, so either finds it.
+    digests = build_index(tmp_path, [rows[0].id])
+    assert search_digests(digests, "classifier") == {rows[0].id}
+    assert search_digests(digests, "load test review") == {rows[0].id}

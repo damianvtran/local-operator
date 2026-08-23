@@ -48,6 +48,18 @@ ORIGIN_NAME = "origin.json"
 #: scheduled run, a server-side session) is a new value and not a second file.
 ORIGIN_SUBAGENT = "subagent"
 
+#: Journals the session's title (and every name it has ever borne) beside the
+#: transcript, mirroring :data:`ORIGIN_NAME` exactly. A SIDECAR rather than a
+#: field in the JSONL for the same reason the origin marker is one: the picker's
+#: cost model is one bounded read per row, and the title in force can sit
+#: anywhere in a multi-megabyte transcript (the auto-name lands at turn 2, a
+#: mid-session ``/rename`` lands in the untouched middle — see
+#: :data:`TITLE_SCAN_BYTES` for the window-scan gap this closes). ``Path.stat``
+#: plus a sub-kilobyte read is O(1) in transcript size where the scan is not,
+#: so :func:`stored_session_title` consults this first and only falls back to
+#: the window scan for sessions written before the sidecar existed.
+TITLE_SIDECAR_NAME = "title.json"
+
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
 #:
@@ -94,22 +106,26 @@ _TITLE_CUSTOM_TYPE = "conversation_name"
 #: Reading both ends rather than the whole file is what keeps the cost per
 #: picker row bounded on a 6 MB transcript.
 #:
-#: **The known gap, stated honestly.** A rename made mid-conversation, then
-#: buried under a further 128 KB and never renamed again, falls between the two
-#: windows. The head still holds the ORIGINAL title, so that session is
-#: labelled with the name it was renamed *away from* rather than falling back
-#: to the opener. That is a stale name, and a stale name is stated with exactly
-#: the confidence of a correct one — so it is a real cost, not a rounding
-#: error, and this comment says so rather than claiming the scan can only ever
-#: miss.
+#: **The window gap this scan cannot close, and where it is closed instead.**
+#: A rename made mid-conversation, then buried under a further 128 KB and never
+#: renamed again, falls between the two windows: the head still holds the
+#: ORIGINAL title, so a window-only scan labels that session with the name it
+#: was renamed *away from*. Worse, a topic-pivot session auto-named late (its
+#: only titles sitting in the untouched middle of a multi-megabyte transcript)
+#: is invisible to both windows and reverts to its opening message — the
+#: reported failure of a session that could not be found by its own subject.
 #:
-#: It is accepted for now because the alternative is reading whole transcripts
-#: on the picker's synchronous path (400 ms against 64 ms across a real store),
-#: and because the case requires a mid-session rename specifically: an
-#: auto-named session has its title at the head, and a session renamed near the
-#: end has it in the tail. If it proves to bite, the fix is to journal the
-#: title to a sidecar the way ``mark_session_origin`` does — one stat and one
-#: small read, no size dependence at all — rather than widening this window.
+#: This scan does not try to fix that by widening: reading whole transcripts on
+#: the picker's synchronous path was measured at 400 ms against 64 ms across a
+#: real store. Instead the fix the previous comment here PRESCRIBED is now
+#: implemented — the title is journalled to a sidecar (``title.json``, see
+#: :func:`write_session_title`) the way :func:`mark_session_origin` journals
+#: origin, one stat and one small read with no size dependence at all.
+#: :func:`stored_session_title` consults that sidecar first, so this window
+#: scan is now the FALLBACK for sessions written before the sidecar existed and
+#: not yet reached by :func:`backfill_session_titles`, not the primary path.
+#: Both ends are still read because that fallback still wants the newest title
+#: it can reach on a pre-sidecar session.
 TITLE_SCAN_BYTES = 131_072
 
 #: Matches a journalled title row in raw JSONL, tolerant of whitespace after
@@ -231,6 +247,133 @@ def session_origin(session_dir: Path) -> str:
     return origin if isinstance(origin, str) else ""
 
 
+class SessionTitle(NamedTuple):
+    """The title sidecar's contents: the in-force name and every past one.
+
+    ``text`` is the name currently on the band and the terminal tab — the one
+    the user last saw and will search by. ``names`` is every distinct title the
+    session has ever carried, first-seen order, so a search matches a name the
+    session was renamed *away from* as well as its current one. ``user_set``
+    rides along for parity with the transcript entry: the picker does not need
+    it, but a future reader deciding rename precedence might, and it costs
+    nothing to keep.
+    """
+
+    text: str
+    user_set: bool
+    names: tuple[str, ...]
+
+
+def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
+    """Parse ``title.json``, or ``None`` when it is absent or unusable.
+
+    Tolerant for the same reason :func:`session_origin` is, and with the same
+    ``errors="replace"`` load-bearing detail: this runs over every session
+    directory to paint a picker, and :func:`write_session_title` writes
+    non-atomically, so a process killed mid-write can leave the file cut inside
+    a multi-byte character. A strict decode would raise ``UnicodeDecodeError``
+    (a ``ValueError``) and could sail past an ``except OSError`` and take the
+    whole picker down — the exact failure a corrupt ``origin.json`` once caused.
+    A missing or malformed sidecar yields ``None`` so the caller falls back to
+    the window scan, never an exception.
+    """
+    try:
+        raw = (session_dir / TITLE_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    text = payload.get("text")
+    if not isinstance(text, str):
+        return None
+    raw_names = payload.get("names")
+    names = (
+        tuple(name for name in raw_names if isinstance(name, str))
+        if (isinstance(raw_names, list))
+        else ()
+    )
+    return SessionTitle(
+        text=" ".join(text.split()),
+        user_set=bool(payload.get("user_set")),
+        names=names,
+    )
+
+
+def read_title_names(session_dir: Path) -> list[str]:
+    """Every name this session has borne, from the sidecar; ``[]`` when absent.
+
+    The source the digest folds in (see ``search_index.build_index``) so a
+    session is findable by any subject it was ever named for, not only its
+    current title. Empty for a pre-sidecar session, which the backfill sweep
+    (:func:`backfill_session_titles`) fills in once at startup.
+    """
+    sidecar = _read_title_sidecar(session_dir)
+    return list(sidecar.names) if sidecar else []
+
+
+def write_session_title(
+    session_dir: Path, text: str, *, user_set: bool, past_names: list[str]
+) -> None:
+    """Journal the in-force title (and every name ever borne) to a sidecar.
+
+    Why a sidecar: :func:`stored_session_title`'s window scan is blind to a
+    title in the middle of a large transcript (see :data:`TITLE_SCAN_BYTES` —
+    an auto-name at turn 2 pushed past the head window by an hour of work, or a
+    mid-session ``/rename`` buried between the two windows). One stat and one
+    small read here is O(1) in transcript size, closing that gap for good.
+
+    Best-effort by contract, exactly like :func:`mark_session_origin`: a title
+    is decoration, and a session that cannot write its sidecar (read-only
+    volume, full disk) must still RUN. The cost of the failure is a stale
+    picker label until the next rename or the backfill sweep, never a lost turn.
+
+    ``names`` accumulates: ``text`` is appended to ``past_names`` (deduped,
+    first-seen order preserved) so a search matches a name the session was
+    renamed away from. The list is authoritative for names seen since the
+    sidecar began; the one-time :func:`backfill_session_titles` sweep recovers
+    the complete history for sessions that predate it.
+
+    **The directory's mtime is preserved**, for the same reason
+    :func:`mark_session_origin` preserves it: recency ranks by the transcript's
+    mtime, but other readers (``os.listdir`` + ``stat`` listings, backups) look
+    at the directory, and journalling a title is bookkeeping ABOUT a session,
+    never activity IN it. The write is atomic (pid-named temp + ``replace``,
+    like ``search_index._save``) because the picker may read this file while a
+    concurrent session rewrites it.
+    """
+    normalized = " ".join(text.split())
+    # Dedup while preserving first-seen order: ``dict.fromkeys`` is the stdlib
+    # ordered-set idiom. The in-force title is folded in as the newest name so a
+    # caller that passes only the prior history still gets a complete list.
+    names = (
+        list(dict.fromkeys([*past_names, normalized]))
+        if normalized
+        else list(dict.fromkeys(past_names))
+    )
+    payload = {"text": normalized, "user_set": user_set, "names": names}
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = session_dir / TITLE_SIDECAR_NAME
+        # The temp carries the writer's PID so two sessions writing at once do
+        # not ``replace`` a document the other is still filling — the same
+        # torn-write hazard ``search_index._save`` documents.
+        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(sidecar)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
 def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     """Stamp pre-existing subagent directories once, and return how many.
 
@@ -287,6 +430,115 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
             mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
             stamped += 1
     return stamped
+
+
+def _scan_all_titles(transcript: Path) -> list[tuple[str, bool]]:
+    """Every ``(text, user_set)`` title journalled in ``transcript``, in order.
+
+    A FULL read, unlike :func:`stored_session_title`'s two windows — which is
+    why it lives only on the backfill path and never on the picker's hot path.
+    Finding *all* titles (not just the newest) requires it: they can sit
+    anywhere, as the topic-pivot session that motivated this proved. Parsed
+    line-by-line rather than by the windowed regex so ``user_set`` is read
+    alongside each ``text`` and the ordering is exact.
+
+    Tolerant like every reader here: an unreadable transcript or a half-written
+    final line yields what it could parse, never an exception.
+    """
+    titles: list[tuple[str, bool]] = []
+    try:
+        with transcript.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or _TITLE_CUSTOM_TYPE not in line:
+                    # Cheap reject before the JSON parse: title rows are a tiny
+                    # fraction of a transcript, and the substring check skips
+                    # the decode for every message and tool line.
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                payload = entry.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("custom_type") != _TITLE_CUSTOM_TYPE:
+                    continue
+                details = payload.get("details")
+                if not isinstance(details, dict):
+                    continue
+                text = details.get("text")
+                if isinstance(text, str) and text.strip():
+                    titles.append((" ".join(text.split()), bool(details.get("user_set"))))
+    except OSError:
+        return titles
+    return titles
+
+
+def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
+    """Write the title sidecar for sessions that predate it, and return how many.
+
+    Mirrors :func:`backfill_session_origins` exactly, and for the same reason:
+    without it the sidecar fix only applies to sessions renamed AFTER the
+    upgrade, so the person who reported being unable to find a topic-pivot
+    session by its subject would upgrade, look, and see the same unfindable row
+    — the change would be correct and appear to do nothing until each session's
+    next rename. This one-time sweep makes every existing session findable by
+    every name it has borne immediately after upgrade.
+
+    A session with a title in the untouched middle of a large transcript is the
+    case this exists for: :func:`stored_session_title`'s window scan misses it,
+    so a full read (:func:`_scan_all_titles`) is the only way to recover its
+    real title and its past names. That read is O(transcript size), which is why
+    it is confined to this startup path — bounded by ``limit`` and run once per
+    session ever, never per picker-open — exactly the trade
+    :func:`backfill_session_origins` makes.
+
+    Best-effort and bounded like every other function here: an unreadable
+    directory is skipped rather than raised, and ``limit`` caps how many
+    sidecars are WRITTEN per run.
+
+    The cap is on work done, never on how far the scan reaches, for the reason
+    :func:`backfill_session_origins` documents at length: slicing the directory
+    list instead would leave any session sorting past the cut unvisited on
+    every run forever, because the list sorts by hex name and the same prefix
+    is recomputed each startup.
+    """
+    written = 0
+    sessions = config_dir / "sessions"
+    try:
+        directories = sorted(sessions.iterdir())
+    except OSError:
+        return 0
+    for directory in directories:
+        if written >= limit:
+            break
+        try:
+            transcript = directory / TRANSCRIPT_NAME
+            if not transcript.is_file():
+                continue
+            # Already answered: never re-stamp. The sidecar is event-sourced
+            # from here on, so a rewrite would only risk clobbering a newer
+            # sidecar with an older full scan on a session that has since been
+            # renamed.
+            if (directory / TITLE_SIDECAR_NAME).exists():
+                continue
+        except OSError:
+            continue
+        titles = _scan_all_titles(transcript)
+        if not titles:
+            # No journalled title at all (a session that predates title
+            # journalling, or one closed before its naming call landed). Leave
+            # it to the window-scan fallback and the opening-message name; there
+            # is nothing to journal.
+            continue
+        past_names = [text for text, _ in titles]
+        newest_text, newest_user_set = titles[-1]
+        write_session_title(directory, newest_text, user_set=newest_user_set, past_names=past_names)
+        written += 1
+    return written
 
 
 def is_user_session(session_dir: Path) -> bool:
@@ -458,7 +710,19 @@ def stored_session_title(session_dir: Path) -> str:
     Tolerant like everything else on this path — an unreadable or truncated
     transcript yields ``""`` and the caller falls back to the opening message
     rather than the picker failing.
+
+    **The title sidecar is consulted FIRST** (``title.json``, written by
+    :func:`write_session_title` on the same event that journals the title to
+    the transcript). It is one stat and a sub-kilobyte read, O(1) in transcript
+    size, and it is what closes the window-scan gap :data:`TITLE_SCAN_BYTES`
+    describes: a title in the untouched middle of a multi-megabyte transcript
+    is invisible to the two windows but sits in the sidecar. The scan below
+    remains the fallback for sessions written before the sidecar existed and
+    not yet reached by :func:`backfill_session_titles`.
     """
+    sidecar = _read_title_sidecar(session_dir)
+    if sidecar is not None and sidecar.text:
+        return sidecar.text
     transcript = session_dir / TRANSCRIPT_NAME
     try:
         with transcript.open("rb") as handle:
