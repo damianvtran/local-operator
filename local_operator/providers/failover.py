@@ -1894,6 +1894,29 @@ async def stream_with_failover(
                     # resolve_next_key owns the decision (PR-04/05).
                     error = exc
                     continue
+                # A request the provider READ and refused (kind=="request": a
+                # 4xx that is not auth/quota/timeout) is DETERMINISTIC in its
+                # bytes — the same request fails identically on every other
+                # provider. Walking the fallback chain on it is the storm this
+                # guard stops: one malformed Anthropic 400 marched through
+                # z.ai/kimi/etc, each 400ing on the same messages. When it is
+                # the PRIMARY (the user's own model) that refused, abort the
+                # turn now and surface its 400 rather than the last fallback's —
+                # the user needs the words of the model they chose. Image
+                # rejections take this path too: their recovery is the session's
+                # _degrade_if_image_rejected (fired from the turn end event,
+                # independent of this walk) plus a resend, NOT the chain, so
+                # stopping the walk costs the image path nothing. A request-kind
+                # error on a FALLBACK is left to fall through to the next
+                # target: it can mean that one fallback rejected a field (an
+                # effort rung its ladder lacks) the primary accepted, a
+                # per-target defect the walk should route around. record() at
+                # L1837 already stored this exc, so raising it surfaces the same
+                # frame the reported slot holds. Gate strictly on kind=="request"
+                # (not "unknown": a bare-status gateway failure may be transient
+                # and a fallback can survive it).
+                if exc.kind == "request" and is_primary:
+                    raise exc
                 break  # non-retryable for this provider
             except Exception as exc:  # network errors et al.
                 wrapped = wrap_transport_error(exc)

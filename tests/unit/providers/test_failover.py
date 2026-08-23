@@ -483,7 +483,13 @@ async def test_fallback_chain_deduplicates_current_model_and_effort() -> None:
     async def client_for(spec: ModelSpec) -> Any:
         specs_seen.append(f"{spec.provider}/{spec.model_id}/{spec.reasoning_effort}")
         if spec.provider == "openai":
-            return ScriptedClient(ProviderError(400, "unavailable"))
+            # A generic "primary is down, walk to the fallback" trigger. Uses an
+            # UNKNOWN-kind failure (status=None) rather than a request-shape 400:
+            # a primary kind=="request" 400 now ABORTS the turn (the storm guard),
+            # so a 400 here would no longer walk. status=None takes the identical
+            # non-retryable break->walk path without being classified "request",
+            # which keeps this test about fallback dedup, not the abort policy.
+            return ScriptedClient(ProviderError(None, "unavailable"))
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
     request = _request()
@@ -520,7 +526,10 @@ async def test_successful_fallback_stays_pinned_for_same_message() -> None:
     async def client_for(spec: ModelSpec) -> Any:
         specs_seen.append(f"{spec.provider}/{spec.model_id}")
         if spec.provider == "openai":
-            return ScriptedClient(ProviderError(400, "model unavailable"))
+            # Unknown-kind (status=None) "primary down" trigger, not a 400: a
+            # primary request-shape 400 now aborts the turn rather than walking.
+            # See test_primary_request_400_aborts_without_walking_chain.
+            return ScriptedClient(ProviderError(None, "model unavailable"))
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
     settings = {
@@ -615,7 +624,10 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     async def client_for(spec: ModelSpec) -> Any:
         specs_seen.append(f"{spec.provider}/{spec.model_id}")
         if spec.provider in ("openai", "anthropic"):
-            return ScriptedClient(ProviderError(400, "model unavailable"))
+            # Unknown-kind (status=None) "target down" trigger, not a 400: a
+            # primary request-shape 400 now aborts instead of walking. status=None
+            # keeps the identical break->walk path for this bench-mechanics test.
+            return ScriptedClient(ProviderError(None, "model unavailable"))
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
     settings = {
@@ -678,7 +690,10 @@ async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeyp
     async def client_for(spec: ModelSpec) -> Any:
         specs_seen.append(f"{spec.provider}/{spec.model_id}")
         if spec.provider == "openai":
-            return ScriptedClient(ProviderError(400, "model unavailable"))
+            # Unknown-kind (status=None) "primary down" trigger, not a 400: a
+            # primary request-shape 400 now aborts instead of walking. status=None
+            # keeps the identical break->walk path for this all-benched test.
+            return ScriptedClient(ProviderError(None, "model unavailable"))
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
     settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["groq/llama-x"]}}}
@@ -767,10 +782,18 @@ async def test_stream_exhaustion_raises_last_error() -> None:
     assert excinfo.value.status == 500
 
 
-async def test_stream_non_retryable_stops_provider_immediately() -> None:
-    """A non-retryable 400 abandons the provider after one call and walks
-    the fallback chain instead of re-trying the same key."""
+async def test_primary_request_400_aborts_without_walking_chain() -> None:
+    """A PRIMARY request-shape 400 aborts the turn instead of walking the chain.
+
+    ``kind=="request"`` is a 4xx the provider READ and refused: the same bytes
+    fail identically on every other provider, so walking the fallback chain is
+    a storm — one malformed Anthropic 400 marched through z.ai/kimi/etc, each
+    400ing on the same messages. When the PRIMARY (the user's own model)
+    refuses, the turn now raises its 400 immediately and never touches the
+    fallback. (Was: this test asserted the anthropic fallback served "b" — the
+    behaviour the storm-stopper corrects.)"""
     calls = {"n": 0}
+    anthropic = ScriptedClient([StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")])
 
     def fail(
         request: ChatRequest, api_key: str | None, oauth_access: Any = None
@@ -780,18 +803,108 @@ async def test_stream_non_retryable_stops_provider_immediately() -> None:
 
     async def client_for(spec: ModelSpec) -> Any:
         if spec.provider == "anthropic":
-            return ScriptedClient([StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")])
+            return anthropic
         return _FnClient(fail)
 
     settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
-    got = [
-        event
-        async for event in stream_with_failover(
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(
             _request(), FakeAuth({"openai": ["k"], "anthropic": ["k2"]}), settings, client_for
-        )
-    ]
+        ):
+            pass
+    # The primary's own 400 surfaces, not a fallback's error.
+    assert excinfo.value.status == 400
+    assert excinfo.value.kind == "request"
     assert calls["n"] == 1  # 400 is not retried on the same provider
-    assert any(isinstance(e, StreamTextDelta) and e.delta == "b" for e in got)
+    assert anthropic.calls == 0  # the fallback chain was never walked
+
+
+async def test_fallback_request_400_still_walks() -> None:
+    """A request-shape 400 on a FALLBACK target still walks to the next target.
+
+    The abort is gated on ``is_primary``: a ``kind=="request"`` failure on a
+    fallback can mean that one fallback rejected a field the primary accepted
+    (an effort rung its ladder lacks) — a per-target defect the walk should
+    route around, NOT a request-shape defect. So a fallback 400 keeps walking
+    to a later target that can serve."""
+    served = ScriptedClient([StreamTextDelta(delta="c"), StreamEndEvent(stop_reason="stop")])
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "openai":  # the primary — hand off with a provider fault
+            return ScriptedClient(ProviderError(500, "boom", retryable=True))
+        if spec.provider == "anthropic":  # first fallback — request-shape 400
+            return ScriptedClient(ProviderError(400, "bad request", retryable=False))
+        return served  # zai — the later target that serves
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 1,
+            "fallbackChains": {"default": ["anthropic/claude-x", "zai/glm-x"]},
+        }
+    }
+    auth = FakeAuth({"openai": ["k"], "anthropic": ["k2"], "zai": ["k3"]})
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+    # The walk continued PAST the fallback 400 to the later target.
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "c" for e in got)
+    assert served.calls == 1
+
+
+async def test_primary_image_rejection_400_aborts_turn() -> None:
+    """A PRIMARY image-rejection 400 aborts too, and keeps its image marker.
+
+    Image rejections are ``kind=="request"`` (a plain 400 on the provider's own
+    wording). Their recovery is the session's ``_degrade_if_image_rejected``,
+    fired from the turn end event INDEPENDENT of this walk, plus a resend — not
+    the fallback chain (a poisoned image 400s everywhere too). So aborting the
+    walk costs the image path nothing, and the raised error must still satisfy
+    ``is_image_rejection`` so the session's degrade fires."""
+    anthropic = ScriptedClient([StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")])
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "anthropic":
+            return anthropic
+        return ScriptedClient(ProviderError(400, "could not process image", retryable=False))
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"], "anthropic": ["k2"]}), settings, client_for
+        ):
+            pass
+    assert excinfo.value.status == 400
+    # The error object still carries the image marker, so the session degrade fires.
+    assert is_image_rejection(excinfo.value)
+    assert anthropic.calls == 0  # aborted, not walked
+
+
+async def test_primary_unknown_400_style_not_aborted_if_not_request_kind() -> None:
+    """An ``unknown``-kind failure still walks — the abort is request-only.
+
+    An empty-bodied gateway failure classifies as ``unknown`` (not ``request``)
+    and may be a transient edge a fallback survives, so the guard is gated
+    strictly on ``kind=="request"``. This pins that a primary ``unknown``
+    failure does NOT abort but walks to a serving fallback (guards against
+    over-broad aborting)."""
+    served = ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "anthropic":
+            return served
+        # status=None, non-retryable, no auth/timeout markers -> kind "unknown".
+        return ScriptedClient(ProviderError(None, "gateway boom", retryable=False))
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 1,
+            "fallbackChains": {"default": ["anthropic/claude-x"]},
+        }
+    }
+    auth = FakeAuth({"openai": ["k"], "anthropic": ["k2"]})
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "ok" for e in got)
+    assert served.calls == 1
 
 
 async def test_transport_retries_honor_budget_same_key_first() -> None:
@@ -3367,7 +3480,10 @@ async def test_route_edges_reach_the_settle_handler_in_both_directions() -> None
 
     async def client_for(spec: ModelSpec) -> Any:
         if spec.provider == "openai" and not primary_healthy:
-            return ScriptedClient(ProviderError(400, "model unavailable"))
+            # Unknown-kind (status=None) "primary down" trigger, not a 400: a
+            # primary request-shape 400 now aborts instead of walking, so it
+            # would never reach the settle-handler pin this test asserts.
+            return ScriptedClient(ProviderError(None, "model unavailable"))
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
     settings = {"retry": {"fallbackChains": {"default": ["anthropic/claude-opus-5"]}}}
