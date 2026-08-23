@@ -290,7 +290,9 @@ async def test_the_chosen_level_survives_a_session_rebuild() -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/effort low")
-        await _submit(pilot, app, "/reload")
+        # In-process rebuild — ``/reload`` now re-execs the process.
+        app._session_factory = lambda: _factory(sessions.pop(0))  # type: ignore[assignment]
+        await app._reload_session(keep_context=True)
         for _ in range(40):
             await pilot.pause()
             if app._session is not None and not sessions:
@@ -311,7 +313,8 @@ async def test_a_level_the_next_model_cannot_take_is_forgotten_not_hidden() -> N
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/effort max")
-        await _submit(pilot, app, "/reload")
+        app._session_factory = lambda: _factory(sessions.pop(0))  # type: ignore[assignment]
+        await app._reload_session(keep_context=True)
         for _ in range(40):
             await pilot.pause()
             if app._session is not None and not sessions:

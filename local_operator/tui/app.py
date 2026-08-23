@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -367,9 +368,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand("new", "Start a new conversation"),
-    # "reloading session…" while it runs; `_reconcile_reload` posts the receipt
-    # that survives the ledger being rebuilt, and it names what came back.
-    SlashCommand("reload", "Reboot the session, keeping this conversation"),
+    # In-process reboot cannot load a replaced wheel; this command exists so
+    # ``/update`` is not the only way to pick up new code. Same relaunch
+    # helper as ``/update`` — the conversation comes back via ``--resume``.
+    SlashCommand("reload", "Relaunch this conversation on the current install"),
+    # The notice (or the relaunch) is the receipt. echo=False is the default;
+    # pin it in ECHO_POLICY so a later flip cannot sneak a user row onto an
+    # empty splash that ``/update`` is required to leave standing.
+    SlashCommand("update", "Install the latest version from PyPI and relaunch"),
     # The picker (or "resuming session <id>…") is the receipt, and a resume
     # replaces the transcript anyway.
     SlashCommand(
@@ -1254,6 +1260,22 @@ class OperatorApp(App[None]):
         #: one only: the splash is one row. Cleared on a session swap
         #: because it describes the session that just died.
         self._splash_notice: str | None = None
+        #: PyPI version strictly newer than this install, filled by the
+        #: one-shot mount worker. ``None`` until then AND when current —
+        #: the splash does not reserve the row.
+        self._update_available: str | None = None
+        #: Stashed so ``cli.main`` can ``replace_self`` after ``run_tui``
+        #: has restored the terminal. ``None`` unless ``/update`` or
+        #: ``/reload`` asked to relaunch.
+        self._restart_plan: Any | None = None
+        #: True from the moment ``/update`` accepts until the process exits
+        #: 75 (or the upgrade is refused). The mutex ``group="update"``
+        #: cannot be: Textual exclusivity CANCELS the running worker, and
+        #: cancelling ``uv tool upgrade`` mid-write leaves a half-replaced
+        #: env. A second ``/update`` and a ``/reload`` both honour this
+        #: instead. Also what keeps the composer locked so a typed-ahead
+        #: turn cannot cancel the relaunch after the wheel is already in.
+        self._update_in_progress: bool = False
         # Whatever held focus when the usage panel opened, so closing it returns
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
@@ -1621,6 +1643,7 @@ class OperatorApp(App[None]):
                     self._providers,
                     notice=self._splash_notice,
                     setup=self._setup_state,
+                    update_available=self._update_available,
                 )
             )
         # The dock band: subagent task list + todo list, sitting between the
@@ -1777,6 +1800,13 @@ class OperatorApp(App[None]):
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
+        # After first paint, not on the welcome poll timer (that one only
+        # waits for the model label). Deferred so this thread worker cannot
+        # steal the first tick from boot. Network failure is silent.
+        self.call_after_refresh(self._start_update_check)
+
+    def _start_update_check(self) -> None:
+        self.run_worker(self._check_for_update, thread=True, group="update-check")
 
     @staticmethod
     async def _warm_session_imports() -> None:
@@ -2478,11 +2508,14 @@ class OperatorApp(App[None]):
         missing history was the smaller half of it — nothing detected or
         reported the divergence, because nothing compared the two surfaces.
 
-        ``keep_context`` states the CALLER'S INTENT — ``/reload`` continues this
-        conversation, ``/new`` and ``/resume`` deliberately do not — and it is
-        verified rather than trusted: a reload that meant to keep the
-        conversation and came back with less of it says so, instead of leaving
-        the user to discover it from an answer that has forgotten everything.
+        ``keep_context`` states the CALLER'S INTENT — an in-process rebuild
+        that meant to continue this conversation (tests, and any future
+        caller that still swaps sessions without re-exec) versus ``/new``
+        and ``/resume``, which deliberately do not. It is verified rather
+        than trusted: a reload that meant to keep the conversation and came
+        back with less of it says so, instead of leaving the user to
+        discover it from an answer that has forgotten everything.
+        ``/reload`` itself no longer calls this path; it re-execs.
         """
         previous_id = self._conversation_id()
         previous_len = self._history_length()
@@ -2827,12 +2860,14 @@ class OperatorApp(App[None]):
         The ledger has already been rebuilt from the new session's own history,
         so the screen cannot disagree with the model by the time this runs. What
         it can be is emptier than the user asked for, and that is what this
-        catches: ``/reload`` is a promise to continue this conversation, and
-        when the replacement comes back with less of it — no resume-capable
-        launcher, a transcript that never reached disk, a boot that failed
-        outright — the promise was not kept. Reporting it is the difference
-        between a user who knows to re-establish context and the one who found
-        out from an answer that had forgotten the question.
+        catches: an in-process rebuild that asked to keep this conversation
+        (``keep_context=True``) is a promise to continue it, and when the
+        replacement comes back with less of it — no resume-capable launcher,
+        a transcript that never reached disk, a boot that failed outright —
+        the promise was not kept. Reporting it is the difference between a
+        user who knows to re-establish context and the one who found out
+        from an answer that had forgotten the question. ``/reload`` no
+        longer uses this path; it re-execs via :meth:`_request_relaunch`.
 
         Spend travels the other way. It was charged to a conversation that is
         still open, so without this the band walks its own total back to zero
@@ -2842,10 +2877,11 @@ class OperatorApp(App[None]):
             total, children, was_floor = carried_spend
             self._total_cost = total
             self._subagent_costs.update(children)
-            # The provenance travels with the money. Without it a `/reload` onto
-            # the same conversation repainted the identical restored floor as a
-            # bare figure — same number, same provenance, honesty mark gone, on
-            # the one command that promises to change nothing.
+            # The provenance travels with the money. Without it an in-process
+            # rebuild onto the same conversation repainted the identical
+            # restored floor as a bare figure — same number, same provenance,
+            # honesty mark gone, on the one path that promises to change
+            # nothing.
             self._spend_is_floor = was_floor
             if self._status is not None:
                 self._status.update(cost=self._spend_text())
@@ -2871,35 +2907,185 @@ class OperatorApp(App[None]):
         )
 
     def _cmd_reload(self, notice: NoticeFn) -> None:
-        """``/reload`` — re-run boot against the SAME conversation.
+        """``/reload`` — relaunch this conversation on the current install.
 
-        What a reload is FOR is the boot: MCP servers reconnected, credentials
-        re-read, the model re-resolved. The conversation is not what went
-        wrong, and with ``/new`` standing as the explicit fresh start there is
-        no reason for this to discard it. It discarded it anyway: the launch
-        factory is ``create_session`` bound to the args the app started with,
-        which name no session to resume, so every ``/reload`` minted a NEW
-        transcript directory. The model lost the conversation while the screen
-        went on showing it.
-
-        So rebind to this conversation's id first, exactly as
-        :meth:`_resume_session` does — a reload IS a resume of the session
-        already open, and ``Session`` seeds its context from the transcript it
-        is pointed at. Gated on that transcript being on disk, because
-        ``resume_dir`` refuses an id it cannot find: a reload before the first
-        turn persisted would otherwise fail to boot at all. The same gate keeps
-        the command's original purpose intact — a session that never
-        constructed has no id to rebind to, so it retries the launch factory
-        exactly as it always did.
+        In-process reboot cannot load a replaced wheel; this command exists
+        so ``/update`` is not the only way to pick up new code. ``/new`` and
+        ``/resume`` stay in-process — they swap conversations, not binaries.
         """
-        resume_id = self._resumable_session_id()
-        if resume_id and self._resume_factory is not None:
-            self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
-        # Transient by design: the reload rebuilds the ledger from the session
-        # it boots, so this line is the acknowledgement WHILE that happens and
-        # `_reconcile_reload`'s receipt is what the user is left holding.
-        notice("reloading session…")
-        self.run_worker(self._reload_session(keep_context=True), thread=False, group="session")
+        del notice
+        if self._update_in_progress:
+            self._system_notice("an update is already running", "warning")
+            return
+        self._request_relaunch()
+
+    def _turn_is_live(self) -> bool:
+        """A mid-turn exec would drop work the user can still abort with esc.
+
+        Compaction holds the session lock with ``is_streaming`` False (see
+        the hold in :meth:`on_editor_submitted`), so it has to count here
+        too: ``/update`` and ``/reload`` would otherwise tear the process
+        down while history is being rewritten.
+        """
+        session = self._session
+        streaming = session is not None and bool(getattr(session, "is_streaming", False))
+        return bool(
+            streaming or self._loop_running or self._streaming_block is not None or self._compacting
+        )
+
+    def _live_turn_refuse_copy(self) -> str:
+        """Mid-turn refuse for ``/update`` / ``/reload``. Same key, right noun."""
+        if self._loop_running and not (
+            self._streaming_block is not None
+            or self._compacting
+            or (self._session is not None and bool(getattr(self._session, "is_streaming", False)))
+        ):
+            return "esc first — a loop is still running"
+        return "esc first — a turn is still running"
+
+    def _request_relaunch(self, *, force: bool = False) -> None:
+        """Stash a :class:`RestartPlan` and exit 75 so ``cli.main`` re-execs.
+
+        ``force`` is the completed-upgrade path: the wheel is already on
+        disk, so a turn that started during the installer must not cancel
+        the relaunch. The composer is locked for that window; this is the
+        belt if something still looks live.
+        """
+        if not force and self._turn_is_live():
+            self._system_notice(self._live_turn_refuse_copy(), "warning")
+            return
+        from local_operator.reexec import REEXEC_CODE, make_plan, stash_plan
+
+        resume_id = self._resumable_session_id() or None
+        plan = make_plan(list(sys.argv), resume_id=resume_id)
+        self._restart_plan = plan
+        stash_plan(plan)
+        # Receipt BEFORE exit: ``/reload`` used to vanish with no copy, which
+        # read as a crash — especially on a first-turn splash whose plan
+        # carries no ``--resume`` and comes back as a cold launch. The
+        # completed-upgrade path already painted ``restarting…`` on the
+        # same tick, so it does not get a second line.
+        if not force:
+            if resume_id is None:
+                self._system_notice("relaunching… this will open a new session")
+            else:
+                self._system_notice("relaunching…")
+        # Keyword: Textual's first positional is ``result``, not the code.
+        self.exit(return_code=REEXEC_CODE)
+
+    def _check_for_update(self) -> None:
+        """Background splash probe. Any failure stays silent — no toast."""
+        from local_operator.update import check_latest
+
+        try:
+            result = check_latest()
+        except Exception:
+            return
+        if not result.behind or not result.latest:
+            return
+        self._update_available = result.latest
+        welcome = self._welcome
+        if welcome is not None:
+            self.call_from_thread(welcome.refresh_info)
+
+    def _cmd_update(self, notice: NoticeFn) -> None:
+        """``/update`` — live PyPI check, upgrade, then the shared relaunch."""
+        del notice
+        if self._update_in_progress:
+            self._system_notice("an update is already running", "warning")
+            return
+        if self._turn_is_live():
+            self._system_notice(self._live_turn_refuse_copy(), "warning")
+            return
+        # Armed BEFORE the worker so a second ``/update`` typed while the
+        # first is still scheduling cannot start a second installer. The
+        # composer lock is the other half: a prompt during ``uv tool
+        # upgrade`` used to cancel the relaunch after the wheel was in.
+        self._update_in_progress = True
+        self._set_composer_read_only(True)
+        self._system_notice("checking for updates…")
+        # exclusive left false on purpose: Textual exclusivity CANCELS the
+        # running worker, and cancelling the installer mid-write is worse
+        # than a refused second ``/update``. The flag above is the mutex.
+        self.run_worker(self._run_update, thread=True, group="update")
+
+    def _finish_update(self) -> None:
+        """Drop the in-progress lock and give the composer back.
+
+        Only the refusal / already-current paths call this. A successful
+        upgrade keeps the lock through ``exit(75)`` so nothing can start
+        a turn that would cancel the relaunch.
+        """
+        self._update_in_progress = False
+        if self._subagent_view is None and self._org_chart_view is None:
+            self._set_composer_read_only(False)
+
+    def _run_update(self) -> None:
+        from local_operator.update import (
+            InstallKind,
+            UpdateError,
+            check_latest,
+            git_snapshot_notice,
+            install_kind,
+            is_git_snapshot,
+            perform_upgrade,
+            tui_editable_refusal,
+            tui_installer_failure,
+        )
+
+        try:
+            result = check_latest(force=True)
+        except Exception as exc:
+            self.call_from_thread(
+                self._system_notice, f"could not check for updates: {exc}", "warning"
+            )
+            self.call_from_thread(self._finish_update)
+            return
+        if result.latest is None:
+            self.call_from_thread(
+                self._system_notice, "could not reach PyPI to learn the latest version", "warning"
+            )
+            self.call_from_thread(self._finish_update)
+            return
+        if not result.behind:
+            self.call_from_thread(
+                self._system_notice, f"already on v{result.installed or result.latest}"
+            )
+            self.call_from_thread(self._finish_update)
+            return
+        kind = install_kind()
+        if is_git_snapshot():
+            # Architect contract: a lop-update snapshot still upgrades from
+            # PyPI after one printed line. CLI already does this; the TUI
+            # used to replace the snapshot silently.
+            self.call_from_thread(self._system_notice, git_snapshot_notice())
+        self.call_from_thread(self._system_notice, f"updating to v{result.latest}…")
+        try:
+            installed = perform_upgrade(target=result.latest, kind=kind)
+        except UpdateError as exc:
+            if "repo .venv" in str(exc) or kind is InstallKind.EDITABLE:
+                message = tui_editable_refusal()
+            elif str(exc).startswith("installer exited"):
+                message = tui_installer_failure(kind)
+            else:
+                message = str(exc)
+            self.call_from_thread(self._system_notice, message, "warning")
+            self.call_from_thread(self._finish_update)
+            return
+        except Exception as exc:
+            self.call_from_thread(self._system_notice, f"update failed: {exc}", "error")
+            self.call_from_thread(self._finish_update)
+            return
+        # ``restarting…`` only once exit 75 is actually happening — a
+        # typed-ahead turn used to make ``_request_relaunch`` refuse after
+        # this line had already painted. Wrapped so ``call_from_thread``
+        # does not have to forward the keyword.
+
+        def _relaunch_after_upgrade() -> None:
+            self._system_notice(f"updated to v{installed} — restarting…")
+            self._request_relaunch(force=True)
+
+        self.call_from_thread(_relaunch_after_upgrade)
 
     def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
         """``/resume`` — pick a conversation; ``/resume <id>`` — resume one.
@@ -2986,10 +3172,11 @@ class OperatorApp(App[None]):
         """``/new`` — start a fresh conversation without leaving the app.
 
         There was no way to do this: ``/clear`` wipes the SCREEN and keeps the
-        conversation the model sees, ``/reload`` reboots the SAME conversation,
-        and ``/resume`` moves to a different existing one. Starting genuinely
-        fresh meant quitting and relaunching, which also throws away the
-        terminal state, the MCP connections and the warm imports.
+        conversation the model sees, ``/reload`` relaunches the SAME
+        conversation in a new process, and ``/resume`` moves to a different
+        existing one. Starting genuinely fresh meant quitting and
+        relaunching, which also throws away the terminal state, the MCP
+        connections and the warm imports.
 
         Implemented through the resume factory with ``None`` rather than a
         second factory: ``create_session`` already branches on
@@ -4799,8 +4986,8 @@ class OperatorApp(App[None]):
         guaranteed to reject.
 
         Read by :meth:`resume_hint`, which must not advertise a command that
-        cannot work, and by :meth:`_cmd_reload`, which must not rebind the
-        session factory to an id that would fail to boot.
+        cannot work, and by :meth:`_request_relaunch`, which must not stash
+        a ``--resume`` id that the next process would reject.
         """
         session = self._session
         if session is None:
@@ -8139,6 +8326,8 @@ class OperatorApp(App[None]):
             self._clear_transcript()
         elif command == "/reload":
             self._cmd_reload(notice)
+        elif command == "/update":
+            self._cmd_update(notice)
         elif command == "/new":
             self._cmd_new(notice)
         elif command == "/resume":
@@ -9534,8 +9723,8 @@ class OperatorApp(App[None]):
             if command in ("on", "off") and len(words) == 1:
                 set_search_enabled(manager, command == "on")
                 notice(
-                    f"web search {command}; /reload "
-                    f"{'adds' if command == 'on' else 'removes'} the tool"
+                    f"web search {command}; /reload relaunches the app to "
+                    f"{'add' if command == 'on' else 'remove'} the tool"
                 )
                 return
             if command in ("enable", "disable") and len(words) == 2:

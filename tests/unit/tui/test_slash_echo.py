@@ -44,6 +44,7 @@ ECHO_POLICY = {
     "clear": False,
     "new": False,
     "reload": False,
+    "update": False,
     "resume": False,
     # The label of the conversation, not words the model is told: the receipt
     # quotes the title that ended up in force, which is more than what was typed.
@@ -100,6 +101,7 @@ PROMPT_POLICY = {
     "clear": False,
     "new": False,
     "reload": False,
+    "update": False,
     "resume": False,
     "rename": False,
     "model": False,
@@ -257,8 +259,10 @@ async def test_every_registered_name_and_alias_actually_runs() -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         for entry in SLASH_COMMANDS:
-            if entry.name == "exit":
-                continue  # `self.exit()` would end the pilot mid-loop
+            if entry.name in {"exit", "reload", "update"}:
+                # ``exit`` ends the pilot; ``reload``/``update`` now exit 75
+                # to re-exec, which would do the same mid-loop.
+                continue
             for spelling in entry.names:
                 app._transcript_view().clear_blocks()
                 app._run_slash_command(f"/{spelling}")

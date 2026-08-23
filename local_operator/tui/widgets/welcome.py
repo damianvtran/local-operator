@@ -357,12 +357,14 @@ WARNING_SHORT = "not logged in"
 #: only row that changes what the user must DO next — is the last one
 #: standing. A harness notice (quota fallback) is the same KIND of row but
 #: not the same urgency: you can still type, just on a different model, so
-#: it sheds one step before the login warning.
+#: it sheds one step before the login warning. An optional update row is
+#: news, not an action that unblocks typing, so it sheds before both.
 _PRIORITY_VERSION = 0
 _PRIORITY_CWD = 1
 _PRIORITY_MODEL = 2
-_PRIORITY_NOTICE = 3
-_PRIORITY_WARNING = 4
+_PRIORITY_UPDATE = 3
+_PRIORITY_NOTICE = 4
+_PRIORITY_WARNING = 5
 
 
 @dataclass(frozen=True)
@@ -392,6 +394,11 @@ class WelcomeInfo:
     #: stacking would shove the lockup the way a transcript notice already
     #: does. ``None`` when nothing has been announced.
     notice: str | None = None
+    #: PyPI version strictly newer than the installed distribution, or
+    #: ``None``. A new field rather than overwriting ``notice``: that slot
+    #: is the quota fallback, and an update probe must not hide a failover.
+    #: Absent when current — the row is not reserved.
+    update_available: str | None = None
     #: First-run SETUP state: the app opened with nothing configured so the user
     #: can `/login` from here (see ``app._enter_setup_state``). It changes what
     #: the empty splash SAYS — the model row's idle word, the affordance the
@@ -419,6 +426,7 @@ def session_welcome_info(
     *,
     notice: str | None = None,
     setup: bool = False,
+    update_available: str | None = None,
 ) -> WelcomeInfo:
     """Snapshot the facts the welcome view shows.
 
@@ -468,6 +476,7 @@ def session_welcome_info(
         cwd=os.getcwd(),
         missing_credential=missing,
         notice=notice or None,
+        update_available=update_available or None,
         setup=setup,
     )
 
@@ -628,6 +637,15 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     if info.cwd:
         shown = _fit_tail(_shorten_home(info.cwd), width)
         rows.append((_PRIORITY_CWD, Text(shown, style=dim, no_wrap=True)))
+    if info.update_available:
+        # Same glyph/tint as the other ``!`` rows. The command is dropped
+        # WHOLE when it does not fit — a half-printed ``/upd…`` is an
+        # instruction nobody can follow, same rule as the login warning.
+        glyph = NOTICE_GLYPHS["warning"]
+        body = f"{glyph} latest is v{info.update_available} — /update"
+        if cell_len(body) > width:
+            body = f"{glyph} latest is v{info.update_available}"
+        rows.append((_PRIORITY_UPDATE, Text(body, style=warn, no_wrap=True)))
     if info.notice:
         # Same glyph and tint as the credential warning: both are "something
         # about the harness you should know before you type". Truncated from
