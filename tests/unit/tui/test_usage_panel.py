@@ -734,6 +734,184 @@ async def test_the_scrollbar_gutter_never_reflows_the_number_columns() -> None:
     assert scrolled.index("10%") == fits.index("10%"), (scrolled, fits)
 
 
+# -- the grab must not leave a selection armed (needs the REAL app) ----------
+# The lightweight ``_PanelHost`` above is deliberately NOT used here: the bug is
+# in the interaction between the panel's grab and ``Screen._forward_event``,
+# which arms a text selection on the MouseDown before the panel's handler runs
+# because the panel is a selectable ``Static``. That machinery only exists on a
+# real ``Screen``, so these tests drive the full ``OperatorApp`` (as
+# ``test_app_pilot`` does) and push events through ``screen._forward_event`` —
+# the same path a real mouse press takes — rather than calling the panel's
+# handler directly, which would skip the selection-arming under test.
+def _bar_screen_x(panel: UsagePanel) -> int:
+    """The absolute screen column the scrollbar paints into.
+
+    Composed from the panel's region plus its live gutter plus the body content
+    width, never hardcoded: the card is positioned by an offset inside a hugging
+    host inside the screen inset, and its padding differs between the real
+    stylesheet and the test host.
+    """
+    return panel.region.x + panel.styles.gutter.left + panel._body_content_width()
+
+
+def _body_screen_y0(panel: UsagePanel) -> int:
+    """Absolute screen row of composed body row 0 (the title cell)."""
+    return panel.region.y + panel.styles.gutter.top
+
+
+def _screen_mouse(cls, x: int, y: int):
+    """A Textual mouse event carrying SCREEN coordinates, for ``_forward_event``.
+
+    ``x``/``y`` and ``screen_x``/``screen_y`` are equal here because the event is
+    fed to the screen, which translates to widget-relative coordinates itself.
+    """
+    return cls(
+        widget=None,
+        x=x,
+        y=y,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=x,
+        screen_y=y,
+    )
+
+
+async def _grab_via_screen(panel: UsagePanel, app: OperatorApp, pilot, dx: int):
+    """Press ``dx`` cells from the bar's screen x (on the thumb row) via the
+    screen, drag to the track's foot, and return the observed grab/selection
+    state plus whether the offset advanced.
+
+    Each event is followed by ``pilot.pause()`` because ``_forward_event`` POSTS
+    the mouse event to the panel's message pump — ``on_mouse_down`` runs on the
+    next pump cycle, not synchronously — so a check before the pause would read
+    the pre-handler state and spuriously fail.
+    """
+    from textual import events
+
+    panel.set_view_offset(0)
+    app.screen.clear_selection()
+    panel._dragging = False
+
+    budget = panel._body_budget()
+    total = len(panel._body().lines)
+    first_row, count = panel._body_region(budget)
+    thumb_top, _ = panel._scrollbar_thumb(total, budget)
+    sx = _bar_screen_x(panel) + dx
+    sy = _body_screen_y0(panel) + first_row + thumb_top
+
+    app.screen._forward_event(_screen_mouse(events.MouseDown, sx, sy))
+    await pilot.pause()
+    dragging = panel._dragging
+    captured = app.mouse_captured
+    off0 = panel.view_offset
+
+    # Drag to the track's foot; the base move handler would extend a leaked
+    # selection here, which is exactly what must NOT happen.
+    app.screen._forward_event(
+        _screen_mouse(events.MouseMove, sx, _body_screen_y0(panel) + first_row + count - 1)
+    )
+    await pilot.pause()
+    off1 = panel.view_offset
+    selecting = app.screen._selecting
+    selections = dict(app.screen.selections)
+
+    app.screen._forward_event(_screen_mouse(events.MouseUp, sx, sy))
+    await pilot.pause()
+    return dragging, captured, off0, off1, selecting, selections
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dx", [0, -1, -2])
+async def test_a_scrollbar_grab_never_leaks_a_selection(dx: int) -> None:
+    """The reported bug: pressing on (dx=0) or just left of (dx=-1,-2) the bar
+    must grab the thumb and scroll, WITHOUT the base screen arming a text
+    selection that its move handler then extends into the messy highlight.
+
+    Driven through the real screen so the selection-arming that caused the bug
+    actually runs; the near-miss cases (dx<0) also exercise the forgiving pad.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_many_reports())
+        await pilot.pause()
+
+        dragging, captured, off0, off1, selecting, selections = await _grab_via_screen(
+            panel, app, pilot, dx
+        )
+
+    assert dragging, dx  # the panel took the grab
+    assert captured is panel, (dx, captured)  # and captured the mouse
+    assert not selecting, (dx, selecting)  # no selection in flight
+    assert selections == {}, (dx, selections)  # nothing selected
+    assert off1 > off0, (dx, off0, off1)  # the drag actually scrolled
+
+
+@pytest.mark.asyncio
+async def test_a_content_click_left_of_the_pad_still_selects() -> None:
+    """The pad is a narrow band: a press ``SCROLLBAR_GRAB_PAD + 1`` cells left of
+    the bar is ordinary content and must still arm a selection, so widening the
+    grab target cannot swallow a real text drag."""
+    from textual import events
+
+    from local_operator.tui.widgets.usage_panel import SCROLLBAR_GRAB_PAD
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_many_reports())
+        await pilot.pause()
+
+        panel.set_view_offset(0)
+        app.screen.clear_selection()
+        first_row, _ = panel._body_region(panel._body_budget())
+        sx = _bar_screen_x(panel) - (SCROLLBAR_GRAB_PAD + 1)
+        sy = _body_screen_y0(panel) + first_row + 1
+        app.screen._forward_event(_screen_mouse(events.MouseDown, sx, sy))
+        await pilot.pause()
+        grabbed = panel._dragging
+        armed = app.screen._select_state is not None
+        app.screen._forward_event(_screen_mouse(events.MouseUp, sx, sy))
+        await pilot.pause()
+
+    assert not grabbed  # the panel did NOT treat content as a grab
+    assert armed  # the base screen armed a selection, as for any content press
+
+
+@pytest.mark.asyncio
+async def test_a_press_on_a_non_scrollable_panel_is_not_a_grab() -> None:
+    """A report that fits reserves the gutter but paints no bar; a press in the
+    gutter column must fall through to the base handler (no grab, no capture),
+    the same non-affordance the "bar absent until it scrolls" test asserts."""
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        await pilot.pause()
+
+        first_row, _ = panel._body_region(panel._body_budget())
+        sx = _bar_screen_x(panel)
+        sy = _body_screen_y0(panel) + first_row
+        app.screen._forward_event(_screen_mouse(events.MouseDown, sx, sy))
+        await pilot.pause()
+        grabbed = panel._dragging
+        captured = app.mouse_captured
+        app.screen._forward_event(_screen_mouse(events.MouseUp, sx, sy))
+        await pilot.pause()
+
+    assert not grabbed
+    assert captured is not panel
+
+
 # -- the card ON the screen (the real app, so the fill is in the frame) -------
 def _painted_span(app: OperatorApp, row: int, fill: str) -> tuple[int, int, int]:
     """``(cells left of the card, cells right of it, its painted width)``.

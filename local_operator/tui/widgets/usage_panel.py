@@ -37,6 +37,7 @@ from typing import Any
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
@@ -73,6 +74,18 @@ TIER_INDENT = "  "
 #: right-aligned numbers one column left the instant the bar appeared, which is
 #: exactly the reflow the transcript avoids with ``scrollbar-gutter: stable``.
 SCROLLBAR_GUTTER_CELLS = 1
+
+#: How many cells LEFT of the bar column still count as a grab. The bar is a
+#: single hand-painted column, and a 1-cell mouse target is easy to miss; a miss
+#: lands on the selectable ``Static`` and arms a text selection whose drag reads
+#: as the messy highlight the user reported. Widening the HIT test (not the
+#: painted bar — see :meth:`UsagePanel._paint_scrollbar`) leftward is safe
+#: because the report's numbers are right-aligned to ``_body_content_width`` and
+#: the rightmost data columns sit well left of the reserved gutter, so a small
+#: left pad cannot steal a content click. Mirrors the transcript's grab pad
+#: (``TranscriptScreen.SCROLLBAR_GRAB_PAD`` in ``app.py``); do not raise it
+#: without a fresh geometry check against the widest realistic report row.
+SCROLLBAR_GRAB_PAD = 2
 
 #: Track vs thumb glyphs. The track is a hairline so the reserved column reads
 #: as a place to aim a drag rather than a right-hand border (the same reason the
@@ -777,6 +790,18 @@ class UsagePanel(Static):
         hit = self._scrollbar_hit(event)
         if hit is None:
             return
+        # Base ``Screen._forward_event`` arms a text selection on this MouseDown
+        # BEFORE this handler runs, because the panel is a selectable ``Static``;
+        # its base mouse-move handler would then extend that selection in parallel
+        # with the drag (the messy highlight, on both a near-miss and an exact
+        # hit). A scrollbar grab is not a selection, so clear whatever it armed as
+        # the grab takes hold. Guarded because the CSS-less test host and any
+        # pre-mount call have no screen to clear.
+        if self.is_mounted:
+            try:
+                self.screen.clear_selection()
+            except NoScreen:
+                pass
         event.stop()
         row_in_body, thumb_top, thumb_len = hit
         if thumb_top <= row_in_body < thumb_top + thumb_len:
@@ -823,12 +848,13 @@ class UsagePanel(Static):
         return self._content_offset(event).y
 
     def _scrollbar_hit(self, event) -> tuple[int, int, int] | None:  # noqa: ANN001
-        """``(row_in_body, thumb_top, thumb_len)`` if the press is on the bar.
+        """``(row_in_body, thumb_top, thumb_len)`` if the press is on the bar or
+        within :data:`SCROLLBAR_GRAB_PAD` cells left of it.
 
         ``None`` when the body is not scrollable, when the press is left of the
-        reserved gutter column, or when it is above/below the track. Sharing the
-        region and thumb maths with the painter is what keeps the grab target
-        exactly under the glyph the user sees.
+        pad band, or when it is above/below the track. Sharing the region and
+        thumb maths with the painter is what keeps the grab target exactly under
+        the glyph the user sees.
         """
         body = self._body()
         budget = self._body_budget()
@@ -837,8 +863,12 @@ class UsagePanel(Static):
             return None
         offset = self._content_offset(event)
         # The bar is the single content column just past the body's composed
-        # width (the reserved gutter). Content x, so no padding term is needed.
-        if offset.x != self._body_content_width():
+        # width (the reserved gutter). Accept a small pad to the LEFT of it too:
+        # the 1-cell target is easy to miss, and a miss would otherwise land on
+        # the selectable Static and arm the messy drag-highlight. Content x, so
+        # no padding term is needed.
+        bar = self._body_content_width()
+        if not (bar - SCROLLBAR_GRAB_PAD <= offset.x <= bar):
             return None
         first_row, count = self._body_region(budget)
         row_in_body = offset.y - first_row
