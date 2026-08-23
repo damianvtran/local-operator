@@ -1757,6 +1757,30 @@ class TranscriptView(ScrollableContainer):
         #: the two modes apart.
         self._pending_mounts: list[TranscriptBlock] | None = None
 
+    def on_mount(self) -> None:
+        """Give the system vertical scrollbar an open-hand hover cursor.
+
+        This is Layer B of the scrollbar affordance (Bug 2): the pointer shape a
+        Kitty-pointer-shape (OSC 22) terminal shows while hovering the bar, so
+        the 1-cell target reads as grabbable before the grab. Textual already
+        flips it to ``grabbing`` on capture and back on release
+        (``scrollbar.py`` ``_on_mouse_capture`` / ``_on_mouse_release``); this
+        only supplies the resting hover shape.
+
+        Set as an INLINE style rather than in ``local_operator.tcss`` on purpose:
+        a `TranscriptView > ScrollBar { pointer: grab; }` rule matches the
+        selector but is never delivered to the widget at runtime — system
+        scrollbars take Textual's shared style-cache branch
+        (``Stylesheet.update_nodes``), and the computed ``pointer`` stays
+        ``default`` through compose/scroll/resize (verified in review round 1,
+        M1). The inline style bypasses that cache and sticks across every natural
+        state. It reaches ONLY terminals that speak the pointer-shape protocol;
+        elsewhere it is a silent no-op, which is why the drawn colour ramp
+        (``scrollbar-color-*`` in the tcss) is the real, everywhere-visible
+        affordance and this is a progressive-enhancement bonus.
+        """
+        self.vertical_scrollbar.styles.pointer = "grab"
+
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired after every :meth:`clear_blocks`."""
         self._on_clear = hook

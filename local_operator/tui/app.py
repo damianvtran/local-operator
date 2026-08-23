@@ -36,11 +36,13 @@ from rich.padding import Padding
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
+from textual import events
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.css.query import NoMatches
+from textual.errors import NoWidget
 from textual.events import (
     AppBlur,
     AppFocus,
@@ -932,6 +934,98 @@ class TranscriptScreen(Screen[None]):
 
     def action_copy_text(self) -> None:
         raise SkipAction()
+
+    #: How many cells LEFT of the 1-cell scrollbar still count as "grabbing the
+    #: bar". The bar is deliberately 1 cell (D4/D21/D27) so it never reads as a
+    #: right border, but a 1-cell mouse target is easy to miss by a column — and
+    #: a miss lands on selectable content, arming a text selection whose drag
+    #: then trips Textual's selection auto-scroll (screen.py _check_auto_scroll).
+    #: That is the reported "it scrolls but leaves a messy highlight" bug.
+    #: Widening the INPUT hit area (not the visual bar) fixes it at the source
+    #: without touching the reserved gutter.
+    #:
+    #: 2 (a 3-cell effective target: the bar plus the two pad columns to its
+    #: left) because a 1-cell forgiving zone is stingy — a review walk found it
+    #: too easy to still miss. The bar is flush-right against the reserved
+    #: gutter, so a miss can ONLY be leftward; there is no rightward content to
+    #: protect. A content click 3+ cells in is untouched, so the pad still
+    #: cannot steal an ordinary selection (guarded by the "three cells left
+    #: still selects" test). Do not raise this further without a fresh geometry
+    #: check: the pad is measured against the transcript's own right padding,
+    #: and a larger value would begin eating real content columns.
+    SCROLLBAR_GRAB_PAD = 2
+
+    def _redirect_gutter_grab(self, event: events.MouseDown) -> events.MouseDown | None:
+        """Rebuild a near-miss mousedown as a grab ON the scrollbar column.
+
+        Returns a ``MouseDown`` relocated onto the scrollbar's x when ``event``
+        fell within :attr:`SCROLLBAR_GRAB_PAD` cells to the LEFT of a visible
+        transcript scrollbar and inside the scrollbar's vertical extent (the
+        whole track, not just the thumb); otherwise ``None`` (leave the event
+        untouched). Only the coordinate moves — button/modifiers/screen offset
+        are preserved — so downstream handling is identical to a true thumb
+        click: the redirected event hits the ``ScrollBar``
+        (``allow_select=False``), so ``Screen._forward_event`` sets
+        ``_select_state`` to ``None`` and no selection is ever armed, then the
+        scrollbar's ``@mouse.down: grab`` starts a real grab. A near-miss over
+        the empty track (thumb elsewhere) redirects to a track page-scroll
+        rather than a selection, which is the correct, benign outcome.
+
+        The caller (:meth:`_forward_event`) has already established that no drag
+        is in progress, so this does not re-check ``mouse_captured``.
+        """
+        # Two transcripts exist in subagent mode (main hidden + child). Two gates
+        # keep the redirect off a bar the user cannot see:
+        #   - `show_vertical_scrollbar` skips a view that is not overflowing, so
+        #     a short transcript never claims the gutter column;
+        #   - a display:none view (the hidden main transcript) is NOT in the
+        #     compositor, so `find_widget` raises `NoWidget` and we skip it. Its
+        #     `show_vertical_scrollbar` can still read True while hidden, so the
+        #     compositor lookup — not that flag — is what excludes it.
+        for view in self.query(TranscriptView):
+            if not view.show_vertical_scrollbar:
+                continue
+            try:
+                region = self._compositor.find_widget(view.vertical_scrollbar).region
+            except NoWidget:
+                continue
+            # Anywhere in the scrollbar's vertical extent — the whole TRACK, not
+            # only the thumb. A mousedown above/below the bar is ordinary content
+            # and must stay selectable; within the track's height a near-miss is
+            # a scroll gesture whichever way the thumb happens to be positioned.
+            if not (region.y <= event.y < region.y + region.height):
+                continue
+            # The pad columns immediately left of the bar. A click
+            # SCROLLBAR_GRAB_PAD+1 cells in is untouched (guarded by the "three
+            # cells left still selects" test).
+            if region.x - self.SCROLLBAR_GRAB_PAD <= event.x < region.x:
+                return events.MouseDown(
+                    event.widget,
+                    x=region.x,
+                    y=event.y,
+                    # Public accessors (both 0 for a MouseDown); preserved so the
+                    # rebuilt event is indistinguishable from a true thumb click.
+                    delta_x=event.delta_x,
+                    delta_y=event.delta_y,
+                    button=event.button,
+                    shift=event.shift,
+                    meta=event.meta,
+                    ctrl=event.ctrl,
+                    screen_x=region.x,
+                    screen_y=event.y,
+                    style=event.style,
+                )
+        return None
+
+    def _forward_event(self, event: events.Event) -> None:
+        # Give the 1-cell scrollbar a forgiving grab target BEFORE the base
+        # class can arm a text selection on the content column next to it.
+        # Hand the rebuilt event to super() — it owns event.stop()/forwarding.
+        if isinstance(event, events.MouseDown) and self.app.mouse_captured is None:
+            redirected = self._redirect_gutter_grab(event)
+            if redirected is not None:
+                event = redirected
+        super()._forward_event(event)
 
 
 class OperatorApp(App[None]):
