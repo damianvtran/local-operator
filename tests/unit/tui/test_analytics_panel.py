@@ -42,6 +42,7 @@ def _agg() -> UsageAggregate:
     agg.components["tool_results"] = 900_000
     agg.components["system_prompt"] = 500_000
     agg.components["tool_schemas"] = 300_000
+    agg.components["images"] = 400_000
     sub = UsageAggregate(
         calls=100,
         input_tokens=500_000,
@@ -195,11 +196,23 @@ def test_report_shows_totals_and_split():
     assert "(2 failed)" in text
     # authoritative headline numbers
     assert "Cache hit rate" in text
+    # NESTED input breakdown: the flat "Input" row is gone; the full context
+    # read is the parent and fresh/cache-read/cache-write are its sub-rows. The
+    # small "Fresh (uncached)" figure must be unmistakably the uncached slice,
+    # never labelled as "Input" (which read as a total) or "user input".
+    assert "Context read" in text
+    assert "Fresh (uncached)" in text
+    assert "Cache read" in text
+    assert "Cache write" in text
+    # The old flat label must not survive as a standalone Totals row.
+    assert not any(line.strip().startswith("Input ") for line in text.splitlines())
     # the estimated component split, largest first
     assert "Where input went" in text
     assert "estimated" in text
     assert "Conversation" in text
     assert "System prompt" in text
+    # image-vs-text split surfaces once image tokens are present
+    assert "Images (est.)" in text
     # per-provider and per-session tables
     assert "By provider" in text
     assert "anthropic" in text

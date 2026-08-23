@@ -478,13 +478,51 @@ def build_report(
             row.append(f"  {note}", style=dim)
         return row
 
-    lines.append(kv("Total billed", format_tokens(aggregate.total_tokens) + " tokens"))
     lines.append(
         kv(
-            "Input",
+            "Total billed",
+            format_tokens(aggregate.total_tokens) + " tokens",
+            f"{format_tokens(aggregate.context_tokens)} in · "
+            f"{format_tokens(aggregate.output_tokens)} out",
+        )
+    )
+    # NESTED input breakdown. The old flat "Input NNN" row read as "total input"
+    # and, at a 97% cache-hit rate, showed a tiny number (only the fresh/uncached
+    # slice) that looked like a bug. All three sub-values are AUTHORITATIVE
+    # provider counts (not estimates), so the tree makes explicit that the small
+    # "Fresh (uncached)" figure sits UNDER the full "Context read" total, with
+    # cache reads/writes as its siblings. The wording is deliberate: "Fresh
+    # (uncached)" is ALL uncached input (new user turns plus freshly-added tool
+    # results/reads/system content not yet cached), NOT "user input" — labelling
+    # it as user messages would be wrong. ``kv`` pads the name to 22 uniformly,
+    # so the leading space + tree glyph on the sub-rows indents them while the
+    # values stay column-aligned.
+    lines.append(
+        kv(
+            "Context read",
+            format_tokens(aggregate.context_tokens),
+            "full input read, all calls summed",
+        )
+    )
+    lines.append(
+        kv(
+            " ├ Fresh (uncached)",
             format_tokens(aggregate.input_tokens),
-            f"+{format_tokens(aggregate.cache_read_tokens)} cache read, "
-            f"{format_tokens(aggregate.cache_write_tokens)} cache write",
+            "new input, billed at full rate",
+        )
+    )
+    lines.append(
+        kv(
+            " ├ Cache read",
+            format_tokens(aggregate.cache_read_tokens),
+            "input served from cache",
+        )
+    )
+    lines.append(
+        kv(
+            " └ Cache write",
+            format_tokens(aggregate.cache_write_tokens),
+            "new input written to cache",
         )
     )
     lines.append(
