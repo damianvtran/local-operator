@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -660,6 +661,12 @@ def live_session_owner(config_dir: Path, session_id: str) -> int | None:
         return None
     if pid <= 0:
         return None
+    # Windows has no signal 0 — ``os.kill`` there TERMINATES the target
+    # (see ``session.retention._process_alive``). A parseable marker is
+    # treated as live rather than probed, so a ``/resume`` cannot kill
+    # the phone-started child it is trying to share (F2).
+    if sys.platform == "win32":
+        return pid
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

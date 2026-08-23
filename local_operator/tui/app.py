@@ -3188,21 +3188,23 @@ class OperatorApp(App[None]):
         )
 
         try:
-            concrete = (
-                resume_id
-                if resume_id == RESUME_LATEST
-                else resolve_resume_id(config_dir(), resume_id)
-            )
+            # Resolve ``@latest`` to a concrete id BEFORE the owner check.
+            # Skipping the sentinel left bare ``/resume`` / ``/resume @latest``
+            # on the second-writer path this method exists to close (F1).
+            concrete = resolve_resume_id(config_dir(), resume_id)
         except Exception:
             concrete = resume_id
         if concrete != RESUME_LATEST:
             owner = live_session_owner(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
-                notice(
-                    f"session {concrete} is already live in pid {owner} — "
-                    "watch and steer it from this TUI's phone list, or "
-                    "from the process that owns it; a second writer would "
-                    "open empty"
+                # A refused navigation is not conversation content: keep the
+                # splash, same as the other /resume rejections (D1). Name the
+                # owning process and the next step in user words (D2).
+                self._system_notice(
+                    f"session {concrete} is already open in another process "
+                    f"(pid {owner}) — watch and steer it there, or from the "
+                    "phone session list",
+                    "warning",
                 )
                 return
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]

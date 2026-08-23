@@ -59,6 +59,27 @@ def test_a_live_pid_marker_is_the_owner_of_the_session(tmp_path: Path, monkeypat
     assert live_session_owner(tmp_path, "missing000001") is None
 
 
+def test_a_windows_live_marker_is_trusted_without_os_kill(tmp_path: Path, monkeypatch) -> None:
+    """Windows has no signal 0; probing would terminate the owning child."""
+    import os
+
+    session = tmp_path / "sessions" / "live00000002"
+    session.mkdir(parents=True)
+    (session / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    (session / ".session.pid").write_text("4242", encoding="utf-8")
+
+    killed: list[tuple[int, int]] = []
+
+    def _kill(pid: int, sig: int) -> None:
+        killed.append((pid, sig))
+        raise AssertionError("os.kill must not run on win32")
+
+    monkeypatch.setattr("local_operator.resume.sys.platform", "win32")
+    monkeypatch.setattr(os, "kill", _kill)
+    assert live_session_owner(tmp_path, "live00000002") == 4242
+    assert killed == []
+
+
 def test_the_journalled_title_type_matches_the_writer():
     """``resume`` may not import the engine, so it spells the entry type again.
 

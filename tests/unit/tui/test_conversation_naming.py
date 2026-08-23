@@ -38,7 +38,7 @@ from local_operator.tui.app import RETITLE_MIN_GAP_S, OperatorApp
 from local_operator.tui.terminal_title import TerminalTitle
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 
 
 class _GatedSession(FakeSession):
@@ -448,7 +448,23 @@ async def test_resume_of_a_live_session_does_not_open_a_second_writer(
         app._resume_session("live00000001", notice)
         await _settle()
         assert rebuilt["called"] is False
-        assert any("already live" in body for body in notices)
+        # The refuse is a system notice (splash stays), not the slash
+        # receipt callback — look at the transcript, not ``notices``.
+        text = _transcript_text(app)
+        assert "already open" in text
+        assert "pid 4242" in text
+        assert "second writer" not in text
+        assert app._session is session
+        # Splash survives a refused navigation (D1).
+        from local_operator.tui.widgets.welcome import WelcomeView
+
+        assert app.query_one(WelcomeView).display is True
+
+        # F1: ``@latest`` must resolve then refuse, not skip the owner check.
+        rebuilt["called"] = False
+        app._resume_session("@latest", notice)
+        await _settle()
+        assert rebuilt["called"] is False
         assert app._session is session
 
 
