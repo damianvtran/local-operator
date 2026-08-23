@@ -488,14 +488,12 @@ class EventController:
             # provider was the authority for the whole turn. Floored through the
             # shared pricing helper rather than a bare ``float()``: a negative or
             # malformed figure must not inflate a credit into the running total.
-            reported = getattr(message_usage, "usd_cost", None)
-            if reported is not None:
-                from local_operator.model.configure import _usage_cost
+            from local_operator.model.configure import _usage_cost
 
-                amount = _usage_cost(message_usage)
-                if amount is not None:
-                    totals["usd"] += amount
-                    usd_reported = True
+            amount = _usage_cost(message_usage)
+            if amount is not None:
+                totals["usd"] += amount
+                usd_reported = True
             usage = message_usage
             context_tokens = (
                 getattr(message_usage, "context_tokens", None)

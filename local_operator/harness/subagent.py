@@ -675,12 +675,11 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     # that did not (mix-and-match is not a real provider today) leave it alone.
     # Floored via the pricing helper so a malformed or negative amount cannot
     # inflate a credit into the child's running total.
-    if usage.usd_cost is not None:
-        from local_operator.model.configure import _usage_cost
+    from local_operator.model.configure import _usage_cost
 
-        amount = _usage_cost(usage)
-        if amount is not None:
-            total.usd_cost = (total.usd_cost or 0.0) + amount
+    amount = _usage_cost(usage)
+    if amount is not None:
+        total.usd_cost = (total.usd_cost or 0.0) + amount
     if usage.context_tokens is not None:
         total.context_tokens = usage.context_tokens
 

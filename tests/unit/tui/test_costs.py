@@ -109,6 +109,20 @@ def test_turn_cost_reported_malformed_falls_back_to_estimate() -> None:
         assert turn_cost("anthropic/opus", usage) == pytest.approx(10.0)
 
 
+def test_turn_cost_non_finite_reported_falls_back_to_estimate() -> None:
+    """A non-finite reported amount (``inf``/``NaN``) is wire-reachable via
+    ``json.loads`` and, left unfloored, renders an infinite dollar figure. It
+    must fall back to the finite table estimate rather than paint infinity."""
+    import math
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        with _resolving(opus=_PRICED):
+            usage = Usage(input_tokens=1_000_000, output_tokens=0, usd_cost=bad)
+            result = turn_cost("anthropic/opus", usage)
+            assert result == pytest.approx(10.0)
+            assert result is not None and math.isfinite(result)
+
+
 # ---------------------------------------------------------------------------
 # job_cost — one child
 # ---------------------------------------------------------------------------

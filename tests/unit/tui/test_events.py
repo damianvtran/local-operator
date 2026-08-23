@@ -431,6 +431,29 @@ def test_agent_end_sums_provider_reported_dollars_across_messages() -> None:
     assert ended and ended[-1].usage.usd_cost == pytest.approx(0.003)
 
 
+def test_agent_end_non_finite_reported_dollar_does_not_poison_the_total() -> None:
+    """A non-finite reported amount on one message (wire-reachable via
+    ``json.loads``'s ``Infinity``/``NaN``) must not be summed into the turn's
+    aggregate. ``inf + x == inf`` would pin the total at infinity forever, so the
+    bad message is dropped and only the valid neighbours contribute a finite sum."""
+    import math
+
+    from local_operator.harness.types import Usage
+
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    good = Message.assistant("")
+    good.usage = Usage(input_tokens=10, output_tokens=0, usd_cost=0.002)
+    poison = Message.assistant("")
+    poison.usage = Usage(input_tokens=20, output_tokens=0, usd_cost=float("inf"))
+    session.emit(AgentEndEvent(messages=[good, poison]))
+    ended = [m for m in app.posted if isinstance(m, TurnEnded)]
+    assert ended
+    total = ended[-1].usage.usd_cost
+    assert total == pytest.approx(0.002)
+    assert total is not None and math.isfinite(total)
+
+
 def test_agent_end_reported_dollar_is_none_when_no_message_carried_one() -> None:
     """A turn whose calls carried only token counts must keep ``usd_cost`` as
     ``None`` ("provider did not report"), so the app falls back to the estimate."""

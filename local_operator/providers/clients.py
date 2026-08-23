@@ -22,6 +22,7 @@ import asyncio
 import email.utils
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -134,8 +135,12 @@ def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
         cost = float(value)
     except (TypeError, ValueError):
         return None
-    if cost < 0:
-        # A negative bill is malformed provider data, not a credit to hand back.
+    if not math.isfinite(cost) or cost < 0:
+        # A negative bill is malformed provider data, not a credit to hand back,
+        # and a non-finite one (``json.loads`` parses the non-standard literals
+        # ``Infinity``/``NaN`` by default, so ``inf`` is wire-reachable) would
+        # poison every summed total forever — ``inf + x == inf`` never recovers.
+        # Both fall through to ``None`` so the token×rate estimate answers.
         return None
     return cost
 

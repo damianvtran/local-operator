@@ -21,6 +21,7 @@ import dataclasses
 import functools
 import inspect
 import logging
+import math
 import os
 import re
 import time
@@ -3034,7 +3035,12 @@ def _usage_cost(usage: Any) -> float | None:
         cost = float(value)
     except (TypeError, ValueError):
         return None
-    return cost if cost >= 0 else None
+    # Require finiteness as well as a non-negative sign. ``inf`` is wire-reachable
+    # (``json.loads`` accepts the non-standard ``Infinity``/``NaN`` literals by
+    # default), passes a bare ``>= 0`` guard, and — because ``inf + x == inf`` —
+    # would permanently pin every summed turn/session/child total at infinity with
+    # no recovery. Non-finite falls back to the estimate, exactly like negatives.
+    return cost if (math.isfinite(cost) and cost >= 0) else None
 
 
 def _usage_field(usage: Any, name: str) -> int:

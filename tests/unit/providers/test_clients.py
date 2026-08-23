@@ -390,6 +390,17 @@ def test_usd_cost_coerces_and_rejects_malformed() -> None:
     assert _usd_cost({"cost": -1}) is None
     assert _usd_cost({"cost": "not-a-number"}) is None
     assert _usd_cost(None) is None
+    # Non-finite is wire-reachable: ``json.loads`` parses the non-standard
+    # ``Infinity``/``NaN`` literals by default, so a provider can emit them. An
+    # unfloored ``inf`` would pin every summed total at infinity forever
+    # (``inf + x == inf``), so both the JSON literal and the numeric-string
+    # spelling must fall through to ``None`` and let the estimate answer.
+    assert _usd_cost(json.loads('{"cost": Infinity}')) is None
+    assert _usd_cost(json.loads('{"cost": -Infinity}')) is None
+    assert _usd_cost(json.loads('{"cost": NaN}')) is None
+    assert _usd_cost({"cost": float("inf")}) is None
+    assert _usd_cost({"cost": "inf"}) is None
+    assert _usd_cost({"cost": "nan"}) is None
 
 
 async def test_openai_compat_tool_history_roundtrip() -> None:

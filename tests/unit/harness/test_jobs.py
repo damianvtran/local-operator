@@ -64,6 +64,29 @@ def test_accumulate_usage_sums_provider_reported_dollars() -> None:
     assert job.usage.usd_cost == pytest.approx(0.003)
 
 
+def test_accumulate_usage_non_finite_reported_dollar_does_not_poison_total() -> None:
+    """A non-finite child figure (``inf``/``NaN``, wire-reachable via
+    ``json.loads``) must be dropped, not summed: ``inf + x == inf`` would pin the
+    child's running total at infinity for the rest of its life with no recovery."""
+    import math
+
+    from local_operator.harness.subagent import _accumulate_usage
+
+    class _Job:
+        def __init__(self) -> None:
+            self.usage = None
+
+    job = _Job()
+    _accumulate_usage(job, Usage(input_tokens=10, output_tokens=0, usd_cost=0.001))
+    _accumulate_usage(job, Usage(input_tokens=20, output_tokens=0, usd_cost=float("inf")))
+    assert job.usage is not None
+    # The poison message is dropped; only the valid one contributes, and a later
+    # valid message still folds in cleanly because the total was never poisoned.
+    _accumulate_usage(job, Usage(input_tokens=5, output_tokens=0, usd_cost=0.002))
+    assert job.usage.usd_cost == pytest.approx(0.003)
+    assert job.usage.usd_cost is not None and math.isfinite(job.usage.usd_cost)
+
+
 def test_accumulate_usage_leaves_reported_dollar_none_when_unreported() -> None:
     """A child whose providers never report a dollar figure keeps ``usd_cost``
     ``None`` — "not reported" is not a sum of zeros and must fall back to the

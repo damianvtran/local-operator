@@ -513,6 +513,22 @@ def test_cost_for_usage_treats_a_malformed_reported_dollar_as_absent() -> None:
     ) == pytest.approx(10.0)
 
 
+def test_cost_for_usage_non_finite_reported_dollar_falls_back_to_estimate() -> None:
+    """A non-finite reported amount is malformed provider data and is
+    wire-reachable (``json.loads`` accepts ``Infinity``/``NaN`` by default). An
+    unfloored ``inf`` would poison every summed total forever, so it must degrade
+    to the token estimate exactly like a negative or non-numeric amount, and the
+    result must be finite."""
+    import math
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        result = cost_for_usage(
+            "openrouter", _priced(), Usage(input_tokens=1_000_000, usd_cost=bad)
+        )
+        assert result == pytest.approx(10.0)
+        assert math.isfinite(result)
+
+
 def test_cost_for_usage_reported_zero_is_a_fact_not_an_absence() -> None:
     """A real ``0.0`` from the provider means "billed as free", which is not the
     same as "not reported" — it must return 0.0, not fall through to the estimate."""
