@@ -1441,6 +1441,12 @@ class OperatorApp(App[None]):
         # same split `_provisional_name` already makes.
         self._last_titled_turn_count: int = 0
         self._theme_refresh_count: int = 0
+        # Opener text of a naming attempt that returned nothing. A quota
+        # fallback pins AFTER the isolated naming call has already 429'd on
+        # the dead primary, so the next substantive message is too late —
+        # the phone stays "untitled" for the whole first turn. The route
+        # edge re-fires this opener once a serving model exists.
+        self._pending_name_text: str = ""
         # A turn holds this for its whole provider round trip, and `_dispose`
         # waits on it so a session is never torn down under a live request.
         # Naming does NOT take it: the title call is `isolated` (see
@@ -2759,6 +2765,7 @@ class OperatorApp(App[None]):
         # from the first title it lands, so nothing is lost that mattered.
         self._last_titled_turn_count = 0
         self._theme_refresh_count = 0
+        self._pending_name_text = ""
         # The spend ledger is the dead conversation's — unless the reload lands
         # back on the SAME conversation, which `/reload` now does. Reset it here
         # so `/new` and `/resume` cannot inherit a figure they did not spend,
@@ -3160,10 +3167,44 @@ class OperatorApp(App[None]):
         Shared by the picker and by ``/resume <id>`` so both paths reload
         identically. Failures inside the new factory surface through
         ``_on_boot_failed`` exactly as a bad ``--resume`` does.
+
+        A session that is ALREADY live in another process (a phone-started
+        child, another TUI) is not reopened here. Two writers on one
+        transcript is how a resume of a mobile session painted the splash:
+        the second process claimed the directory, replayed a mid-write
+        journal, and left the first process as the only one still appending.
+        The live process already publishes to the phone; this TUI stays
+        put and names that process so the user can watch and steer from
+        either front end.
         """
         if self._resume_factory is None:
             self._system_notice("resume unavailable: no resume-capable launcher", "warning")
             return
+        from local_operator.paths import config_dir
+        from local_operator.resume import (
+            RESUME_LATEST,
+            live_session_owner,
+            resolve_resume_id,
+        )
+
+        try:
+            concrete = (
+                resume_id
+                if resume_id == RESUME_LATEST
+                else resolve_resume_id(config_dir(), resume_id)
+            )
+        except Exception:
+            concrete = resume_id
+        if concrete != RESUME_LATEST:
+            owner = live_session_owner(config_dir(), concrete)
+            if owner is not None and owner != os.getpid():
+                notice(
+                    f"session {concrete} is already live in pid {owner} — "
+                    "watch and steer it from this TUI's phone list, or "
+                    "from the process that owns it; a second writer would "
+                    "open empty"
+                )
+                return
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
         self.run_worker(self._reload_session(), thread=False, group="session")
@@ -5665,6 +5706,23 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 - a phone bridge must never break the ask
             logger.debug("mobile ask-advanced notify failed", exc_info=True)
 
+    def _notify_mobile_title(self, name: str) -> None:
+        """Push a title (generated, renamed, or provisional) to the phone.
+
+        The fold only re-reads ``session.conversation_name`` on an event, and
+        a title lands on a detached worker with no event of its own. A
+        provisional stand-in never even reaches the session store. Without
+        this the phone stays on "untitled" for the whole first turn — and
+        forever if the isolated naming call 429s on a dead primary.
+        """
+        handle = self._mobile_handle
+        if handle is None:
+            return
+        try:
+            handle.note_title(name)
+        except Exception:  # noqa: BLE001 — a phone bridge must never break naming
+            logger.debug("mobile title notify failed", exc_info=True)
+
     def _settle_ask_picker(self) -> None:
         """Take down a live ``ask`` picker, answering with whatever was chosen.
 
@@ -7065,6 +7123,11 @@ class OperatorApp(App[None]):
             return
         self._provisional_name = label
         self._status.update(conversation_name=label)
+        # The band is DISPLAY-only; the phone reads the session store, which
+        # is still empty. Push the stand-in so the list and header name the
+        # conversation the same frame the tab does, instead of "untitled"
+        # until a generated title lands (or forever, if naming 429s).
+        self._notify_mobile_title(label)
 
     def _clock(self) -> float:
         """Monotonic seconds, as one overridable seam.
@@ -7273,7 +7336,12 @@ class OperatorApp(App[None]):
             # that is the point of it being a stand-in and not a placeholder.
             if not session.conversation_name:
                 self._name_requested = False
+                # Remember the opener so a fallback that pins AFTER this
+                # isolated 429 can re-fire naming on the serving model
+                # without waiting for the next user message.
+                self._pending_name_text = text
             return
+        self._pending_name_text = ""
         self._store_title(session, title)
 
     def _charge_theme_refresh(self, session: SessionProtocol, turn_count: int) -> None:
@@ -7348,6 +7416,10 @@ class OperatorApp(App[None]):
             # `StatusLine._sync_terminal_title`), so both surfaces follow from
             # this one call and neither can lag the other by a frame.
             self._status.update(conversation_name=stored)
+        # The title lands on a detached worker AFTER the last turn event, so
+        # the mobile fold never re-reads it on its own. Push now so the
+        # phone's header and list update the same moment the band does.
+        self._notify_mobile_title(stored)
         return stored
 
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
@@ -7396,6 +7468,7 @@ class OperatorApp(App[None]):
             # `StatusLine._sync_terminal_title`), so neither surface can lag the
             # other by a frame.
             self._status.update(conversation_name=stored)
+        self._notify_mobile_title(stored)
         # `stored`, not `arg`: the store collapses whitespace and caps the length
         # (`MAX_TITLE_CHARS`), and the receipt's whole job is to show the title
         # that is actually in force. Truncated rather than REJECTED, unlike a
@@ -12952,6 +13025,13 @@ class OperatorApp(App[None]):
             effort=_effort_label(session) if session is not None else "",
             context_window=_context_window(session) if session is not None else 0,
         )
+        # Naming is isolated (no fallback chain) and often fires BEFORE the
+        # turn pins a fallback. A 429 on the dead primary released the latch
+        # and stashed the opener; now a serving model exists, so retry once.
+        pending = self._pending_name_text
+        if pending and session is not None and not session.conversation_name:
+            self._pending_name_text = ""
+            self._maybe_name_conversation(pending)
 
     def on_retry_started(self, message: RetryStarted) -> None:
         body = f"retry {message.attempt}: {message.error}"

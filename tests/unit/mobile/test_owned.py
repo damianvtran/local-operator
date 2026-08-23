@@ -26,6 +26,7 @@ class FakeSession:
     def __init__(self) -> None:
         self.session_id = "sess-1"
         self.model_label = "test/model"
+        self.effective_model_label = "test/model"
         self.model = None
         self.conversation_name = ""
         self.is_streaming = False
@@ -279,6 +280,62 @@ async def test_naming_worker_stores_a_title_once() -> None:
     for _ in range(5):
         await asyncio.sleep(0)
     assert session._named == [("A Neat Title", False)]
+
+
+@pytest.mark.asyncio
+async def test_first_prompt_wears_a_provisional_title_before_the_model_answers() -> None:
+    """The phone list must not stay "untitled" for the whole first turn.
+
+    Isolated naming is a round trip (and often a 429 on a dead primary). The
+    opener excerpt is already in hand, so the projection wears it the same
+    frame the prompt is accepted — matching the TUI band.
+    """
+    handle, session = make_handle()
+    session.title_reply = ""  # naming will fail; the stand-in must still land
+
+    handle._maybe_name_conversation("review what regressed in mobile titles")
+    assert handle._fold.projection.conversation_name == "Review what regressed in mobile titles"
+    assert session.conversation_name == ""
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+    # Failure released the latch and stashed the opener for a route-edge retry.
+    assert handle._name_requested is False
+    assert handle._pending_name_text == "review what regressed in mobile titles"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_name_retries_once_a_fallback_pins() -> None:
+    """Quota-exhausted naming is isolated; the turn's fallback must re-fire it."""
+    from local_operator.harness.types import ModelChangeEvent
+
+    handle, session = make_handle()
+    session.title_reply = ""
+    handle.subscribe(lambda: None)
+    handle._maybe_name_conversation("review what regressed in mobile titles")
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert session.conversation_name == ""
+    assert handle._pending_name_text
+
+    session.title_reply = "<title>Mobile title sync</title>"
+    # The real session updates effective_model BEFORE emitting; _refresh_state
+    # then re-reads that label. A fake that only emits would have the fold
+    # paint the fallback and the refresh clobber it back to the selection.
+    session.effective_model_label = "xai/grok-4.6"
+    session.emit(
+        ModelChangeEvent(
+            provider="xai",
+            model_id="grok-4.6",
+            is_fallback=True,
+            reason="quota exhausted",
+        )
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    assert session.conversation_name == "Mobile title sync"
+    assert handle._pending_name_text == ""
+    assert handle._fold.projection.model_label == "xai/grok-4.6"
 
 
 @pytest.mark.asyncio

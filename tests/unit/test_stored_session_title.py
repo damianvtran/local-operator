@@ -18,6 +18,7 @@ from local_operator.resume import (
     TITLE_SIDECAR_NAME,
     _read_title_sidecar,
     backfill_session_titles,
+    live_session_owner,
     read_title_names,
     session_name,
     stored_session_title,
@@ -40,6 +41,22 @@ def _session(tmp_path: Path, opener: str, *titles: tuple[str, bool]) -> Path:
 
     asyncio.run(build())
     return session
+
+
+def test_a_live_pid_marker_is_the_owner_of_the_session(tmp_path: Path, monkeypatch) -> None:
+    """A second writer must not reopen a conversation another process hosts."""
+    import os
+
+    session = tmp_path / "sessions" / "live00000001"
+    session.mkdir(parents=True)
+    (session / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    (session / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+    assert live_session_owner(tmp_path, "live00000001") == os.getpid()
+
+    (session / ".session.pid").write_text("2147483646", encoding="utf-8")
+    monkeypatch.setattr(os, "kill", lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+    assert live_session_owner(tmp_path, "live00000001") is None
+    assert live_session_owner(tmp_path, "missing000001") is None
 
 
 def test_the_journalled_title_type_matches_the_writer():
