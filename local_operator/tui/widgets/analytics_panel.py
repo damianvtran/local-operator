@@ -29,6 +29,7 @@ it is the right way to pin what the screen SAYS.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from rich.style import Style
 from rich.text import Text
@@ -42,9 +43,31 @@ from local_operator.analytics.model import (
     COMPONENT_KEYS,
     COMPONENT_LABELS,
     UsageAggregate,
+    UsagePeriod,
     short_session_label,
 )
 from local_operator.tui import theme as theme_mod
+
+
+class _CostLike(Protocol):
+    """The cost interface both a scope and a calendar bucket expose.
+
+    ``format_cost``/``_append_cost`` render the same ``$—``/``$X.XX``/``$X+``
+    honesty for a :class:`UsageAggregate` (a provider/session scope) AND a
+    :class:`UsagePeriod` (a day/month bucket). Rather than duplicate the money
+    formatter or widen the annotation to a lie, this Protocol names the three
+    members both dataclasses share, so the formatter is typed for exactly what
+    it reads.
+    """
+
+    @property
+    def cost_usd(self) -> float: ...
+
+    @property
+    def cost_is_known(self) -> bool: ...
+
+    @property
+    def cost_is_partial(self) -> bool: ...
 
 
 def format_tokens(n: int) -> str:
@@ -86,7 +109,7 @@ def format_percent(fraction: float | None) -> str:
     return f"{round(pct)}%"
 
 
-def format_cost(aggregate: "UsageAggregate") -> str:
+def format_cost(aggregate: "_CostLike") -> str:
     """A dollar figure for one scope: ``$12.34`` / ``$1.2k`` / ``$0.0042`` / ``$—``.
 
     Reads three states off the aggregate, because "how much did this cost" has
@@ -119,9 +142,7 @@ def format_cost(aggregate: "UsageAggregate") -> str:
     return body + ("+" if aggregate.cost_is_partial else "")
 
 
-def _append_cost(
-    block: Text, aggregate: "UsageAggregate", cell: int, fg: Style, dim: Style
-) -> None:
+def _append_cost(block: Text, aggregate: "_CostLike", cell: int, fg: Style, dim: Style) -> None:
     """Append a right-aligned cost cell, with the lower-bound ``+`` in ``dim``.
 
     The ``+`` is a STATUS FLAG, not a digit (review D1): rendering it in the same
@@ -237,12 +258,185 @@ def _section_header(title: str, meta: str = "") -> Text:
     return row
 
 
-def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
+#: The two metrics the daily/monthly bar charts can plot. ``cost`` is the
+#: default because "how much am I spending over time" is the stated purpose of
+#: the historical view; ``t`` toggles to ``tokens`` for a run whose models are
+#: mostly unpriced (where cost bars would all be floor marks). Held as a small
+#: vocabulary so the toggle, the header, and the renderer cannot disagree on the
+#: legal values.
+METRIC_COST = "cost"
+METRIC_TOKENS = "tokens"
+
+
+def _month_name(mm: int) -> str:
+    return (
+        "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()[mm - 1] if 1 <= mm <= 12 else "?"
+    )
+
+
+def _period_label(period: str) -> str:
+    """A compact, human bucket label: ``Aug 21`` for a day, ``Aug 2026`` for a month.
+
+    Parses the stored ``YYYY-MM-DD`` / ``YYYY-MM`` key rather than reformatting
+    a datetime, because the key is already the local calendar bucket the store
+    chose (see the schema comment) and re-deriving it from a timestamp risks a
+    tz round-trip disagreeing with what was recorded. An unparseable key falls
+    back to itself so a malformed row is still legible, never a crash.
+    """
+    parts = period.split("-")
+    try:
+        if len(parts) == 3:
+            return f"{_month_name(int(parts[1]))} {int(parts[2]):02d}"
+        if len(parts) == 2:
+            return f"{_month_name(int(parts[1]))} {parts[0]}"
+    except (ValueError, IndexError):
+        return period
+    return period
+
+
+def _metric_value(period: UsagePeriod, metric: str) -> float:
+    """The number a bar is drawn proportional to, for the chosen metric.
+
+    Cost is read in micro-USD (kept as a float for the fraction maths); tokens
+    is the full billed total. Both are non-negative, so the fraction against the
+    window max is always well defined.
+    """
+    if metric == METRIC_TOKENS:
+        return float(period.total_tokens)
+    return float(period.cost_micro)
+
+
+def _format_metric_cell(period: UsagePeriod, metric: str) -> str:
+    """The right-hand numeric label on a bar row for the chosen metric."""
+    if metric == METRIC_TOKENS:
+        return format_tokens(period.total_tokens)
+    # ``format_cost`` is duck-typed on the cost_* / cost_usd interface that
+    # UsagePeriod shares with UsageAggregate, so a period formats identically to
+    # a scope — same ``$—``/``+`` honesty, no second money formatter.
+    return format_cost(period)
+
+
+def _metric_meta(metric: str, *, prefix: str = "") -> str:
+    """The section-meta string that self-describes the active metric + toggle.
+
+    ``cost · t → tokens`` / ``tokens · t → cost`` — so BOTH the daily and the
+    monthly chart state what their bars plot and that ``t`` flips it (review
+    U2/D5). Shared by both call sites so the two sibling charts speak with one
+    voice. ``prefix`` prepends a functional descriptor (e.g. ``by calendar
+    month``) ahead of the metric clause where the section wants one.
+    """
+    active = "cost" if metric == METRIC_COST else "tokens"
+    other = "tokens" if metric == METRIC_COST else "cost"
+    clause = f"{active} · t → {other}"
+    return f"{prefix} · {clause}" if prefix else clause
+
+
+def _series_chart(
+    title: str,
+    meta: str,
+    periods: list[UsagePeriod],
+    metric: str,
+    width: int,
+    *,
+    empty_note: str,
+) -> list[Text]:
+    """A titled horizontal bar chart, one row per calendar bucket.
+
+    Each bar's fill is that bucket's value as a fraction of the WINDOW MAX (the
+    largest bucket in view), so the tallest bar is full and the rest read
+    relative to it — the standard "which day/month was biggest" shape. Columns
+    are measured across every row so the labels, bars, and numbers align into
+    one table (the same discipline ``_group_section`` and ``/usage`` use).
+
+    The ``≥`` floor mark is prepended to a cost cell that is a genuine lower
+    bound — a bucket that mixed priced AND unpriced calls, so its dollar figure
+    is real money that undercounts (``cost_is_floor and cost_is_known``, review
+    D1). A FULLY-unpriced bucket has no dollar figure to bound: it renders a
+    clean ``$—`` with NO ``≥``, because "≥ unknown" is a contradiction (you
+    cannot lower-bound a value you do not have). This matters for Local
+    Operator's common local-model-only run, whose default cost chart would
+    otherwise be a wall of ``≥ $—``. Because the mark is the single lower-bound
+    signal here, ``format_cost``'s trailing ``+`` — which means the same thing —
+    is stripped from a marked cell (review D2), so a floored row reads
+    ``≥ $0.700`` rather than the doubled ``≥ $0.700+``.
+
+    Newest bucket LAST (the store returns oldest-first) to match the
+    transcript's top-to-bottom reading order.
+
+    Pure: returns ``Text`` lines so ``render_lines_for_test`` reads the chart
+    back as plain strings, exactly like the rest of ``build_report``.
+    """
+    fg = _semantic("fg")
+    dim = _semantic("dim")
+    accent = _semantic("accent")
+
+    lines: list[Text] = [_section_header(title, meta)]
+    if not periods:
+        empty = Text()
+        empty.append(f"  {empty_note}", style=dim)
+        lines.append(empty)
+        return lines
+
+    labels = [_period_label(p.period) for p in periods]
+    values = [_metric_value(p, metric) for p in periods]
+    # The ``≥`` marks a genuine lower bound: cost mode, some spend we could
+    # price (``cost_is_known``), and some we could not (``cost_is_floor``). A
+    # fully-unpriced bucket is ``cost_is_known == False`` → no mark, and its
+    # cell is a plain ``$—`` (review D1).
+    floored = [metric == METRIC_COST and p.cost_is_floor and p.cost_is_known for p in periods]
+    # A marked cell drops the redundant trailing ``+`` (review D2): the ``≥``
+    # already says "lower bound", so ``format_cost``'s ``+`` would say it twice.
+    cells = [
+        (_format_metric_cell(p, metric).rstrip("+") if is_floor else _format_metric_cell(p, metric))
+        for p, is_floor in zip(periods, floored)
+    ]
+    max_value = max(values) if values else 0.0
+
+    label_col = max((len(lbl) for lbl in labels), default=0)
+    # The value cell reserves room for the floor mark (`≥ `) so a floored and an
+    # unfloored row's numbers right-align in the same column.
+    value_col = max((len(c) for c in cells), default=0) + 2
+    bar_width = max(8, min(28, width - label_col - value_col - 6))
+
+    for period, label, value, cell, is_floor in zip(periods, labels, values, cells, floored):
+        fraction = (value / max_value) if max_value > 0 else 0.0
+        row = Text()
+        row.append(f"  {label:<{label_col}}  ", style=fg)
+        row.append(proportion_bar(fraction, bar_width), style=accent)
+        mark = "≥ " if is_floor else "  "
+        # The mark is dim (a status flag, not a digit — review D1 on the ``+``),
+        # the number full-strength ``fg``. Right-align the number within the
+        # column after the mark so bars of different magnitudes still line up.
+        row.append(" ")
+        row.append(mark, style=dim)
+        row.append(f"{cell:>{max(0, value_col - 2)}}", style=fg)
+        lines.append(row)
+    return lines
+
+
+def build_report(
+    aggregate: UsageAggregate,
+    width: int,
+    *,
+    daily: list[UsagePeriod] | None = None,
+    monthly: list[UsagePeriod] | None = None,
+    window_totals: UsagePeriod | None = None,
+    metric: str = METRIC_COST,
+) -> list[Text]:
     """Render one aggregate as a list of ``Text`` lines for the screen body.
 
     Pure: takes the summed data and a width, returns lines. The screen wraps
     this in a scroll container and owns the chrome, so everything about WHAT is
     shown lives here where a test can read it back as plain strings.
+
+    ``daily``/``monthly`` are the calendar rollup series
+    (:meth:`AnalyticsStore.daily_series` / ``monthly_series``); when present
+    they render as "Last N days" and "Monthly" bar charts between the headline
+    totals and the input attribution — the historical arc the raw aggregate
+    cannot show. ``metric`` (``cost`` or ``tokens``) selects what the bars plot;
+    the screen's ``t`` key flips it. They default to ``None``/``cost`` so a
+    caller with no rollups (or a pre-rollup test) gets exactly the original
+    report.
     """
     width = max(40, width)
     fg = _semantic("fg")
@@ -328,6 +522,64 @@ def build_report(aggregate: UsageAggregate, width: int) -> list[Text]:
     cost_row.append(f"  {cost_note}", style=dim)
     lines.append(cost_row)
     lines.append(Text())
+
+    # -- historical time series (daily + monthly bars) ----------------------
+    # Drawn only when the store handed the screen rollup rows. The metric label
+    # in each section header states what the bars plot AND how to flip it, so a
+    # reader who sees dollar bars knows tokens are one keypress away (and vice
+    # versa on a run whose models are unpriced and whose cost bars are all
+    # floors). Placed above the input attribution because "when did I spend"
+    # precedes "what was the spend made of" in a diagnostics read.
+    if daily is not None:
+        # ``len(daily)`` is the number of DAYS WITH USAGE the store returned,
+        # not a calendar window (``daily_series`` skips idle days), so the label
+        # says exactly that rather than "Last N days" — which read as a calendar
+        # span and misstated sparse usage (review D3). Singular "day" for one
+        # (review D4). The empty case keeps a static title (no count to state).
+        if daily:
+            n = len(daily)
+            day_title = f"{n} day{'s' if n != 1 else ''} with usage"
+        else:
+            day_title = "Days with usage"
+        # The window's grand total rides the section meta ahead of the metric
+        # clause (review C2 — this is where ``series_totals`` surfaces): the
+        # daily bars show the per-day shape, and this states what they sum to
+        # over the same window, in the active metric so the two agree. Falls
+        # back to just the metric clause when no window total was supplied.
+        if window_totals is not None and daily:
+            if metric == METRIC_TOKENS:
+                window_summary = f"{format_tokens(window_totals.total_tokens)} tokens"
+            else:
+                window_summary = format_cost(window_totals)
+            daily_meta = _metric_meta(metric, prefix=window_summary)
+        else:
+            daily_meta = _metric_meta(metric)
+        lines.extend(
+            _series_chart(
+                day_title,
+                daily_meta,
+                daily,
+                metric,
+                width,
+                empty_note="no daily usage recorded yet",
+            )
+        )
+        lines.append(Text())
+    if monthly is not None:
+        lines.extend(
+            _series_chart(
+                "Monthly",
+                # Functional meta that ALSO self-describes the metric and toggle
+                # (reviews D5 + U2): the sibling chart must state $ vs tokens too,
+                # so a reader parked on Monthly is not left guessing.
+                _metric_meta(metric, prefix="by calendar month"),
+                monthly,
+                metric,
+                width,
+                empty_note="no monthly usage recorded yet",
+            )
+        )
+        lines.append(Text())
 
     # -- input attribution (estimated) --------------------------------------
     # The estimate caveat rides the section meta (``dim``, not ``faint``): the
@@ -474,6 +726,7 @@ class AnalyticsScreen(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "dismiss_screen", "Back", show=False),
         Binding("q", "dismiss_screen", "Back", show=False),
+        Binding("t", "toggle_metric", "Cost/tokens", show=False),
         Binding("up", "scroll_up", "Up", show=False),
         Binding("down", "scroll_down", "Down", show=False),
         Binding("pageup", "page_up", "Page up", show=False),
@@ -482,15 +735,39 @@ class AnalyticsScreen(ModalScreen[None]):
         Binding("end", "scroll_end", "Bottom", show=False),
     ]
 
-    def __init__(self, aggregate: UsageAggregate) -> None:
+    def __init__(
+        self,
+        aggregate: UsageAggregate,
+        *,
+        daily: list[UsagePeriod] | None = None,
+        monthly: list[UsagePeriod] | None = None,
+        window_totals: UsagePeriod | None = None,
+    ) -> None:
         super().__init__()
         self._aggregate = aggregate
+        # Grand total over the daily chart's window (``series_totals``), shown in
+        # that chart's meta so the bars and their sum describe the same span.
+        self._window_totals = window_totals
+        # The calendar rollup series the store handed us on open. Held so the
+        # ``t`` toggle can re-render the SAME data with the other metric without
+        # a second store read — the numbers do not change, only which of them
+        # the bars plot. ``None`` (a caller that passed no rollups) hides the
+        # chart sections entirely rather than drawing an empty frame.
+        self._daily = daily
+        self._monthly = monthly
+        #: Which metric the bar charts plot; ``t`` flips it. Cost by default
+        #: (the historical view's stated purpose).
+        self._metric = METRIC_COST
+        self._title: Static
         self._body: Static
         self._scroll: VerticalScroll
 
     def compose(self) -> ComposeResult:
         with Container(classes="analytics-panel"):
-            yield Static(self._title_text(), id="analytics-title")
+            # Held so the metric toggle can repaint the pinned title in place
+            # (the ``bars: cost``/``bars: tokens`` suffix — reviews U1/U4).
+            self._title = Static(self._title_text(), id="analytics-title")
+            yield self._title
             with VerticalScroll(id="analytics-scroll") as scroll:
                 self._scroll = scroll
                 self._body = Static(id="analytics-body")
@@ -537,6 +814,15 @@ class AnalyticsScreen(ModalScreen[None]):
         title = Text(no_wrap=True, overflow="crop")
         title.append("Usage analytics", style=fg)
         title.append("   all sessions", style=faint)
+        # Carry the active chart metric in the PINNED title so ``t`` gives
+        # on-screen feedback regardless of scroll position (reviews U1/U4): a
+        # user parked past both charts still sees ``cost``↔``tokens`` flip up
+        # here, so the advertised key never reads as a dead control. Only shown
+        # when there are charts to toggle — an empty/rollup-less report has no
+        # metric, so the suffix would be noise.
+        if self._has_charts():
+            active = "cost" if self._metric == METRIC_COST else "tokens"
+            title.append(f"   bars: {active}", style=faint)
         title.append("\n")
         title.append("─" * max(1, self._card_width()), style=faint)
         return title
@@ -548,6 +834,12 @@ class AnalyticsScreen(ModalScreen[None]):
         faint = Style(color=theme_mod.semantic_color("faint"))
         hint = Text()
         hint.append("esc back", style=faint)
+        # The metric toggle is advertised only when there is a chart to toggle;
+        # an empty or rollup-less report has no bars, so the key is a no-op and
+        # promising it would be a dead control (the same rule the scroll hint
+        # follows). ``bool(series)`` is false for both ``None`` and ``[]``.
+        if self._has_charts():
+            hint.append(" · t cost/tokens", style=faint)
         if scrollable:
             hint.append(" · ↑↓ scroll", style=faint)
         return hint
@@ -564,8 +856,24 @@ class AnalyticsScreen(ModalScreen[None]):
             scrollable = False
         hint.update(self._hint_text(scrollable=scrollable))
 
+    def _has_charts(self) -> bool:
+        """Whether any non-empty rollup series is loaded (a bar to toggle).
+
+        ``[]`` and ``None`` both read as no charts: an empty-store report shows
+        the "no usage yet" line, not bars, so the metric toggle has nothing to
+        act on and must not be advertised.
+        """
+        return bool(self._daily or self._monthly)
+
     def _report_lines(self) -> list[Text]:
-        return build_report(self._aggregate, self._card_width())
+        return build_report(
+            self._aggregate,
+            self._card_width(),
+            daily=self._daily,
+            monthly=self._monthly,
+            window_totals=self._window_totals,
+            metric=self._metric,
+        )
 
     def _repaint(self) -> None:
         body = getattr(self, "_body", None)
@@ -588,6 +896,26 @@ class AnalyticsScreen(ModalScreen[None]):
     # -- actions -------------------------------------------------------------
     def action_dismiss_screen(self) -> None:
         self.dismiss(None)
+
+    def action_toggle_metric(self) -> None:
+        """Flip the bar charts between cost and tokens, in place.
+
+        Re-renders from the series already in hand (no store read): the toggle
+        changes only which number the bars are proportional to, so the data is
+        unchanged and only the body repaints. A no-op when no rollup series are
+        loaded — there is nothing to plot, so the key does nothing rather than
+        silently toggling invisible state.
+        """
+        if not self._has_charts():
+            return
+        self._metric = METRIC_TOKENS if self._metric == METRIC_COST else METRIC_COST
+        self._repaint()
+        # Repaint the PINNED title too, so its ``bars: cost``/``bars: tokens``
+        # suffix reflects the flip even when the charts are scrolled off screen
+        # (reviews U1/U4). The body repaint above does not touch the title Static.
+        title = getattr(self, "_title", None)
+        if title is not None and title.is_mounted:
+            title.update(self._title_text())
 
     def action_scroll_up(self) -> None:
         self._scroll.scroll_up()
