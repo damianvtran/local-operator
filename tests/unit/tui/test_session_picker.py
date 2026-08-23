@@ -27,6 +27,7 @@ from local_operator.resume import (
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
+    _MARKER_LEGEND,
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
@@ -35,9 +36,11 @@ from local_operator.tui.widgets.session_picker import (
     PAGE_ROWS_MAX,
     PICKER_MIN_WIDTH,
     SessionPickerScreen,
+    _footer_hints,
     filter_rows,
     matched_in_body,
     plan_columns,
+    rank_rows,
     render_rows,
 )
 
@@ -1087,3 +1090,149 @@ def test_an_unfiltered_list_reserves_no_marker_column() -> None:
     # and exactly the marker's width later when something did.
     assert unmarked.index("one") == GUTTER_CELLS
     assert marked.index("one") == GUTTER_CELLS + cell_len(BODY_MATCH_MARKER)
+
+
+# --- relevance ranking ------------------------------------------------------
+# Ordering is a property of the QUERY, applied by rank_rows only when a query is
+# active, so the "no reorder under the cursor" invariant holds: the only event
+# that reorders (a query change) is the same one that re-homes the cursor.
+
+
+def test_ranking_orders_name_above_body_above_soft() -> None:
+    """A query hit in the visible name outranks one in the body, which outranks
+    a soft-only match — the tiered rule the design specifies."""
+    name_hit = _row("aaa1", "classifier tuning", age_s=300)  # matches by name
+    body_hit = _row("bbb2", "unrelated title", age_s=200)  # exact body match
+    soft_hit = _row("ccc3", "another title", age_s=100)  # soft-only match
+    rows = [name_hit, body_hit, soft_hit]
+    # body_matches carries only the exact-body id; the soft id is in `rows`
+    # (already filtered) but not in body_matches, so it takes the soft tier.
+    ranked = rank_rows(rows, "classifier", {"bbb2"})
+    assert [r.id for r in ranked] == ["aaa1", "bbb2", "ccc3"]
+
+
+def test_ranking_breaks_ties_by_recency_within_a_tier() -> None:
+    """Two rows in the same tier keep newest-first order (stable tie-break)."""
+    older = _row("aaa1", "classifier one", age_s=500)
+    newer = _row("bbb2", "classifier two", age_s=100)
+    # Passed newest-first, as the picker builds them; both match by name.
+    ranked = rank_rows([newer, older], "classifier", set())
+    assert [r.id for r in ranked] == ["bbb2", "aaa1"]
+
+
+def test_an_empty_query_keeps_recency_order_unchanged() -> None:
+    """No query means no ordering: the list stays exactly as it arrived."""
+    rows = [_row("aaa1", "one"), _row("bbb2", "two"), _row("ccc3", "three")]
+    assert rank_rows(rows, "") == rows
+    assert rank_rows(rows, "   ") == rows
+
+
+def test_ranking_is_stable_for_a_fixed_query() -> None:
+    """A fixed query must produce byte-for-byte the same order every call, so a
+    repaint or resize never moves a row under the cursor."""
+    rows = [_row("aaa1", "classifier"), _row("bbb2", "unrelated"), _row("ccc3", "classify")]
+    first = rank_rows(rows, "class", {"bbb2"})
+    second = rank_rows(rows, "class", {"bbb2"})
+    assert [r.id for r in first] == [r.id for r in second]
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_re_homes_to_the_top_match_on_a_query_change() -> None:
+    """set_query pins the cursor to rank 0, so it tracks the best match rather
+    than sitting on a row ranking then slides away from."""
+    rows = [_row("aaa1", "one"), _row("bbb2", "two"), _row("ccc3", "three")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen._move_to(2)  # move the cursor off the top
+        assert screen.selected_index == 2
+        screen.set_query("three")
+        await pilot.pause()
+        # Cursor is re-homed to index 0 (the top match), not clamped to the
+        # last surviving row.
+        assert screen.selected_index == 0
+        assert screen.selected_id() == "ccc3"
+
+
+@pytest.mark.asyncio
+async def test_visible_rows_is_stable_across_repaints_for_a_fixed_query() -> None:
+    """The invariant end to end: repeated repaints under a FIXED query never
+    reorder the visible rows."""
+    rows = [_row("aaa1", "classifier"), _row("bbb2", "unrelated"), _row("ccc3", "classify")]
+    digests = {"bbb2": "a body mentioning classifier deep inside"}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_query("classifier")
+        await pilot.pause()
+        first = [r.id for r in screen.visible_rows]
+        screen._repaint()
+        screen._repaint()
+        assert [r.id for r in screen.visible_rows] == first
+
+
+@pytest.mark.asyncio
+async def test_a_row_matched_only_by_a_soft_query_is_shown_and_marked() -> None:
+    """A soft match (typo) surfaces the row via the body path and carries the
+    body-match marker, since it did not match the visible name."""
+    rows = [_row("aaa1", "vague title"), _row("bbb2", "another")]
+    digests = {"aaa1": "improve adm classifier throughput"}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_query("classifer")  # typo, soft match only
+        await pilot.pause()
+        assert [r.id for r in screen.visible_rows] == ["aaa1"]
+        assert screen.body_matched_ids == {"aaa1"}
+
+
+@pytest.mark.asyncio
+async def test_a_row_matched_only_by_a_past_name_is_shown_and_marked() -> None:
+    """A session found by a name it was renamed AWAY from surfaces via the body
+    path (the digest folds past names in) and carries the marker."""
+    rows = [_row("aaa1", "Current Title"), _row("bbb2", "another")]
+    # The digest carries a PAST name the visible row name no longer shows.
+    digests = {"aaa1": "Old Abandoned Name the session body text"}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_query("abandoned")
+        await pilot.pause()
+        assert [r.id for r in screen.visible_rows] == ["aaa1"]
+        assert screen.body_matched_ids == {"aaa1"}
+
+
+def test_footer_legend_appears_only_when_a_row_is_marked() -> None:
+    """D2: the ``"`` marker is meaningless without a legend, but advertising it
+    when nothing is marked would explain a glyph the user cannot see. So the
+    legend is present exactly when the footer has room AND a marked row exists,
+    and absent otherwise."""
+    # A card wide enough to hold the legend beside the essential keys.
+    with_legend = _footer_hints(74, has_marked=True)
+    assert _MARKER_LEGEND in with_legend
+    # Same width, nothing marked: no legend, and the full key row is intact.
+    without = _footer_hints(74, has_marked=False)
+    assert _MARKER_LEGEND not in without
+    assert ("pgup/pgdn", "page") in without
+
+
+def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
+    """The legend teaches; it must never crowd out the keys that OPERATE the
+    card. Under width pressure it sheds after the two disposable hints but
+    before movement/resume/cancel, and it never survives as a bare unlabelled
+    glyph (which would be the very artifact-looking mark D2 flagged)."""
+    # Wide: legend shown, and it displaced only a disposable hint (pgup/pgdn).
+    wide = _footer_hints(74, has_marked=True)
+    assert _MARKER_LEGEND in wide
+    assert ("pgup/pgdn", "page") not in wide
+    # Narrow: the essential keys survive and the legend is gone entirely — not
+    # reduced to a lone glyph.
+    narrow = _footer_hints(40, has_marked=True)
+    assert _MARKER_LEGEND not in narrow
+    assert (_MARKER_LEGEND[0], "") not in narrow
+    assert ("enter", "resume") in narrow
+    assert ("esc", "cancel") in narrow

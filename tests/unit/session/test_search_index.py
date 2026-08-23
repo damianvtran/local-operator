@@ -14,13 +14,17 @@ import json
 from pathlib import Path
 
 from local_operator.harness.types import Message, MessageRole, TextContent
+from local_operator.resume import write_session_title
 from local_operator.session.search_index import (
     DIGEST_CHARS,
     INDEX_VERSION,
+    SoftSearchIndex,
+    _within_edit_distance,
     build_index,
     digest_transcript,
     index_path,
     search_digests,
+    soft_search_digests,
 )
 from local_operator.session.transcript import Transcript
 
@@ -152,3 +156,184 @@ def test_an_empty_query_matches_nothing_rather_than_everything(tmp_path: Path):
     digests = build_index(tmp_path, ["7777bbbb"])
     assert search_digests(digests, "") == set()
     assert search_digests(digests, "   ") == set()
+
+
+# ---------------------------------------------------------------------------
+# Title-fold: the digest prepends the session's title and every past name, so a
+# topic-pivot session is found by the subject it ended on, not the one it
+# opened with. See build_index / read_title_names.
+# ---------------------------------------------------------------------------
+
+
+def test_a_session_is_found_by_its_title_when_the_body_lacks_the_topic(tmp_path: Path):
+    """The ADM pivot, modelled: opening body about topic A, title about topic
+    B, query B -> found, because the title is folded into the digest."""
+    session = tmp_path / "sessions" / "pivot001"
+    _write(
+        session,
+        ("user", "review the article-search load test results please"),
+        ("assistant", "the load test showed elevated latency on the search path"),
+    )
+    # The defining topic lives ONLY in the title/past names, not the body.
+    write_session_title(
+        session,
+        "Improve ADM Classifier Throughput",
+        user_set=False,
+        past_names=["Article Search Load Test Review"],
+    )
+    digests = build_index(tmp_path, ["pivot001"])
+    assert "classifier" not in digest_transcript(session / "transcript.jsonl").lower()
+    assert search_digests(digests, "classifier") == {"pivot001"}
+    assert search_digests(digests, "throughput") == {"pivot001"}
+    # A PAST name the session was renamed away from is searchable too.
+    assert search_digests(digests, "article search load") == {"pivot001"}
+
+
+def test_a_rename_re_folds_the_digest_even_when_the_transcript_is_unchanged(tmp_path: Path):
+    """The signature includes the title sidecar's mtime, so a new title.json
+    invalidates the cached digest even when the transcript is byte-identical."""
+    session = tmp_path / "sessions" / "renamed01"
+    _write(session, ("user", "some body text"))
+    write_session_title(session, "First Title", user_set=False, past_names=[])
+    first = build_index(tmp_path, ["renamed01"])
+    assert search_digests(first, "First Title") == {"renamed01"}
+    # Rename with no transcript change; the sidecar mtime moves.
+    import time
+
+    time.sleep(0.01)
+    write_session_title(session, "Second Title", user_set=True, past_names=["First Title"])
+    second = build_index(tmp_path, ["renamed01"])
+    assert search_digests(second, "Second Title") == {"renamed01"}
+    # The old name is retained (past_names), so both are findable.
+    assert search_digests(second, "First Title") == {"renamed01"}
+
+
+def test_an_index_version_bump_discards_a_stale_shaped_cache(tmp_path: Path):
+    """A cache written under a different INDEX_VERSION is dropped wholesale and
+    rebuilt with the current shape, never migrated."""
+    session = tmp_path / "sessions" / "verbump1"
+    _write(session, ("user", "distinctive body content"))
+    build_index(tmp_path, ["verbump1"])
+    stale = json.loads(index_path(tmp_path).read_text(encoding="utf-8"))
+    stale["version"] = INDEX_VERSION - 1
+    index_path(tmp_path).write_text(json.dumps(stale), encoding="utf-8")
+    digests = build_index(tmp_path, ["verbump1"])
+    # Rebuilt (the stale cache was discarded) and still searchable.
+    assert search_digests(digests, "distinctive") == {"verbump1"}
+    fresh = json.loads(index_path(tmp_path).read_text(encoding="utf-8"))
+    assert fresh["version"] == INDEX_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Bounded soft matching: prefix, order-independent token-AND, edit-distance <=2
+# for tokens >=4 chars. See soft_search_digests.
+# ---------------------------------------------------------------------------
+
+
+def _soft_session(tmp_path: Path, sid: str, title: str) -> dict[str, str]:
+    session = tmp_path / "sessions" / sid
+    _write(session, ("user", "opening line"))
+    write_session_title(session, title, user_set=False, past_names=[])
+    return build_index(tmp_path, [sid])
+
+
+def test_soft_match_finds_a_prefix(tmp_path: Path):
+    digests = _soft_session(tmp_path, "soft0001", "Classifier Throughput Work")
+    assert "soft0001" in soft_search_digests(digests, "class")
+
+
+def test_soft_match_tolerates_a_typo(tmp_path: Path):
+    digests = _soft_session(tmp_path, "soft0002", "Classifier Throughput Work")
+    # 'classifer' -> 'classifier' is one insertion, within the distance cap.
+    assert "soft0002" in soft_search_digests(digests, "classifer")
+
+
+def test_soft_match_is_word_order_independent(tmp_path: Path):
+    digests = _soft_session(tmp_path, "soft0003", "Improve ADM Classifier Throughput")
+    assert "soft0003" in soft_search_digests(digests, "throughput classifier")
+
+
+def test_soft_match_does_not_let_a_short_nonsense_token_match_everything(tmp_path: Path):
+    """The distance cap is gated on token length: a 3-char nonsense token must
+    not match via edit distance, or the bound the design relies on is gone."""
+    digests = _soft_session(tmp_path, "soft0004", "Retention Sweep Policy")
+    # 'xyz' is 3 chars — below the floor — and is not a prefix of any token,
+    # so it must not match.
+    assert soft_search_digests(digests, "xyz") == set()
+
+
+def test_soft_match_requires_all_query_tokens(tmp_path: Path):
+    """Order-independent AND: a query with one matching and one unmatched token
+    does not match, so soft matching narrows rather than widening."""
+    digests = _soft_session(tmp_path, "soft0005", "Retention Sweep Policy")
+    assert soft_search_digests(digests, "retention nonexistentword") == set()
+
+
+def test_bounded_edit_distance_rejects_beyond_the_cap():
+    """The primitive itself: within cap true, beyond cap false, cheap reject on
+    a length gap."""
+    assert _within_edit_distance("classifier", "classifer", 2)  # one edit
+    assert _within_edit_distance("throughput", "throughput", 2)  # zero edits
+    assert not _within_edit_distance("classifier", "retention", 2)  # far apart
+    assert not _within_edit_distance("cat", "category", 2)  # length gap > cap
+
+
+# ---------------------------------------------------------------------------
+# SoftSearchIndex: the per-picker token cache behind soft matching. It exists
+# only to make the SAME soft match dramatically cheaper across the keystrokes
+# of one picker session, so these pin (a) that it returns exactly what the
+# stateless function returns and (b) that its cache stays honest — a changed
+# digest re-tokenises, a dropped session is pruned, so it can neither serve a
+# stale match nor grow without bound.
+# ---------------------------------------------------------------------------
+
+
+def test_soft_index_matches_the_stateless_function_across_tiers():
+    """Parity is the whole contract: the cache is an optimisation, so any query
+    must return byte-identically what ``soft_search_digests`` returns."""
+    digests = {
+        "aaaa": "improve adm classifier throughput",
+        "bbbb": "retention sweep policy",
+        "cccc": "database migration rollback plan",
+    }
+    index = SoftSearchIndex()
+    for query in [
+        "class",  # prefix
+        "classifer",  # typo (edit distance 1)
+        "throughput classifier",  # word-order-independent AND
+        "retention nonexistentword",  # AND with an unmatched token -> no match
+        "xyz",  # short nonsense, below the fuzzy floor
+        "databse migration",  # typo + exact, both must hold
+        "",  # empty query
+    ]:
+        assert index.search(digests, query) == soft_search_digests(digests, query), query
+
+
+def test_soft_index_retokenizes_when_a_digest_changes():
+    """Freshness: a re-digested session (its digest STRING changed) must be
+    re-tokenised, so a match that the old digest supported disappears and one the
+    new digest supports appears. Keying the cache on the digest string is what
+    makes a re-digest after a rename or append invalidate the stale tokens."""
+    index = SoftSearchIndex()
+    before = {"s1": "classifier throughput"}
+    assert index.search(before, "class") == {"s1"}
+    assert index.search(before, "migration") == set()
+
+    # Same session id, different digest content (as a rename/append would produce).
+    after = {"s1": "database migration rollback"}
+    assert index.search(after, "class") == set()  # stale token must not survive
+    assert index.search(after, "migration") == {"s1"}  # new token is searchable
+
+
+def test_soft_index_prunes_dropped_sessions_and_stays_bounded():
+    """Boundedness: an entry for a session no longer in ``digests`` is dropped,
+    so the cache tracks the live store rather than every digest ever seen over
+    the picker's life. A dropped session must also stop matching."""
+    index = SoftSearchIndex()
+    index.search({"s1": "retention policy", "s2": "classifier work"}, "warm")
+    assert len(index._tokens) == 2
+
+    pruned = index.search({"s1": "retention policy"}, "classifier")
+    assert pruned == set()  # s2 is gone, so its match is gone
+    assert set(index._tokens) == {"s1"}  # and its cache entry with it
+    assert index.search({"s1": "retention policy"}, "retention") == {"s1"}
