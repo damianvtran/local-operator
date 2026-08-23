@@ -54,6 +54,7 @@ later re-title.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -283,7 +284,66 @@ _TRAILING_PUNCTUATION = ".,;:!?-–—"
 
 _TITLE_TAG_RE = re.compile(r"<title\s*>(.*?)</title\s*>", re.IGNORECASE | re.DOTALL)
 _EMPTY_TITLE_RE = re.compile(r"<title\s*/\s*>", re.IGNORECASE)
+#: Stray / unclosed ``<title>`` fragments. A truncated reply often starts
+#: ``<title>the login redirect loop`` and never closes; treating that as a
+#: tagged title stored the markup. Ported from omp's
+#: ``.replace(/<\/?title>/gi, "")`` on the untagged path.
+_STRAY_TITLE_TAG_RE = re.compile(r"</?title\s*/?>", re.IGNORECASE)
 _QUOTE_CHARS = "\"'`“”‘’«»"
+
+#: Thinking envelopes some non-Anthropic models leak into the visible stream
+#: (xAI, DeepSeek, Kimi, local Qwen). A ``<title>`` inside one of these is the
+#: model talking to itself, not the answer; the last *visible* marked title
+#: wins. Ported from omp's ``extractVisibleMarkedTitle`` — we do not invent a
+#: second parser beside :func:`parse_title`.
+_THINKING_TAG_RE = re.compile(
+    r"<(think|thinking|reasoning)>\s*.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINKING_FENCE_RE = re.compile(
+    r"```(?:thinking|reasoning)\b.*?```",
+    re.IGNORECASE | re.DOTALL,
+)
+#: Unclosed thinking. A 1024-token naming reply that ran out of budget mid-
+#: ``<think>`` or mid-`` ```thinking `` has no visible answer yet; the rest of
+#: the string is still inside the envelope. Accepting it as a title is how
+#: truncated reasoning became the session name. Closed envelopes still match
+#: the pair regexes above and strip as they do today. Line-start only so a
+#: title that *mentions* ``<think>`` or `` ```thinking `` is not treated as
+#: an envelope (omp keeps "Fix <think> tag parsing").
+_UNCLOSED_THINKING_TAG_RE = re.compile(
+    r"^[ \t]*<(think|thinking|reasoning)\b[^>]*>",
+    re.IGNORECASE | re.MULTILINE,
+)
+_UNCLOSED_THINKING_FENCE_RE = re.compile(
+    r"^[ \t]*```(?:thinking|reasoning)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+#: Untagged path only. A later marked title remains authoritative; a bare
+#: "Thinking process:" reply is the model answering the user, not naming.
+_THINKING_PREAMBLE_RE = re.compile(
+    r"^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?"
+    r"(?:thinking|thought|reasoning)(?:[ \t]+process)?[ \t]*:?[ \t]*(?:\r?\n|$)",
+    re.IGNORECASE,
+)
+#: Conversational first line on a multi-line untagged reply. "Sure, I'll name
+#: this." is the model talking, not the title; the short line after it usually
+#: is. Prefer that later line over keeping the preamble (review m1). A single
+#: chatty line still goes through :func:`_normalise_title_body` and is
+#: rejected by the caps, not truncated.
+_CHATTY_PREAMBLE_RE = re.compile(
+    r"^(?:sure|okay|ok|alright|right|got it|understood|of course|certainly|"
+    r"absolutely|yeah|yep|yes)(?:[,!.\s].*)?$",
+    re.IGNORECASE,
+)
+#: A later untagged line that already looks like a title: short, no trailing
+#: sentence period. Used only after a chatty first line so we do not invent a
+#: classifier for every multi-line reply.
+_UNTAGGED_TITLE_LINE_RE = re.compile(r"^[^\n.]{1,80}$")
+_FENCED_JSON_RE = re.compile(
+    r"^```[^\n]*\s*(.*?)\s*```$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def is_low_signal(text: str) -> bool:
@@ -312,23 +372,117 @@ def is_low_signal(text: str) -> bool:
     return False
 
 
-def parse_title(raw: str) -> str | None:
-    """Extract and normalise a title from a naming call's raw reply.
+def _strip_thinking_envelopes(text: str) -> str:
+    """Drop leaked ``<think>`` / fenced-reasoning blocks from ``text``.
 
-    Returns ``None`` for the ``<title/>`` sentinel, for a reply with no tag
-    at all (a model that ignored the format is a model whose output we cannot
-    trust to be a title), and for an answer that breaks either cap.
+    Applied before any title lookup so a tag the model wrote *inside* a
+    thinking envelope cannot win, and so an untagged short title sitting
+    after a leaked preamble is still visible.
     """
-    if not raw:
-        return None
-    if _EMPTY_TITLE_RE.search(raw) and not _TITLE_TAG_RE.search(raw):
-        return None
-    match = _TITLE_TAG_RE.search(raw)
-    if match is None:
-        return None
-    body = match.group(1)
+    stripped = _THINKING_TAG_RE.sub("", text)
+    return _THINKING_FENCE_RE.sub("", stripped)
+
+
+def _cut_unclosed_thinking(text: str) -> str:
+    """Drop the tail that still sits inside an unclosed thinking envelope.
+
+    Closed pairs are already gone after :func:`_strip_thinking_envelopes`.
+    An opener that remains is the truncated-reasoning case: everything
+    from that line onward is still inside thinking, including a closed
+    ``<title>`` the model drafted in there. Text *before* the opener is
+    visible (a finished answer, then more thinking that never closed).
+    """
+    starts = [
+        match.start()
+        for pattern in (_UNCLOSED_THINKING_TAG_RE, _UNCLOSED_THINKING_FENCE_RE)
+        for match in [pattern.search(text)]
+        if match is not None
+    ]
+    if not starts:
+        return text
+    return text[: min(starts)]
+
+
+def _unwrap_json_title(candidate: str) -> str:
+    """``{"title": "..."}`` (optionally fenced) → the inner string.
+
+    Some models emit the structured shape they were trained on for title
+    tasks instead of the ``<title>`` tag. Without this the raw JSON became
+    the session name — or, more often, was rejected as over-long / not a
+    tag, which is how those sessions kept the opener excerpt. Truncated
+    JSON is salvaged the same way omp's ``unwrapJsonTitle`` does: pull the
+    quoted ``title`` value if the object itself will not parse.
+
+    The fence language is ignored: `` ```python\\n{"title": "…"}\\n``` ``
+    is still JSON, and treating the language tag as the title named
+    sessions "Python". Only unwrap when the fence body starts with ``{``
+    so a fenced prose title is left alone.
+    """
+    text = candidate.strip()
+    fenced = _FENCED_JSON_RE.match(text)
+    if fenced is not None:
+        body = fenced.group(1).strip()
+        if body.startswith("{"):
+            text = body
+    if not text.startswith("{"):
+        return candidate
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        quoted = re.search(r'"title"\s*:\s*("(?:[^"\\]|\\.)*")', text)
+        if quoted is None:
+            return candidate
+        try:
+            salvaged = json.loads(quoted.group(1))
+        except json.JSONDecodeError:
+            return candidate
+        return salvaged.strip() if isinstance(salvaged, str) else candidate
+    if isinstance(parsed, dict) and isinstance(parsed.get("title"), str):
+        return parsed["title"].strip()
+    return candidate
+
+
+def _looks_like_title_line(line: str) -> bool:
+    """Cheap title-shaped check for a later untagged line (review m1).
+
+    3–7 words, no trailing sentence period. Not a classifier: used only
+    after a chatty first line so we prefer a later short line over keeping
+    the preamble. Rejection, not truncation, still applies via
+    :func:`_normalise_title_body`.
+    """
+    cleaned = " ".join(line.split()).strip(_QUOTE_CHARS + " ")
+    if not cleaned or cleaned.endswith("."):
+        return False
+    words = cleaned.split()
+    if not (3 <= len(words) <= 7):
+        return False
+    return _UNTAGGED_TITLE_LINE_RE.match(cleaned) is not None
+
+
+def _untagged_candidate(visible: str) -> str:
+    """Pick the untagged body: skip a chatty first line when a later one titles.
+
+    First-line-only parse used to keep ``Sure, I'll name this.`` and drop
+    the real title on the next line. Prefer a later short title-shaped
+    line over that preamble; if nothing later looks like a title, leave
+    the first line for :func:`_normalise_title_body` to reject.
+    """
+    lines = [line.strip() for line in visible.splitlines() if line.strip()]
+    if len(lines) >= 2 and _CHATTY_PREAMBLE_RE.match(lines[0]):
+        for line in reversed(lines[1:]):
+            if _looks_like_title_line(line):
+                return line
+        # Chatty preamble with no later title-shaped line: reject rather
+        # than store the preamble. First-line-only parse used to keep it.
+        return ""
+    return visible
+
+
+def _normalise_title_body(body: str) -> str | None:
+    """Shared quote / punct / cap rejection for a candidate title body."""
     # First line only: a model that appends a rationale must not smuggle it
-    # into a one-row status band.
+    # into a one-row status band. Multi-line untagged replies with a chatty
+    # first line are already reduced by :func:`_untagged_candidate`.
     first_line = next((line for line in body.splitlines() if line.strip()), "")
     cleaned = " ".join(first_line.split()).strip(_QUOTE_CHARS + " ")
     cleaned = cleaned.rstrip(_TRAILING_PUNCTUATION).strip()
@@ -343,6 +497,43 @@ def parse_title(raw: str) -> str | None:
     if len(words) > MAX_TITLE_WORDS:
         return None
     return _sentence_case(words)
+
+
+def parse_title(raw: str) -> str | None:
+    """Extract and normalise a title from a naming call's raw reply.
+
+    Tagged output is preferred: a well-formed ``<title>...</title>`` that
+    sits *outside* a leaked thinking envelope is the answer we asked for.
+    Untagged short text is what non-Anthropic models actually emit (Grok,
+    DeepSeek, Kimi, most OpenAI-compat local servers), so rejecting those
+    replies is how Grok sessions silently kept the opener excerpt forever.
+    ``<title/>``, empty, quotes-only, and anything over the caps still
+    return ``None`` — over-long answers are rejected, not truncated.
+
+    Unclosed markup is not a title. An unclosed ``<title>`` is stripped
+    as a fragment and the remainder is parsed untagged (omp's policy).
+    An unclosed ``<think>`` / `` ```thinking `` envelope means the rest
+    of the string is still inside thinking, so the reply is discarded
+    unless a CLOSED visible ``<title>`` already won.
+    """
+    if not raw:
+        return None
+    visible = _cut_unclosed_thinking(_strip_thinking_envelopes(raw))
+    if _EMPTY_TITLE_RE.search(visible) and not _TITLE_TAG_RE.search(visible):
+        return None
+    matches = list(_TITLE_TAG_RE.finditer(visible))
+    if matches:
+        # Last visible marked title wins: a draft tag the model wrote
+        # before the real one is common, and a tag inside thinking was
+        # already stripped (closed) or cut (unclosed) so it cannot win.
+        return _normalise_title_body(_unwrap_json_title(matches[-1].group(1)))
+    # Strip stray / unclosed ``<title>`` fragments so the leftover short
+    # phrase can still name the session, never with the tag characters.
+    visible = _STRAY_TITLE_TAG_RE.sub("", visible)
+    if _THINKING_PREAMBLE_RE.search(visible.lstrip()):
+        return None
+    unwrapped = _unwrap_json_title(_untagged_candidate(visible).strip())
+    return _normalise_title_body(unwrapped)
 
 
 def cut_on_a_word(text: str, max_chars: int) -> str:
@@ -619,8 +810,8 @@ async def generate_title(
 
     ``complete_fn(system, prompt)`` is any awaitable one-shot completion (the
     session's :meth:`complete_once`). Every failure mode — low-signal input,
-    a raising callable, a hanging callable, a reply that ignores the format,
-    an over-long answer — resolves to ``None``. The caller therefore needs no
+    a raising callable, a hanging callable, a thinking preamble, or an
+    over-long answer — resolves to ``None``. The caller therefore needs no
     error handling at all, which is the point: naming is decoration, and
     decoration that can break a turn is a defect.
     """

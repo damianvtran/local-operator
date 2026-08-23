@@ -2497,6 +2497,8 @@ async def test_the_naming_errand_leaves_the_session_isolated_and_cheap(tmp_path,
     assert request.isolated is True, "the naming call reached the wire un-isolated"
     assert request.replayable is False, "a title is worth one attempt, not a replay"
     assert request.max_tokens == Session.ERRAND_MAX_TOKENS
+    assert Session.ERRAND_MAX_TOKENS == 1024
+    assert request.temperature == 0
     assert request.model == session._errand_model()
     assert request.model.model_id == MODEL.model_id, "no `lo` tier is configured here"
     assert request.tools == [] and request.tool_choice == "none"
@@ -2507,9 +2509,9 @@ async def test_the_naming_errand_leaves_the_session_isolated_and_cheap(tmp_path,
 
 @pytest.mark.asyncio
 async def test_the_errand_model_is_effort_clamped_on_both_routes(tmp_path, monkeypatch):
-    """``ERRAND_MAX_TOKENS`` is an output cap that COUNTS REASONING TOKENS, so a
-    128-token errand left on a reasoning model's default effort can spend the
-    whole budget thinking, emit no ``<title>`` at all and make ``parse_title``
+    """``ERRAND_MAX_TOKENS`` is an output cap that COUNTS REASONING TOKENS, so an
+    errand left on a reasoning model's default effort can spend the whole
+    budget thinking, emit no visible title at all and make ``parse_title``
     return ``None`` — auto-naming would silently never work for that operator
     while still billing the thinking.
 

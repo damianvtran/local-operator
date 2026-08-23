@@ -4538,14 +4538,19 @@ class Session:
         return None
 
     #: Output cap for :meth:`complete_once`, and the only bound on what a model
-    #: that ignores the output format can bill us for. Not tight, deliberately:
-    #: the cap counts EVERY response token, and on a provider with adaptive
-    #: thinking (Anthropic's ``thinking: adaptive``, which this session sends
-    #: whenever the model has an effort ladder) some of them are thinking. Seven
-    #: measured naming calls emitted 18–38 tokens, so a 64-token cap was running
-    #: at 60% of budget on a title we would then have to REJECT for being
-    #: truncated. Only the tokens produced are billed, so headroom is free.
-    ERRAND_MAX_TOKENS = 128
+    #: that ignores the output format can bill us for. The cap counts EVERY
+    #: response token, including thinking. Seven Claude naming calls at lowest
+    #: effort emitted 18–38 tokens, which is why 128 used to look generous —
+    #: Claude has an effort ladder, so ``_lowest_effort`` keeps thinking short
+    #: and the title still fits. Families with no ladder (xAI, DeepSeek, Kimi;
+    #: see ``model.effort``) can spend the whole budget thinking and emit no
+    #: visible title at all, which is how Grok sessions kept the opener excerpt
+    #: while still billing the thinking. omp hit the same wall (oh-my-pi #4355)
+    #: and raised the title ceiling to 1024. Headroom is free: only produced
+    #: tokens are billed. Do not invent an unverified ``disable_reasoning``
+    #: wire key to shrink this — a 400 on the errand is swallowed and the
+    #: session stays unnamed.
+    ERRAND_MAX_TOKENS = 1024
 
     async def complete_once(self, system: str, prompt: str) -> str:
         """One CHEAP, ISOLATED, single-attempt provider call for a host errand.
@@ -4574,7 +4579,7 @@ class Session:
         * cheapest route available: the ``lo`` subagent tier when the operator
           has configured one, otherwise this session's model — either way
           clamped to the lowest reasoning effort the spec accepts, because that
-          128-token cap counts thinking tokens as well as the title.
+          token cap counts thinking tokens as well as the title.
         """
         model = self._errand_model()
         request = ChatRequest(
@@ -4584,6 +4589,11 @@ class Session:
             tools=[],
             tool_choice="none",
             max_tokens=self.ERRAND_MAX_TOKENS,
+            # Titling is extraction, not generation. Backends that default
+            # temperature high otherwise garble names. ``_sampling_params``
+            # already drops the key when the spec rejects sampling, so this
+            # cannot 400 a Claude-5 / o-series errand.
+            temperature=0,
             replayable=False,
             isolated=True,
         )
@@ -4605,8 +4615,8 @@ class Session:
         The clamp is applied to WHICHEVER of the two this returns, and it is not
         only a cost argument. ``ERRAND_MAX_TOKENS`` becomes
         ``max_output_tokens``, which counts reasoning tokens too, so a spec left
-        on its provider's default effort can spend the whole 128-token budget
-        thinking, emit no ``<title>`` at all and make ``parse_title`` return
+        on its provider's default effort can spend the whole token budget
+        thinking, emit no visible title at all and make ``parse_title`` return
         ``None`` — auto-naming would silently never produce a title for that
         operator while still billing the thinking. ``build_model_spec`` seeds
         ``reasoning_effort`` from ``default_effort``, which is ``None`` for

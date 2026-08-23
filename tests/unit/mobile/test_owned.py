@@ -32,9 +32,8 @@ class FakeSession:
         self._handlers: list[Any] = []
         self._named: list[tuple[str, bool]] = []
         self._complete_calls: list[tuple[str, str]] = []
-        # The naming call's reply must be wrapped in the <title> tag the
-        # parser expects; a bare string is treated as a model that ignored the
-        # format and discarded.
+        # Tagged or a short untagged title both parse; the default stays
+        # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"
 
     # -- naming seams ----------------------------------------------------------

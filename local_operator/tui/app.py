@@ -7049,7 +7049,7 @@ class OperatorApp(App[None]):
         is what ``session.complete_once`` now builds: one attempt, no fallback
         chain, no credential rotation, no sticky-route read or write, no quota
         preflight, no boundary classification, not the session's prompt cache
-        key, a 128-token cap, the cheapest route the session can reach, and a
+        key, a 1024-token cap, the cheapest route the session can reach, and a
         15-second ceiling. A 429 here is swallowed by ``generate_title`` and
         cannot have touched anything the turn depends on — see
         ``ChatRequest.isolated`` for the enumeration.
