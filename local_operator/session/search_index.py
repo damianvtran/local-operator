@@ -19,8 +19,15 @@ sessions and 125 MB; a real store grows without bound. Grepping all of it costs
 ~190 ms even reading only the first 256 KB of each file — far too slow to run
 on every keystroke of a filter, and the filter reruns per keystroke. A digest
 of the first :data:`DIGEST_CHARS` characters of each conversation's prose
-compresses that to ~0.7 MB, which loads in ~1 ms and searches in microseconds.
-The bound is per session and applied at BUILD time, so a single pathological
+compresses that to ~0.7 MB, which loads in ~1 ms. Exact-substring search
+(:func:`search_digests`) is then ~5 ms over the whole store; bounded soft
+search (:class:`SoftSearchIndex`) is ~6-20 ms per query change once its per-
+digest token cache is warm (prefix queries at the low end, a full typo-tolerant
+word at the high), after a one-time ~70 ms cost on the first keystroke to build
+that cache. All measured at ~640 sessions / ~180k digest tokens — see
+:class:`SoftSearchIndex` for why the naive per-call form was ~75-185 ms EVERY
+keystroke. The bound is per session and applied at BUILD time, so a single
+pathological
 transcript (a pasted 80 MB file) costs its cap and not its size.
 
 **Why the cache lives outside the session directories.** A sidecar inside
@@ -369,8 +376,11 @@ def _within_edit_distance(a: str, b: str, max_distance: int) -> bool:
     every cell in a row exceeds the cap, so the cost is O(len * max_distance)
     rather than O(len^2). Pure Python and dependency-free on purpose —
     ``rapidfuzz`` is a compiled wheel this project deliberately does not add
-    (see the module docstring); over the ~200 short digest tokens this runs
-    against, the bounded DP is microseconds.
+    (see the module docstring). One DP is sub-millisecond; the cost that
+    mattered was running it per digest token per keystroke, which
+    :class:`SoftSearchIndex` removes by resolving each query token against the
+    deduplicated vocabulary once (~6-20 ms per warm query change at ~640
+    sessions, vs ~75-185 ms for the naive per-digest form on every keystroke).
     """
     if abs(len(a) - len(b)) > max_distance:
         return False
@@ -421,15 +431,163 @@ def _token_soft_matches(needle_token: str, haystack_tokens: set[str]) -> bool:
     return False
 
 
+class SoftSearchIndex:
+    """A reusable soft-search accelerator that caches per-digest tokenisation.
+
+    Why this exists as an object rather than the old stateless function. The
+    picker recomputes soft matches on every KEYSTROKE (see
+    ``SessionPickerScreen.visible_rows``), and the naive implementation
+    re-tokenised every digest and ran the edit-distance DP against every
+    digest token on each of those calls. At the real store scale (~640
+    sessions, ~180k digest tokens) that cost ~75-185 ms per keystroke, measured
+    (~75 ms for a short/prefix query, ~185 ms for a full typo-tolerant word) \u2014
+    the "microseconds" the earlier docstrings claimed held only at the ~200
+    sessions the design was first measured on. Two costs dominated and both are
+    eliminated here:
+
+    * **Re-tokenising every digest per keystroke (~55 ms).** Fixed by caching
+      the token set of each digest keyed on the digest STRING, so a digest is
+      tokenised once and reused until it actually changes.
+    * **Running the edit-distance DP per DIGEST token (up to ~130 ms).** The 180k
+      digest tokens are only ~8.5k DISTINCT words. Fixed by resolving each
+      query token against that deduplicated VOCABULARY once \u2014 the DP runs
+      ~8.5k times, not ~180k \u2014 then answering each digest by a cheap set
+      intersection against the resolved word set. Length- and first-letter
+      buckets over the vocabulary cut the DP candidate list further (edit
+      distance <=2 can only reach words within two of the query token's
+      length; a prefix match shares its first letter).
+
+    Freshness and bound. ``search`` re-syncs the cache against the ``digests``
+    it is handed on every call: an entry whose digest STRING changed is
+    re-tokenised (a re-digested session invalidates itself), and an entry whose
+    session is gone is dropped \u2014 so the cache tracks the live digest set and
+    cannot grow past it across the picker's life. The derived vocabulary and
+    its buckets are rebuilt only when that token cache actually changed, so a
+    run of keystrokes over a fixed store rebuilds them once. Net warm cost is
+    ~6-20 ms per query change (prefix cheap, full typo dearer), after a one-time
+    ~70 ms first keystroke that builds the token cache and vocabulary.
+
+    Behaviour is identical to the previous stateless implementation: same
+    prefix / order-independent token-AND / edit-distance-<=2-for-tokens->=4
+    bounds, same matches. Only the cost changed. See :func:`soft_search_digests`
+    for the stateless one-shot wrapper tests and non-repeating callers use.
+    """
+
+    def __init__(self) -> None:
+        # sid -> (digest_string, frozenset_of_tokens). Keyed on the digest
+        # string so a re-digested session (new string) is re-tokenised, and
+        # pruned to the live sids on each sync so it cannot grow unbounded.
+        self._tokens: dict[str, tuple[str, frozenset[str]]] = {}
+        # Deduplicated view of every token across the cached digests, plus the
+        # buckets that bound the DP candidate list. ``None`` marks them stale
+        # (a token-cache change or the first search), so they rebuild lazily.
+        self._vocab: set[str] | None = None
+        self._by_len: dict[int, set[str]] = {}
+        self._by_first: dict[str, list[str]] = {}
+
+    def _sync(self, digests: dict[str, str]) -> None:
+        """Reconcile the token cache with ``digests``; rebuild vocab if it moved."""
+        changed = False
+        # Drop entries for sessions that are no longer listed. This is what
+        # keeps the cache bounded by the live store rather than by the number
+        # of distinct digests seen over the picker's life.
+        for sid in [sid for sid in self._tokens if sid not in digests]:
+            del self._tokens[sid]
+            changed = True
+        for sid, digest in digests.items():
+            cached = self._tokens.get(sid)
+            # Re-tokenise only when the digest STRING differs (new session or a
+            # re-digest after a rename/append), so freshness is honoured without
+            # re-tokenising unchanged digests every keystroke.
+            if cached is None or cached[0] != digest:
+                self._tokens[sid] = (digest, frozenset(_tokenize(digest)))
+                changed = True
+        if changed or self._vocab is None:
+            self._rebuild_vocab()
+
+    def _rebuild_vocab(self) -> None:
+        """Recompute the deduplicated vocabulary and its DP-narrowing buckets."""
+        vocab: set[str] = set()
+        for _digest, tokens in self._tokens.values():
+            vocab |= tokens
+        by_len: dict[int, set[str]] = {}
+        by_first: dict[str, list[str]] = {}
+        for word in vocab:
+            by_len.setdefault(len(word), set()).add(word)
+            by_first.setdefault(word[0], []).append(word)
+        self._vocab = vocab
+        self._by_len = by_len
+        self._by_first = by_first
+
+    def _resolve(self, needle_token: str) -> set[str]:
+        """Vocabulary words this query token softly matches (see :func:`_token_soft_matches`).
+
+        The per-vocabulary equivalent of :func:`_token_soft_matches`: instead of
+        asking "does this token match any word in one digest", it computes, once,
+        the set of ALL vocabulary words the token matches, so every digest is then
+        answered by a set intersection. Same three tiers, same bounds.
+        """
+        matches: set[str] = set()
+        # Prefix (which subsumes exact): a vocabulary word beginning with the
+        # query token shares its first letter, so only that bucket can contain a
+        # prefix hit. Mirrors ``token.startswith(needle_token)``.
+        for word in self._by_first.get(needle_token[0], ()):
+            if word.startswith(needle_token):
+                matches.add(word)
+        # Edit distance <=2, both tokens >=4 chars. A word within two edits can
+        # differ in length by at most two, so only those length buckets can hold
+        # a fuzzy hit \u2014 this is what turns the DP from ~180k runs into ~a few
+        # hundred. The length and bound checks match _token_soft_matches exactly.
+        if len(needle_token) >= _SOFT_MIN_TOKEN:
+            for length in range(
+                len(needle_token) - _SOFT_MAX_DISTANCE,
+                len(needle_token) + _SOFT_MAX_DISTANCE + 1,
+            ):
+                for word in self._by_len.get(length, ()):
+                    if len(word) >= _SOFT_MIN_TOKEN and _within_edit_distance(
+                        needle_token, word, _SOFT_MAX_DISTANCE
+                    ):
+                        matches.add(word)
+        return matches
+
+    def search(self, digests: dict[str, str], query: str) -> set[str]:
+        """Ids whose body SOFTLY matches ``query`` \u2014 prefix, typo, or word-order.
+
+        Identical result to :func:`soft_search_digests`; see this class's
+        docstring for why it is dramatically cheaper across repeated calls over
+        the same store. Re-syncs its cache against ``digests`` first, so passing
+        a changed store is safe.
+        """
+        self._sync(digests)
+        needle_tokens = _tokenize(query)
+        if not needle_tokens:
+            return set()
+        # Resolve each query token to the vocabulary words it matches, once. A
+        # query token that matches nothing in the whole store yields an empty
+        # set here, which makes the AND below reject every digest \u2014 the same
+        # "excludes rather than ranks" bound the stateless version relied on.
+        resolved = [self._resolve(token) for token in needle_tokens]
+        matched: set[str] = set()
+        for sid, (_digest, tokens) in self._tokens.items():
+            if not tokens:
+                continue
+            # Order-independent AND: every query token must have a resolved word
+            # present in this digest's token set. Set intersection replaces the
+            # per-token DP the stateless version ran here.
+            if all(tokens & words for words in resolved):
+                matched.add(sid)
+        return matched
+
+
 def soft_search_digests(digests: dict[str, str], query: str) -> set[str]:
-    """Ids whose body SOFTLY matches ``query`` — prefix, typo, or word-order.
+    """Ids whose body SOFTLY matches ``query`` \u2014 prefix, typo, or word-order.
 
     The bounded soft tier that sits beside :func:`search_digests`. A query
     matches a digest when EVERY query token softly matches some token in the
     digest (order-independent AND), where "softly" is exact, prefix, or a
     bounded edit-distance typo (see :func:`_token_soft_matches`). Order-
     independent AND is what makes ``throughput classifier`` find a session
-    titled "Improve ADM Classifier Throughput" — word order and exact substring
+    titled "Improve ADM Classifier Throughput" \u2014 word order and exact substring
     contiguity both stop mattering.
 
     Returned as a SET, like :func:`search_digests`: the caller
@@ -439,20 +597,17 @@ def soft_search_digests(digests: dict[str, str], query: str) -> set[str]:
 
     Bounded and dependency-free by design. The old substring-only filter warned
     that fuzzy matching over free text produces confident nonsense; that was
-    right about UNBOUNDED fuzzy. This is bounded — a distance cap of 2 for
-    tokens of 4+ chars, plus prefix and token-AND — and the bound is precisely
+    right about UNBOUNDED fuzzy. This is bounded \u2014 a distance cap of 2 for
+    tokens of 4+ chars, plus prefix and token-AND \u2014 and the bound is precisely
     what keeps a soft match from being confident nonsense: a nonsense token
     close to nothing in the digest excludes the row rather than dragging in
     everything.
+
+    **This is the STATELESS one-shot form.** It builds a fresh
+    :class:`SoftSearchIndex` per call, so it re-tokenises the whole store every
+    time \u2014 at ~640 sessions that is ~75-185 ms, fine for a single call (a test, a
+    mobile-daemon query) but NOT for a per-keystroke loop. A caller that
+    searches the same store repeatedly (the picker) holds a
+    :class:`SoftSearchIndex` instead and pays that cost once; see that class.
     """
-    needle_tokens = _tokenize(query)
-    if not needle_tokens:
-        return set()
-    matched: set[str] = set()
-    for sid, digest in digests.items():
-        haystack = set(_tokenize(digest))
-        if not haystack:
-            continue
-        if all(_token_soft_matches(token, haystack) for token in needle_tokens):
-            matched.add(sid)
-    return matched
+    return SoftSearchIndex().search(digests, query)

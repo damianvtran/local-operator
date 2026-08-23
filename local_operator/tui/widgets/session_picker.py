@@ -63,7 +63,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from local_operator.resume import SessionRow, format_age
-from local_operator.session.search_index import search_digests, soft_search_digests
+from local_operator.session.search_index import SoftSearchIndex, search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -500,6 +500,13 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # without an index — tests, embedders — gets the name-and-id filter
         # unchanged instead of an error.
         self._digests = dict(digests or {})
+        # Soft matching reruns on every keystroke; a per-screen index caches each
+        # digest's token set (and a deduplicated vocabulary over them) so the
+        # bounded edit-distance search costs ~13 ms per query change at real
+        # store scale instead of the ~185 ms a stateless re-tokenise-everything
+        # call costs there. Owned by the screen so the cache lives exactly as
+        # long as the picker and is discarded with it.
+        self._soft_index = SoftSearchIndex()
         # Filtering runs on every keystroke and again on every paint; the
         # result is cached against the query that produced it so a card with
         # several hundred sessions does not re-scan the list per repaint. The
@@ -543,7 +550,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # query change, never per repaint — scanning 200 digests per paint
             # is the cost this cache exists to avoid.
             self._body_matches = search_digests(self._digests, self._query)
-            soft = soft_search_digests(self._digests, self._query)
+            soft = self._soft_index.search(self._digests, self._query)
             self._admitted = self._body_matches | soft
             admitted = filter_rows(self._all, self._query, self._admitted)
             self._filtered = rank_rows(admitted, self._query, self._body_matches)

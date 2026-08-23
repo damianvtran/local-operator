@@ -18,6 +18,7 @@ from local_operator.resume import write_session_title
 from local_operator.session.search_index import (
     DIGEST_CHARS,
     INDEX_VERSION,
+    SoftSearchIndex,
     _within_edit_distance,
     build_index,
     digest_transcript,
@@ -275,3 +276,64 @@ def test_bounded_edit_distance_rejects_beyond_the_cap():
     assert _within_edit_distance("throughput", "throughput", 2)  # zero edits
     assert not _within_edit_distance("classifier", "retention", 2)  # far apart
     assert not _within_edit_distance("cat", "category", 2)  # length gap > cap
+
+
+# ---------------------------------------------------------------------------
+# SoftSearchIndex: the per-picker token cache behind soft matching. It exists
+# only to make the SAME soft match dramatically cheaper across the keystrokes
+# of one picker session, so these pin (a) that it returns exactly what the
+# stateless function returns and (b) that its cache stays honest — a changed
+# digest re-tokenises, a dropped session is pruned, so it can neither serve a
+# stale match nor grow without bound.
+# ---------------------------------------------------------------------------
+
+
+def test_soft_index_matches_the_stateless_function_across_tiers():
+    """Parity is the whole contract: the cache is an optimisation, so any query
+    must return byte-identically what ``soft_search_digests`` returns."""
+    digests = {
+        "aaaa": "improve adm classifier throughput",
+        "bbbb": "retention sweep policy",
+        "cccc": "database migration rollback plan",
+    }
+    index = SoftSearchIndex()
+    for query in [
+        "class",  # prefix
+        "classifer",  # typo (edit distance 1)
+        "throughput classifier",  # word-order-independent AND
+        "retention nonexistentword",  # AND with an unmatched token -> no match
+        "xyz",  # short nonsense, below the fuzzy floor
+        "databse migration",  # typo + exact, both must hold
+        "",  # empty query
+    ]:
+        assert index.search(digests, query) == soft_search_digests(digests, query), query
+
+
+def test_soft_index_retokenizes_when_a_digest_changes():
+    """Freshness: a re-digested session (its digest STRING changed) must be
+    re-tokenised, so a match that the old digest supported disappears and one the
+    new digest supports appears. Keying the cache on the digest string is what
+    makes a re-digest after a rename or append invalidate the stale tokens."""
+    index = SoftSearchIndex()
+    before = {"s1": "classifier throughput"}
+    assert index.search(before, "class") == {"s1"}
+    assert index.search(before, "migration") == set()
+
+    # Same session id, different digest content (as a rename/append would produce).
+    after = {"s1": "database migration rollback"}
+    assert index.search(after, "class") == set()  # stale token must not survive
+    assert index.search(after, "migration") == {"s1"}  # new token is searchable
+
+
+def test_soft_index_prunes_dropped_sessions_and_stays_bounded():
+    """Boundedness: an entry for a session no longer in ``digests`` is dropped,
+    so the cache tracks the live store rather than every digest ever seen over
+    the picker's life. A dropped session must also stop matching."""
+    index = SoftSearchIndex()
+    index.search({"s1": "retention policy", "s2": "classifier work"}, "warm")
+    assert len(index._tokens) == 2
+
+    pruned = index.search({"s1": "retention policy"}, "classifier")
+    assert pruned == set()  # s2 is gone, so its match is gone
+    assert set(index._tokens) == {"s1"}  # and its cache entry with it
+    assert index.search({"s1": "retention policy"}, "retention") == {"s1"}
