@@ -516,6 +516,37 @@ def test_an_unavailable_account_keeps_its_identity_and_last_known_numbers() -> N
     assert any("72%" in line for line in lines)
 
 
+def test_unavailable_with_last_known_meters_keeps_binding_on_the_heading() -> None:
+    """Heading stays identity + binding; the new fact lives only on the note.
+
+    Putting ``usage unavailable`` on both rows duplicates the status and
+    clips the binding window on the designed 72-col card. Gominerva's
+    last-known hierarchy is the model: heading is the window, note is
+    the honesty. With no meters the heading may still say unavailable.
+    """
+    now = 40 * 60_000
+    with_meters = _report(
+        _percent("c:7d", "7 day", 33.0, shared=True, resets_at_ms=now + 60 * 3600 * 1000),
+        identity="damian@pergamonhq.com",
+    )
+    with_meters.usage_unavailable = True
+    with_meters.consecutive_failures = 5
+    with_meters.fetched_at = 1  # any past stamp; age is now - fetched_at
+    heading, note, *_rest = _lines([with_meters], width=72, now=now)
+    assert "damian@pergamonhq.com" in heading
+    assert "7 day 33%" in heading
+    assert "usage unavailable" not in heading
+    assert "…" not in heading
+    assert "usage unavailable" in note
+    assert "last known" in note
+
+    no_meters = _report(identity="new@example.com")
+    no_meters.usage_unavailable = True
+    no_meters.consecutive_failures = 5
+    no_heading = _lines([no_meters])[0]
+    assert "usage unavailable" in no_heading
+
+
 def test_a_stale_account_keeps_its_numbers_and_says_last_known() -> None:
     report = _report(
         _percent("a:7d", "7 day", 40.0, shared=True),

@@ -472,9 +472,11 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     row.append(report.provider, style=heading)
     if report.identity:
         row.append(f"  {report.identity}", style=muted)
-    if getattr(report, "usage_unavailable", False):
-        # The login is still real; the probe is not. Named on the identity
-        # line so a 429'd account is not mistaken for a missing one.
+    if getattr(report, "usage_unavailable", False) and not report.limits:
+        # Last-known meters already occupy the heading's binding slot —
+        # naming unavailable here duplicates the note and clips the
+        # window on a 72-col card. With no meters there is no binding
+        # to protect, so the heading may say the probe failed.
         row.append("  ·  usage unavailable", style=dim)
     binding = binding_limit(report)
     if binding is not None:
