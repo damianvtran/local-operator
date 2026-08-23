@@ -382,6 +382,27 @@ def editable_refusal() -> str:
     )
 
 
+def tui_editable_refusal() -> str:
+    """Same refusal as :func:`editable_refusal`, worded for the person in the TUI.
+
+    The CLI line names ``.venv`` and ``lop-update`` because that is the
+    contributor path. ``/update`` is typed by someone sitting in the app;
+    they need to know this is the checkout, not the installed ``lop``.
+    """
+    return "this is the repo checkout, not the installed lop — run lop-update after merge"
+
+
+def tui_installer_failure(kind: InstallKind) -> str:
+    """User-facing next step after a non-zero installer, keyed by install kind."""
+    if kind is InstallKind.PIPX:
+        hint = "pipx upgrade local-operator"
+    elif kind is InstallKind.PIP:
+        hint = "python -m pip install -U local-operator"
+    else:
+        hint = "uv tool upgrade local-operator"
+    return f"upgrade failed; try `{hint}` in a shell"
+
+
 def unknown_refusal(
     *,
     prefix: str | None = None,

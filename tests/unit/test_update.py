@@ -21,6 +21,8 @@ from local_operator.update import (
     is_behind,
     parse_version,
     perform_upgrade,
+    tui_editable_refusal,
+    tui_installer_failure,
     update_command,
 )
 
@@ -251,6 +253,13 @@ def test_perform_upgrade_nonzero_installer() -> None:
 
 def test_installer_argv_matches_kind() -> None:
     assert installer_argv(InstallKind.UV_TOOL) == ["uv", "tool", "upgrade", "local-operator"]
+
+
+def test_tui_refusal_copy_is_user_facing() -> None:
+    assert "repo checkout" in tui_editable_refusal()
+    assert "lop-update" in tui_editable_refusal()
+    assert "uv tool upgrade local-operator" in tui_installer_failure(InstallKind.UV_TOOL)
+    assert "pipx upgrade local-operator" in tui_installer_failure(InstallKind.PIPX)
 
 
 def _check(installed: str, latest: str | None, behind: bool) -> update_mod.VersionCheck:
