@@ -506,9 +506,6 @@ async def leased_account_usage(
     if store is None:
         return await fetch()
 
-    stale = store.get(key, include_expired=True)
-    stale_report = stale[0] if stale else None
-
     # The lease is contended only when a peer is mid-fetch. A free lease (the common
     # case, and ALWAYS the case in a single-process test) means: this process fetches.
     if not store.try_lease(key):
@@ -516,6 +513,14 @@ async def leased_account_usage(
         # next boundary. Serve what we have rather than doubling the network hit. With
         # nothing on hand (cold start) we cannot serve nothing — fetch live, matching
         # the controller's "the lease only protects a stale value" rule.
+        #
+        # The stale read lives HERE, not before the lease check, on purpose: the
+        # free-lease fast path (the overwhelming majority of calls) never consumes
+        # ``stale_report``, so reading it up front spent one SQLite query per probe
+        # for nothing. Deferring it to the contended branch also reads a marginally
+        # fresher row — any write the peer landed between here and the lease check.
+        stale = store.get(key, include_expired=True)
+        stale_report = stale[0] if stale else None
         return stale_report if stale_report is not None else await fetch()
 
     try:
