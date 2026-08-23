@@ -1128,6 +1128,54 @@ class AuthStore:
             )
         return accesses
 
+    def list_oauth_identities(self, provider: str) -> list[OAuthAccess]:
+        """Stored OAuth identities for ``provider``, without minting a bearer.
+
+        :meth:`list_oauth_accesses` is the right enumerator when a live usage
+        probe needs a token, and it still omits a row whose refresh raises —
+        taking a credential out of service is a routing decision, and a read
+        is not entitled to make it. ``/usage`` still has to *name* that
+        account: the operator is logged in, the email is on the row, and
+        dropping the block is how a refresh-failed login vanished from the
+        panel. This sibling never calls ``_ensure_oauth_fresh`` and never
+        blocks a row. The token field is empty; callers that need a bearer
+        still go through :meth:`list_oauth_accesses`.
+
+        Identity is taken from the stored payload first (email / account_id /
+        org_id) and falls back to ``identity_key`` so a row whose token blob
+        is unreadable still has a label. Logged-out rows stay excluded —
+        ``list_credentials`` already filters ``disabled_cause``.
+        """
+        if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
+            return []
+        rows = [r for r in self.list_credentials(provider) if r.credential_type == "oauth"]
+        identities: list[OAuthAccess] = []
+        for row in sorted(rows, key=lambda r: r.id):
+            data = row.data if isinstance(row.data, dict) else {}
+            email = data.get("email")
+            account_id = data.get("account_id")
+            org_id = data.get("org_id")
+            if not email and not account_id:
+                # identity_key is the same field upsert already computed; it
+                # is what the cache fingerprint names the account by when the
+                # payload has no email.
+                fallback = row.identity_key
+                if fallback and not str(fallback).startswith("oauth:"):
+                    email = fallback
+            identities.append(
+                OAuthAccess(
+                    access_token="",
+                    credential_id=row.id,
+                    account_id=str(account_id) if account_id else None,
+                    email=str(email) if email else None,
+                    org_id=str(org_id) if org_id else None,
+                    api_endpoint=data.get("api_endpoint"),
+                    kind="oauth",
+                    raw=data or None,
+                )
+            )
+        return identities
+
     async def _resolve(
         self,
         provider: str,

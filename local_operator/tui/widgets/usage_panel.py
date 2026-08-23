@@ -49,7 +49,7 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 #: without losing information — a percentage is exact and a countdown is words —
 #: so it is what absorbs a small terminal, down to the floor where a bar stops
 #: being readable as a proportion at all and is dropped entirely.
-BAR_MAX_CELLS = 24
+BAR_MAX_CELLS = 40
 BAR_MIN_CELLS = 8
 
 #: Filled / empty cells, and the glyph for a window that reported no number.
@@ -102,10 +102,13 @@ SCROLLBAR_GRAB_PAD = 2
 SCROLLBAR_TRACK = "│"
 SCROLLBAR_THUMB = "█"
 
-#: Panel geometry. The width cap is a measure, not a fraction of the terminal:
-#: a label, a bar and two numbers need about seventy cells and gain nothing from
-#: two hundred. The width margin keeps the card off the screen's edge padding.
-PANEL_MAX_WIDTH = 76
+#: Panel geometry. The width cap is a measure, not a fraction of the terminal.
+#: Seventy cells was enough for one provider and one identity; four Anthropic
+#: logins plus long notes (``extra usage disabled — out of credits``, ``usage
+#: unavailable — last known 40m ago``) and ``7 day (Fable)`` labels need more
+#: air on a laptop, but a 200-col sheet still reads as a wall. 104 is the
+#: laptop measure. The width margin keeps the card off the screen's edge padding.
+PANEL_MAX_WIDTH = 104
 PANEL_MIN_WIDTH = 32
 PANEL_WIDTH_MARGIN = 4
 
@@ -432,6 +435,31 @@ def _limit_row(limit, columns: _Columns, now_ms: float) -> Text:  # noqa: ANN001
     return row
 
 
+def _account_status_note(report, now_ms: float) -> str:  # noqa: ANN001
+    """Per-account stale / unavailable copy, or empty when the row is live.
+
+    Age already lives in the panel title for the *set*. A single 429 must
+    not drop the block, so the honesty sits on the account itself: last-known
+    numbers keep their meters and this note says they are last-known. An
+    exhausted 200 (100% weekly) is quota, not this path.
+    """
+    unavailable = bool(getattr(report, "usage_unavailable", False))
+    failures = int(getattr(report, "consecutive_failures", 0) or 0)
+    if not unavailable and failures <= 0:
+        return ""
+    age = ""
+    fetched_at = int(getattr(report, "fetched_at", 0) or 0)
+    if fetched_at and report.limits:
+        age = format_age(max(0.0, now_ms - fetched_at))
+    if unavailable:
+        if age:
+            return f"usage unavailable — last known {age}"
+        return "usage unavailable"
+    if age:
+        return f"last known {age}"
+    return "last known"
+
+
 def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     """``anthropic  (me@example.com)`` plus the window that binds.
 
@@ -447,6 +475,12 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     row.append(report.provider, style=heading)
     if report.identity:
         row.append(f"  {report.identity}", style=muted)
+    if getattr(report, "usage_unavailable", False) and not report.limits:
+        # Last-known meters already occupy the heading's binding slot —
+        # naming unavailable here duplicates the note and clips the
+        # window on a 72-col card. With no meters there is no binding
+        # to protect, so the heading may say the probe failed.
+        row.append("  ·  usage unavailable", style=dim)
     binding = binding_limit(report)
     if binding is not None:
         fraction = binding.amount.fraction() or 0.0
@@ -504,6 +538,11 @@ def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: 
         # identity must lose its tail rather than widen or clip the whole card.
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
+        account_note = _account_status_note(report, now_ms)
+        if account_note:
+            note = Text(f"  {account_note}", style=dim)
+            note.truncate(max(1, width), overflow="ellipsis")
+            lines.append(note)
         if report.notes:
             note = Text(f"  {report.notes}", style=dim)
             note.truncate(max(1, width), overflow="ellipsis")

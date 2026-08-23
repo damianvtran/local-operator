@@ -749,10 +749,11 @@ async def test_zai_labels_fit_the_usage_panel_label_column() -> None:
 
     The panel caps its label column at a third of its content width, and the
     panel itself is capped at ``PANEL_MAX_WIDTH``, so the ceiling is a constant
-    24 cells no matter how wide the terminal is. `Zread feature quota (1 month)`
-    needed 31 and truncated mid-parenthesis at EVERY width, leaving the only row
-    on the panel whose reset period was unavailable. Pinned here rather than in
-    the TUI tests because the label is written in this module.
+    ``(104 - 4) // 3 = 33`` cells no matter how wide the terminal is. `Zread
+    feature quota (1 month)` needed 31 and used to truncate mid-parenthesis at
+    EVERY width when the ceiling was 24, leaving the only row on the panel
+    whose reset period was unavailable. Pinned here rather than in the TUI
+    tests because the label is written in this module.
     """
     from rich.cells import cell_len
 

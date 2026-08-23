@@ -14,9 +14,11 @@ import pytest
 
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import (
+    USAGE_ACCOUNT_BACKOFF_CAP_MS,
     USAGE_FAILURE_BACKOFF_MS,
     USAGE_LAST_GOOD_RETENTION_MS,
     UsageCacheStore,
+    account_backoff_ms,
     account_preflight_key,
     fingerprint_accounts,
     fingerprint_secret,
@@ -86,6 +88,28 @@ def test_fingerprint_is_order_independent() -> None:
     # Enumeration order (row id, round-robin) must not change the key.
     assert fingerprint_accounts(["a", "b"]) == fingerprint_accounts(["b", "a"])
     assert fingerprint_accounts([]) == "none"
+
+
+def test_account_backoff_doubles_then_caps() -> None:
+    assert account_backoff_ms(0) == 0
+    assert account_backoff_ms(1) == 10_000
+    assert account_backoff_ms(2) == 20_000
+    assert account_backoff_ms(3) == 40_000
+    assert account_backoff_ms(4) == 80_000
+    assert account_backoff_ms(5) == 160_000
+    assert account_backoff_ms(8) == USAGE_ACCOUNT_BACKOFF_CAP_MS
+
+
+def test_report_round_trip_keeps_per_account_failure_state() -> None:
+    report = _report()
+    report.consecutive_failures = 3
+    report.usage_unavailable = True
+    report.next_probe_at_ms = 1_700_000_000_000
+    restored = report_from_dict(report_to_dict(report))
+    assert restored is not None
+    assert restored.consecutive_failures == 3
+    assert restored.usage_unavailable is True
+    assert restored.next_probe_at_ms == 1_700_000_000_000
 
 
 def test_secret_fingerprint_never_contains_the_secret() -> None:

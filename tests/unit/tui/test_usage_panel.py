@@ -22,7 +22,9 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
+    PANEL_MAX_WIDTH,
     PANEL_PADDING_ROWS,
+    PANEL_WIDTH_MARGIN,
     UsagePanel,
     binding_limit,
     build_usage_body,
@@ -499,6 +501,79 @@ async def test_a_report_block_separates_its_heading_from_its_meters() -> None:
     assert lines[1].strip() == "extra usage disabled"
     assert lines[2] == ""  # the breathing row
     assert "5 hour" in lines[3]
+
+
+def test_an_unavailable_account_keeps_its_identity_and_last_known_numbers() -> None:
+    """A maxed-out probe must not drop the block — the login is still real."""
+    report = _report(
+        _percent("a:5h", "5 hour", 72.0, shared=True),
+        identity="damian@gominerva.com",
+    )
+    report.usage_unavailable = True
+    report.consecutive_failures = 5
+    report.fetched_at = 0
+    lines = _lines([report], now=60_000)
+    assert any("damian@gominerva.com" in line for line in lines)
+    assert any("usage unavailable" in line for line in lines)
+    assert any("72%" in line for line in lines)
+
+
+def test_unavailable_with_last_known_meters_keeps_binding_on_the_heading() -> None:
+    """Heading stays identity + binding; the new fact lives only on the note.
+
+    Putting ``usage unavailable`` on both rows duplicates the status and
+    clips the binding window on the designed 72-col card. Gominerva's
+    last-known hierarchy is the model: heading is the window, note is
+    the honesty. With no meters the heading may still say unavailable.
+    """
+    now = 40 * 60_000
+    with_meters = _report(
+        _percent("c:7d", "7 day", 33.0, shared=True, resets_at_ms=now + 60 * 3600 * 1000),
+        identity="damian@pergamonhq.com",
+    )
+    with_meters.usage_unavailable = True
+    with_meters.consecutive_failures = 5
+    with_meters.fetched_at = 1  # any past stamp; age is now - fetched_at
+    heading, note, *_rest = _lines([with_meters], width=72, now=now)
+    assert "damian@pergamonhq.com" in heading
+    assert "7 day 33%" in heading
+    assert "usage unavailable" not in heading
+    assert "…" not in heading
+    assert "usage unavailable" in note
+    assert "last known" in note
+
+    no_meters = _report(identity="new@example.com")
+    no_meters.usage_unavailable = True
+    no_meters.consecutive_failures = 5
+    no_heading = _lines([no_meters])[0]
+    assert "usage unavailable" in no_heading
+
+
+def test_a_stale_account_keeps_its_numbers_and_says_last_known() -> None:
+    report = _report(
+        _percent("a:7d", "7 day", 40.0, shared=True),
+        identity="damian@radienthq.com",
+    )
+    report.consecutive_failures = 2
+    report.fetched_at = 0
+    lines = _lines([report], now=5 * 60_000)
+    assert any("damian@radienthq.com" in line for line in lines)
+    assert any("last known" in line for line in lines)
+    assert any("40%" in line for line in lines)
+
+
+def test_an_exhausted_200_is_not_labelled_unavailable() -> None:
+    """100% weekly from a live 200 is quota, not a fetch failure."""
+    report = _report(
+        _percent("a:7d", "7 day", 100.0, shared=True),
+        identity="damianvtran@gmail.com",
+    )
+    lines = _lines([report])
+    joined = "\n".join(lines)
+    assert "damianvtran@gmail.com" in joined
+    assert "100%" in joined
+    assert "usage unavailable" not in joined
+    assert "last known" not in joined
 
 
 @pytest.mark.asyncio
@@ -1351,3 +1426,17 @@ async def test_the_title_row_truncates_instead_of_wrapping() -> None:
         )
         title = panel._compose_rows()[0]
         assert cell_len(title.plain) <= panel.panel_width(), title.plain
+
+
+@pytest.mark.asyncio
+async def test_panel_width_caps_on_a_laptop_and_holds_on_eighty_cols() -> None:
+    """Extra terminal width used to be thrown away at 76, so a laptop /usage
+    card sat as a skinny column with short bars. The cap is a measure (104),
+    not a fraction: 80-col stays ``80 - margin``, a 140-col laptop grows to
+    the cap rather than filling the sheet."""
+    async with _panel_app(size=(80, 24)) as panel:
+        assert panel.panel_width() == 80 - PANEL_WIDTH_MARGIN
+        assert panel.panel_width() == 76
+    async with _panel_app(size=(140, 34)) as panel:
+        assert panel.panel_width() == PANEL_MAX_WIDTH
+        assert panel.panel_width() == 104
