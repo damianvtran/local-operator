@@ -346,11 +346,26 @@ class OwnedSessionHandle(SessionHandle):
                 self._loop.call_soon_threadsafe(_resolve_gate_future, future, value)
         self._pending_futures.clear()
 
-    def _resolve_pending(self, request_id: str, value: Any) -> None:
-        future = self._pending_futures.get(request_id)
-        if future is None or future.done():
-            raise ValueError("that prompt is no longer waiting")
-        self._loop.call_soon_threadsafe(future.set_result, value)
+    async def _resolve_pending(self, request_id: str, value: Any) -> None:
+        """Atomically reserve and settle one gate on its owning event loop."""
+        import concurrent.futures
+
+        receipt: concurrent.futures.Future[None] = concurrent.futures.Future()
+
+        def settle() -> None:
+            future = self._pending_futures.pop(request_id, None)
+            if future is None or future.done():
+                receipt.set_exception(ValueError("that prompt is no longer waiting"))
+                return
+            try:
+                future.set_result(value)
+            except (InvalidStateError, TypeError):
+                receipt.set_exception(ValueError("that prompt is no longer waiting"))
+                return
+            receipt.set_result(None)
+
+        self._loop.call_soon_threadsafe(settle)
+        await asyncio.wrap_future(receipt)
 
     # -- SessionHandle -----------------------------------------------------------
 
@@ -556,11 +571,23 @@ class OwnedSessionHandle(SessionHandle):
                 self._prompt_queue.popleft()
                 self._prompt_commands.pop(command.command_id, None)
 
-    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def steer(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
         self._check_loop_thread()
-        # Images ride the steer too — a screenshot sent mid-turn IS the
-        # correction, and session.steer already carries them.
-        self._session.steer(text, _image_blocks(images))
+        if command_id and any(
+            getattr(message, "id", None) == command_id for message in self._session.history()
+        ):
+            return "already admitted"
+        # Images ride the steer too. Producer identity follows the queued user
+        # row so a reconnect cannot inject the same correction twice.
+        fields: dict[str, Any] = {}
+        if "message_id" in inspect.signature(self._session.steer).parameters:
+            fields["message_id"] = command_id
+        self._session.steer(text, _image_blocks(images), **fields)
         self._projection.queued_count += 1
         self._fold.note_user_message(text, steer=True)
         self._notify()
@@ -612,7 +639,7 @@ class OwnedSessionHandle(SessionHandle):
         raise ValueError("pick the session from the session list instead")
 
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
-        self._resolve_pending(request_id, approved)
+        await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
     async def ask_answer(
@@ -627,16 +654,11 @@ class OwnedSessionHandle(SessionHandle):
         # Resolve with the QUESTION id the harness asked under — never our
         # request id, which the harness never saw.
         question_id = self._pending_question_ids.get(request_id, request_id)
-        future = self._pending_futures.get(request_id)
-        if future is None or future.done():
-            # Human, reconciling copy (U4): a stale tap means this question
-            # already settled elsewhere — say so rather than the developer-
-            # worded "no longer waiting", so the phone user learns their tap
-            # lost a race instead of the card silently vanishing.
-            raise ValueError("that question was already answered")
-        self._loop.call_soon_threadsafe(
-            future.set_result, {question_id: [value]} if value else None
-        )
+        try:
+            await self._resolve_pending(request_id, {question_id: [value]} if value else None)
+        except ValueError as exc:
+            # Human, reconciling copy: a stale tap means another front end won.
+            raise ValueError("that question was already answered") from exc
         return "answered"
 
     async def refresh(self) -> None:

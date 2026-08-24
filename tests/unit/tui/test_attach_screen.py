@@ -136,8 +136,7 @@ async def test_submit_routes_to_steer_when_streaming() -> None:
         screen._composer.focus()
         await pilot.press("enter")
         await pilot.pause()
-        assert len(stub.sent) == 1
-        assert stub.sent[0][1][0] == "focus on the retry path"
+        assert stub.sent == [("steer", ("focus on the retry path",))]
 
 
 @pytest.mark.asyncio
@@ -226,6 +225,23 @@ async def test_owner_death_state() -> None:
             )
         )
         assert "late" not in _text(screen._pending)
+
+
+@pytest.mark.asyncio
+async def test_attached_help_discovers_detach_without_forwarding() -> None:
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen, stub = await _attached_screen(app)
+        screen._render_projection(make_projection())
+        screen._composer.value = "/help"
+        screen._composer.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert stub.sent == []
+        assert "/detach" in _text(screen._pending)
+        assert "prior conversation" in _text(screen._pending)
+        assert screen._composer.value == ""
 
 
 @pytest.mark.asyncio

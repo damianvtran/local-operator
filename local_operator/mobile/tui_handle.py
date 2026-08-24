@@ -189,11 +189,21 @@ class TuiSessionHandle(SessionHandle):
             raise
         return "prompt admitted"
 
-    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def steer(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
         image_blocks = _image_blocks(images)
 
         def do_steer() -> None:
-            self._session().steer(text, image_blocks)
+            session = self._session()
+            if command_id and any(
+                getattr(message, "id", None) == command_id for message in session.history()
+            ):
+                return
+            session.steer(text, image_blocks, message_id=command_id)
 
         await self._on_app(do_steer)
         self._fold.note_user_message(text, steer=True)

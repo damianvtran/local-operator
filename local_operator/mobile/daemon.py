@@ -108,6 +108,9 @@ class SessionEntry:
         self.next_dial_at: float = 0.0
         self.degraded = False
         self.ended = False
+        # SSE ownership is session-level in SessionTable. A process entry is a
+        # replaceable routing generation and must never own a conversation view.
+        # Kept as an alias only for compatibility with focused diagnostics.
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         # Monotonic request id for control frames we originate.
         self._req_seq = 0
@@ -123,6 +126,10 @@ class SessionTable:
     def __init__(self) -> None:
         self.entries: dict[int, SessionEntry] = {}  # by pid
         self.list_subscribers: set[asyncio.Queue[None]] = set()
+        # Durable conversation identity owns viewers across zero or many host
+        # generations. Entries route watch commands but never own these queues.
+        self.session_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        self.provisional_active: set[str] = set()
 
     def summaries(self) -> list[dict[str, Any]]:
         """Reconcile live generations with durable conversations by session id."""
@@ -145,7 +152,9 @@ class SessionTable:
             out.append(
                 {
                     "session_id": session_id,
-                    "section": "active" if entry else "previous",
+                    "section": (
+                        "active" if entry or session_id in self.provisional_active else "previous"
+                    ),
                     "conversation_name": (p.conversation_name if p else "")
                     or (entry.record.conversation_name if entry else "")
                     or (row.name if row else ""),
@@ -293,7 +302,9 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                 entry.projection.degraded = False
                 entry.projection.ended = False
                 daemon.session_projections[entry.record.session_id] = entry.projection
-                _fan_out(entry)
+                daemon.table.provisional_active.discard(entry.record.session_id)
+                daemon.table.notify_list_changed()
+                _fan_out(entry, daemon)
             # acks/errors are matched by req id in _request's future map.
             pending = daemon._pending_reqs.pop((record.pid, frame.get("req")), None)
             if pending is not None and not pending.done():
@@ -305,7 +316,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
             entry.writer = None
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
         entry.degraded = not entry.ended
-        _fan_out(entry)
+        _fan_out(entry, daemon)
 
 
 def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> SessionProjection:
@@ -500,15 +511,17 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
     return raw, images[index].mime_type or "image/png"
 
 
-def _fan_out(entry: SessionEntry) -> None:
-    """Push the current projection to every open SSE queue for this session.
-    A slow phone's queue fills; repaints supersede, so evict the oldest and
-    retry until the put lands — a repaint must never be silently lost, because
-    the dropped one might be the approval card."""
+def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
+    """Push a repaint to durable session viewers, never one pid generation."""
     if entry.projection is None:
         return
     frame = entry.projection.to_json()
-    for queue in entry.subscribers:
+    queues = (
+        daemon.table.session_subscribers.get(entry.record.session_id, set())
+        if daemon is not None
+        else entry.subscribers
+    )
+    for queue in queues:
         while True:
             try:
                 queue.put_nowait(frame)
@@ -539,6 +552,7 @@ class MobileDaemon:
         # A session route outlives every process generation. Retain its latest
         # repaint so an open phone remains a normal conversation while idle.
         self.session_projections: dict[str, SessionProjection] = {}
+        self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
 
     # -- scanning --------------------------------------------------------------
 
@@ -560,6 +574,11 @@ class MobileDaemon:
                 entry = SessionEntry(record)
                 self.table.entries[record.pid] = entry
                 changed = True
+                # Durable viewers predate this process generation after a
+                # Previous wake. Rebind only the reaper signal to the new host;
+                # the SSE queues remain owned by session_id in the daemon.
+                if self.table.session_subscribers.get(record.session_id):
+                    self.notify_watch_transition(record.pid, watching=True)
             else:
                 # Re-adopt record updates (model label, name, /resume's new
                 # session id) — the socket survives them by design.
@@ -567,6 +586,31 @@ class MobileDaemon:
             if state == "stale":
                 entry.ended = True
                 changed = True
+                # SIGKILL cannot run owner cleanup. Discovery already proved the
+                # record pid dead; the lease helper revalidates generation and
+                # process identity under the recovery lock before removing only
+                # that claim and its pid mirror. Transcript data is untouched.
+                from local_operator.paths import config_dir
+                from local_operator.session_lease import reap_proven_dead_session_claim
+
+                await asyncio.to_thread(
+                    reap_proven_dead_session_claim,
+                    config_dir() / "sessions" / record.session_id,
+                    record.pid,
+                )
+                self.table.provisional_active.discard(record.session_id)
+                projection = await asyncio.to_thread(_durable_projection, record.session_id)
+                if projection is not None:
+                    self.session_projections[record.session_id] = projection
+                    for queue in self.table.session_subscribers.get(record.session_id, set()):
+                        try:
+                            queue.put_nowait(projection.to_json())
+                        except asyncio.QueueFull:
+                            try:
+                                queue.get_nowait()
+                                queue.put_nowait(projection.to_json())
+                            except asyncio.QueueEmpty:
+                                pass
             elif state == "wedged":
                 entry.degraded = True
             # Degraded is precisely "we owe this session a redial" — the only
@@ -585,8 +629,48 @@ class MobileDaemon:
                 if not entry.ended:
                     entry.ended = True
                     changed = True
+                    session_id = entry.record.session_id
+                    self.table.provisional_active.discard(session_id)
+                    projection = await asyncio.to_thread(_durable_projection, session_id)
+                    if projection is not None:
+                        self.session_projections[session_id] = projection
+                        for queue in self.table.session_subscribers.get(session_id, set()):
+                            try:
+                                queue.put_nowait(projection.to_json())
+                            except asyncio.QueueFull:
+                                try:
+                                    queue.get_nowait()
+                                    queue.put_nowait(projection.to_json())
+                                except asyncio.QueueEmpty:
+                                    pass
         if changed:
             self.table.notify_list_changed()
+
+    def retain_provisional_active(self, session_id: str) -> None:
+        """Hold a wake transition until discovery or one scan interval wins."""
+        previous = self._wake_settle_tasks.pop(session_id, None)
+        if previous is not None:
+            previous.cancel()
+
+        async def settle() -> None:
+            try:
+                await asyncio.sleep(SCAN_INTERVAL_S)
+                await self._scan_once()
+                if _entry_for_session(self, session_id) is None:
+                    self.table.provisional_active.discard(session_id)
+                    projection = await asyncio.to_thread(_durable_projection, session_id)
+                    if projection is not None:
+                        self.session_projections[session_id] = projection
+                        for queue in self.table.session_subscribers.get(session_id, set()):
+                            try:
+                                queue.put_nowait(projection.to_json())
+                            except asyncio.QueueFull:
+                                pass
+                    self.table.notify_list_changed()
+            finally:
+                self._wake_settle_tasks.pop(session_id, None)
+
+        self._wake_settle_tasks[session_id] = asyncio.create_task(settle())
 
     # -- control requests ---------------------------------------------------------
 
@@ -840,8 +924,11 @@ def build_app(daemon: MobileDaemon):
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
-        if entry is not None:
-            entry.subscribers.add(queue)
+        subscribers = daemon.table.session_subscribers.setdefault(session_id, set())
+        first_watcher = not subscribers
+        subscribers.add(queue)
+        if entry is not None and first_watcher:
+            daemon.notify_watch_transition(entry.record.pid, watching=True)
         # First subscriber = a phone just started watching: tell the session so
         # its self-reaper (if any) counts this front end and holds the session
         # in ACTIVE. Fire-and-forget on the already-open dial writer; an OLD
@@ -850,7 +937,8 @@ def build_app(daemon: MobileDaemon):
 
         async def stream():
             try:
-                projection = daemon.session_projections.get(session_id)
+                live = _entry_for_session(daemon, session_id)
+                projection = live.projection if live is not None else None
                 if projection is None:
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
@@ -864,8 +952,14 @@ def build_app(daemon: MobileDaemon):
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
-                if entry is not None:
-                    entry.subscribers.discard(queue)
+                current = daemon.table.session_subscribers.get(session_id)
+                if current is not None:
+                    current.discard(queue)
+                    if not current:
+                        daemon.table.session_subscribers.pop(session_id, None)
+                        live = _entry_for_session(daemon, session_id)
+                        if live is not None:
+                            daemon.notify_watch_transition(live.record.pid, watching=False)
 
         return StreamingResponse(
             stream(),
@@ -994,9 +1088,28 @@ def build_app(daemon: MobileDaemon):
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        op = str(body.pop("op", ""))
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        body = dict(body)
+        op = body.pop("op", None)
+        if not isinstance(op, str) or not op:
+            return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
         try:
+            from local_operator.mobile.types import (
+                ContinuationCommand,
+                validate_control_frame,
+            )
+
             entry = _entry_for_session(daemon, session_id)
+            if op == "prompt" and entry is None and _durable_user_session_dir(session_id) is None:
+                raise KeyError(session_id)
+            validate_control_frame({"op": op, "session_id": session_id, **body})
+            # HTTP is a reconnectable producer boundary, so prompt/steer identity
+            # is mandatory even though protocol-v2 loopback clients remain valid.
+            if op in ("prompt", "steer"):
+                ContinuationCommand.from_json(
+                    {**body, "session_id": session_id, "images": body.get("images", [])}
+                )
             if op == "prompt" and entry is None:
                 # Only an existing durable user conversation may wake a host.
                 # Besides authorization, this prevents a malformed/unknown id
@@ -1004,15 +1117,34 @@ def build_app(daemon: MobileDaemon):
                 if _durable_user_session_dir(session_id) is None:
                     raise KeyError(session_id)
                 from local_operator.mobile.attach_client import continue_command
-                from local_operator.mobile.types import ContinuationCommand
 
                 command = ContinuationCommand.from_json(
                     {**body, "session_id": session_id, "images": body.get("images", [])}
                 )
                 from local_operator.paths import config_dir
 
-                client, detail = await continue_command(config_dir(), command)
+                # Publish the accepted wake intent before process discovery. It
+                # remains authoritative until a live projection arrives or the
+                # attempt fails, so even a 50 ms worker is observable in list SSE.
+                daemon.table.provisional_active.add(session_id)
+                daemon.table.notify_list_changed()
+                projection = daemon.session_projections.get(session_id) or _durable_projection(
+                    session_id
+                )
+                if projection is not None:
+                    projection.ended = False
+                    projection.degraded = False
+                    daemon.session_projections[session_id] = projection
+                    for target in daemon.table.session_subscribers.get(session_id, set()):
+                        target.put_nowait(projection.to_json())
+                try:
+                    client, detail = await continue_command(config_dir(), command)
+                except BaseException:
+                    daemon.table.provisional_active.discard(session_id)
+                    daemon.table.notify_list_changed()
+                    raise
                 client.close()
+                daemon.retain_provisional_active(session_id)
                 return JSONResponse({"ok": True, "detail": detail})
             if entry is None:
                 raise KeyError(session_id)
@@ -1026,6 +1158,8 @@ def build_app(daemon: MobileDaemon):
             # failures. The web composer maps every non-2xx continuation reply
             # to its stable retry message while retaining the original command.
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
         return JSONResponse({"ok": True, "detail": reply.get("detail", "")})

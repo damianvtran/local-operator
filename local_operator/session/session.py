@@ -2589,14 +2589,23 @@ class Session:
             await self._transcript.append_message(message)
             self._context.messages.append(message)
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        """Inject a steering message into the running turn (interrupts tool
-        batches at the next boundary).
+    def steer(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+    ) -> None:
+        """Inject an identified steering message into the running turn.
 
-        Attachments ride along for the same reason they do on ``prompt``:
-        steering mid-turn with a screenshot is the case where the picture
-        IS the correction."""
-        self._steering_queue.put_nowait(Message.user(text, images))
+        Attachments ride along for the same reason they do on ``prompt``. The
+        optional producer identity is persisted when the queue drains, letting
+        reconnecting followers deduplicate the correction like an ordinary turn.
+        """
+        message = (
+            Message.user(text, images, id=message_id) if message_id else Message.user(text, images)
+        )
+        self._steering_queue.put_nowait(message)
 
     def queued_steering(self) -> list[AgentMessage]:
         """A FIFO snapshot of the steering queue, without draining it.

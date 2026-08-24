@@ -235,6 +235,51 @@ def test_directories_endpoint_offers_tmp(monkeypatch) -> None:
     assert body.get("tmp")
 
 
+def test_previous_command_validation_is_bounded_without_side_effects(tmp_path, monkeypatch) -> None:
+    """Malformed authenticated continuation input never reaches child startup."""
+    import asyncio as _asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.mobile import attach_client
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    directory = cfg / "sessions" / "previous-invalid"
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    _asyncio.run(transcript.append_message(Message.user("existing", id="existing")))
+    called = False
+
+    async def should_not_start(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal called
+        called = True
+        raise AssertionError("invalid input spawned a continuation")
+
+    monkeypatch.setattr(attach_client, "continue_command", should_not_start)
+    client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
+    client.post("/login", data={"password": "pw123"})
+    invalid = [
+        {"op": "prompt", "command_id": "not-a-uuid", "text": "hello"},
+        {"op": "prompt", "text": "hello"},
+        {"op": "prompt", "command_id": "12345678-1234-5678-1234-567812345678", "text": []},
+        {
+            "op": "prompt",
+            "command_id": "12345678-1234-5678-1234-567812345678",
+            "text": "hello",
+            "images": {},
+        },
+    ]
+    for payload in invalid:
+        response = client.post("/api/sessions/previous-invalid/command", json=payload)
+        assert response.status_code in (400, 422)
+        assert response.headers["content-type"].startswith("application/json")
+        assert "error" in response.json()
+    assert not called
+    assert [message.id for message in transcript.build_llm_history()] == ["existing"]
+
+
 def test_previous_continuation_transport_failure_is_non_2xx(tmp_path, monkeypatch) -> None:
     """Provider/child/socket failures return an error and never a false ACK."""
     import asyncio as _asyncio

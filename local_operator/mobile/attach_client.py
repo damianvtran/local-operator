@@ -265,17 +265,45 @@ class AttachClient:
             images=list(images or []),
         )
 
-    async def send_command(self, command: ContinuationCommand) -> str:
+    async def send_command(self, command: ContinuationCommand, *, streaming: bool = False) -> str:
+        """Submit natural text using the latest owner projection.
+
+        The retained command id rides both paths. If an idle projection races a
+        turn start, the owner's busy rejection is reconciled once as steering;
+        no second prompt is created and reconnect retries keep one identity.
+        """
         if command.session_id != self._session_id:
             raise ValueError("command belongs to another conversation")
-        return await self.prompt(
-            command.text,
-            command_id=command.command_id,
-            images=command.images,
-        )
+        if streaming:
+            return await self.steer(
+                command.text, command_id=command.command_id, images=command.images
+            )
+        try:
+            return await self.prompt(
+                command.text,
+                command_id=command.command_id,
+                images=command.images,
+            )
+        except RuntimeError as exc:
+            if "already streaming" not in str(exc):
+                raise
+            return await self.steer(
+                command.text, command_id=command.command_id, images=command.images
+            )
 
-    async def steer(self, text: str) -> str:
-        return await self._request("steer", text=text)
+    async def steer(
+        self,
+        text: str,
+        *,
+        command_id: str | None = None,
+        images: list[dict[str, str]] | None = None,
+    ) -> str:
+        return await self._request(
+            "steer",
+            command_id=command_id or str(uuid.uuid4()),
+            text=text,
+            images=list(images or []),
+        )
 
     async def abort(self) -> str:
         return await self._request("abort")

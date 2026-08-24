@@ -456,6 +456,9 @@ class Registrant:
             await self._push()
 
     async def _dispatch(self, op: str, frame: dict[str, Any]) -> str:
+        from local_operator.mobile.types import validate_control_frame
+
+        validate_control_frame(frame)
         h = self._handle
         if op == "ping":
             return "pong"
@@ -464,18 +467,15 @@ class Registrant:
             return "snapshot sent"
         if op == "prompt":
             images = frame.get("images")
-            fields: dict[str, Any] = {
-                "images": images if isinstance(images, list) else None,
-            }
+            fields: dict[str, Any] = {"images": images}
             if "command_id" in inspect.signature(h.prompt).parameters:
-                fields["command_id"] = str(frame.get("command_id", "")) or None
-            return await h.prompt(str(frame.get("text", "")), **fields)
+                fields["command_id"] = frame.get("command_id")
+            return await h.prompt(frame["text"], **fields)
         if op == "steer":
-            images = frame.get("images")
-            return await h.steer(
-                str(frame.get("text", "")),
-                images=images if isinstance(images, list) else None,
-            )
+            fields = {"images": frame.get("images")}
+            if "command_id" in inspect.signature(h.steer).parameters:
+                fields["command_id"] = frame.get("command_id")
+            return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
         if op == "set_model":
@@ -490,9 +490,9 @@ class Registrant:
             return await h.resume_session(str(frame.get("session_id", "")))
         if op == "approval_answer":
             return await h.approval_answer(
-                str(frame.get("request_id", "")),
-                bool(frame.get("approved")),
-                bool(frame.get("remember")),
+                frame["request_id"],
+                frame["approved"],
+                frame.get("remember", False),
             )
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
@@ -503,8 +503,8 @@ class Registrant:
             raw_index = frame.get("question_index")
             question_index = int(raw_index) if isinstance(raw_index, (int, float)) else None
             return await h.ask_answer(
-                str(frame.get("request_id", "")),
-                str(frame.get("value", "")),
+                frame["request_id"],
+                frame["value"],
                 question_index=question_index,
             )
         raise ValueError(f"unknown op: {op!r}")

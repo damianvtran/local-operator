@@ -13,6 +13,7 @@ from local_operator.session_lease import (
     SessionLease,
     SessionLeaseHeldError,
     acquire_session_lease,
+    reap_proven_dead_session_claim,
 )
 
 
@@ -63,12 +64,13 @@ def _recover_stale(directory: str, start, release, results) -> None:
         lease.release()
 
 
-def _write_stale_claim(session_dir: Path) -> None:
+def _write_stale_claim(session_dir: Path, pid: int = 2_147_483_646) -> None:
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / LEASE_NAME).write_text(
-        '{"schema":1,"session_id":"same","generation":"stale","pid":2147483646}',
+        f'{{"schema":1,"session_id":"same","generation":"stale","pid":{pid}}}',
         encoding="utf-8",
     )
+    (session_dir / ".session.pid").write_text(str(pid), encoding="utf-8")
 
 
 def test_two_stale_recoverers_cannot_replace_a_fresh_successor(tmp_path: Path, monkeypatch) -> None:
@@ -138,6 +140,25 @@ def test_many_processes_recover_one_stale_claim_exactly_once(tmp_path: Path) -> 
     for process in processes:
         process.join(timeout=10)
         assert process.exitcode == 0
+
+
+def test_daemon_reap_removes_only_proven_dead_exact_claim(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions" / "dead"
+    dead_pid = 2_147_483_646
+    _write_stale_claim(session_dir, pid=dead_pid)
+    assert reap_proven_dead_session_claim(session_dir, dead_pid)
+    assert not (session_dir / LEASE_NAME).exists()
+    assert not (session_dir / ".session.pid").exists()
+
+
+def test_daemon_reap_never_removes_live_successor(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions" / "successor"
+    dead_pid = 2_147_483_646
+    _write_stale_claim(session_dir, pid=dead_pid)
+    successor = acquire_session_lease(session_dir)
+    assert not reap_proven_dead_session_claim(session_dir, dead_pid)
+    assert (session_dir / LEASE_NAME).exists()
+    successor.release()
 
 
 def test_stale_release_cannot_unlink_successor_claim(tmp_path: Path) -> None:

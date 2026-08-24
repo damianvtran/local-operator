@@ -50,6 +50,8 @@ from local_operator.tui.widgets.editor import DEFAULT_PLACEHOLDER
 #: Only one exists (/detach); parsed by prefix so the composer stays a plain
 #: Editor with no slash registry of its own — the owner owns slash commands.
 DETACH_COMMAND = "/detach"
+HELP_COMMAND = "/help"
+ATTACHED_HELP = "/detach  Return to your prior conversation and close this view."
 
 
 def _entry_line(entry: TranscriptEntry) -> str:
@@ -284,6 +286,14 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         if text.lower() in (DETACH_COMMAND, "esc"):
             self.action_detach()
             return
+        if text.lower() == HELP_COMMAND:
+            # Attached help is local navigation, never model input. Keep the
+            # escape route out of persistent chrome while making it discoverable
+            # in the command flow users already know from ordinary conversations.
+            self._pending.update(ATTACHED_HELP)
+            self._pending.display = True
+            self._composer.value = ""
+            return
         command = self._pending_command or ContinuationCommand.create(self._session_id, text)
         self._pending_command = command
         client = self._client
@@ -294,7 +304,18 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         # user the screen is broken when it is working as designed.
         try:
             if client is not None and client.connected:
-                await client.send_command(command)
+                if self._projection is not None and self._projection.streaming:
+                    try:
+                        await client.send_command(command, streaming=True)
+                    except TypeError:
+                        # Compatibility for third-party/test attach clients built
+                        # before natural dispatch accepted the state hint.
+                        await client.steer(command.text)
+                else:
+                    try:
+                        await client.send_command(command, streaming=False)
+                    except TypeError:
+                        await client.send_command(command)
             else:
                 self._pending.update("Connecting…")
                 self._pending.display = True

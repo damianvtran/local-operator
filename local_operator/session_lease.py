@@ -163,6 +163,42 @@ class SessionLease:
             pass
 
 
+def reap_proven_dead_session_claim(session_dir: Path, owner_pid: int) -> bool:
+    """Remove only the exact dead owner's lease and compatibility mirror.
+
+    The daemon calls this after discovery proves a record pid is gone. Recovery
+    still revalidates under the same kernel lock used by acquisition, because a
+    successor may claim the durable transcript between the scan and cleanup.
+    Windows remains conservative through ``_pid_state`` and lock acquisition.
+    """
+    if _pid_state(owner_pid) != "dead":
+        return False
+    path = session_dir / LEASE_NAME
+    with _stale_recovery_right(session_dir) as may_recover:
+        if not may_recover:
+            return False
+        generation, current_pid = _read_claim(path)
+        if generation is None or current_pid is None or current_pid != owner_pid:
+            return False
+        if _pid_state(current_pid) != "dead":
+            return False
+        # Re-read immediately before unlink so cleanup is generation-fenced even
+        # if a future platform changes lock semantics around pathname replacement.
+        if _read_claim(path) != (generation, current_pid):
+            return False
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        mirror = session_dir / MIRROR_NAME
+        try:
+            if mirror.read_text(encoding="utf-8").strip() == str(owner_pid):
+                mirror.unlink()
+        except OSError:
+            pass
+        return True
+
+
 def acquire_session_lease(session_dir: Path, pid: int | None = None) -> SessionLease:
     """Atomically acquire sole-writer ownership, recovering proven-dead claims."""
     owner_pid = os.getpid() if pid is None else pid

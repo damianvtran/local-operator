@@ -69,15 +69,82 @@ class ContinuationCommand:
 
     @staticmethod
     def from_json(data: dict[str, Any]) -> "ContinuationCommand":
-        command_id = str(data.get("command_id", ""))
-        uuid.UUID(command_id)
+        """Validate an untrusted continuation payload without coercing types.
+
+        This constructor sits on both HTTP and control-socket boundaries. Silent
+        ``str(...)`` coercion turns missing, object, and list fields into model
+        input and lets malformed UUIDs escape as route-level 500s, so invalid
+        producer data is rejected before any owner is spawned or transcript is
+        opened.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("command payload must be an object")
+        command_id = data.get("command_id")
+        if not isinstance(command_id, str) or not command_id:
+            raise ValueError("command_id must be a UUID string")
+        try:
+            uuid.UUID(command_id)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("command_id must be a valid UUID") from exc
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        images = data.get("images", [])
+        if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
+            raise ValueError("images must be a list of objects")
+        submitted_at = data.get("submitted_at", time.time())
+        if not isinstance(submitted_at, (int, float)) or isinstance(submitted_at, bool):
+            raise ValueError("submitted_at must be a number")
         return ContinuationCommand(
             command_id=command_id,
-            session_id=str(data.get("session_id", "")),
-            text=str(data.get("text", "")),
-            images=[dict(item) for item in data.get("images", []) if isinstance(item, dict)],
-            submitted_at=float(data.get("submitted_at", time.time())),
+            session_id=session_id,
+            text=text,
+            images=[dict(item) for item in images],
+            submitted_at=float(submitted_at),
         )
+
+
+def validate_control_frame(frame: dict[str, Any]) -> None:
+    """Reject malformed authenticated mutations before dispatch side effects."""
+    if not isinstance(frame, dict):
+        raise ValueError("control frame must be an object")
+    op = frame.get("op")
+    if not isinstance(op, str) or not op:
+        raise ValueError("op must be a non-empty string")
+    if op in ("prompt", "steer"):
+        text = frame.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        images = frame.get("images", [])
+        if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
+            raise ValueError("images must be a list of objects")
+        # Protocol-v3 producers send identity on both paths. Older authenticated
+        # loopback clients omitted it, so absence remains compatible; a supplied
+        # id is always validated before reaching transcript or steering state.
+        if "command_id" in frame:
+            ContinuationCommand.from_json(
+                {
+                    "command_id": frame.get("command_id"),
+                    "session_id": frame.get("session_id", "control-session"),
+                    "text": text,
+                    "images": images,
+                }
+            )
+    elif op == "approval_answer":
+        if not isinstance(frame.get("request_id"), str) or not frame["request_id"]:
+            raise ValueError("request_id must be a non-empty string")
+        if not isinstance(frame.get("approved"), bool):
+            raise ValueError("approved must be a boolean")
+        if "remember" in frame and not isinstance(frame.get("remember"), bool):
+            raise ValueError("remember must be a boolean")
+    elif op == "ask_answer":
+        if not isinstance(frame.get("request_id"), str) or not frame["request_id"]:
+            raise ValueError("request_id must be a non-empty string")
+        if not isinstance(frame.get("value"), str):
+            raise ValueError("value must be a string")
 
 
 #: Bumped on any breaking change to control frames or web payloads. The

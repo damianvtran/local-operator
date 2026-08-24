@@ -249,6 +249,24 @@ async def test_queue_overflow_rejects_before_admission(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_gate_answers_have_one_authoritative_winner() -> None:
+    handle, _ = make_handle()
+    gate = asyncio.create_task(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    request_id = next(iter(handle._pending_futures))
+    results = await asyncio.gather(
+        handle.approval_answer(request_id, True, False),
+        handle.approval_answer(request_id, False, False),
+        return_exceptions=True,
+    )
+    assert gate.done()
+    assert await gate in (True, False)
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    assert sum(isinstance(result, str) for result in results) == 1
+    assert request_id not in handle._pending_futures
+
+
+@pytest.mark.asyncio
 async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
     handle, session = make_handle()
     receipts = await asyncio.gather(

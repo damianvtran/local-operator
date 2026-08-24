@@ -140,7 +140,8 @@ def test_startup_import_weight_unchanged() -> None:
         "or m.startswith('local_operator.tui.attach_screen')]; "
         "print('LEAKED:' + ','.join(bad) if bad else 'CLEAN')"
     )
+    repo_root = Path(__file__).resolve().parents[2]
     out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, cwd="/tmp/lop-attach"
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=repo_root
     )
     assert out.stdout.strip() == "CLEAN", out.stdout
