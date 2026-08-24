@@ -2493,8 +2493,19 @@ class Session:
             await result
 
     # -- driving turns --------------------------------------------------------
-    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+        admitted: asyncio.Future[None] | None = None,
+    ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``message_id`` and ``admitted`` form the continuation admission seam:
+        the caller receives a receipt only after the user row is on disk, while
+        the model turn may continue afterward. Ordinary local prompts omit both.
 
         ``images`` are attachments the user pasted into their prompt; they
         ride the same message as the text so the model sees them as one
@@ -2550,12 +2561,9 @@ class Session:
                         "continue with the user's request that follows" if fresh else None
                     ),
                 )
-            initial: list[AgentMessage] = (
-                [catchup, Message.user(text, images)]
-                if catchup is not None
-                else [Message.user(text, images)]
-            )
-            await self._run_turn_pipeline(initial)
+            user = Message.user(text, images, **({"id": message_id} if message_id else {}))
+            initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
+            await self._run_turn_pipeline(initial, admitted=admitted, admitted_id=user.id)
         finally:
             self._turn_lock.release()
 
@@ -3118,7 +3126,13 @@ class Session:
             self._handle_missed_wakes()
             await self._run_turn_pipeline(initial)
 
-    async def _run_turn_pipeline(self, initial: list[AgentMessage]) -> None:
+    async def _run_turn_pipeline(
+        self,
+        initial: list[AgentMessage],
+        *,
+        admitted: asyncio.Future[None] | None = None,
+        admitted_id: str | None = None,
+    ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
         A post-compaction continuation is a CONTINUATION of the same logical
@@ -3142,7 +3156,7 @@ class Session:
             begin_message()
         self._turn_task = asyncio.current_task()
         try:
-            await self._run_turn(initial)
+            await self._run_turn(initial, admitted=admitted, admitted_id=admitted_id)
             await self._drain_continuation()
         finally:
             self._turn_task = None
@@ -3166,7 +3180,13 @@ class Session:
             else held.model_copy(update={"generation": generation})
         )
 
-    async def _run_turn(self, initial: list[AgentMessage]) -> None:
+    async def _run_turn(
+        self,
+        initial: list[AgentMessage],
+        *,
+        admitted: asyncio.Future[None] | None = None,
+        admitted_id: str | None = None,
+    ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``."""
         if self._wake.needs_rearm:
             # HC-20: the scheduler could not arm without a running loop at
@@ -3186,6 +3206,10 @@ class Session:
         try:
             for message in initial:
                 await self._transcript.append_message(message)
+                if admitted is not None and message.id == admitted_id and not admitted.done():
+                    # The append completed under Transcript's fsync boundary;
+                    # only now may a producer discard its retained command.
+                    admitted.set_result(None)
                 # Announce USER turns to every subscriber. The loop only emits
                 # MessageStartEvent for ASSISTANT messages, so without this a
                 # user prompt — from any front end — never reaches the other

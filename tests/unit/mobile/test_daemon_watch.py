@@ -32,7 +32,7 @@ class FakeHandle:
     def subscribe(self, on_projection):  # noqa: ANN001, ANN202
         return lambda: None
 
-    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
         return "sent"
 
     async def steer(self, text, images=None):  # noqa: ANN001, ANN202

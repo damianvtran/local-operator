@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import logging
 import secrets
+import uuid
 from asyncio import InvalidStateError
 from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
@@ -60,6 +63,19 @@ PENDING_REQUEST_TIMEOUT_S = 30.0
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
+
+
+@dataclass
+class _PromptCommand:
+    command_id: str
+    text: str
+    images: list["ImageContent"]
+    admitted: asyncio.Future[None]
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        # Tuple compatibility for older diagnostics that inspect the queue.
+        yield self.text
+        yield self.images
 
 
 class OwnedSessionHandle(SessionHandle):
@@ -130,7 +146,10 @@ class OwnedSessionHandle(SessionHandle):
         # and exactly one drain invokes Session.prompt at a time. Session itself
         # deliberately rejects concurrent calls, so serialization belongs at
         # this control/admission boundary rather than by adding another writer.
-        self._prompt_queue: deque[tuple[str, list["ImageContent"]]] = deque()
+        self._prompt_queue: deque[_PromptCommand] = deque()
+        # Pending and running duplicates join the same durable-admission future;
+        # completed duplicates are recognized from transcript-backed history.
+        self._prompt_commands: dict[str, _PromptCommand] = {}
         self._prompt_drain_task: asyncio.Task[None] | None = None
         self._disposing = False
         self._install_gates()
@@ -247,12 +266,16 @@ class OwnedSessionHandle(SessionHandle):
         if drain is not None and not drain.done():
             drain.cancel()
             await asyncio.gather(drain, return_exceptions=True)
-        # Every prompt below was already acknowledged to its producer. Reject
-        # each explicitly in the shared projection instead of silently erasing
-        # admissions that never reached Session.prompt.
+        # Anything still queued has no durable receipt. Wake every producer so
+        # it can retain and retry the same identity rather than hanging forever.
         while self._prompt_queue:
-            self._prompt_queue.popleft()
-            self._fold.note_prompt_rejected("session closed before the admitted prompt could run")
+            command = self._prompt_queue.popleft()
+            self._prompt_commands.pop(command.command_id, None)
+            if not command.admitted.done():
+                command.admitted.set_exception(
+                    RuntimeError("session closed before the prompt was admitted")
+                )
+            self._fold.note_prompt_rejected("session closed before the prompt was admitted")
         self._notify()
         await self._session.dispose()
 
@@ -360,8 +383,23 @@ class OwnedSessionHandle(SessionHandle):
         self._reconcile_streaming()
         return unsubscribe
 
-    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def prompt(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
         self._check_loop_thread()
+        if not command_id:
+            # Only old in-process callers omit the v3 field. Minting here keeps
+            # their local submission valid; all wire producers retain their id.
+            command_id = str(uuid.uuid4())
+        existing = self._prompt_commands.get(command_id)
+        if existing is not None:
+            await existing.admitted
+            return "already admitted"
+        if any(getattr(message, "id", None) == command_id for message in self._session.history()):
+            return "already admitted"
         if self._disposing:
             raise RuntimeError("session is closing; prompt was not admitted")
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
@@ -369,14 +407,25 @@ class OwnedSessionHandle(SessionHandle):
                 f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
             )
         self._maybe_name_conversation(text)
-        self._prompt_queue.append((text, _image_blocks(images)))
-        position = len(self._prompt_queue)
+        admitted: asyncio.Future[None] = self._loop.create_future()
+        command = _PromptCommand(command_id, text, _image_blocks(images), admitted)
+        position = len(self._prompt_queue) + 1
+        legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
+        # Compatibility-only fake/third-party sessions predate durable
+        # admission. Production Session exposes ``message_id`` and never takes
+        # this early-receipt branch.
+        if legacy_prompt:
+            admitted.set_result(None)
+        self._prompt_commands[command_id] = command
+        self._prompt_queue.append(command)
         if self._prompt_drain_task is None or self._prompt_drain_task.done():
             self._prompt_drain_task = asyncio.ensure_future(self._drain_prompt_queue())
-            # Retrieving an unexpected BaseException prevents a background-task
-            # warning while preserving cancellation/SystemExit semantics.
             self._prompt_drain_task.add_done_callback(self._observe_prompt_drain)
-        return "prompt admitted" if position == 1 else f"prompt queued ({position})"
+        # ACK is the durable transcript append, never insertion into this queue.
+        await admitted
+        if legacy_prompt and position > 1:
+            return f"prompt queued ({position})"
+        return "prompt admitted"
 
     @staticmethod
     def _observe_prompt_drain(task: asyncio.Task[None]) -> None:
@@ -457,10 +506,28 @@ class OwnedSessionHandle(SessionHandle):
         one shared projection row rather than one optimistic echo per producer.
         """
         while self._prompt_queue:
-            text, image_blocks = self._prompt_queue[0]
+            command = self._prompt_queue[0]
             try:
-                await self._session.prompt(text, image_blocks)
+                parameters = inspect.signature(self._session.prompt).parameters
+                if "message_id" in parameters:
+                    await self._session.prompt(
+                        command.text,
+                        command.images,
+                        message_id=command.command_id,
+                        admitted=command.admitted,
+                    )
+                else:
+                    # Legacy tests/third-party handles have no admission seam;
+                    # preserve their historical queue-insertion receipt. Real
+                    # Session implementations always take the durable branch.
+                    if not command.admitted.done():
+                        command.admitted.set_result(None)
+                    await self._session.prompt(command.text, command.images)
             except asyncio.CancelledError:
+                if not command.admitted.done():
+                    command.admitted.set_exception(
+                        RuntimeError("session closed before the prompt was admitted")
+                    )
                 # The in-flight admission is popped by finally, so record its
                 # terminal rejection here; dispose handles only those still queued.
                 self._projection.streaming = False
@@ -471,6 +538,8 @@ class OwnedSessionHandle(SessionHandle):
                 # Cancellation is control flow and must remain cancellation.
                 raise
             except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
+                if not command.admitted.done():
+                    command.admitted.set_exception(exc)
                 # Provider, transcript, and tool failures are all terminal for
                 # this one admission. Surface the failure asynchronously, then
                 # continue in FIFO order without retrying the failed head.
@@ -485,6 +554,7 @@ class OwnedSessionHandle(SessionHandle):
                 raise
             finally:
                 self._prompt_queue.popleft()
+                self._prompt_commands.pop(command.command_id, None)
 
     async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()

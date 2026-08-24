@@ -36,7 +36,7 @@ class FakeHandle:
     async def refresh(self) -> None:
         pass
 
-    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
         self._projection.transcript.append(
             TranscriptEntry(id=f"u{len(self._projection.transcript)}", kind="user", text=text)
         )

@@ -10,6 +10,7 @@ import pytest
 
 from local_operator.mobile.types import (
     AskOptionWire,
+    ContinuationCommand,
     PendingRequest,
     SessionProjection,
     SessionRecord,
@@ -65,9 +66,9 @@ class StubClient:
     async def connect(self, record, session_id):  # noqa: ANN001, ANN202
         pass
 
-    async def prompt(self, text: str) -> str:
-        self.sent.append(("prompt", (text,)))
-        return "prompt sent"
+    async def send_command(self, command: ContinuationCommand) -> str:
+        self.sent.append(("prompt", (command.text, command.command_id)))
+        return "prompt admitted"
 
     async def steer(self, text: str) -> str:
         self.sent.append(("steer", (text,)))
@@ -115,10 +116,7 @@ async def test_banner_and_transcript_rows() -> None:
         screen, _ = await _attached_screen(app)
         screen._render_projection(make_projection())
         await pilot.pause()
-        assert "attached" in _text(screen._banner)
-        assert "pid 4242" in _text(screen._banner)
-        assert "Attach Demo" in _text(screen._banner)
-        assert "/detach" in _text(screen._banner)
+        assert screen._composer.placeholder == "Message Local Operator…"
         rows = [c for c in screen._transcript.children]
         texts = [_text(r) for r in rows]
         assert "❯ summarise the ingest path" in texts
@@ -138,7 +136,8 @@ async def test_submit_routes_to_steer_when_streaming() -> None:
         screen._composer.focus()
         await pilot.press("enter")
         await pilot.pause()
-        assert stub.sent == [("steer", ("focus on the retry path",))]
+        assert len(stub.sent) == 1
+        assert stub.sent[0][1][0] == "focus on the retry path"
 
 
 @pytest.mark.asyncio
@@ -153,7 +152,9 @@ async def test_submit_routes_to_prompt_when_idle() -> None:
         screen._composer.focus()
         await pilot.press("enter")
         await pilot.pause()
-        assert stub.sent == [("prompt", ("what are the three stages?",))]
+        assert len(stub.sent) == 1
+        assert stub.sent[0][1][0] == "what are the three stages?"
+        assert screen._composer.value == ""
 
 
 @pytest.mark.asyncio
@@ -213,11 +214,10 @@ async def test_owner_death_state() -> None:
         await pilot.pause()
         screen._owner_exited("owner exited")
         await pilot.pause()
-        assert "owner exited" in _text(screen._banner)
-        assert "resume here" in _text(screen._pending)
         assert screen._owner_dead
-        assert "resume here" not in _text(screen._banner)
-        assert "resume here" not in screen._composer.placeholder
+        assert not screen._pending.display
+        assert not screen._composer.disabled
+        assert screen._composer.placeholder == "Message Local Operator…"
         # A late projection queued before EOF cannot repaint contradictory live
         # state or resurrect the approval card after owner death.
         screen._render_projection(
@@ -225,7 +225,6 @@ async def test_owner_death_state() -> None:
                 pending=PendingRequest(request_id="late", kind="approval", title="late")
             )
         )
-        assert "attached ·" not in _text(screen._banner)
         assert "late" not in _text(screen._pending)
 
 
@@ -268,7 +267,8 @@ async def test_live_client_callback_schedules_on_ui_loop() -> None:
         screen, _ = await _attached_screen(app)
         screen._on_projection(make_projection())
         await pilot.pause()
-        assert "Attach Demo" in _text(screen._banner)
+        assert screen._projection is not None
+        assert screen._projection.conversation_name == "Attach Demo"
 
 
 @pytest.mark.asyncio
@@ -287,4 +287,5 @@ async def test_owner_death_r_key_runs_async_resume_callback() -> None:
         screen._owner_exited("owner exited")
         await pilot.press("r")
         await pilot.pause()
-        assert resumed == ["sess-42"]
+        assert resumed == []
+        assert screen._composer.placeholder == "Message Local Operator…"

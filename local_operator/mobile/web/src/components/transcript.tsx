@@ -33,7 +33,7 @@ function AttachmentImage({
 	entryId,
 	index,
 }: {
-	pid: number;
+	pid: string;
 	entryId: string;
 	index: number;
 }) {
@@ -80,7 +80,7 @@ function AttachmentImage({
 	);
 }
 
-function Entry({ entry, pid }: { entry: TranscriptEntry; pid: number }) {
+function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 	switch (entry.kind) {
 		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
@@ -159,7 +159,7 @@ export function Transcript({
 	pid,
 	entries,
 }: {
-	pid: number;
+	pid: string;
 	entries: TranscriptEntry[];
 }) {
 	const [windowSize, setWindowSize] = useState(PAGE);

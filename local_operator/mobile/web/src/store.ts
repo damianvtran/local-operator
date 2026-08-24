@@ -20,7 +20,7 @@ export interface ProjectionSlot {
 
 let sessions: SessionSummary[] = [];
 let sessionsConnected = false;
-const projections = new Map<number, ProjectionSlot>();
+const projections = new Map<string, ProjectionSlot>();
 
 const listeners = new Set<() => void>();
 
@@ -47,11 +47,11 @@ export function useSessions(): {
 	return { sessions: list, connected };
 }
 
-export function useProjection(pid: number): ProjectionSlot {
+export function useProjection(sessionId: string): ProjectionSlot {
 	return useSyncExternalStore(
 		subscribe,
 		() =>
-			projections.get(pid) ?? { projection: null, connected: false },
+			projections.get(sessionId) ?? { projection: null, connected: false },
 	);
 }
 
@@ -149,18 +149,18 @@ export function retainSessionListStream(): () => void {
 /* ------------------------------------------------------------------ */
 
 const projectionStreams = new Map<
-	number,
+	string,
 	{ close: () => void; refs: number }
 >();
 
-export function retainProjectionStream(pid: number): () => void {
-	const existing = projectionStreams.get(pid);
+export function retainProjectionStream(sessionId: string): () => void {
+	const existing = projectionStreams.get(sessionId);
 	if (existing) {
 		existing.refs++;
 	} else {
-		projections.set(pid, { projection: null, connected: false });
+		projections.set(sessionId, { projection: null, connected: false });
 		const close = openEventStream(
-			`/api/sessions/${pid}/events`,
+			`/api/sessions/${encodeURIComponent(sessionId)}/events`,
 			"projection",
 			(data) => {
 				let incoming: SessionProjection;
@@ -169,7 +169,7 @@ export function retainProjectionStream(pid: number): () => void {
 				} catch {
 					return;
 				}
-				const current = projections.get(pid);
+				const current = projections.get(sessionId);
 				/* Drop stale repaints: the daemon's epoch only moves forward. */
 				if (
 					current?.projection &&
@@ -177,27 +177,27 @@ export function retainProjectionStream(pid: number): () => void {
 				) {
 					return;
 				}
-				projections.set(pid, { projection: incoming, connected: true });
+				projections.set(sessionId, { projection: incoming, connected: true });
 				emit();
 			},
 			() => {
-				const cur = projections.get(pid);
+				const cur = projections.get(sessionId);
 				if (cur) {
-					projections.set(pid, { ...cur, connected: true });
+					projections.set(sessionId, { ...cur, connected: true });
 					emit();
 				}
 			},
 		);
-		projectionStreams.set(pid, { close, refs: 1 });
+		projectionStreams.set(sessionId, { close, refs: 1 });
 	}
 	return () => {
-		const entry = projectionStreams.get(pid);
+		const entry = projectionStreams.get(sessionId);
 		if (!entry) return;
 		entry.refs--;
 		if (entry.refs > 0) return;
 		entry.close();
-		projectionStreams.delete(pid);
-		projections.delete(pid);
+		projectionStreams.delete(sessionId);
+		projections.delete(sessionId);
 		emit();
 	};
 }
@@ -208,15 +208,15 @@ export function retainProjectionStream(pid: number): () => void {
 
 const DRAFT_PREFIX = "lo-mobile-draft:";
 
-export function getDraft(pid: number): string {
-	return localStorage.getItem(DRAFT_PREFIX + pid) ?? "";
+export function getDraft(sessionId: string): string {
+	return localStorage.getItem(DRAFT_PREFIX + sessionId) ?? "";
 }
 
-export function setDraft(pid: number, text: string): void {
+export function setDraft(sessionId: string, text: string): void {
 	if (text) {
-		localStorage.setItem(DRAFT_PREFIX + pid, text);
+		localStorage.setItem(DRAFT_PREFIX + sessionId, text);
 	} else {
-		localStorage.removeItem(DRAFT_PREFIX + pid);
+		localStorage.removeItem(DRAFT_PREFIX + sessionId);
 	}
 }
 
@@ -225,16 +225,16 @@ export function setDraft(pid: number, text: string): void {
  * Drafts survive navigation away and back, which is the phone case — the
  * user answers a message mid-compose and returns.
  */
-export function useDraft(pid: number): [string, (t: string) => void] {
-	const [text, setText] = useState(() => getDraft(pid));
+export function useDraft(sessionId: string): [string, (t: string) => void] {
+	const [text, setText] = useState(() => getDraft(sessionId));
 	useEffect(() => {
-		setText(getDraft(pid));
-	}, [pid]);
+		setText(getDraft(sessionId));
+	}, [sessionId]);
 	return [
 		text,
 		(t: string) => {
 			setText(t);
-			setDraft(pid, t);
+			setDraft(sessionId, t);
 		},
 	];
 }

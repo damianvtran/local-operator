@@ -51,7 +51,7 @@ class FakeHandle:
         self.calls.append((name, args, kwargs))
         return f"{name} ok"
 
-    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
         return await self._record("prompt", text)
 
     async def steer(self, text, images=None):  # noqa: ANN001, ANN202
@@ -113,7 +113,7 @@ class ConcurrentHandle(FakeHandle):
             await asyncio.sleep(0)
             return f"{kind} admitted"
 
-    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
         return await self._admit("prompt", text)
 
     async def steer(self, text, images=None):  # noqa: ANN001, ANN202
@@ -159,8 +159,8 @@ async def _until(
 
 
 @pytest.mark.asyncio
-async def test_protocol_version_is_two_and_cap_constant() -> None:
-    assert PROTOCOL_VERSION == 2
+async def test_protocol_version_is_three_and_cap_constant() -> None:
+    assert PROTOCOL_VERSION == 3
     assert ATTACH_MAX_CLIENTS == 4
 
 

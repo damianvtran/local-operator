@@ -36,12 +36,15 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Input, Static
 
-from local_operator.mobile.attach_client import AttachClient
+from local_operator.mobile.attach_client import AttachClient, continue_command
 from local_operator.mobile.types import (
+    ContinuationCommand,
     SessionProjection,
     SessionRecord,
     TranscriptEntry,
 )
+from local_operator.paths import config_dir
+from local_operator.tui.widgets.editor import DEFAULT_PLACEHOLDER
 
 #: Submitted text that starts with this word is a screen command, not a steer.
 #: Only one exists (/detach); parsed by prefix so the composer stays a plain
@@ -130,10 +133,6 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
     AttachScreen {
         layout: vertical;
     }
-    #attach-banner {
-        height: 1;
-        color: $lo-dim;
-    }
     #attach-transcript {
         height: 1fr;
         overflow-y: auto;
@@ -171,10 +170,7 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
     }
     """
 
-    BINDINGS = [
-        Binding("escape", "detach", "Detach", show=False),
-        Binding("r", "resume_here", "Resume here", show=False),
-    ]
+    BINDINGS = [Binding("escape", "detach", "Detach", show=False)]
 
     def __init__(
         self,
@@ -195,19 +191,16 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         self._projection: SessionProjection | None = None
         self._owner_dead = False
         self._answering_request: str | None = None
+        self._pending_command: ContinuationCommand | None = None
 
     # -- lifecycle ---------------------------------------------------------------
 
     def on_mount(self) -> None:
-        self._banner = _Banner(id="attach-banner")
         self._transcript = _Transcript(id="attach-transcript")
         self._pending = _PendingCard(id="attach-pending")
-        self._composer = _AttachComposer(
-            placeholder="steer the attached session — /detach to leave"
-        )
+        self._composer = _AttachComposer(placeholder=DEFAULT_PLACEHOLDER)
         self._composer.id = "attach-composer"
-        self.mount(self._banner, self._transcript, self._pending, self._composer)
-        self._set_banner()
+        self.mount(self._transcript, self._pending, self._composer)
         self._client = AttachClient(
             on_projection=self._on_projection,
             on_disconnected=self._on_disconnected,
@@ -248,21 +241,15 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
 
     # -- rendering ----------------------------------------------------------------
 
-    def _set_banner(self, dead: bool = False) -> None:
-        name = (self._projection.conversation_name if self._projection else "") or "untitled"
-        pid = self._record.pid
-        if dead:
-            self._banner.update(f"owner exited · pid {pid}")
-        else:
-            self._banner.update(f"attached · pid {pid} · {name} — /detach to release")
-
     def _render_projection(self, projection: SessionProjection) -> None:
         # EOF is terminal for this connection. A projection already queued on
         # the UI tick must not repaint the screen back to "live" afterward.
         if self._owner_dead:
             return
         self._projection = projection
-        self._set_banner()
+        self._owner_dead = False
+        self._composer.disabled = False
+        self._composer.placeholder = DEFAULT_PLACEHOLDER
         self._transcript.render_projection(projection)
         pending = projection.pending
         if pending is None:
@@ -277,67 +264,53 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
             self._pending.display = True
 
     def _owner_exited(self, reason: str) -> None:
-        """Owner death: swap the banner and offer the two exits inline.
-
-        No modal (design §3): the transcript stays readable behind the choice.
-        'resume here' re-runs the resume path — by now the claim marker names
-        a dead pid, so this process becomes the legitimate FIRST writer.
-        """
+        """Preserve the conversation projection while its routing disappears."""
         if self._owner_dead:
             return
         self._owner_dead = True
-        self._set_banner(dead=True)
-        self._pending.update("r: resume here · esc: detach")
-        self._pending.display = True
-        self._composer.placeholder = "attached session inactive"
-        # Disable the dead composer so printable keys bubble to the Screen's
-        # inline actions instead of becoming a draft that can never be sent.
-        self._composer.disabled = True
+        # Process loss is invisible plumbing. The retained transcript and
+        # composer remain exactly the same; a submit performs continuation.
+        if self._projection is None or self._projection.pending is None:
+            self._pending.display = False
+        self._composer.placeholder = DEFAULT_PLACEHOLDER
+        self._composer.disabled = False
 
     # -- input ---------------------------------------------------------------------
-
-    def _resume_after_owner_death(self) -> None:
-        if self._on_resume_here is None:
-            self._pending.update("resume unavailable here · esc: detach")
-            return
-        self._pending.update("resuming here…")
-        outcome = self._on_resume_here(self._session_id)
-        if asyncio.iscoroutine(outcome):
-            asyncio.get_event_loop().create_task(outcome)
 
     async def on_input_submitted(self, event: Any) -> None:
         text = str(getattr(event, "value", "")).strip()
         if not text:
             return
-        if self._composer is not None:
-            self._composer.value = ""
         if text.lower() in (DETACH_COMMAND, "esc"):
             self.action_detach()
             return
-        if self._owner_dead:
-            return
+        command = self._pending_command or ContinuationCommand.create(self._session_id, text)
+        self._pending_command = command
         client = self._client
-        if client is None or not client.connected:
-            return
         # Route by owner state: prompt when idle, steer when streaming. The
         # alternative — sending prompt and showing the busy error — is what
         # the owned handle does, but from a follower terminal the busy case IS
         # the normal case mid-turn, and reading it as a failure teaches the
         # user the screen is broken when it is working as designed.
-        streaming = bool(self._projection and self._projection.streaming)
         try:
-            if streaming:
-                detail = await client.steer(text)
-                self._transcript.mount(Static(f"↪ {text}", classes="attach-row attach-steer"))
-                self._banner.update(
-                    f"attached · pid {self._record.pid} — queued as steering ({detail})"
-                )
+            if client is not None and client.connected:
+                await client.send_command(command)
             else:
-                detail = await client.prompt(text)
-                self._transcript.mount(Static(f"❯ {text}", classes="attach-row attach-user"))
-                self._banner.update(f"attached · pid {self._record.pid} — {detail}")
-        except (RuntimeError, ConnectionError) as exc:
-            self._banner.update(f"attached · pid {self._record.pid} — {exc}")
+                self._pending.update("Connecting…")
+                self._pending.display = True
+                client, _ = await continue_command(
+                    config_dir(), command, on_projection=self._on_projection
+                )
+                self._client = client
+            self._pending_command = None
+            self._composer.value = ""
+            if self._projection is None or self._projection.pending is None:
+                self._pending.display = False
+        except (RuntimeError, ConnectionError, TimeoutError) as exc:
+            self._pending.update(str(exc) or "Couldn’t continue this conversation. Try again.")
+            self._pending.display = True
+            # Exact text and attachments remain mounted until durable ACK.
+            self._composer.value = command.text
 
     def on_key(self, event: Any) -> None:
         """Minimal key answers for the pending gate, plus owner-death actions."""
@@ -346,12 +319,6 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
     def _handle_gate_key(self, event: Any) -> None:
         """Consume only keys that answer the currently displayed state."""
         key = str(getattr(event, "key", ""))
-        if self._owner_dead:
-            if key == "r":
-                event.prevent_default()
-                event.stop()
-                self._resume_after_owner_death()
-            return
         pending = self._projection.pending if self._projection else None
         if pending is None or self._composer is None:
             return
@@ -394,10 +361,6 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
             asyncio.get_event_loop().create_task(answer())
 
     # -- actions --------------------------------------------------------------------
-
-    def action_resume_here(self) -> None:
-        if self._owner_dead:
-            self._resume_after_owner_death()
 
     def action_detach(self) -> None:
         """Leave the attach: pop (in-app) or exit (standalone)."""

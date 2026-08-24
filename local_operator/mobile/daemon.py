@@ -125,46 +125,58 @@ class SessionTable:
         self.list_subscribers: set[asyncio.Queue[None]] = set()
 
     def summaries(self) -> list[dict[str, Any]]:
-        """The session-list payload: one summary per session, live first,
-        then wedged, then ended — the order the phone list renders."""
-        out = []
+        """Reconcile live generations with durable conversations by session id."""
+        from local_operator.paths import config_dir
+        from local_operator.resume import recent_session_rows
+
+        durable = {row.id: row for row in recent_session_rows(config_dir(), limit=100)}
+        active: dict[str, SessionEntry] = {}
         for entry in self.entries.values():
-            p = entry.projection
+            if entry.ended:
+                continue
+            prior = active.get(entry.record.session_id)
+            if prior is None or entry.record.heartbeat_at > prior.record.heartbeat_at:
+                active[entry.record.session_id] = entry
+        out: list[dict[str, Any]] = []
+        for session_id in set(durable) | set(active):
+            entry = active.get(session_id)
+            p = entry.projection if entry else None
+            row = durable.get(session_id)
             out.append(
                 {
-                    "pid": entry.record.pid,
-                    "kind": entry.record.kind,
-                    "session_id": entry.record.session_id,
-                    "conversation_name": (
-                        p.conversation_name if p else entry.record.conversation_name
+                    "session_id": session_id,
+                    "section": "active" if entry else "previous",
+                    "conversation_name": (p.conversation_name if p else "")
+                    or (entry.record.conversation_name if entry else "")
+                    or (row.name if row else ""),
+                    "cwd": p.cwd if p else (entry.record.cwd if entry else ""),
+                    "model_label": (
+                        p.model_label if p else (entry.record.model_label if entry else "")
                     ),
-                    "cwd": p.cwd if p else entry.record.cwd,
-                    "model_label": p.model_label if p else entry.record.model_label,
                     "streaming": bool(p and p.streaming),
-                    "ended": entry.ended,
-                    "degraded": entry.degraded,
                     "needs_attention": bool(p and p.pending),
-                    "pending_kind": (p.pending.kind if p and p.pending else ""),
-                    "subagents_running": (
-                        sum(1 for s in p.subagents if s.status == "running") if p else 0
+                    "pending_kind": p.pending.kind if p and p.pending else "",
+                    "subagents_running": sum(
+                        1 for subagent in (p.subagents if p else []) if subagent.status == "running"
                     ),
-                    # Open == not closed (``pending`` or ``blocked``; ``blocked``
-                    # is open work waiting on an answer, mirroring the tool's
-                    # ``open_todos``). Summed across ALL phases so a multi-phase
-                    # plan's badge counts every group, not just the first.
-                    "todos_open": (
-                        sum(
-                            1
-                            for phase in p.todos
-                            for t in phase.items
-                            if t.status in ("pending", "blocked")
-                        )
-                        if p
-                        else 0
+                    "todos_open": sum(
+                        1
+                        for phase in (p.todos if p else [])
+                        for todo in phase.items
+                        if todo.status in ("pending", "blocked")
                     ),
+                    "mtime": row.mtime if row else entry.record.started_at if entry else 0,
                 }
             )
-        out.sort(key=lambda s: (s["ended"], s["degraded"], -s["pid"]))
+        out.sort(
+            key=lambda summary: (
+                summary["section"] != "active",
+                not summary["needs_attention"],
+                not summary["streaming"],
+                -summary["mtime"],
+                summary["session_id"],
+            )
+        )
         return out
 
     def notify_list_changed(self) -> None:
@@ -173,6 +185,41 @@ class SessionTable:
                 queue.put_nowait(None)
             except asyncio.QueueFull:
                 pass
+
+
+def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry | None:
+    """Select the newest live generation without exposing its pid publicly."""
+    candidates = [
+        entry
+        for entry in daemon.table.entries.values()
+        if entry.record.session_id == session_id and not entry.ended
+    ]
+    return max(candidates, key=lambda entry: entry.record.heartbeat_at, default=None)
+
+
+def _durable_projection(session_id: str) -> SessionProjection | None:
+    """Fold a conversation from disk when no execution host exists."""
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.paths import config_dir
+    from local_operator.resume import stored_session_title
+    from local_operator.session.transcript import Transcript
+
+    directory = config_dir() / "sessions" / session_id
+    if not (directory / "transcript.jsonl").exists():
+        return None
+    projection = SessionProjection(
+        session_id=session_id,
+        pid=0,
+        kind="daemon",
+        conversation_name=stored_session_title(directory),
+        cwd="",
+        model_label="",
+    )
+    fold = ProjectionFold(projection)
+    fold.fold_history(Transcript(directory).build_llm_history())
+    projection.ended = False
+    projection.degraded = False
+    return projection
 
 
 # ---------------------------------------------------------------------------
@@ -226,8 +273,9 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     # the NEXT push is a full repaint that repairs the view.
                     logger.debug("mobile daemon: dropping malformed projection", exc_info=True)
                     continue
-                entry.projection.degraded = entry.degraded
-                entry.projection.ended = entry.ended
+                entry.projection.degraded = False
+                entry.projection.ended = False
+                daemon.session_projections[entry.record.session_id] = entry.projection
                 _fan_out(entry)
             # acks/errors are matched by req id in _request's future map.
             pending = daemon._pending_reqs.pop((record.pid, frame.get("req")), None)
@@ -458,6 +506,9 @@ class MobileDaemon:
         # Session id -> pid of a resume spawn already in flight, so a retried
         # resume POST returns the same child instead of forking a second.
         self.resumes_in_flight: dict[str, int] = {}
+        # A session route outlives every process generation. Retain its latest
+        # repaint so an open phone remains a normal conversation while idle.
+        self.session_projections: dict[str, SessionProjection] = {}
 
     # -- scanning --------------------------------------------------------------
 
@@ -756,24 +807,26 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        pid = int(request.path_params["pid"])
-        entry = daemon.table.entries.get(pid)
-        if entry is None:
-            return JSONResponse({"error": "unknown session"}, status_code=404)
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
-        entry.subscribers.add(queue)
+        if entry is not None:
+            entry.subscribers.add(queue)
         # First subscriber = a phone just started watching: tell the session so
         # its self-reaper (if any) counts this front end and holds the session
         # in ACTIVE. Fire-and-forget on the already-open dial writer; an OLD
         # registrant answers `error: unknown op` and that must not 500 the SSE
         # handshake — RuntimeError/TimeoutError are swallowed by design.
-        if len(entry.subscribers) == 1:
-            daemon.notify_watch_transition(pid, watching=True)
 
         async def stream():
             try:
-                if entry.projection is not None:
-                    yield _sse("projection", entry.projection.to_json())
+                projection = daemon.session_projections.get(session_id)
+                if projection is None:
+                    projection = await asyncio.to_thread(_durable_projection, session_id)
+                    if projection is not None:
+                        daemon.session_projections[session_id] = projection
+                if projection is not None:
+                    yield _sse("projection", projection.to_json())
                 while True:
                     try:
                         frame = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
@@ -781,13 +834,8 @@ def build_app(daemon: MobileDaemon):
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
-                was_last = entry.subscribers == {queue}
-                entry.subscribers.discard(queue)
-                if was_last:
-                    # Last subscriber out = no phone is watching: the session's
-                    # grace timer (if it has one) may now start. Same swallow
-                    # rules as the watch push above.
-                    daemon.notify_watch_transition(pid, watching=False)
+                if entry is not None:
+                    entry.subscribers.discard(queue)
 
         return StreamingResponse(
             stream(),
@@ -840,8 +888,8 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        pid = int(request.path_params["pid"])
-        entry = daemon.table.entries.get(pid)
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
         if entry is None:
             return JSONResponse({"error": "unknown session"}, status_code=404)
         before = request.query_params.get("before")
@@ -877,8 +925,8 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        pid = int(request.path_params["pid"])
-        entry = daemon.table.entries.get(pid)
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
         if entry is None:
             return JSONResponse({"error": "unknown session"}, status_code=404)
         entry_id = request.query_params.get("entry", "")
@@ -905,14 +953,29 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        pid = int(request.path_params["pid"])
+        session_id = str(request.path_params["session_id"])
         try:
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         op = str(body.pop("op", ""))
         try:
-            reply = await daemon.request(pid, op, **body)
+            entry = _entry_for_session(daemon, session_id)
+            if op == "prompt" and entry is None:
+                from local_operator.mobile.attach_client import continue_command
+                from local_operator.mobile.types import ContinuationCommand
+
+                command = ContinuationCommand.from_json(
+                    {**body, "session_id": session_id, "images": body.get("images", [])}
+                )
+                from local_operator.paths import config_dir
+
+                client, detail = await continue_command(config_dir(), command)
+                client.close()
+                return JSONResponse({"ok": True, "detail": detail})
+            if entry is None:
+                raise KeyError(session_id)
+            reply = await daemon.request(entry.record.pid, op, **body)
         except KeyError:
             return JSONResponse({"error": "session not connected"}, status_code=409)
         except TimeoutError:
@@ -1076,10 +1139,10 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/past", api_past_sessions),
         Route("/api/sessions/resume", api_resume_session, methods=["POST"]),
         Route("/api/sessions/search", api_search_sessions),
-        Route("/api/sessions/{pid:int}/events", api_session_events),
-        Route("/api/sessions/{pid:int}/history", api_session_history),
-        Route("/api/sessions/{pid:int}/image", api_session_image),
-        Route("/api/sessions/{pid:int}/command", api_command, methods=["POST"]),
+        Route("/api/sessions/{session_id:str}/events", api_session_events),
+        Route("/api/sessions/{session_id:str}/history", api_session_history),
+        Route("/api/sessions/{session_id:str}/image", api_session_image),
+        Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
         Route("/mark.png", mark_png),

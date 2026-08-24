@@ -34,8 +34,51 @@ binary and a stale registrant is re-registered on its next heartbeat.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class ContinuationCommand:
+    """Producer-owned prompt retained until its transcript row is durable.
+
+    Process discovery and request ids are transport details. This identity is
+    the conversation-level receipt that survives reconnects and host changes.
+    """
+
+    command_id: str
+    session_id: str
+    text: str
+    images: list[dict[str, str]] = field(default_factory=list)
+    submitted_at: float = field(default_factory=time.time)
+
+    @staticmethod
+    def create(
+        session_id: str, text: str, images: list[dict[str, str]] | None = None
+    ) -> "ContinuationCommand":
+        return ContinuationCommand(
+            command_id=str(uuid.uuid4()),
+            session_id=session_id,
+            text=text,
+            images=list(images or []),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> "ContinuationCommand":
+        command_id = str(data.get("command_id", ""))
+        uuid.UUID(command_id)
+        return ContinuationCommand(
+            command_id=command_id,
+            session_id=str(data.get("session_id", "")),
+            text=str(data.get("text", "")),
+            images=[dict(item) for item in data.get("images", []) if isinstance(item, dict)],
+            submitted_at=float(data.get("submitted_at", time.time())),
+        )
+
 
 #: Bumped on any breaking change to control frames or web payloads. The
 #: registrant and daemon always ship together; the phone UI learns the
@@ -49,7 +92,7 @@ from typing import Any, Literal
 #: rather than silently breaking the owner's phone bridge. The record's
 #: version field is the only pre-dial gate — the socket itself speaks the
 #: same frame shapes either side of the bump.
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 #: Which side of the owner relationship a control connection speaks for.
 #: ``daemon`` (the default when the auth frame omits ``client``) may rebind
@@ -125,7 +168,7 @@ class SessionRecord:
 # Requests the daemon may send. Kept as Literal aliases rather than enums so
 # frames stay plain dicts — json.loads output needs no decoding step.
 ControlOp = Literal[
-    "prompt",  # {text, images?} — a full user turn (or queue while streaming)
+    "prompt",  # {command_id, text, images?} — durable idempotent user turn
     "steer",  # {text} — inject mid-turn
     "abort",  # {} — the stop button; never kills the session
     "set_model",  # {provider, model_id} — the model sheet's choice

@@ -47,6 +47,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _await_future(future: asyncio.Future[Any]) -> Any:
+    """Await an owner-loop future from the registrant's bridge coroutine."""
+    return await future
+
+
 # Decode wire images via the shared mobile-contract helper (registrant.py);
 # kept as a module alias so existing call sites stay short.
 _image_blocks = image_blocks
@@ -157,17 +162,32 @@ class TuiSessionHandle(SessionHandle):
 
     # -- mutations: every one hops to the Textual thread ---------------------------
 
-    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def prompt(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        if not command_id:
+            raise ValueError("command_id is required")
         image_blocks = _image_blocks(images)
-
-        def submit() -> None:
-            self._app._submit_prompt(text, image_blocks, None)
-
-        await self._on_app(submit)
-        self._fold.note_user_message(text)
-        if self._on_projection is not None:
-            self._on_projection()
-        return "prompt sent"
+        owner_loop: asyncio.AbstractEventLoop = await self._on_app(asyncio.get_running_loop)
+        session = self._session()
+        if any(getattr(message, "id", None) == command_id for message in session.history()):
+            return "already admitted"
+        admitted: asyncio.Future[None] = owner_loop.create_future()
+        turn = asyncio.run_coroutine_threadsafe(
+            session.prompt(text, image_blocks, message_id=command_id, admitted=admitted),
+            owner_loop,
+        )
+        try:
+            await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(_await_future(admitted), owner_loop)
+            )
+        except Exception:
+            turn.cancel()
+            raise
+        return "prompt admitted"
 
     async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         image_blocks = _image_blocks(images)

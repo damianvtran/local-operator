@@ -3329,21 +3329,8 @@ class OperatorApp(App[None]):
         record, found_owner = await asyncio.to_thread(find_owner_record, config_dir, concrete)
         if record is not None and found_owner == owner:
             from local_operator.tui.attach_screen import AttachScreen
-            from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS, Toast
 
-            self.push_screen(
-                AttachScreen(record, concrete, on_resume_here=self._resume_attached_here)
-            )
-            # The toast replaces the warning the refusal used to print: the
-            # user's navigation SUCCEEDED, it just landed on a follower view.
-            try:
-                self.query_one(Toast).show(
-                    f"attached to pid {owner} — /detach to return",
-                    duration_ms=TOAST_DEFAULT_MS,
-                    yield_to_actionable=True,
-                )
-            except Exception:  # noqa: BLE001 — a toast is decoration, never a gate
-                pass
+            self.push_screen(AttachScreen(record, concrete))
             return
         # A refused navigation is not conversation content: keep the
         # splash, same as the other /resume rejections (D1). Name the
@@ -3354,24 +3341,6 @@ class OperatorApp(App[None]):
             "phone session list",
             "warning",
         )
-
-    async def _resume_attached_here(self, session_id: str) -> None:
-        """Replace a dead follower with this app's normal writable resume path.
-
-        The factory owns atomic lease arbitration, so a successor that appeared
-        after EOF becomes an actionable boot failure rather than a second writer.
-        Pop first so progress and any failure render in the app's native surface.
-        """
-        if self._resume_factory is None:
-            screen = self.screen
-            pending = getattr(screen, "_pending", None)
-            if pending is not None:
-                pending.update("resume unavailable: no resume-capable launcher")
-            return
-        self.pop_screen()
-        self._session_factory = lambda: self._resume_factory(session_id)  # type: ignore[misc]
-        self._system_notice(f"resuming session {session_id} here…", "info")
-        await self._reload_session()
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.

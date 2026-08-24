@@ -172,7 +172,7 @@ function EffortSheet({
 }: {
 	open: boolean;
 	onClose: () => void;
-	pid: number;
+	pid: string;
 	projection: SessionProjection;
 }) {
 	const set = async (effort: string) => {
@@ -223,7 +223,7 @@ export function Composer({
 	onCloseEffort,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
-	pid: number;
+	pid: string;
 	projection: SessionProjection;
 	onOpenModels: () => void;
 	onOpenEffort: () => void;
@@ -252,7 +252,7 @@ export function Composer({
 		el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`;
 	}, [text]);
 
-	const disabled = projection.ended;
+	const disabled = false;
 
 	const addFiles = async (files: Iterable<File>) => {
 		for (const f of files) {
@@ -297,13 +297,19 @@ export function Composer({
 			} else {
 				const chosen =
 					op ?? (projection.streaming ? "steer" : "prompt");
-				await sendCommand(pid, {
-					op: chosen,
-					text: trimmed,
-					images: images.length
-						? images.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
-						: undefined,
-				});
+				const commandId =
+					localStorage.getItem(`lo-mobile-command:${pid}`) ?? crypto.randomUUID();
+				localStorage.setItem(`lo-mobile-command:${pid}`, commandId);
+				const payloadImages = images.length
+					? images.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
+					: undefined;
+				await sendCommand(
+					pid,
+					chosen === "prompt"
+						? { op: "prompt", command_id: commandId, text: trimmed, images: payloadImages }
+						: { op: "steer", text: trimmed, images: payloadImages },
+				);
+				if (chosen === "prompt") localStorage.removeItem(`lo-mobile-command:${pid}`);
 				images.forEach((i) => URL.revokeObjectURL(i.preview));
 				setImages([]);
 			}

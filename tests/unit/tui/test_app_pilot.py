@@ -866,17 +866,15 @@ async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) 
             await asyncio.sleep(0.05)
         assert isinstance(app.screen, AttachScreen)
         assert session.prompts == []  # no second writer ever built
-        # Exact production construction carries the recovery callback. Owner EOF
-        # followed by r replaces the follower with the durable resumed session.
+        # Owner loss is invisible plumbing. The conversation surface remains
+        # mounted and composer-ready; printable keys are ordinary draft input.
         app.screen._owner_exited("owner exited")
         await pilot.press("r")
-        for _ in range(100):
-            await pilot.pause()
-            if not isinstance(app.screen, AttachScreen) and app._session is resumed:
-                break
-            await asyncio.sleep(0.02)
-        assert app._session is resumed
-        assert not isinstance(app.screen, AttachScreen)
+        await pilot.pause()
+        assert app._session is session
+        assert isinstance(app.screen, AttachScreen)
+        assert app.screen._composer.value == "r"
+        assert not app.screen._composer.disabled
         assert app.query_one(Editor).disabled is False
 
 

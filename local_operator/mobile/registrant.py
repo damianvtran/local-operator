@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -133,7 +134,12 @@ class SessionHandle(Protocol):
         Returns an unsubscribe callable."""
         ...
 
-    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str: ...
+    async def prompt(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str: ...
     async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str: ...
     async def abort(self) -> str: ...
     async def set_model(self, provider: str, model_id: str) -> str: ...
@@ -458,10 +464,12 @@ class Registrant:
             return "snapshot sent"
         if op == "prompt":
             images = frame.get("images")
-            return await h.prompt(
-                str(frame.get("text", "")),
-                images=images if isinstance(images, list) else None,
-            )
+            fields: dict[str, Any] = {
+                "images": images if isinstance(images, list) else None,
+            }
+            if "command_id" in inspect.signature(h.prompt).parameters:
+                fields["command_id"] = str(frame.get("command_id", "")) or None
+            return await h.prompt(str(frame.get("text", "")), **fields)
         if op == "steer":
             images = frame.get("images")
             return await h.steer(

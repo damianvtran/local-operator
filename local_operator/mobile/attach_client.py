@@ -31,12 +31,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from local_operator.mobile.registry import scan
 from local_operator.mobile.types import (
     PROTOCOL_VERSION,
+    ContinuationCommand,
     SessionProjection,
     SessionRecord,
     _projection_from_json,
@@ -245,8 +251,28 @@ class AttachClient:
             raise RuntimeError(str(reply.get("message", "request failed")))
         return str(reply.get("detail", ""))
 
-    async def prompt(self, text: str) -> str:
-        return await self._request("prompt", text=text)
+    async def prompt(
+        self,
+        text: str,
+        *,
+        command_id: str | None = None,
+        images: list[dict[str, str]] | None = None,
+    ) -> str:
+        return await self._request(
+            "prompt",
+            command_id=command_id or str(uuid.uuid4()),
+            text=text,
+            images=list(images or []),
+        )
+
+    async def send_command(self, command: ContinuationCommand) -> str:
+        if command.session_id != self._session_id:
+            raise ValueError("command belongs to another conversation")
+        return await self.prompt(
+            command.text,
+            command_id=command.command_id,
+            images=command.images,
+        )
 
     async def steer(self, text: str) -> str:
         return await self._request("steer", text=text)
@@ -292,3 +318,57 @@ class AttachClient:
                 self._writer.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+async def continue_command(
+    config_dir: Path,
+    command: ContinuationCommand,
+    *,
+    deadline_s: float = ACK_TIMEOUT_S,
+    on_projection: Callable[[SessionProjection], None] | None = None,
+) -> tuple[AttachClient, str]:
+    """Deliver one retained command to whichever host wins the session lease.
+
+    Every contender may start a candidate. The atomic transcript lease, never
+    a check before spawning, decides authority. Losing candidates exit and the
+    producer redials the published winner with the unchanged command id.
+    """
+    deadline = time.monotonic() + deadline_s
+    spawned = False
+    delay = 0.1
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        record, _ = await asyncio.to_thread(find_owner_record, config_dir, command.session_id)
+        if record is not None:
+            disconnected = asyncio.Event()
+            client = AttachClient(
+                on_projection or (lambda projection: None),
+                lambda reason: disconnected.set(),
+            )
+            try:
+                await client.connect(record, command.session_id)
+                detail = await client.send_command(command)
+                return client, detail
+            except (ConnectionError, RuntimeError, TimeoutError) as exc:
+                last_error = exc
+                client.close()
+        if not spawned:
+            # Only routing data enters the environment. Prompt text, images and
+            # command identity stay on the authenticated loopback connection.
+            env = dict(os.environ)
+            env["LOP_MOBILE_CHILD_CWD"] = str(Path.home())
+            env["LOP_MOBILE_CHILD_RESUME"] = command.session_id
+            await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "local_operator.mobile.child",
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            spawned = True
+        await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+        delay = min(delay * 1.7, 1.0)
+    raise TimeoutError("Couldn’t continue this conversation. Try again.") from last_error
