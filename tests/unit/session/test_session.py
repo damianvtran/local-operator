@@ -131,6 +131,54 @@ def make_session(tmp_path, stream, tools=None, **kwargs) -> Session:
 
 
 @pytest.mark.asyncio
+async def test_prompt_marks_only_explicit_producer_commands(tmp_path):
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("local", message_id="collision")
+    assert not session.has_admitted_command("collision")
+
+    admitted = asyncio.get_running_loop().create_future()
+    await session.prompt(
+        "mobile",
+        message_id="mobile-message",
+        producer_command_id="collision",
+        admitted=admitted,
+    )
+    assert admitted.done()
+    assert session.has_admitted_command("collision")
+    assert Transcript(tmp_path / "sess").has_admitted_command("collision")
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_steer_marks_only_explicit_producer_commands(tmp_path):
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    session.steer("local", message_id="collision")
+    session.steer(
+        "mobile",
+        message_id="mobile-message",
+        producer_command_id="producer-steer",
+    )
+
+    drained = await session._drain_steering()
+
+    assert [message.text for message in drained if isinstance(message, Message)] == [
+        "local",
+        "mobile",
+    ]
+    assert not session.has_admitted_command("collision")
+    assert session.has_admitted_command("producer-steer")
+    assert Transcript(tmp_path / "sess").has_admitted_command("producer-steer")
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_prompt_full_turn_events_and_persistence(tmp_path):
     """prompt() drives a text→tool→text turn; handlers see ordered events;
     every produced message lands in the transcript."""

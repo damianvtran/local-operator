@@ -33,6 +33,7 @@ mobile is a daemon-owned-session capability today (see :mod:`owned`).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import secrets
 from typing import TYPE_CHECKING, Any, Callable
@@ -190,12 +191,13 @@ class TuiSessionHandle(SessionHandle):
 
             async def run_turn() -> None:
                 try:
-                    await session.prompt(
-                        text,
-                        image_blocks,
-                        message_id=command_id,
-                        admitted=admitted,
-                    )
+                    fields: dict[str, Any] = {
+                        "message_id": command_id,
+                        "admitted": admitted,
+                    }
+                    if "producer_command_id" in inspect.signature(session.prompt).parameters:
+                        fields["producer_command_id"] = command_id
+                    await session.prompt(text, image_blocks, **fields)
                 except BaseException as exc:
                     if not admitted.done():
                         self._command_reservations.reject(
@@ -240,7 +242,10 @@ class TuiSessionHandle(SessionHandle):
             ):
                 return False
             try:
-                session.steer(text, image_blocks, message_id=command_id)
+                fields: dict[str, Any] = {"message_id": command_id}
+                if "producer_command_id" in inspect.signature(session.steer).parameters:
+                    fields["producer_command_id"] = command_id
+                session.steer(text, image_blocks, **fields)
             except Exception:
                 self._command_reservations.reject(command_id)
                 raise

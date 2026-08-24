@@ -536,12 +536,13 @@ class OwnedSessionHandle(SessionHandle):
             try:
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
-                    await self._session.prompt(
-                        command.text,
-                        command.images,
-                        message_id=command.command_id,
-                        admitted=command.admitted,
-                    )
+                    fields: dict[str, Any] = {
+                        "message_id": command.command_id,
+                        "admitted": command.admitted,
+                    }
+                    if "producer_command_id" in parameters:
+                        fields["producer_command_id"] = command.command_id
+                    await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
                     # preserve their historical queue-insertion receipt. Real
@@ -603,8 +604,11 @@ class OwnedSessionHandle(SessionHandle):
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
         fields: dict[str, Any] = {}
-        if "message_id" in inspect.signature(self._session.steer).parameters:
+        parameters = inspect.signature(self._session.steer).parameters
+        if "message_id" in parameters:
             fields["message_id"] = command_id
+        if "producer_command_id" in parameters:
+            fields["producer_command_id"] = command_id
         try:
             self._session.steer(text, _image_blocks(images), **fields)
         except Exception:

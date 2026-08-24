@@ -1106,6 +1106,10 @@ class Session:
         )
         self._handlers: list[EventHandler] = []
         self._steering_queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
+        # Producer identity is transport provenance, not message identity. Keep
+        # it beside queued messages so ordinary callers can still choose ids
+        # without accidentally entering the mobile admission namespace.
+        self._steering_producers: dict[int, str] = {}
         # Count of courtesy wake_prompt messages sitting in the steering
         # queue. The immediate-interrupt poll may cancel a RUNNING tool only
         # for steering the user actually typed (see ``_has_urgent_steering``):
@@ -2507,13 +2511,16 @@ class Session:
         images: Sequence[ImageContent] | None = None,
         *,
         message_id: str | None = None,
+        producer_command_id: str | None = None,
         admitted: asyncio.Future[None] | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
-        ``message_id`` and ``admitted`` form the continuation admission seam:
-        the caller receives a receipt only after the user row is on disk, while
-        the model turn may continue afterward. Ordinary local prompts omit both.
+        ``producer_command_id`` and ``admitted`` form the continuation
+        admission seam: the caller receives a receipt only after the explicitly
+        marked user row is on disk, while the model turn may continue afterward.
+        ``message_id`` remains independent conversation identity; ordinary local
+        prompts omit producer provenance even if a host supplies a message id.
 
         ``images`` are attachments the user pasted into their prompt; they
         ride the same message as the text so the model sees them as one
@@ -2571,7 +2578,12 @@ class Session:
                 )
             user = Message.user(text, images, **({"id": message_id} if message_id else {}))
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
-            await self._run_turn_pipeline(initial, admitted=admitted, admitted_id=user.id)
+            await self._run_turn_pipeline(
+                initial,
+                admitted=admitted,
+                admitted_id=user.id,
+                producer_command_id=producer_command_id,
+            )
         finally:
             self._turn_lock.release()
 
@@ -2603,6 +2615,7 @@ class Session:
         images: Sequence[ImageContent] | None = None,
         *,
         message_id: str | None = None,
+        producer_command_id: str | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -2614,6 +2627,8 @@ class Session:
             Message.user(text, images, id=message_id) if message_id else Message.user(text, images)
         )
         self._steering_queue.put_nowait(message)
+        if producer_command_id is not None:
+            self._steering_producers[id(message)] = producer_command_id
 
     def queued_steering(self) -> list[AgentMessage]:
         """A FIFO snapshot of the steering queue, without draining it.
@@ -2681,6 +2696,7 @@ class Session:
             item = self._steering_queue.get_nowait()
             if item is message and not found:
                 found = True
+                self._steering_producers.pop(id(item), None)
                 continue
             remaining.append(item)
         for item in remaining:
@@ -3149,6 +3165,7 @@ class Session:
         *,
         admitted: asyncio.Future[None] | None = None,
         admitted_id: str | None = None,
+        producer_command_id: str | None = None,
     ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
@@ -3173,7 +3190,12 @@ class Session:
             begin_message()
         self._turn_task = asyncio.current_task()
         try:
-            await self._run_turn(initial, admitted=admitted, admitted_id=admitted_id)
+            await self._run_turn(
+                initial,
+                admitted=admitted,
+                admitted_id=admitted_id,
+                producer_command_id=producer_command_id,
+            )
             await self._drain_continuation()
         finally:
             self._turn_task = None
@@ -3203,6 +3225,7 @@ class Session:
         *,
         admitted: asyncio.Future[None] | None = None,
         admitted_id: str | None = None,
+        producer_command_id: str | None = None,
     ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``."""
         if self._wake.needs_rearm:
@@ -3222,7 +3245,12 @@ class Session:
             signal.abort("interrupted")
         try:
             for message in initial:
-                await self._transcript.append_message(message)
+                await self._transcript.append_message(
+                    message,
+                    producer_command_id=(
+                        producer_command_id if message.id == admitted_id else None
+                    ),
+                )
                 if admitted is not None and message.id == admitted_id and not admitted.done():
                     # The append completed under Transcript's fsync boundary;
                     # only now may a producer discard its retained command.
@@ -3726,7 +3754,14 @@ class Session:
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
-            await self._transcript.append_message(message)
+            producer_command_id = self._steering_producers.get(id(message))
+            try:
+                await self._transcript.append_message(
+                    message,
+                    producer_command_id=producer_command_id,
+                )
+            finally:
+                self._steering_producers.pop(id(message), None)
             messages.append(message)
         # The drain is the ONLY consumer, so every courtesy message queued
         # before this boundary just left with it; anything queued after is a

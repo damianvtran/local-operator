@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -81,6 +82,109 @@ async def test_append_rebuilds_when_only_the_file_vanished(tmp_path):
     assert len(lines) == 3  # rebuilt complete, not restarted at one row
     texts = [json.loads(line)["payload"]["content"][0]["text"] for line in lines]
     assert texts == ["one", "two", "three"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["write", "flush"])
+async def test_failed_append_never_enters_memory_index_or_later_rebuild(
+    tmp_path, monkeypatch, failure_point
+):
+    """A rejected producer row must not resurrect through a later rebuild."""
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    await transcript.append_message(
+        Message.user("admitted", id="admitted"),
+        producer_command_id="admitted",
+    )
+    real_open = Path.open
+    fail_once = True
+
+    class FailingHandle:
+        def __init__(self, handle):  # noqa: ANN001
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002, ANN202
+            return self._handle.__exit__(*args)
+
+        def write(self, value):  # noqa: ANN001, ANN201
+            if failure_point == "write":
+                self._handle.write(value[: max(1, len(value) // 2)])
+                raise OSError("injected write failure")
+            return self._handle.write(value)
+
+        def flush(self):
+            if failure_point == "flush":
+                raise OSError("injected flush failure")
+            return self._handle.flush()
+
+        def fileno(self):
+            return self._handle.fileno()
+
+    def failing_open(path, *args, **kwargs):  # noqa: ANN001, ANN202
+        nonlocal fail_once
+        handle = real_open(path, *args, **kwargs)
+        if fail_once and path == transcript.path and args and args[0] == "a":
+            fail_once = False
+            return FailingHandle(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(OSError, match=failure_point):
+        await transcript.append_message(
+            Message.user("failed", id="failed"),
+            producer_command_id="failed",
+        )
+
+    assert [entry.id for entry in transcript.entries()] == ["admitted"]
+    assert not transcript.has_admitted_command("failed")
+    assert [entry.id for entry in Transcript(directory).entries()] == ["admitted"]
+
+    transcript.path.unlink()
+    await transcript.append_message(
+        Message.user("later", id="later"),
+        producer_command_id="later",
+    )
+    reopened = Transcript(directory)
+    assert [entry.id for entry in reopened.entries()] == ["admitted", "later"]
+    assert not reopened.has_admitted_command("failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_kind", ["prompt", "steer"])
+async def test_failed_first_rebuild_is_retryable_without_resurrection(
+    tmp_path, monkeypatch, command_kind
+):
+    """An open failure before the first row leaves no disk or memory claim."""
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    real_open = Path.open
+    fail_once = True
+
+    def failing_open(path, *args, **kwargs):  # noqa: ANN001, ANN202
+        nonlocal fail_once
+        if fail_once and path == transcript.path and args and args[0] == "w":
+            fail_once = False
+            raise OSError("injected open failure")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    command_id = f"retry-{command_kind}"
+    failed = Message.user("failed", id=command_id)
+    with pytest.raises(OSError, match="open failure"):
+        await transcript.append_message(failed, producer_command_id=command_id)
+
+    assert transcript.entries() == []
+    assert not transcript.path.exists()
+    assert not transcript.has_admitted_command(command_id)
+
+    await transcript.append_message(failed, producer_command_id=command_id)
+    reopened = Transcript(directory)
+    assert [entry.id for entry in reopened.entries()] == [command_id]
+    assert reopened.has_admitted_command(command_id)
 
 
 @pytest.mark.asyncio
