@@ -205,6 +205,32 @@ async def test_in_process_close_joins_delayed_projection_push() -> None:
     assert task.done()
     assert registrant._push_task is None
     assert not registrant._push_scheduled
+    assert registrant._heartbeat_task is None
+    assert registrant._server is None
+
+    # A second awaited close must join the completed shutdown rather than
+    # returning early based only on the cross-thread close latch.
+    await registrant.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_process_sync_close_schedules_cleanup_without_deadlock() -> None:
+    """Legacy synchronous hosts may close from inside the owning loop."""
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    await registrant.start_in_process()
+    registrant._schedule_push()
+    await asyncio.sleep(0)
+
+    registrant.close()
+    registrant.close()
+    task = registrant._shutdown_task
+    assert task is not None
+    await asyncio.wait_for(asyncio.shield(task), timeout=2)
+
+    assert registrant._heartbeat_task is None
+    assert registrant._push_task is None
+    assert registrant._server is None
 
 
 @pytest.mark.asyncio

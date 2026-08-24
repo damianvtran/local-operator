@@ -193,6 +193,10 @@ class Registrant:
         # an orphan warning and proving teardown returned before its work ended.
         self._push_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        # Shutdown is represented by one owner-loop task so synchronous close,
+        # awaited close, and the thread runner can converge without cancelling
+        # loop-owned objects from whichever thread happened to request teardown.
+        self._shutdown_task: asyncio.Task[None] | None = None
         # -- front-end accounting (the child reaper's inputs, §4) --------------
         # Phone SSE watchers, fed by the daemon's watch/unwatch pushes. Floored
         # at 0: a daemon restart redials without unwatching, and a counter that
@@ -227,9 +231,51 @@ class Registrant:
         await self._serve()
 
     def close(self) -> None:
-        """Unpublish and shut down. Safe from any thread, safe twice. In
-        in-process mode prefer :meth:`aclose` — it awaits the cleanup instead
-        of posting it onto a loop the caller may be about to tear down."""
+        """Unpublish and shut down. Safe from any thread, safe twice.
+
+        Thread-hosted registrants are joined before returning. In-process hosts
+        should prefer :meth:`aclose`; when ``close`` is called on their owning
+        loop it schedules cleanup instead of deadlocking that loop waiting for
+        itself.
+        """
+        self._request_close()
+        loop = self._loop
+        if self._thread is not None:
+            # The thread runner observes the close latch and performs teardown
+            # itself. Joining it is both simpler and race-free when close lands
+            # while the thread is still publishing its loop reference.
+            if threading.current_thread() is not self._thread:
+                self._thread.join(timeout=2.0)
+            return
+        if loop is None or loop.is_closed():
+            return
+        if self._on_owner_loop():
+            self._ensure_shutdown_task()
+            return
+        shutdown = self._shutdown_on_loop()
+        try:
+            asyncio.run_coroutine_threadsafe(shutdown, loop).result(timeout=2.0)
+        except RuntimeError:
+            # run_coroutine_threadsafe does not consume the coroutine when the
+            # loop wins the close race, so close it to avoid a false leak warning.
+            shutdown.close()
+            logger.debug("registrant loop exited during shutdown", exc_info=True)
+        except TimeoutError:
+            logger.debug("registrant shutdown did not finish before timeout", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Await complete teardown on the owning loop.
+
+        Repeated calls still join the original cleanup task; merely observing
+        the cross-thread closed flag is not proof that loop-owned work ended.
+        """
+        self._request_close()
+        if not self._on_owner_loop():
+            raise RuntimeError("Registrant.aclose() must run on its owning event loop")
+        await self._shutdown_on_loop()
+
+    def _request_close(self) -> None:
+        """Latch closure and detach the host feed exactly once."""
         if self._closed.is_set():
             return
         self._closed.set()
@@ -238,33 +284,13 @@ class Registrant:
                 self._unsubscribe()
             except Exception:  # noqa: BLE001 — shutdown must not raise
                 logger.debug("registrant unsubscribe failed", exc_info=True)
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._shutdown)
-        if self._publisher is not None:
-            self._publisher.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._unsubscribe = None
 
-    async def aclose(self) -> None:
-        """In-process mode shutdown, awaited on the owning loop: cancel the
-        heartbeat, close the server and the daemon connection, unpublish.
-        Posting this to a loop that is about to close (the child's amain
-        returns right after) is how heartbeats outlive their process — so the
-        child awaits it instead."""
-        if self._closed.is_set():
-            return
-        self._closed.set()
-        if self._unsubscribe is not None:
-            try:
-                self._unsubscribe()
-            except Exception:  # noqa: BLE001
-                logger.debug("registrant unsubscribe failed", exc_info=True)
-        self._shutdown()
-        await self._await_push_shutdown()
-        if self._server is not None:
-            await self._server.wait_closed()
-        if self._publisher is not None:
-            self._publisher.close()
+    def _on_owner_loop(self) -> bool:
+        try:
+            return asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            return False
 
     # -- the registrant's own loop -------------------------------------------
 
@@ -295,30 +321,50 @@ class Registrant:
             # mode returns so the caller's loop keeps running its own work —
             # the caller then owns cancelling the heartbeat (close() does).
             await self._closed_wait()
-            heartbeat.cancel()
-            if self._push_task is not None:
-                self._push_task.cancel()
-            await self._await_push_shutdown()
-            self._server.close()
-            await self._server.wait_closed()
+            await self._shutdown_on_loop()
 
     async def _closed_wait(self) -> None:
         while not self._closed.is_set():
             await asyncio.sleep(0.2)
 
-    def _shutdown(self) -> None:
+    def _ensure_shutdown_task(self) -> asyncio.Task[None]:
+        """Create the one teardown task; called only on the registrant loop."""
+        task = self._shutdown_task
+        if task is None:
+            task = asyncio.create_task(self._shutdown_impl())
+            self._shutdown_task = task
+        return task
+
+    async def _shutdown_on_loop(self) -> None:
+        """Join idempotent teardown from a coroutine on the registrant loop."""
+        await asyncio.shield(self._ensure_shutdown_task())
+
+    async def _shutdown_impl(self) -> None:
+        """Cancel and join every object owned by the registrant event loop."""
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
         if self._push_task is not None:
             self._push_task.cancel()
         if self._server is not None:
             self._server.close()
-        for conn in list(self._clients.values()):
-            try:
-                conn.writer.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self._clients.clear()
+        clients = list(self._clients.values())
+        for conn in clients:
+            self._drop_client(conn)
+        await self._await_push_shutdown()
+        heartbeat = self._heartbeat_task
+        if heartbeat is not None:
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            self._heartbeat_task = None
+        if self._server is not None:
+            await self._server.wait_closed()
+            self._server = None
+        if clients:
+            await asyncio.gather(
+                *(conn.writer.wait_closed() for conn in clients), return_exceptions=True
+            )
+        if self._publisher is not None:
+            self._publisher.close()
+            self._publisher = None
 
     async def _await_push_shutdown(self) -> None:
         """Join the coalesced repaint before its owning loop can disappear."""

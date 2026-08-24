@@ -219,8 +219,11 @@ async def test_owner_death_fires_on_disconnected_once(config: Path) -> None:
         disconnected: list[str] = []
         client = AttachClient(lambda p: None, disconnected.append)
         await client.connect(record, "sess-a")
-        # Kill the owner's socket the hard way: close the server.
-        r._shutdown()
+        # Kill the owner through its public synchronous seam. This call runs
+        # on the attach client's loop, not the registrant thread, preserving
+        # the hard socket-death path while exercising the cross-loop boundary.
+        r.close()
+        r.close()  # repeated host teardown must remain a no-op
         deadline = asyncio.get_running_loop().time() + 5
         while asyncio.get_running_loop().time() < deadline:
             if disconnected:
