@@ -190,6 +190,24 @@ async def test_daemon_and_attach_clients_coexist() -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_process_close_joins_delayed_projection_push() -> None:
+    """Loop teardown leaves no coalesced repaint task behind."""
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    await registrant.start_in_process()
+    registrant._schedule_push()
+    await asyncio.sleep(0)
+    task = registrant._push_task
+    assert task is not None and not task.done()
+
+    await registrant.aclose()
+
+    assert task.done()
+    assert registrant._push_task is None
+    assert not registrant._push_scheduled
+
+
+@pytest.mark.asyncio
 async def test_broadcast_reaches_every_client() -> None:
     handle = FakeHandle()
     registrant = Registrant(handle, kind="tui")

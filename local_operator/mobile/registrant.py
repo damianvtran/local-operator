@@ -188,6 +188,10 @@ class Registrant:
         self._unsubscribe: Callable[[], None] | None = None
         self._closed = threading.Event()
         self._push_scheduled = False
+        # The delayed repaint must be owned like the heartbeat. A bare task can
+        # still be sleeping when close tears down the registrant loop, producing
+        # an orphan warning and proving teardown returned before its work ended.
+        self._push_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         # -- front-end accounting (the child reaper's inputs, §4) --------------
         # Phone SSE watchers, fed by the daemon's watch/unwatch pushes. Floored
@@ -256,6 +260,7 @@ class Registrant:
             except Exception:  # noqa: BLE001
                 logger.debug("registrant unsubscribe failed", exc_info=True)
         self._shutdown()
+        await self._await_push_shutdown()
         if self._server is not None:
             await self._server.wait_closed()
         if self._publisher is not None:
@@ -291,6 +296,9 @@ class Registrant:
             # the caller then owns cancelling the heartbeat (close() does).
             await self._closed_wait()
             heartbeat.cancel()
+            if self._push_task is not None:
+                self._push_task.cancel()
+            await self._await_push_shutdown()
             self._server.close()
             await self._server.wait_closed()
 
@@ -301,6 +309,8 @@ class Registrant:
     def _shutdown(self) -> None:
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
+        if self._push_task is not None:
+            self._push_task.cancel()
         if self._server is not None:
             self._server.close()
         for conn in list(self._clients.values()):
@@ -309,6 +319,16 @@ class Registrant:
             except Exception:  # noqa: BLE001
                 pass
         self._clients.clear()
+
+    async def _await_push_shutdown(self) -> None:
+        """Join the coalesced repaint before its owning loop can disappear."""
+        task = self._push_task
+        if task is None:
+            return
+        await asyncio.gather(task, return_exceptions=True)
+        if self._push_task is task:
+            self._push_task = None
+        self._push_scheduled = False
 
     async def _heartbeat_loop(self) -> None:
         while not self._closed.is_set():
@@ -524,16 +544,21 @@ class Registrant:
             pass
 
     def _push_soon(self) -> None:
-        if self._push_scheduled:
+        # A callback may already be queued when close flips the cross-thread
+        # event. Recheck here so shutdown cannot create new work behind itself.
+        if self._closed.is_set() or self._push_scheduled:
             return
         self._push_scheduled = True
-        asyncio.ensure_future(self._push_later())
+        self._push_task = asyncio.create_task(self._push_later())
 
     async def _push_later(self) -> None:
-        # One sleep(0) lets the current event batch fold before the snapshot.
-        await asyncio.sleep(0.05)
-        self._push_scheduled = False
-        await self._push()
+        try:
+            # One short delay lets the current event batch fold before snapshot.
+            await asyncio.sleep(0.05)
+            if not self._closed.is_set():
+                await self._push()
+        finally:
+            self._push_scheduled = False
 
     async def _push(self) -> None:
         """Broadcast a projection repaint to every live connection.
