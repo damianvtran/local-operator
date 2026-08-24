@@ -21,14 +21,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import logging
 import secrets
+import uuid
+from asyncio import InvalidStateError
+from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
+from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle
 from local_operator.mobile.registrant import image_blocks as _image_blocks
@@ -40,10 +46,37 @@ from local_operator.mobile.types import (
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_gate_future(future: asyncio.Future[Any], value: Any) -> None:
+    """Set a gate future's result if it can still take one, swallowing the
+    InvalidStateError otherwise. Module-level so ``call_soon_threadsafe``
+    callbacks (which must never raise) can share it."""
+    try:
+        future.set_result(value)
+    except (InvalidStateError, TypeError):
+        pass
+
+
 #: How long an approval/ask may sit unanswered before the tool is denied and
 #: the turn told why. A phone in a pocket is the common case; an unbounded
 #: wait would pin the turn (and its tool slot) forever.
-PENDING_REQUEST_TIMEOUT_S = 3600.0
+PENDING_REQUEST_TIMEOUT_S = 30.0
+# Socket admission is intentionally bounded: many front ends may produce input,
+# but an abandoned automation loop must not grow one owner's memory forever.
+MAX_QUEUED_PROMPTS = 32
+
+
+@dataclass
+class _PromptCommand:
+    command_id: str
+    text: str
+    images: list["ImageContent"]
+    admitted: asyncio.Future[None]
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        # Tuple compatibility for older diagnostics that inspect the queue.
+        yield self.text
+        yield self.images
 
 
 class OwnedSessionHandle(SessionHandle):
@@ -110,6 +143,21 @@ class OwnedSessionHandle(SessionHandle):
         # request_id -> the AskQuestion.id the harness is waiting on (the
         # answer map's key — see ask_gate).
         self._pending_question_ids: dict[str, str] = {}
+        # One owner process, many producers: ordinary prompts enter this FIFO
+        # and exactly one drain invokes Session.prompt at a time. Session itself
+        # deliberately rejects concurrent calls, so serialization belongs at
+        # this control/admission boundary rather than by adding another writer.
+        self._prompt_queue: deque[_PromptCommand] = deque()
+        # Pending and running duplicates join the same durable-admission future;
+        # completed duplicates are recognized from transcript-backed history.
+        self._prompt_commands: dict[str, _PromptCommand] = {}
+        self._prompt_drain_task: asyncio.Task[None] | None = None
+        # Prompt and steer share one identity namespace. In particular, an idle
+        # projection may race a turn start and transfer the rejected prompt's
+        # identity to steer rather than admitting the same producer twice.
+        self._command_reservations = CommandReservations(session)
+        self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
+        self._disposing = False
         self._install_gates()
 
     # -- gates -----------------------------------------------------------------
@@ -213,11 +261,119 @@ class OwnedSessionHandle(SessionHandle):
         self._session.set_approval_handler(approval_gate)
         self._session.set_ask_handler(ask_gate)
 
-    def _resolve_pending(self, request_id: str, value: Any) -> None:
-        future = self._pending_futures.get(request_id)
-        if future is None or future.done():
-            raise ValueError("that prompt is no longer waiting")
-        self._loop.call_soon_threadsafe(future.set_result, value)
+    async def dispose(self) -> None:
+        """Dispose the underlying session (release the claim, flush, abort).
+
+        The child's clean-exit path calls this rather than reaching through
+        to ``self._session`` so the ordering (deny gates first) stays in one
+        place and hosts cannot forget the claim release."""
+        self._disposing = True
+        drain = self._prompt_drain_task
+        if drain is not None and not drain.done():
+            drain.cancel()
+            await asyncio.gather(drain, return_exceptions=True)
+        # Anything still queued has no durable receipt. Wake every producer so
+        # it can retain and retry the same identity rather than hanging forever.
+        while self._prompt_queue:
+            command = self._prompt_queue.popleft()
+            self._prompt_commands.pop(command.command_id, None)
+            if not command.admitted.done():
+                command.admitted.set_exception(
+                    RuntimeError("session closed before the prompt was admitted")
+                )
+            self._fold.note_prompt_rejected("session closed before the prompt was admitted")
+        self._notify()
+        self._unsubscribe_admitted_commands()
+        self._command_reservations.clear()
+        await self._session.dispose()
+
+    def is_busy(self) -> bool:
+        """True while the session holds work a clean exit would destroy.
+
+        The child reaper's WORK signal (design §4.1): a turn under the lock,
+        an on-demand compaction, live subagents, or a gate parked on the
+        user's answer. A parked approval IS a running turn — the tool slot is
+        held and the conversation is mid-flight, so a reaper that counted it
+        idle would kill sessions waiting on a phone that is merely slow.
+
+        Reads private session state (``_turn_lock``, ``_compacting``) the way
+        the session's own prompt guard does; the alternative — exposing each
+        flag — would widen the session's public surface for one caller."""
+        if self._disposing:
+            # Disposal has explicitly rejected the admission queue and owns
+            # teardown now; stale provider streaming flags must not wedge exit.
+            return False
+        session = self._session
+        if getattr(session, "is_streaming", False):
+            return True
+        if getattr(session, "_compacting", False):
+            return True
+        if getattr(session, "_turn_lock", None) is not None and session._turn_lock.locked():
+            return True
+        try:
+            if session.running_subagents() > 0:
+                return True
+        except Exception:  # noqa: BLE001 — a broken counter must not wedge the reaper
+            return True
+        if self._prompt_queue or (
+            self._prompt_drain_task is not None and not self._prompt_drain_task.done()
+        ):
+            return True
+        if self._pending_futures:
+            # Ordinary gate timeout owns the non-authorizing answer. Keeping the
+            # host busy until then prevents the reaper from denying it early.
+            return True
+        manager = getattr(session, "jobs", None)
+        if manager is not None:
+            try:
+                # Session.dispose tears down the whole manager, not only task jobs.
+                # Background bash and capacity-queued jobs therefore carry the same
+                # liveness weight as subagents until their manager row settles.
+                if any(getattr(job, "status", None) == "running" for job in manager.list()):
+                    return True
+            except Exception:  # noqa: BLE001 — uncertainty must fail closed
+                return True
+        if any(not task.done() for task in self._background_tasks):
+            return True
+        return False
+
+    def _deny_pending_gates(self) -> None:
+        """Refuse every parked approval/ask so teardown cannot hang on them.
+
+        The clean-exit ordering mirror of OperatorApp.on_unmount (deny gates
+        BEFORE dispose): dispose awaits teardown, and a turn parked on an
+        unanswered card would never reach it. Resolving False/None here is
+        the same answer a timeout would eventually deliver, minus the wait."""
+        for request_id, future in list(self._pending_futures.items()):
+            if not future.done():
+                # None answers an ask ("user escaped"); False would be wrong
+                # there, and None is meaningless to an approval future typed
+                # bool — so resolve by the gate the future serves. Both are
+                # the deny answer their timeout would deliver.
+                value = None if request_id in self._pending_question_ids else False
+                self._loop.call_soon_threadsafe(_resolve_gate_future, future, value)
+        self._pending_futures.clear()
+
+    async def _resolve_pending(self, request_id: str, value: Any) -> None:
+        """Atomically reserve and settle one gate on its owning event loop."""
+        import concurrent.futures
+
+        receipt: concurrent.futures.Future[None] = concurrent.futures.Future()
+
+        def settle() -> None:
+            future = self._pending_futures.pop(request_id, None)
+            if future is None or future.done():
+                receipt.set_exception(ValueError("that prompt is no longer waiting"))
+                return
+            try:
+                future.set_result(value)
+            except (InvalidStateError, TypeError):
+                receipt.set_exception(ValueError("that prompt is no longer waiting"))
+                return
+            receipt.set_result(None)
+
+        self._loop.call_soon_threadsafe(settle)
+        await asyncio.wrap_future(receipt)
 
     # -- SessionHandle -----------------------------------------------------------
 
@@ -250,18 +406,61 @@ class OwnedSessionHandle(SessionHandle):
         self._reconcile_streaming()
         return unsubscribe
 
-    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def prompt(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
         self._check_loop_thread()
-        image_blocks = _image_blocks(images)
-        # A rejected prompt must not leave a ghost user row on the phone, so
-        # the echo waits until Session.prompt has ACCEPTED the turn (the lock
-        # is the honest signal) — see _run_turn_task. Check the cheap guard up
-        # front so the common busy case answers immediately without a task.
-        if self._session.is_streaming or getattr(self._session, "_compacting", False):
-            return "not sent: session is busy — steer instead, or retry in a moment"
+        if not command_id:
+            # Only old in-process callers omit the v3 field. Minting here keeps
+            # their local submission valid; all wire producers retain their id.
+            command_id = str(uuid.uuid4())
+        existing = self._prompt_commands.get(command_id)
+        if existing is not None:
+            await existing.admitted
+            return "already admitted"
+        if not self._command_reservations.reserve(command_id, kind="prompt"):
+            return "already admitted"
+        if self._disposing:
+            self._command_reservations.reject(command_id)
+            raise RuntimeError("session is closing; prompt was not admitted")
+        if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
+            self._command_reservations.reject(command_id)
+            raise RuntimeError(
+                f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
+            )
         self._maybe_name_conversation(text)
-        self._run_turn_task(text, image_blocks)
-        return "prompt sent"
+        admitted: asyncio.Future[None] = self._loop.create_future()
+        command = _PromptCommand(command_id, text, _image_blocks(images), admitted)
+        position = len(self._prompt_queue) + 1
+        legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
+        # Compatibility-only fake/third-party sessions predate durable
+        # admission. Production Session exposes ``message_id`` and never takes
+        # this early-receipt branch.
+        if legacy_prompt:
+            admitted.set_result(None)
+        self._prompt_commands[command_id] = command
+        self._prompt_queue.append(command)
+        if self._prompt_drain_task is None or self._prompt_drain_task.done():
+            self._prompt_drain_task = asyncio.ensure_future(self._drain_prompt_queue())
+            self._prompt_drain_task.add_done_callback(self._observe_prompt_drain)
+        # ACK is the durable transcript append, never insertion into this queue.
+        await admitted
+        self._command_reservations.accept(command_id)
+        if legacy_prompt and position > 1:
+            return f"prompt queued ({position})"
+        return "prompt admitted"
+
+    @staticmethod
+    def _observe_prompt_drain(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
 
     def _maybe_name_conversation(self, text: str) -> None:
         """Name a still-unnamed conversation from its first real prompt.
@@ -325,35 +524,99 @@ class OwnedSessionHandle(SessionHandle):
         self._refresh_state()
         self._notify()
 
-    def _run_turn_task(self, text: str, image_blocks: list["ImageContent"]) -> None:
-        """Run the turn as a background task; a rejection surfaces as a notice,
-        never as a ghost user row.
+    async def _drain_prompt_queue(self) -> None:
+        """Run admitted ordinary prompts in owner order, one safe turn at a time.
 
-        The session emits MessageStartEvent for a user turn only AFTER the
-        turn lock is acquired (see Session._run_turn), so that event IS the
-        acceptance signal — the fold paints the row from it, and there is no
-        optimistic echo to undo. Session.prompt raises RuntimeError when a
-        turn started in the gap between the guard above and the lock; catching
-        it here keeps the un-awaited-future warning out of the log and gives
-        the phone a quiet "not sent" notice instead of a fake sent row.
+        Accepted input remains in memory until its turn reaches Session.prompt;
+        only that call emits the user row and persists it, giving every viewer
+        one shared projection row rather than one optimistic echo per producer.
         """
-
-        async def run() -> None:
+        while self._prompt_queue:
+            command = self._prompt_queue[0]
             try:
-                await self._session.prompt(text, image_blocks)
-            except RuntimeError as exc:
+                parameters = inspect.signature(self._session.prompt).parameters
+                if "message_id" in parameters:
+                    fields: dict[str, Any] = {
+                        "message_id": command.command_id,
+                        "admitted": command.admitted,
+                    }
+                    if "producer_command_id" in parameters:
+                        fields["producer_command_id"] = command.command_id
+                    await self._session.prompt(command.text, command.images, **fields)
+                else:
+                    # Legacy tests/third-party handles have no admission seam;
+                    # preserve their historical queue-insertion receipt. Real
+                    # Session implementations always take the durable branch.
+                    if not command.admitted.done():
+                        command.admitted.set_result(None)
+                    await self._session.prompt(command.text, command.images)
+            except asyncio.CancelledError:
+                if not command.admitted.done():
+                    command.admitted.set_exception(
+                        RuntimeError("session closed before the prompt was admitted")
+                    )
+                # The in-flight admission is popped by finally, so record its
+                # terminal rejection here; dispose handles only those still queued.
+                self._projection.streaming = False
+                self._fold.note_prompt_rejected(
+                    "session closed before the admitted prompt could complete"
+                )
+                self._notify()
+                # Cancellation is control flow and must remain cancellation.
+                raise
+            except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
+                if not command.admitted.done():
+                    self._command_reservations.reject(
+                        command.command_id,
+                        transfer_to_steer="already streaming" in str(exc),
+                    )
+                    command.admitted.set_exception(exc)
+                # Provider, transcript, and tool failures are all terminal for
+                # this one admission. Surface the failure asynchronously, then
+                # continue in FIFO order without retrying the failed head.
                 self._projection.streaming = self._session.is_streaming
                 self._fold.note_prompt_rejected(str(exc))
                 self._notify()
-                logger.warning("mobile prompt rejected: %s", exc)
+                logger.exception("mobile prompt failed after admission")
+            except BaseException:
+                # KeyboardInterrupt/SystemExit retain their process semantics;
+                # the finally block still removes exactly the failed admission.
+                logger.critical("mobile prompt drain terminated", exc_info=True)
+                raise
+            finally:
+                self._prompt_queue.popleft()
+                self._prompt_commands.pop(command.command_id, None)
 
-        asyncio.ensure_future(run())
-
-    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def steer(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
         self._check_loop_thread()
-        # Images ride the steer too — a screenshot sent mid-turn IS the
-        # correction, and session.steer already carries them.
-        self._session.steer(text, _image_blocks(images))
+        command_id = command_id or str(uuid.uuid4())
+        if not self._command_reservations.reserve(
+            command_id,
+            kind="steer",
+            prompt_transfer=True,
+        ):
+            return "already admitted"
+        # Images ride the steer too. Producer identity follows the queued user
+        # row so a reconnect cannot inject the same correction twice.
+        fields: dict[str, Any] = {}
+        parameters = inspect.signature(self._session.steer).parameters
+        if "message_id" in parameters:
+            fields["message_id"] = command_id
+        if "producer_command_id" in parameters:
+            fields["producer_command_id"] = command_id
+        try:
+            self._session.steer(text, _image_blocks(images), **fields)
+        except Exception:
+            # No queue insertion means no durable acceptance exists; the same
+            # producer identity must remain retryable after this terminal reject.
+            self._command_reservations.reject(command_id)
+            raise
+        self._command_reservations.accept(command_id)
         self._projection.queued_count += 1
         self._fold.note_user_message(text, steer=True)
         self._notify()
@@ -405,7 +668,7 @@ class OwnedSessionHandle(SessionHandle):
         raise ValueError("pick the session from the session list instead")
 
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
-        self._resolve_pending(request_id, approved)
+        await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
     async def ask_answer(
@@ -420,16 +683,11 @@ class OwnedSessionHandle(SessionHandle):
         # Resolve with the QUESTION id the harness asked under — never our
         # request id, which the harness never saw.
         question_id = self._pending_question_ids.get(request_id, request_id)
-        future = self._pending_futures.get(request_id)
-        if future is None or future.done():
-            # Human, reconciling copy (U4): a stale tap means this question
-            # already settled elsewhere — say so rather than the developer-
-            # worded "no longer waiting", so the phone user learns their tap
-            # lost a race instead of the card silently vanishing.
-            raise ValueError("that question was already answered")
-        self._loop.call_soon_threadsafe(
-            future.set_result, {question_id: [value]} if value else None
-        )
+        try:
+            await self._resolve_pending(request_id, {question_id: [value]} if value else None)
+        except ValueError as exc:
+            # Human, reconciling copy: a stale tap means another front end won.
+            raise ValueError("that question was already answered") from exc
         return "answered"
 
     async def refresh(self) -> None:

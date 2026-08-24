@@ -33,7 +33,7 @@ function AttachmentImage({
 	entryId,
 	index,
 }: {
-	pid: number;
+	pid: string;
 	entryId: string;
 	index: number;
 }) {
@@ -80,7 +80,7 @@ function AttachmentImage({
 	);
 }
 
-function Entry({ entry, pid }: { entry: TranscriptEntry; pid: number }) {
+function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 	switch (entry.kind) {
 		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
@@ -159,7 +159,7 @@ export function Transcript({
 	pid,
 	entries,
 }: {
-	pid: number;
+	pid: string;
 	entries: TranscriptEntry[];
 }) {
 	const [windowSize, setWindowSize] = useState(PAGE);
@@ -201,7 +201,16 @@ export function Transcript({
 	const visible =
 		merged.length > windowSize ? merged.slice(-windowSize) : merged;
 	const hiddenCount = merged.length - visible.length;
-	const oldestId = visible.length > 0 ? visible[0].id : null;
+	/* Long projections pin the opening user row ahead of a disjoint tail. It is
+	   already retained, but it is not the tail's chronological history cursor;
+	   anchor at the next row so the API can return the missing middle. The
+	   merge's id de-dup keeps the opener exactly once when that page reaches it. */
+	const oldestId =
+		older.length === 0 && entries.length === PAGE && entries[0]?.kind === "user"
+			? entries[1]?.id ?? entries[0]?.id ?? null
+			: visible.length > 0
+				? visible[0].id
+				: null;
 
 	/* Follow the tail on new content, but only when already at the bottom. */
 	useEffect(() => {

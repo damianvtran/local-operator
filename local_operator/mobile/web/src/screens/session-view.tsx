@@ -18,7 +18,6 @@ import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
-import { cn } from "../lib/cn";
 import { navigate } from "../router";
 import { retainProjectionStream, useProjection } from "../store";
 import type { SessionProjection } from "../types";
@@ -28,13 +27,6 @@ function Header({
 }: {
 	projection: SessionProjection;
 }) {
-	const status = projection.ended
-		? "bg-ink-disabled"
-		: projection.degraded
-			? "bg-warning"
-			: projection.streaming
-				? "lo-pulse bg-accent"
-				: "bg-success";
 	return (
 		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 			<button
@@ -45,10 +37,6 @@ function Header({
 			>
 				‹
 			</button>
-			<span
-				className={cn("size-2 shrink-0 rounded-full", status)}
-				aria-hidden
-			/>
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
 			</span>
@@ -56,13 +44,13 @@ function Header({
 	);
 }
 
-export function SessionScreen({ pid }: { pid: number }) {
-	const { projection, connected } = useProjection(pid);
+export function SessionScreen({ sessionId }: { sessionId: string }) {
+	const { projection, connected } = useProjection(sessionId);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
 
-	useEffect(() => retainProjectionStream(pid), [pid]);
+	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
 
 	/* Keep the composer above the iOS keyboard: pin the layout column to
 	   the visual viewport's height and offset while the keyboard is open. */
@@ -135,7 +123,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 					</p>
 				</div>
 			) : (
-				<Transcript pid={pid} entries={projection.transcript} />
+				<Transcript pid={sessionId} entries={projection.transcript} />
 			)}
 
 			{/* The aggregate working line — pinned at the foot of the transcript
@@ -156,25 +144,14 @@ export function SessionScreen({ pid }: { pid: number }) {
 
 			{projection.pending ? (
 				<PendingCard
-					pid={pid}
+					pid={sessionId}
 					pending={projection.pending}
 					count={projection.pending_count}
 				/>
 			) : null}
 
-			{projection.degraded && !projection.ended ? (
-				<p className="mx-3 rounded-sm bg-warning-wash px-3 py-2 text-center text-body-sm text-warning">
-					reconnecting to this session…
-				</p>
-			) : null}
-			{projection.ended ? (
-				<p className="mx-3 rounded-sm bg-sunken px-3 py-2 text-center text-body-sm text-ink-dim">
-					this session has ended
-				</p>
-			) : null}
-
 			<Composer
-				pid={pid}
+				pid={sessionId}
 				projection={projection}
 				onOpenModels={() => setModelsOpen(true)}
 				onOpenEffort={() => setEffortOpen(true)}
@@ -185,7 +162,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 			<ModelSheet
 				open={modelsOpen}
 				onClose={() => setModelsOpen(false)}
-				pid={pid}
+				pid={sessionId}
 				projection={projection}
 			/>
 		</div>

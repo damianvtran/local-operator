@@ -637,6 +637,77 @@ logger = logging.getLogger("local_operator.tui.app")
 #: resume command — where omp's only clears the editor.)
 DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
+#: Terminal-reader liveness is a lifecycle signal, not an idle timer. Fine
+#: polling bounds the 3-second drain without turning user inactivity into input.
+TERMINAL_LIFECYCLE_CHECK_S = 0.25
+TERMINAL_GATE_TIMEOUT_S = 30.0
+
+
+@dataclass
+class _TerminalFrontendReaper:
+    """Sequence terminal-loss gate settlement and clean exit safely.
+
+    A front-end-only gate gets one grace window for a replacement viewer before
+    it is settled. Work unblocked by that settlement then gets as long as it
+    needs, and clean exit requires a fresh quiescent grace. Keeping those clocks
+    separate prevents terminal EOF from becoming either an immediate denial or
+    an implicit turn cancellation.
+    """
+
+    grace_s: float
+    gate_timeout_s: float = TERMINAL_GATE_TIMEOUT_S
+    reader_seen: bool = False
+    gate_since: float | None = None
+    quiescent_since: float | None = None
+
+    def observe(
+        self,
+        *,
+        reader_alive: bool | None,
+        busy: bool,
+        gate_pending: bool,
+        remote_holders: bool,
+        now: float,
+    ) -> str | None:
+        if reader_alive is None:
+            return None
+        if reader_alive:
+            self.reader_seen = True
+            self.gate_since = None
+            self.quiescent_since = None
+            return None
+        if not self.reader_seen:
+            return None
+        if gate_pending:
+            self.quiescent_since = None
+            if self.gate_since is None:
+                self.gate_since = now
+                return None
+            # Settling the front-end future is not an interruption: it is the
+            # only event that lets this gate-owned streaming turn progress. Any
+            # unrelated work remains untouched and is observed after settlement.
+            if now - self.gate_since >= self.gate_timeout_s:
+                self.gate_since = None
+                return "settle"
+            return None
+        if busy:
+            self.gate_since = None
+            self.quiescent_since = None
+            return None
+        self.gate_since = None
+        if self.quiescent_since is None:
+            self.quiescent_since = now
+            return None
+        if now - self.quiescent_since >= self.grace_s:
+            return "exit"
+        return None
+
+    def gates_settled(self) -> None:
+        """Require a fresh grace after settlement, even if callbacks drain inline."""
+        self.gate_since = None
+        self.quiescent_since = None
+
+
 #: How long a second Esc counts as the "also stop the subagents" press. Longer
 #: than the Ctrl+C window because the two gestures answer different questions.
 #: Ctrl+C's second press QUITS, so its window is deliberately too short to hit
@@ -1531,6 +1602,11 @@ class OperatorApp(App[None]):
         #: first session is adopted; torn down in ``on_unmount``.
         self._mobile_registrant: Any = None
         self._mobile_handle: Any = None
+        # Separate from user inactivity: this watches the OS-backed terminal
+        # reader. A mounted but untouched TUI remains alive indefinitely.
+        from local_operator.mobile.child import _grace_seconds
+
+        self._terminal_frontend_reaper = _TerminalFrontendReaper(_grace_seconds())
         # What a NEW session opens in, read from config at mount and rewritten
         # by `/approvals default <mode>`. Held beside `_approve_all` rather than
         # re-read per use because the two are ONE state to a reader — "is the
@@ -1800,6 +1876,11 @@ class OperatorApp(App[None]):
         editor.focus()
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
+        self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
+        # Prime the reader observation while mount still owns a known-live
+        # driver. A tty can EOF before the first interval tick, and requiring a
+        # prior observation is what keeps headless/alternate drivers safe.
+        self._check_terminal_frontend()
         # Keep the active provider's quota warm in the shared cache so `/usage`
         # answers from disk (see USAGE_WARM_INTERVAL_S).
         self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
@@ -3191,13 +3272,14 @@ class OperatorApp(App[None]):
         ``_on_boot_failed`` exactly as a bad ``--resume`` does.
 
         A session that is ALREADY live in another process (a phone-started
-        child, another TUI) is not reopened here. Two writers on one
-        transcript is how a resume of a mobile session painted the splash:
-        the second process claimed the directory, replayed a mid-write
-        journal, and left the first process as the only one still appending.
-        The live process already publishes to the phone; this TUI stays
-        put and names that process so the user can watch and steer from
-        either front end.
+        child, another TUI) is not reopened here — it is ATTACHED to when the
+        owner is reachable over the mobile control socket (see
+        ``_attach_or_refuse``), and refused with today's copy otherwise. Two
+        writers on one transcript is how a resume of a mobile session painted
+        the splash: the second process claimed the directory, replayed a
+        mid-write journal, and left the first process as the only one still
+        appending. The live process already publishes to the phone; this TUI
+        follows and steers that process instead of racing it.
         """
         if self._resume_factory is None:
             self._system_notice("resume unavailable: no resume-capable launcher", "warning")
@@ -3219,19 +3301,46 @@ class OperatorApp(App[None]):
         if concrete != RESUME_LATEST:
             owner = live_session_owner(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
-                # A refused navigation is not conversation content: keep the
-                # splash, same as the other /resume rejections (D1). Name the
-                # owning process and the next step in user words (D2).
-                self._system_notice(
-                    f"session {concrete} is already open in another process "
-                    f"(pid {owner}) — watch and steer it there, or from the "
-                    "phone session list",
-                    "warning",
+                # Discovery scans the filesystem; run it as a worker so the
+                # UI thread never blocks on it, and settle attach-vs-refuse
+                # when the record is in hand.
+                self.run_worker(
+                    self._attach_or_refuse(config_dir(), concrete, owner),
+                    thread=False,
+                    group="session",
                 )
                 return
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
         self.run_worker(self._reload_session(), thread=False, group="session")
+
+    async def _attach_or_refuse(self, config_dir, concrete: str, owner: int) -> None:
+        """Settle the owned-session branch of ``_resume_session``.
+
+        ATTACH when the owner is reachable over the control socket (record
+        found, protocol >= 2, pid match): push the AttachScreen and toast the
+        new state. Otherwise degrade to TODAY's refusal message verbatim —
+        graceful degradation for old binaries, registrant-start failures, and
+        rebind races. Runs as a worker: ``find_owner_record`` is filesystem
+        I/O.
+        """
+        from local_operator.mobile.attach_client import find_owner_record
+
+        record, found_owner = await asyncio.to_thread(find_owner_record, config_dir, concrete)
+        if record is not None and found_owner == owner:
+            from local_operator.tui.attach_screen import AttachScreen
+
+            self.push_screen(AttachScreen(record, concrete))
+            return
+        # A refused navigation is not conversation content: keep the
+        # splash, same as the other /resume rejections (D1). Name the
+        # owning process and the next step in user words (D2).
+        self._system_notice(
+            f"session {concrete} is already open in another process "
+            f"(pid {owner}) — watch and steer it there, or from the "
+            "phone session list",
+            "warning",
+        )
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -6693,6 +6802,69 @@ class OperatorApp(App[None]):
                 logger.debug("mobile registrant close failed", exc_info=True)
             self._mobile_registrant = None
             self._mobile_handle = None
+
+    def _terminal_reader_alive(self) -> bool | None:
+        """Return the Textual tty reader's lifecycle, when the driver has one.
+
+        Textual's POSIX driver exits ``_key_thread`` when ``os.read`` returns
+        EOF. The app loop keeps running, so thread liveness is the normal
+        terminal-loss signal that distinguishes a closed front end from an idle
+        mounted TUI. Headless and alternate drivers expose no such thread and
+        are deliberately outside this policy.
+        """
+        if self.is_headless or self._driver is None:
+            return None
+        reader = getattr(self._driver, "_key_thread", None)
+        if reader is None:
+            return None
+        return bool(reader.is_alive())
+
+    def _terminal_frontend_gate_pending(self) -> bool:
+        approval = self._approval
+        approval_pending = approval is not None and not approval.answered
+        ask_pending = self._ask_pending is not None and not self._ask_pending.done()
+        return approval_pending or ask_pending or self._key_prompt is not None
+
+    def _terminal_loss_busy(self, *, gate_pending: bool) -> bool:
+        session = self._session
+        if self._compacting:
+            return True
+        if session is None:
+            return self._turn_is_live() and not gate_pending
+        # Streaming and the turn task are expected to remain live while their
+        # displayed gate is parked. They matter again immediately after the gate
+        # is settled; before then they must not prevent its hard deadline.
+        if bool(getattr(session, "is_streaming", False)) and not gate_pending:
+            return True
+        if self._turn_is_live() and not gate_pending:
+            return True
+        try:
+            return session.running_subagents() > 0
+        except Exception:  # noqa: BLE001 — uncertainty keeps the owner alive
+            return True
+
+    def _check_terminal_frontend(self) -> None:
+        """Reap a TUI whose tty reader is gone, without truncating live work."""
+        reader_alive = self._terminal_reader_alive()
+        gate_pending = self._terminal_frontend_gate_pending()
+        action = self._terminal_frontend_reaper.observe(
+            reader_alive=reader_alive,
+            busy=self._terminal_loss_busy(gate_pending=gate_pending),
+            gate_pending=gate_pending,
+            remote_holders=False,
+            now=time.monotonic(),
+        )
+        if action == "settle":
+            # Only grace expiry makes an unreachable front-end gate disposable.
+            # Its callback may resume real work, which the next observations let
+            # finish before a separate clean-exit grace can begin.
+            self._deny_queued_approvals()
+            self._settle_ask_picker()
+            self._settle_key_prompt()
+            self._terminal_frontend_reaper.gates_settled()
+        elif action == "exit":
+            logger.info("terminal front end closed; session is quiescent — exiting cleanly")
+            self.exit()
 
     async def on_unmount(self) -> None:
         # Unpublish the discovery record BEFORE anything can block: the mobile

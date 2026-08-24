@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -24,6 +25,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     TextContent,
 )
+from local_operator.paths import config_dir
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
@@ -37,6 +39,7 @@ from local_operator.tui.app import (
     SLASH_COMMANDS,
     OperatorApp,
     _splash_toast_headline,
+    _TerminalFrontendReaper,
 )
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.events import TurnEnded, TurnStarted
@@ -95,6 +98,219 @@ class _FakeJobs:
             for i in range(self._session.running_bash_jobs)
         ]
         return rows
+
+
+def test_idle_mounted_terminal_never_reaps() -> None:
+    """Idle duration is irrelevant while the owning TUI reader is alive."""
+    reaper = _TerminalFrontendReaper(grace_s=10.0)
+    assert (
+        reaper.observe(
+            reader_alive=True, busy=False, gate_pending=False, remote_holders=False, now=0.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=True,
+            busy=False,
+            gate_pending=False,
+            remote_holders=False,
+            now=10_000.0,
+        )
+        is None
+    )
+    assert reaper.quiescent_since is None
+
+
+def test_frontend_gone_busy_defers_reap_until_work_finishes() -> None:
+    reaper = _TerminalFrontendReaper(grace_s=10.0)
+    reaper.observe(reader_alive=True, busy=False, gate_pending=False, remote_holders=False, now=0.0)
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=True, gate_pending=False, remote_holders=False, now=100.0
+        )
+        is None
+    )
+    assert reaper.quiescent_since is None
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=False, remote_holders=False, now=110.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=False, remote_holders=False, now=119.9
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=False,
+            gate_pending=False,
+            remote_holders=False,
+            now=120.0,
+        )
+        == "exit"
+    )
+
+
+def test_frontend_gate_gets_grace_then_fresh_exit_grace() -> None:
+    reaper = _TerminalFrontendReaper(grace_s=3.0)
+    reaper.observe(reader_alive=True, busy=False, gate_pending=False, remote_holders=False, now=0.0)
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=True, remote_holders=False, now=1.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=False,
+            gate_pending=True,
+            remote_holders=False,
+            now=30.9,
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=True,
+            gate_pending=True,
+            remote_holders=False,
+            now=31.0,
+        )
+        == "settle"
+    )
+    reaper.gates_settled()
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=False, remote_holders=False, now=31.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=False,
+            gate_pending=False,
+            remote_holders=False,
+            now=34.0,
+        )
+        == "exit"
+    )
+
+
+class _FrontendRegistrant:
+    def __init__(
+        self,
+        *,
+        watch_supported: bool,
+        phone_watchers: int = 0,
+        attach_clients: int = 0,
+    ) -> None:
+        self.watch_supported = watch_supported
+        self.phone_watchers = phone_watchers
+        self._attach_clients = attach_clients
+
+    def attach_clients(self) -> int:
+        return self._attach_clients
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("work", ["model", "tool", "compaction", "subagent"])
+async def test_terminal_loss_settles_gate_without_exiting_during_active_work(work: str) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    app._terminal_frontend_reaper = _TerminalFrontendReaper(grace_s=3.0, reader_seen=True)
+    approval = ApprovalPrompt("bash", "run a command")
+    app._approval = approval
+    session = FakeSession()
+    app._session = session
+    if work in ("model", "tool"):
+        session.streaming = True
+    elif work == "compaction":
+        app._compacting = True
+    else:
+        session.running_children = 1
+    exits: list[bool] = []
+    with (
+        patch.object(app, "_terminal_reader_alive", return_value=False),
+        patch.object(app, "exit", side_effect=lambda: exits.append(True)),
+        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 100.0]),
+    ):
+        app._check_terminal_frontend()
+        app._check_terminal_frontend()
+    # The 30-second authority deadline is independent of unrelated activity;
+    # settling it does not abort that activity and therefore cannot exit.
+    assert approval.answered is True
+    assert exits == []
+
+
+@pytest.mark.asyncio
+async def test_pending_gate_waits_for_reconnect_then_settles_and_reaps_after_work() -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    app._terminal_frontend_reaper = _TerminalFrontendReaper(grace_s=3.0, reader_seen=True)
+    approval = ApprovalPrompt("bash", "run a command")
+    app._approval = approval
+    session = FakeSession()
+    app._session = session
+    exits: list[bool] = []
+    readers = iter([False, True, False, False, False, False, False])
+    times = iter([0.0, 2.0, 3.0, 33.0, 34.0, 40.0, 43.0])
+
+    def deny_and_resume() -> None:
+        approval.resolve(False, answer="n")
+        session.streaming = True
+
+    with (
+        patch.object(app, "_terminal_reader_alive", side_effect=lambda: next(readers)),
+        patch.object(app, "_deny_queued_approvals", side_effect=deny_and_resume),
+        patch.object(app, "_settle_ask_picker"),
+        patch.object(app, "_settle_key_prompt"),
+        patch.object(app, "exit", side_effect=lambda: exits.append(True)),
+        patch("local_operator.tui.app.time.monotonic", side_effect=lambda: next(times)),
+    ):
+        app._check_terminal_frontend()  # gate grace starts
+        app._check_terminal_frontend()  # reconnect preserves the gate
+        assert approval.answered is False
+        app._check_terminal_frontend()  # replacement grace starts
+        app._check_terminal_frontend()  # grace expires and resumes work
+        assert approval.answered is True
+        app._check_terminal_frontend()  # resumed work cannot exit
+        session.streaming = False
+        app._check_terminal_frontend()  # fresh clean-exit grace starts
+        app._check_terminal_frontend()  # only now may the owner exit
+    assert exits == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "registrant",
+    [
+        _FrontendRegistrant(watch_supported=True, attach_clients=1),
+        _FrontendRegistrant(watch_supported=True, phone_watchers=1),
+        _FrontendRegistrant(watch_supported=False),
+    ],
+)
+async def test_terminal_loss_reaps_independently_of_remote_viewers(
+    registrant: _FrontendRegistrant,
+) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    app._mobile_registrant = registrant
+    app._session = FakeSession()
+    app._terminal_frontend_reaper = _TerminalFrontendReaper(grace_s=3.0, reader_seen=True)
+    exits: list[bool] = []
+    with (
+        patch.object(app, "_terminal_reader_alive", return_value=False),
+        patch.object(app, "exit", side_effect=lambda: exits.append(True)),
+        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 3.0]),
+    ):
+        app._check_terminal_frontend()
+        app._check_terminal_frontend()
+    assert exits == [True]
 
 
 class FakeSession:
@@ -605,6 +821,90 @@ def test_exit_quit_collapsed_to_one_command() -> None:
     assert "quit" not in names  # not a separate command
     exit_command = next(c for c in SLASH_COMMANDS if c.name == "exit")
     assert exit_command.aliases == ("quit",)
+
+
+@pytest.mark.asyncio
+async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) -> None:
+    """The owned-session branch attaches, then can recover after owner EOF."""
+    from local_operator.mobile import registry as mobile_registry
+    from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
+    from local_operator.tui.attach_screen import AttachScreen
+
+    session = FakeSession()
+    resumed = FakeSession()
+
+    async def resume_factory(resume_id):
+        assert resume_id == "sess-owned"
+        return resumed
+
+    app = OperatorApp(lambda: _factory(session), resume_factory=resume_factory)
+    # A live pid that is not the app: this test's own parent (the xdist
+    # worker shell) is alive and distinct.
+    owner = os.getppid()
+    marker_dir = config_dir() / "sessions" / "sess-owned"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / ".session.pid").write_text(str(owner))
+    record = SessionRecord(
+        pid=owner,
+        kind="tui",
+        session_id="sess-owned",
+        conversation_name="Owned",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        protocol=PROTOCOL_VERSION,
+    )
+    mobile_registry.publish(record, root=config_dir())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._resume_session("sess-owned", lambda *a, **k: None)
+        for _ in range(50):
+            await pilot.pause()
+            if app.screen_stack and isinstance(app.screen, AttachScreen):
+                break
+            await asyncio.sleep(0.05)
+        assert isinstance(app.screen, AttachScreen)
+        assert session.prompts == []  # no second writer ever built
+        # Owner loss is invisible plumbing. The conversation surface remains
+        # mounted and composer-ready; printable keys are ordinary draft input.
+        app.screen._owner_exited("owner exited")
+        await pilot.press("r")
+        await pilot.pause()
+        assert app._session is session
+        assert isinstance(app.screen, AttachScreen)
+        assert app.screen._composer.value == "r"
+        assert not app.screen._composer.disabled
+        assert app.query_one(Editor).disabled is False
+
+
+@pytest.mark.asyncio
+async def test_resume_owned_session_without_record_keeps_refusal(monkeypatch, capsys) -> None:
+    """No record (old binary / registrant failure) keeps today's refusal copy
+    verbatim — graceful degradation."""
+    session = FakeSession()
+
+    async def resume_factory(resume_id):
+        return session
+
+    app = OperatorApp(lambda: _factory(session), resume_factory=resume_factory)
+    owner = os.getppid()
+    marker_dir = config_dir() / "sessions" / "sess-owned2"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / ".session.pid").write_text(str(owner))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._resume_session("sess-owned2", lambda *a, **k: None)
+        for _ in range(20):
+            await pilot.pause()
+        capsys.readouterr()
+        # The refusal lands as a transcript notice (rendered), not stdout;
+        # assert on the app's notice bookkeeping instead of the pipe.
+        from local_operator.tui.widgets.transcript import NoticeBlock
+
+        notices = list(app.query(NoticeBlock))
+        assert any("already open in another process" in (n.text() or "") for n in notices)
+        assert session.prompts == []
 
 
 @pytest.mark.asyncio

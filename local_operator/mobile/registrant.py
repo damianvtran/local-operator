@@ -30,11 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import json
 import logging
 import os
 import secrets
 import threading
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
@@ -43,7 +46,9 @@ if TYPE_CHECKING:
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registry import RecordPublisher
 from local_operator.mobile.types import (
+    ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
+    ClientKind,
     PendingRequest,
     SessionProjection,
     SessionRecord,
@@ -81,6 +86,30 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
+# A projection is replaceable state. If a peer cannot accept one within this
+# bound, dropping that peer is safer than blocking authority-bearing ACKs for
+# every healthy front end.
+_SEND_TIMEOUT_S = 1.0
+
+
+@dataclass
+class _ClientConn:
+    """One authenticated control connection in the registrant's registry.
+
+    Multiplexing is already half-there (frames carry caller-chosen ``req``
+    ids), so multi-front-end needs N concurrent connections on the ONE
+    socket rather than a second protocol: the daemon plus up to
+    ``ATTACH_MAX_CLIENTS`` attach terminals. ``last_seen`` is the LRU clock
+    for attach eviction — stamped on every request so the least-recently-ACTIVE
+    follower is the one dropped when the cap is hit.
+    """
+
+    writer: asyncio.StreamWriter
+    kind: ClientKind
+    last_seen: float = field(default_factory=time.monotonic)
+    # Frames on one TCP stream must stay ordered, while unrelated streams must
+    # never queue behind its backpressure.
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class SessionHandle(Protocol):
@@ -105,7 +134,12 @@ class SessionHandle(Protocol):
         Returns an unsubscribe callable."""
         ...
 
-    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str: ...
+    async def prompt(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str: ...
     async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str: ...
     async def abort(self) -> str: ...
     async def set_model(self, provider: str, model_id: str) -> str: ...
@@ -144,14 +178,37 @@ class Registrant:
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
-        self._writer: asyncio.StreamWriter | None = None
+        # N authenticated connections keyed by id(writer): one daemon (a new
+        # daemon dial evicts the old — that IS its reconnect story) plus up to
+        # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
+        # the phone bridge and a follower terminal at once.
+        self._clients: dict[int, _ClientConn] = {}
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
         self._closed = threading.Event()
         self._push_scheduled = False
-        self._send_lock: asyncio.Lock | None = None
+        # The delayed repaint must be owned like the heartbeat. A bare task can
+        # still be sleeping when close tears down the registrant loop, producing
+        # an orphan warning and proving teardown returned before its work ended.
+        self._push_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        # Shutdown is represented by one owner-loop task so synchronous close,
+        # awaited close, and the thread runner can converge without cancelling
+        # loop-owned objects from whichever thread happened to request teardown.
+        self._shutdown_task: asyncio.Task[None] | None = None
+        # -- front-end accounting (the child reaper's inputs, §4) --------------
+        # Phone SSE watchers, fed by the daemon's watch/unwatch pushes. Floored
+        # at 0: a daemon restart redials without unwatching, and a counter that
+        # went negative would read as "watchers" to an == 0 check forever.
+        self.phone_watchers: int = 0
+        # Latched True on the first watch/unwatch EVER received. Until then
+        # watcher count is UNKNOWN (an old daemon never sends the ops), and
+        # unknown must be treated as "present" — a new child under an old
+        # daemon must not reap a session a phone is actively watching. The
+        # latch never resets: once a watch-capable daemon has spoken, absence
+        # of the op means absence of watchers.
+        self.watch_supported: bool = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -171,13 +228,54 @@ class Registrant:
         if self._server is not None:
             return
         self._loop = asyncio.get_running_loop()
-        self._send_lock = asyncio.Lock()
         await self._serve()
 
     def close(self) -> None:
-        """Unpublish and shut down. Safe from any thread, safe twice. In
-        in-process mode prefer :meth:`aclose` — it awaits the cleanup instead
-        of posting it onto a loop the caller may be about to tear down."""
+        """Unpublish and shut down. Safe from any thread, safe twice.
+
+        Thread-hosted registrants are joined before returning. In-process hosts
+        should prefer :meth:`aclose`; when ``close`` is called on their owning
+        loop it schedules cleanup instead of deadlocking that loop waiting for
+        itself.
+        """
+        self._request_close()
+        loop = self._loop
+        if self._thread is not None:
+            # The thread runner observes the close latch and performs teardown
+            # itself. Joining it is both simpler and race-free when close lands
+            # while the thread is still publishing its loop reference.
+            if threading.current_thread() is not self._thread:
+                self._thread.join(timeout=2.0)
+            return
+        if loop is None or loop.is_closed():
+            return
+        if self._on_owner_loop():
+            self._ensure_shutdown_task()
+            return
+        shutdown = self._shutdown_on_loop()
+        try:
+            asyncio.run_coroutine_threadsafe(shutdown, loop).result(timeout=2.0)
+        except RuntimeError:
+            # run_coroutine_threadsafe does not consume the coroutine when the
+            # loop wins the close race, so close it to avoid a false leak warning.
+            shutdown.close()
+            logger.debug("registrant loop exited during shutdown", exc_info=True)
+        except TimeoutError:
+            logger.debug("registrant shutdown did not finish before timeout", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Await complete teardown on the owning loop.
+
+        Repeated calls still join the original cleanup task; merely observing
+        the cross-thread closed flag is not proof that loop-owned work ended.
+        """
+        self._request_close()
+        if not self._on_owner_loop():
+            raise RuntimeError("Registrant.aclose() must run on its owning event loop")
+        await self._shutdown_on_loop()
+
+    def _request_close(self) -> None:
+        """Latch closure and detach the host feed exactly once."""
         if self._closed.is_set():
             return
         self._closed.set()
@@ -186,39 +284,19 @@ class Registrant:
                 self._unsubscribe()
             except Exception:  # noqa: BLE001 — shutdown must not raise
                 logger.debug("registrant unsubscribe failed", exc_info=True)
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._shutdown)
-        if self._publisher is not None:
-            self._publisher.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._unsubscribe = None
 
-    async def aclose(self) -> None:
-        """In-process mode shutdown, awaited on the owning loop: cancel the
-        heartbeat, close the server and the daemon connection, unpublish.
-        Posting this to a loop that is about to close (the child's amain
-        returns right after) is how heartbeats outlive their process — so the
-        child awaits it instead."""
-        if self._closed.is_set():
-            return
-        self._closed.set()
-        if self._unsubscribe is not None:
-            try:
-                self._unsubscribe()
-            except Exception:  # noqa: BLE001
-                logger.debug("registrant unsubscribe failed", exc_info=True)
-        self._shutdown()
-        if self._server is not None:
-            await self._server.wait_closed()
-        if self._publisher is not None:
-            self._publisher.close()
+    def _on_owner_loop(self) -> bool:
+        try:
+            return asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            return False
 
     # -- the registrant's own loop -------------------------------------------
 
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
-        self._send_lock = asyncio.Lock()
         try:
             loop.run_until_complete(self._serve())
         except Exception:  # noqa: BLE001 — a dead registrant must not kill the host
@@ -243,24 +321,60 @@ class Registrant:
             # mode returns so the caller's loop keeps running its own work —
             # the caller then owns cancelling the heartbeat (close() does).
             await self._closed_wait()
-            heartbeat.cancel()
-            self._server.close()
-            await self._server.wait_closed()
+            await self._shutdown_on_loop()
 
     async def _closed_wait(self) -> None:
         while not self._closed.is_set():
             await asyncio.sleep(0.2)
 
-    def _shutdown(self) -> None:
+    def _ensure_shutdown_task(self) -> asyncio.Task[None]:
+        """Create the one teardown task; called only on the registrant loop."""
+        task = self._shutdown_task
+        if task is None:
+            task = asyncio.create_task(self._shutdown_impl())
+            self._shutdown_task = task
+        return task
+
+    async def _shutdown_on_loop(self) -> None:
+        """Join idempotent teardown from a coroutine on the registrant loop."""
+        await asyncio.shield(self._ensure_shutdown_task())
+
+    async def _shutdown_impl(self) -> None:
+        """Cancel and join every object owned by the registrant event loop."""
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
+        if self._push_task is not None:
+            self._push_task.cancel()
         if self._server is not None:
             self._server.close()
-        if self._writer is not None:
-            try:
-                self._writer.close()
-            except Exception:  # noqa: BLE001
-                pass
+        clients = list(self._clients.values())
+        for conn in clients:
+            self._drop_client(conn)
+        await self._await_push_shutdown()
+        heartbeat = self._heartbeat_task
+        if heartbeat is not None:
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            self._heartbeat_task = None
+        if self._server is not None:
+            await self._server.wait_closed()
+            self._server = None
+        if clients:
+            await asyncio.gather(
+                *(conn.writer.wait_closed() for conn in clients), return_exceptions=True
+            )
+        if self._publisher is not None:
+            self._publisher.close()
+            self._publisher = None
+
+    async def _await_push_shutdown(self) -> None:
+        """Join the coalesced repaint before its owning loop can disappear."""
+        task = self._push_task
+        if task is None:
+            return
+        await asyncio.gather(task, return_exceptions=True)
+        if self._push_task is task:
+            self._push_task = None
+        self._push_scheduled = False
 
     async def _heartbeat_loop(self) -> None:
         while not self._closed.is_set():
@@ -284,16 +398,19 @@ class Registrant:
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """One daemon connection. Auth is the first frame: ``{"key": ...}``
+        """One control connection. Auth is the first frame: ``{"key": ...}``
         within a short deadline, constant-time compared. Anything else closes
         without a reply — an open port that answers wrong keys with errors is
         an oracle, however small.
 
-        One control connection at a time — the daemon is the only legitimate
-        client, and a second one racing it would interleave repaints on the
-        same socket. A new dial REPLACES the old, which is also the reconnect
-        story: the daemon re-dials after any drop and the stale socket is
-        evicted."""
+        Protocol v2 carries N connections: one ``daemon`` plus up to
+        ``ATTACH_MAX_CLIENTS`` ``attach`` followers. A new daemon dial still
+        REPLACES the old one (that is its reconnect story, preserved from the
+        single-writer era); a further attach dial past the cap evicts the
+        least-recently-seen attach client. Connection close is detected by
+        the reader loop's ``finally``; the cap only guards leaked-but-open
+        sockets liveness detection cannot see.
+        """
         peer = writer.get_extra_info("peername")
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=5.0)
@@ -306,50 +423,108 @@ class Registrant:
             logger.warning("mobile control: rejected bad key from %s", peer)
             writer.close()
             return
+        # Absent client field means daemon: an OLD daemon dialing a NEW
+        # registrant must land on the class it always had, or every rolling
+        # upgrade would demote the phone bridge to a follower.
+        raw_kind = frame.get("client", "daemon")
+        kind: ClientKind = "attach" if raw_kind == "attach" else "daemon"
 
-        # Authenticated: this becomes THE daemon connection. A prior one is
-        # evicted — reconnect after a drop is the normal path here.
-        if self._writer is not None:
-            try:
-                self._writer.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self._writer = writer
-        await self._push()  # the welcome: a full projection, unprompted
+        if kind == "daemon":
+            # At most ONE daemon connection — a new dial evicts the old, which
+            # is also the reconnect path after a daemon restart.
+            for other in [
+                c for c in self._clients.values() if c.kind == "daemon" and c.writer is not writer
+            ]:
+                self._drop_client(other)
+        else:
+            # Attach cap with LRU eviction: the least-recently-seen follower
+            # goes. Sending on the evicted socket first (a goodbye) is not
+            # worth the failure modes — its reader loop is still alive and
+            # will observe the close as EOF, which is the attach screen's
+            # owner-death signal minus a corpse.
+            attaches = [c for c in self._clients.values() if c.kind == "attach"]
+            if len(attaches) >= ATTACH_MAX_CLIENTS:
+                victim = min(attaches, key=lambda c: c.last_seen)
+                logger.info("mobile control: evicting attach client %s (cap)", peer)
+                self._drop_client(victim)
+
+        conn = _ClientConn(writer=writer, kind=kind)
+        self._clients[id(writer)] = conn
+        await self._push_to(conn)  # the welcome: a full projection, unprompted
         try:
             while not self._closed.is_set():
                 line = await reader.readline()
                 if not line:
-                    return  # daemon hung up
+                    return  # client hung up
                 try:
                     frame = json.loads(line.decode("utf-8", "replace"))
                 except ValueError:
                     continue
-                await self._on_request(frame)
+                conn.last_seen = time.monotonic()
+                await self._on_request(frame, conn)
         except (ConnectionResetError, BrokenPipeError):
             return
         finally:
-            if self._writer is writer:
-                self._writer = None
-            try:
-                writer.close()
-            except Exception:  # noqa: BLE001
-                pass
+            self._drop_client(conn)
 
-    async def _on_request(self, frame: dict[str, Any]) -> None:
+    def _drop_client(self, conn: _ClientConn) -> None:
+        """Remove one connection from the registry and close its socket.
+
+        The ONLY removal path: reader-loop exit, shutdown, daemon eviction,
+        and attach-cap eviction all funnel here so the registry can never
+        retain an entry whose socket is closed (the reaper counts them)."""
+        self._clients.pop(id(conn.writer), None)
+        try:
+            conn.writer.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def attach_clients(self) -> int:
+        """How many attach (follower terminal) connections are live.
+
+        The child reaper's front-end count: an attached TUI is a front end
+        exactly like a phone, so it must hold the child in ACTIVE."""
+        return sum(1 for c in self._clients.values() if c.kind == "attach")
+
+    async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         op = str(frame.get("op") or "")
         req = frame.get("req")
         try:
-            detail = await self._dispatch(op, frame)
-            await self._send({"op": "ack", "req": req, "detail": detail})
-            # Mutations change the projection; push what the phone should see.
-            await self._handle.refresh()
-            await self._push()
+            # Attach clients are followers: rebinding the owner's conversation
+            # from a follower terminal surprises the user AT THAT TERMINAL's
+            # owner. The error frame is the reply — the attach screen surfaces
+            # it like any other rejected op. The daemon keeps both ops (the
+            # phone's resume button rides them).
+            if conn.kind == "attach" and op in ("new_conversation", "resume_session"):
+                raise ValueError(
+                    "attached front ends cannot rebind the session; detach and /resume instead"
+                )
+            if op in ("watch", "unwatch"):
+                # The reaper's phone-watcher signal (§2.8). watch_supported
+                # latches on the FIRST op seen so a mixed-version child never
+                # mistakes silence for zero watchers.
+                self.watch_supported = True
+                if op == "watch":
+                    self.phone_watchers += 1
+                else:
+                    self.phone_watchers = max(0, self.phone_watchers - 1)
+                detail = f"watchers: {self.phone_watchers}"
+            else:
+                detail = await self._dispatch(op, frame)
+            await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
+            # Mutations change the projection; push what every front end
+            # should see.
+            if op not in ("watch", "unwatch"):
+                await self._handle.refresh()
+                await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
-            await self._send({"op": "error", "req": req, "message": str(exc)[:400]})
+            await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
             await self._push()
 
     async def _dispatch(self, op: str, frame: dict[str, Any]) -> str:
+        from local_operator.mobile.types import validate_control_frame
+
+        validate_control_frame(frame)
         h = self._handle
         if op == "ping":
             return "pong"
@@ -358,16 +533,15 @@ class Registrant:
             return "snapshot sent"
         if op == "prompt":
             images = frame.get("images")
-            return await h.prompt(
-                str(frame.get("text", "")),
-                images=images if isinstance(images, list) else None,
-            )
+            fields: dict[str, Any] = {"images": images}
+            if "command_id" in inspect.signature(h.prompt).parameters:
+                fields["command_id"] = frame.get("command_id")
+            return await h.prompt(frame["text"], **fields)
         if op == "steer":
-            images = frame.get("images")
-            return await h.steer(
-                str(frame.get("text", "")),
-                images=images if isinstance(images, list) else None,
-            )
+            fields = {"images": frame.get("images")}
+            if "command_id" in inspect.signature(h.steer).parameters:
+                fields["command_id"] = frame.get("command_id")
+            return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
         if op == "set_model":
@@ -382,9 +556,9 @@ class Registrant:
             return await h.resume_session(str(frame.get("session_id", "")))
         if op == "approval_answer":
             return await h.approval_answer(
-                str(frame.get("request_id", "")),
-                bool(frame.get("approved")),
-                bool(frame.get("remember")),
+                frame["request_id"],
+                frame["approved"],
+                frame.get("remember", False),
             )
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
@@ -395,8 +569,8 @@ class Registrant:
             raw_index = frame.get("question_index")
             question_index = int(raw_index) if isinstance(raw_index, (int, float)) else None
             return await h.ask_answer(
-                str(frame.get("request_id", "")),
-                str(frame.get("value", "")),
+                frame["request_id"],
+                frame["value"],
                 question_index=question_index,
             )
         raise ValueError(f"unknown op: {op!r}")
@@ -416,29 +590,55 @@ class Registrant:
             pass
 
     def _push_soon(self) -> None:
-        if self._push_scheduled:
+        # A callback may already be queued when close flips the cross-thread
+        # event. Recheck here so shutdown cannot create new work behind itself.
+        if self._closed.is_set() or self._push_scheduled:
             return
         self._push_scheduled = True
-        asyncio.ensure_future(self._push_later())
+        self._push_task = asyncio.create_task(self._push_later())
 
     async def _push_later(self) -> None:
-        # One sleep(0) lets the current event batch fold before the snapshot.
-        await asyncio.sleep(0.05)
-        self._push_scheduled = False
-        await self._push()
+        try:
+            # One short delay lets the current event batch fold before snapshot.
+            await asyncio.sleep(0.05)
+            if not self._closed.is_set():
+                await self._push()
+        finally:
+            self._push_scheduled = False
 
     async def _push(self) -> None:
-        await self._send({"op": "projection", "data": self._fold.projection.to_json()})
+        """Broadcast a projection repaint to every live connection.
+
+        Projections are snapshots (no deltas), so every front end wants each
+        one — the daemon fans it to the phone, each attach terminal renders
+        it directly. Sending is per-connection: one dead socket must not
+        block or corrupt the others' frames."""
+        await self._broadcast({"op": "projection", "data": self._fold.projection.to_json()})
+
+    async def _push_to(self, conn: _ClientConn) -> None:
+        """The welcome form of a push: one full projection to one connection."""
+        await self._send_to(conn, {"op": "projection", "data": self._fold.projection.to_json()})
+
+    async def _broadcast(self, frame: dict[str, Any]) -> None:
+        # Copy the registry: a send failure drops its own entry, and mutating
+        # the dict mid-iteration is exactly the failure being handled.
+        await asyncio.gather(*(self._send_to(conn, frame) for conn in list(self._clients.values())))
+
+    async def _send_to(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
+        """One frame to one connection. A failed send drops ONLY that client
+        from the registry (never retried — the reader loop will observe the
+        close and its finally is a no-op second removal)."""
+        async with conn.send_lock:
+            try:
+                conn.writer.write(json.dumps(frame).encode() + b"\n")
+                await asyncio.wait_for(conn.writer.drain(), timeout=_SEND_TIMEOUT_S)
+            except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
+                self._drop_client(conn)
 
     async def _send(self, frame: dict[str, Any]) -> None:
-        if self._writer is None or self._send_lock is None:
-            return
-        async with self._send_lock:
-            try:
-                self._writer.write(json.dumps(frame).encode() + b"\n")
-                await self._writer.drain()
-            except (ConnectionResetError, BrokenPipeError):
-                self._writer = None
+        """Broadcast alias kept for the pre-v2 call shape (tests, hosts that
+        grabbed a reference before the bump)."""
+        await self._broadcast(frame)
 
     # -- host-facing helpers ----------------------------------------------------
 

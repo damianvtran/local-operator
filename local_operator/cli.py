@@ -1946,6 +1946,25 @@ def main() -> int:
                         )
                 return 1
 
+            # Second-writer guard, at the ONLY place the hole starts. Left to
+            # the session factory, `lop --resume <live-id>` claims the
+            # directory and silently becomes a second writer on a transcript
+            # another process is appending to — the exact corruption the
+            # in-app /resume guard exists to prevent, reachable on every cold
+            # boot. Owned by another LIVE pid: attach to that owner (a
+            # follower view over its control socket) when it is reachable,
+            # refuse with the same copy the TUI uses otherwise. The factory
+            # never runs on this path. `exec --resume` refuses outright (a
+            # headless one-shot cannot follow) — see the exec branch below.
+            if args.subcommand is None and getattr(args, "resume", None) is not None:
+                from local_operator.resume import live_session_owner
+
+                owner = live_session_owner(config_dir(), str(args.resume))
+                if owner is not None and owner != os.getpid():
+                    from local_operator.cli_attach import run_owned_resume_attach
+
+                    return run_owned_resume_attach(config_dir(), str(args.resume), owner)
+
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
         # (CL-12) No env_config binding here: the scheduler wrapper resolves its
         # own env config and the session factory does the same lazily — a
@@ -2115,6 +2134,27 @@ def main() -> int:
             invalid = _apply_run_in(args.run_in)
             if invalid is not None:
                 return invalid
+            # Second-writer guard, same rationale as the interactive branch
+            # above but with no attach escape: exec is headless and one-shot,
+            # following a live session is meaningless, and double-writing a
+            # transcript another process owns is the corruption case. The
+            # refusal IS the feature; no new flag.
+            if getattr(args, "resume", None) is not None:
+                from local_operator.resume import live_session_owner, resolve_resume_id
+
+                try:
+                    exec_resume_id = resolve_resume_id(config_dir(), str(args.resume))
+                except Exception:
+                    exec_resume_id = str(args.resume)
+                exec_owner = live_session_owner(config_dir(), exec_resume_id)
+                if exec_owner is not None and exec_owner != os.getpid():
+                    print(
+                        f"\033[31msession {exec_resume_id} is already open in "
+                        f"another process (pid {exec_owner}) — watch and steer "
+                        "it there, or from the phone session list\033[0m",
+                        file=sys.stderr,
+                    )
+                    return 1
             from local_operator.exec_mode import ExecArgs, run_exec
 
             exec_args = ExecArgs(

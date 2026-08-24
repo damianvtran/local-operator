@@ -48,7 +48,7 @@ export function PendingCard({
 	pending,
 	count = 1,
 }: {
-	pid: number;
+	pid: string;
 	pending: PendingRequest;
 	/** Total requests waiting, including this one. A parallel tool batch can
 	    open several approvals at once; when >1 the card shows a "1 of N" badge

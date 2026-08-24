@@ -14,7 +14,7 @@ from starlette.testclient import TestClient
 from local_operator.mobile import registry
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
 from local_operator.mobile.registrant import Registrant
-from local_operator.mobile.types import SessionProjection
+from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT, SessionProjection
 
 
 class FakeHandle:
@@ -42,7 +42,7 @@ class FakeHandle:
         self.calls.append((name, args, kwargs))
         return f"{name} ok"
 
-    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
         return await self._record("prompt", text)
 
     async def steer(self, text, images=None):  # noqa: ANN001, ANN202
@@ -176,6 +176,14 @@ def test_unknown_session_command_is_a_409() -> None:
     client.post("/login", data={"password": "pw123"})
     reply = client.post("/api/sessions/424242/command", json={"op": "abort"})
     assert reply.status_code == 409
+    # A prompt to an unknown/malformed route must not reach continuation child
+    # construction; only a proven durable user conversation can wake a host.
+    prompt = {"op": "prompt", "command_id": "unknown-1", "text": "hello"}
+    assert client.post("/api/sessions/424242/command", json=prompt).status_code == 409
+    assert client.post("/api/sessions/%2E%2E%2Foutside/command", json=prompt).status_code in (
+        404,
+        409,
+    )
 
 
 def test_spawn_dir_gate_allows_home_and_tmp_only(tmp_path, monkeypatch) -> None:
@@ -225,6 +233,171 @@ def test_directories_endpoint_offers_tmp(monkeypatch) -> None:
     assert "recent" in body
     # /tmp is offered as a scratch start dir beside home.
     assert body.get("tmp")
+
+
+def test_previous_command_validation_is_bounded_without_side_effects(tmp_path, monkeypatch) -> None:
+    """Malformed authenticated continuation input never reaches child startup."""
+    import asyncio as _asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.mobile import attach_client
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    directory = cfg / "sessions" / "previous-invalid"
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    _asyncio.run(transcript.append_message(Message.user("existing", id="existing")))
+    called = False
+
+    async def should_not_start(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal called
+        called = True
+        raise AssertionError("invalid input spawned a continuation")
+
+    monkeypatch.setattr(attach_client, "continue_command", should_not_start)
+    client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
+    client.post("/login", data={"password": "pw123"})
+    invalid = [
+        {"op": "prompt", "command_id": "not-a-uuid", "text": "hello"},
+        {"op": "prompt", "text": "hello"},
+        {"op": "prompt", "command_id": "12345678-1234-5678-1234-567812345678", "text": []},
+        {
+            "op": "prompt",
+            "command_id": "12345678-1234-5678-1234-567812345678",
+            "text": "hello",
+            "images": {},
+        },
+    ]
+    for payload in invalid:
+        response = client.post("/api/sessions/previous-invalid/command", json=payload)
+        assert response.status_code in (400, 422)
+        assert response.headers["content-type"].startswith("application/json")
+        assert "error" in response.json()
+    assert not called
+    assert [message.id for message in transcript.build_llm_history()] == ["existing"]
+
+
+def test_previous_continuation_transport_failure_is_non_2xx(tmp_path, monkeypatch) -> None:
+    """Provider/child/socket failures return an error and never a false ACK."""
+    import asyncio as _asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.mobile import attach_client
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    directory = cfg / "sessions" / "previous-failure"
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    _asyncio.run(transcript.append_message(Message.user("existing", id="existing")))
+
+    async def fail(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ConnectionError("daemon restarted")
+
+    monkeypatch.setattr(attach_client, "continue_command", fail)
+    client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
+    client.post("/login", data={"password": "pw123"})
+    response = client.post(
+        "/api/sessions/previous-failure/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-5678-1234-567812345678",
+            "text": "retry me",
+        },
+    )
+    assert response.status_code == 502
+    assert response.json() == {"error": "daemon restarted"}
+    history = transcript.build_llm_history()
+    assert [message.id for message in history] == ["existing"]
+
+
+def test_previous_history_pages_full_durable_transcript_once(tmp_path, monkeypatch) -> None:
+    """A Previous route pages beyond the projection cap without a live host.
+
+    The first request anchors at the retained tail's oldest row, then each
+    cursor walks backwards. Concatenating the pages with that tail must recover
+    every folded row exactly once and in chronological order.
+    """
+    import asyncio as _asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.mobile.daemon import _durable_projection
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    session_id = "durable-history"
+    directory = cfg / "sessions" / session_id
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    expected_ids: list[str] = []
+    for turn in range(PROJECTION_TRANSCRIPT_LIMIT + 25):
+        user = Message.user(f"user {turn}", id=f"u-{turn:03d}")
+        assistant = Message.assistant(f"answer {turn}", id=f"a-{turn:03d}")
+        _asyncio.run(transcript.append_message(user))
+        _asyncio.run(transcript.append_message(assistant))
+        expected_ids.extend([user.id, assistant.id])
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    projection = _durable_projection(session_id)
+    assert projection is not None
+    tail_ids = [entry.id for entry in projection.transcript]
+    assert len(tail_ids) == PROJECTION_TRANSCRIPT_LIMIT
+
+    pages: list[list[str]] = []
+    # The projection pins the opener at index 0 and keeps the chronological tail
+    # after it; the web view therefore anchors history at the first tail row.
+    before = tail_ids[1]
+    while True:
+        response = client.get(
+            f"/api/sessions/{session_id}/history", params={"before": before, "limit": 17}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        page = [entry["id"] for entry in body["entries"]]
+        pages.insert(0, page)
+        if not body["has_more"]:
+            break
+        assert page
+        before = page[0]
+
+    recovered = [entry_id for page in pages for entry_id in page] + tail_ids[1:]
+    # The pinned opener overlaps the oldest page and is de-duplicated by the
+    # web merge, exactly as it is here.
+    recovered = list(dict.fromkeys([tail_ids[0], *recovered]))
+    assert recovered == expected_ids
+    assert len(recovered) == len(set(recovered))
+
+
+def test_previous_history_rejects_unknown_traversal_and_subagent(tmp_path, monkeypatch) -> None:
+    """Durability does not broaden the route beyond human-owned sessions."""
+    import asyncio as _asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    subagent = cfg / "sessions" / "subagent-session"
+    subagent.mkdir(parents=True)
+    _asyncio.run(Transcript(subagent).append_message(Message.user("hidden", id="hidden")))
+    (subagent / "origin.json").write_text('{"origin":"subagent"}')
+
+    client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
+    client.post("/login", data={"password": "pw123"})
+    assert client.get("/api/sessions/unknown/history").status_code == 404
+    assert client.get("/api/sessions/subagent-session/history").status_code == 404
+    # Encoded slash must never turn the public identifier into a filesystem path.
+    assert client.get("/api/sessions/%2E%2E%2Foutside/history").status_code in (404, 400)
 
 
 def test_image_bytes_reads_attachment_from_transcript(tmp_path, monkeypatch) -> None:

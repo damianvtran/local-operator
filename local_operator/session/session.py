@@ -1106,6 +1106,15 @@ class Session:
         )
         self._handlers: list[EventHandler] = []
         self._steering_queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
+        # Producer identity is transport provenance, not message identity. Keep
+        # it beside queued messages so ordinary callers can still choose ids
+        # without accidentally entering the mobile admission namespace.
+        self._steering_producers: dict[int, str] = {}
+        # Hosts reserve producer identities before a steer reaches its durable
+        # boundary. A failed append must hand that identity back explicitly;
+        # otherwise one disk error consumes both the retry ID and a bounded
+        # steering slot for the lifetime of the owner.
+        self._steering_rejection_handlers: list[Callable[[str, str], None]] = []
         # Count of courtesy wake_prompt messages sitting in the steering
         # queue. The immediate-interrupt poll may cancel a RUNNING tool only
         # for steering the user actually typed (see ``_has_urgent_steering``):
@@ -1740,6 +1749,28 @@ class Session:
         """``provider/model`` of the spec actually serving requests."""
         spec = self.effective_model
         return f"{spec.provider}/{spec.model_id}"
+
+    def has_admitted_command(self, command_id: str) -> bool:
+        """Return whether a producer command is durably in this transcript."""
+        return self._transcript.has_admitted_command(command_id)
+
+    def subscribe_admitted_commands(self, handler: Callable[[str], None]) -> Callable[[], None]:
+        """Observe command IDs once their transcript append has succeeded."""
+        return self._transcript.subscribe_admitted_commands(handler)
+
+    def subscribe_rejected_steering(
+        self, handler: Callable[[str, str], None]
+    ) -> Callable[[], None]:
+        """Observe producer steers that failed before durable admission."""
+        self._steering_rejection_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            try:
+                self._steering_rejection_handlers.remove(handler)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     def history(self) -> list[AgentMessage]:
         """The conversation as replayed into LLM context, in order.
@@ -2493,8 +2524,22 @@ class Session:
             await result
 
     # -- driving turns --------------------------------------------------------
-    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+        producer_command_id: str | None = None,
+        admitted: asyncio.Future[None] | None = None,
+    ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``producer_command_id`` and ``admitted`` form the continuation
+        admission seam: the caller receives a receipt only after the explicitly
+        marked user row is on disk, while the model turn may continue afterward.
+        ``message_id`` remains independent conversation identity; ordinary local
+        prompts omit producer provenance even if a host supplies a message id.
 
         ``images`` are attachments the user pasted into their prompt; they
         ride the same message as the text so the model sees them as one
@@ -2550,12 +2595,14 @@ class Session:
                         "continue with the user's request that follows" if fresh else None
                     ),
                 )
-            initial: list[AgentMessage] = (
-                [catchup, Message.user(text, images)]
-                if catchup is not None
-                else [Message.user(text, images)]
+            user = Message.user(text, images, **({"id": message_id} if message_id else {}))
+            initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
+            await self._run_turn_pipeline(
+                initial,
+                admitted=admitted,
+                admitted_id=user.id,
+                producer_command_id=producer_command_id,
             )
-            await self._run_turn_pipeline(initial)
         finally:
             self._turn_lock.release()
 
@@ -2581,14 +2628,26 @@ class Session:
             await self._transcript.append_message(message)
             self._context.messages.append(message)
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        """Inject a steering message into the running turn (interrupts tool
-        batches at the next boundary).
+    def steer(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+        producer_command_id: str | None = None,
+    ) -> None:
+        """Inject an identified steering message into the running turn.
 
-        Attachments ride along for the same reason they do on ``prompt``:
-        steering mid-turn with a screenshot is the case where the picture
-        IS the correction."""
-        self._steering_queue.put_nowait(Message.user(text, images))
+        Attachments ride along for the same reason they do on ``prompt``. The
+        optional producer identity is persisted when the queue drains, letting
+        reconnecting followers deduplicate the correction like an ordinary turn.
+        """
+        message = (
+            Message.user(text, images, id=message_id) if message_id else Message.user(text, images)
+        )
+        self._steering_queue.put_nowait(message)
+        if producer_command_id is not None:
+            self._steering_producers[id(message)] = producer_command_id
 
     def queued_steering(self) -> list[AgentMessage]:
         """A FIFO snapshot of the steering queue, without draining it.
@@ -2656,6 +2715,7 @@ class Session:
             item = self._steering_queue.get_nowait()
             if item is message and not found:
                 found = True
+                self._steering_producers.pop(id(item), None)
                 continue
             remaining.append(item)
         for item in remaining:
@@ -3118,7 +3178,14 @@ class Session:
             self._handle_missed_wakes()
             await self._run_turn_pipeline(initial)
 
-    async def _run_turn_pipeline(self, initial: list[AgentMessage]) -> None:
+    async def _run_turn_pipeline(
+        self,
+        initial: list[AgentMessage],
+        *,
+        admitted: asyncio.Future[None] | None = None,
+        admitted_id: str | None = None,
+        producer_command_id: str | None = None,
+    ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
         A post-compaction continuation is a CONTINUATION of the same logical
@@ -3142,7 +3209,12 @@ class Session:
             begin_message()
         self._turn_task = asyncio.current_task()
         try:
-            await self._run_turn(initial)
+            await self._run_turn(
+                initial,
+                admitted=admitted,
+                admitted_id=admitted_id,
+                producer_command_id=producer_command_id,
+            )
             await self._drain_continuation()
         finally:
             self._turn_task = None
@@ -3166,7 +3238,14 @@ class Session:
             else held.model_copy(update={"generation": generation})
         )
 
-    async def _run_turn(self, initial: list[AgentMessage]) -> None:
+    async def _run_turn(
+        self,
+        initial: list[AgentMessage],
+        *,
+        admitted: asyncio.Future[None] | None = None,
+        admitted_id: str | None = None,
+        producer_command_id: str | None = None,
+    ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``."""
         if self._wake.needs_rearm:
             # HC-20: the scheduler could not arm without a running loop at
@@ -3185,7 +3264,16 @@ class Session:
             signal.abort("interrupted")
         try:
             for message in initial:
-                await self._transcript.append_message(message)
+                await self._transcript.append_message(
+                    message,
+                    producer_command_id=(
+                        producer_command_id if message.id == admitted_id else None
+                    ),
+                )
+                if admitted is not None and message.id == admitted_id and not admitted.done():
+                    # The append completed under Transcript's fsync boundary;
+                    # only now may a producer discard its retained command.
+                    admitted.set_result(None)
                 # Announce USER turns to every subscriber. The loop only emits
                 # MessageStartEvent for ASSISTANT messages, so without this a
                 # user prompt — from any front end — never reaches the other
@@ -3668,6 +3756,25 @@ class Session:
         )
         self._spawn_background(self._prompt_messages([message]))
 
+    async def _reject_steering(self, command_id: str, reason: str) -> None:
+        """Terminally reject one accepted-but-undurable producer steer."""
+        for handler in list(self._steering_rejection_handlers):
+            try:
+                handler(command_id, reason)
+            except Exception:  # noqa: BLE001 - one owner cannot hide rejection from others
+                logger.exception("steering rejection handler failed")
+        await self._emit(
+            NoticeEvent(
+                text=(
+                    f"steering command {command_id} was not saved: {reason}; "
+                    "retry with the same command ID"
+                )
+            )
+        )
+        # Mobile projections optimistically count accepted steers. Rejection is
+        # another terminal exit from that queue, even though it was not delivered.
+        await self._emit(SteeringDeliveredEvent(count=1))
+
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
         turns, so they are persisted here — the loop never returns them in its
@@ -3685,7 +3792,20 @@ class Session:
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
-            await self._transcript.append_message(message)
+            producer_command_id = self._steering_producers.get(id(message))
+            try:
+                await self._transcript.append_message(
+                    message,
+                    producer_command_id=producer_command_id,
+                )
+            except OSError as exc:
+                if producer_command_id is not None:
+                    await self._reject_steering(producer_command_id, str(exc))
+                else:
+                    logger.warning("could not journal steering message", exc_info=True)
+                continue
+            finally:
+                self._steering_producers.pop(id(message), None)
             messages.append(message)
         # The drain is the ONLY consumer, so every courtesy message queued
         # before this boundary just left with it; anything queued after is a
@@ -5621,6 +5741,14 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
+        # No later boundary can drain producer steers once disposal starts.
+        # Reject them while owner callbacks and viewers are still attached so
+        # capacity is released and the producer can safely reuse the same ID.
+        while not self._steering_queue.empty():
+            message = self._steering_queue.get_nowait()
+            command_id = self._steering_producers.pop(id(message), None)
+            if command_id is not None:
+                await self._reject_steering(command_id, "session closed before durable admission")
         # A courtesy wake still queued here was never delivered, so its count
         # must not survive to misclassify a later enqueue on a reused Session.
         self._courtesy_wake_count = 0

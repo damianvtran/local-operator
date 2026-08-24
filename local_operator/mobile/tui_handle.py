@@ -33,10 +33,12 @@ mobile is a daemon-owned-session capability today (see :mod:`owned`).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import secrets
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle, image_blocks
 from local_operator.mobile.types import SessionProjection, ask_pending_request
@@ -45,6 +47,11 @@ if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
 
 logger = logging.getLogger(__name__)
+
+
+async def _await_future(future: asyncio.Future[Any]) -> Any:
+    """Await an owner-loop future from the registrant's bridge coroutine."""
+    return await future
 
 
 # Decode wire images via the shared mobile-contract helper (registrant.py);
@@ -72,6 +79,10 @@ class TuiSessionHandle(SessionHandle):
         self._fold = ProjectionFold(self._projection)
         self._on_projection: Callable[[], None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        # Mutated only on Textual's loop, making admission atomic even though
+        # several registrant coroutines may cross from its socket thread.
+        self._command_reservations = CommandReservations(session)
+        self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         # request_id -> the live AskPickerScreen for every ask picker this
         # handle has projected to the phone. Keyed by a token_hex request id
         # (owned.py's scheme) because the phone answers by request id and never
@@ -115,6 +126,10 @@ class TuiSessionHandle(SessionHandle):
         # so a late phone answer for a question that no longer exists reports
         # "no longer waiting" instead of settling into the new conversation.
         self._ask_pending.clear()
+        self._unsubscribe_admitted_commands()
+        self._command_reservations.clear()
+        self._command_reservations = CommandReservations(session)
+        self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         if self._on_projection is not None:
             self.subscribe(self._on_projection)
 
@@ -157,25 +172,88 @@ class TuiSessionHandle(SessionHandle):
 
     # -- mutations: every one hops to the Textual thread ---------------------------
 
-    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def prompt(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        if not command_id:
+            raise ValueError("command_id is required")
         image_blocks = _image_blocks(images)
 
-        def submit() -> None:
-            self._app._submit_prompt(text, image_blocks, None)
+        def begin_prompt() -> tuple[asyncio.AbstractEventLoop, asyncio.Future[None], Any] | None:
+            session = self._session()
+            if not self._command_reservations.reserve(command_id, kind="prompt"):
+                return None
+            owner_loop = asyncio.get_running_loop()
+            admitted: asyncio.Future[None] = owner_loop.create_future()
 
-        await self._on_app(submit)
-        self._fold.note_user_message(text)
-        if self._on_projection is not None:
-            self._on_projection()
-        return "prompt sent"
+            async def run_turn() -> None:
+                try:
+                    fields: dict[str, Any] = {
+                        "message_id": command_id,
+                        "admitted": admitted,
+                    }
+                    if "producer_command_id" in inspect.signature(session.prompt).parameters:
+                        fields["producer_command_id"] = command_id
+                    await session.prompt(text, image_blocks, **fields)
+                except BaseException as exc:
+                    if not admitted.done():
+                        self._command_reservations.reject(
+                            command_id,
+                            transfer_to_steer="already streaming" in str(exc),
+                        )
+                        admitted.set_exception(exc)
+                    raise
 
-    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+            return owner_loop, admitted, asyncio.run_coroutine_threadsafe(run_turn(), owner_loop)
+
+        started = await self._on_app(begin_prompt)
+        if started is None:
+            return "already admitted"
+        owner_loop, admitted, turn = started
+        try:
+            await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(_await_future(admitted), owner_loop)
+            )
+        except Exception:
+            turn.cancel()
+            raise
+        await self._on_app(lambda: self._command_reservations.accept(command_id))
+        return "prompt admitted"
+
+    async def steer(
+        self,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        if not command_id:
+            raise ValueError("command_id is required")
         image_blocks = _image_blocks(images)
 
-        def do_steer() -> None:
-            self._session().steer(text, image_blocks)
+        def do_steer() -> bool:
+            session = self._session()
+            if not self._command_reservations.reserve(
+                command_id,
+                kind="steer",
+                prompt_transfer=True,
+            ):
+                return False
+            try:
+                fields: dict[str, Any] = {"message_id": command_id}
+                if "producer_command_id" in inspect.signature(session.steer).parameters:
+                    fields["producer_command_id"] = command_id
+                session.steer(text, image_blocks, **fields)
+            except Exception:
+                self._command_reservations.reject(command_id)
+                raise
+            self._command_reservations.accept(command_id)
+            return True
 
-        await self._on_app(do_steer)
+        if not await self._on_app(do_steer):
+            return "already admitted"
         self._fold.note_user_message(text, steer=True)
         if self._on_projection is not None:
             self._on_projection()
