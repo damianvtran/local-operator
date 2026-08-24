@@ -3103,8 +3103,12 @@ class OperatorApp(App[None]):
                     "warning",
                 )
             elif mobile.kind == "unsupervised":
+                # No LaunchAgent owns this daemon (foreground `lop mobile
+                # serve`), so `lop mobile restart` is not the fix — tell the
+                # operator to relaunch the process they started.
                 self._system_notice(
-                    "a mobile daemon is running unsupervised; restart it to pick up the new UI",
+                    "a mobile daemon is running unsupervised; stop and relaunch "
+                    "the foreground lop mobile serve process to pick up the new UI",
                     "warning",
                 )
             self._system_notice(f"updated to v{installed} — restarting…")

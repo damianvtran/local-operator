@@ -445,30 +445,36 @@ def test_refresh_failed_timeout() -> None:
     assert result == MobileRefresh(kind="failed", error="timed out")
 
 
-def test_refresh_falls_back_to_path_lop_when_executable_gone() -> None:
+def test_refresh_never_falls_back_to_path_lop() -> None:
+    """M1: PATH ``lop`` is a different install, not this one.
+
+    After ``uv tool upgrade`` the interpreter path can vanish; restarting a
+    PATH ``lop`` would serve whatever build THAT install has while the
+    update reports success. The refresh must fail honestly instead.
+    """
     with (
         patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
         patch.object(update_mod.sys, "executable", "/gone/python"),
         patch.object(Path, "exists", return_value=False),
         patch("shutil.which", return_value="/usr/local/bin/lop"),
-        patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run,
-    ):
-        result = refresh_mobile_after_upgrade()
-    assert result == MobileRefresh(kind="restarted")
-    assert run.call_args.args[0] == ["/usr/local/bin/lop", "mobile", "restart"]
-
-
-def test_refresh_failed_when_no_executable_and_no_lop() -> None:
-    with (
-        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
-        patch.object(update_mod.sys, "executable", "/gone/python"),
-        patch.object(Path, "exists", return_value=False),
-        patch("shutil.which", return_value=None),
         patch("subprocess.run") as run,
     ):
         result = refresh_mobile_after_upgrade()
     assert result.kind == "failed"
-    assert "lop is not on PATH" in result.error
+    assert "lop is not on PATH" not in result.error
+    run.assert_not_called()
+
+
+def test_refresh_failed_when_executable_gone() -> None:
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch.object(update_mod.sys, "executable", "/gone/python"),
+        patch.object(Path, "exists", return_value=False),
+        patch("subprocess.run") as run,
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result.kind == "failed"
+    assert "interpreter vanished" in result.error
     run.assert_not_called()
 
 
@@ -523,7 +529,9 @@ def test_update_command_refresh_fail_still_zero(capsys: pytest.CaptureFixture[st
     captured = capsys.readouterr()
     assert run.call_count == 1
     assert "installed 0.28.0" in captured.out
+    # U1: the failure names the recovery, not just the cause.
     assert "warning: mobile daemon did not restart:" in captured.err
+    assert "run lop mobile restart" in captured.err
     assert "kickstart failed" in captured.err
 
 
@@ -563,6 +571,9 @@ def test_update_command_unsupervised_warns(capsys: pytest.CaptureFixture[str]) -
     run.assert_not_called()
     assert "installed 0.28.0" in captured.out
     assert "warning: a mobile daemon is running unsupervised" in captured.err
+    # U2: `lop mobile restart` is launchd-only and is NOT the fix here.
+    assert "lop mobile serve" in captured.err
+    assert "lop mobile restart" not in captured.err
 
 
 def test_perform_upgrade_does_not_refresh() -> None:

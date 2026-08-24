@@ -510,16 +510,16 @@ def _mobile_restart_argv() -> list[str] | None:
     """Argv for the *new* distribution's ``mobile restart``.
 
     ``sys.executable -m local_operator.cli`` is the post-upgrade
-    interpreter. After ``uv tool upgrade`` that path can vanish; fall
-    back to PATH ``lop`` rather than inventing a third entry point.
+    interpreter — the same interpreter the LaunchAgent's ProgramArguments
+    already name, so its site-packages are the wheel the installer just
+    wrote. There is deliberately NO PATH ``lop`` fallback: a PATH hit can
+    be a *different* installation (another tool env, a brew shim) than
+    the one just upgraded, and restarting that would serve the wrong
+    build while reporting success. If this interpreter is gone after the
+    upgrade, the refresh fails honestly and the copy names the recovery.
     """
-    import shutil
-
     if sys.executable and Path(sys.executable).exists():
         return [sys.executable, "-m", "local_operator.cli", "mobile", "restart"]
-    lop = shutil.which("lop")
-    if lop:
-        return [lop, "mobile", "restart"]
     return None
 
 
@@ -546,7 +546,7 @@ def refresh_mobile_after_upgrade() -> MobileRefresh:
         if argv is None:
             return MobileRefresh(
                 kind="failed",
-                error="sys.executable is gone and lop is not on PATH",
+                error="this interpreter vanished after the upgrade",
             )
         completed = subprocess.run(
             argv,
@@ -572,13 +572,20 @@ def _print_cli_mobile_refresh(result: MobileRefresh) -> None:
     if result.kind == "restarted":
         print("mobile daemon restarted — refresh the phone UI")
     elif result.kind == "failed":
+        # U1: name the recovery, not just the failure — the update itself
+        # succeeded, so the only action left is the bounce the update could
+        # not perform.
         print(
-            f"warning: mobile daemon did not restart: {result.error}",
+            f"warning: mobile daemon did not restart: {result.error}; run lop mobile restart",
             file=sys.stderr,
         )
     elif result.kind == "unsupervised":
+        # U2: no LaunchAgent owns this daemon, so `lop mobile restart` is not
+        # the fix — that path is launchd-only. The operator of a foreground
+        # serve must stop and relaunch the process they started.
         print(
-            "warning: a mobile daemon is running unsupervised; " "restart it to pick up the new UI",
+            "warning: a mobile daemon is running unsupervised; "
+            "stop and relaunch the foreground lop mobile serve process to pick up the new UI",
             file=sys.stderr,
         )
 
