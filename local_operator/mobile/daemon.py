@@ -197,15 +197,32 @@ def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry 
     return max(candidates, key=lambda entry: entry.record.heartbeat_at, default=None)
 
 
-def _durable_projection(session_id: str) -> SessionProjection | None:
-    """Fold a conversation from disk when no execution host exists."""
-    from local_operator.mobile.projection import ProjectionFold
+def _durable_user_session_dir(session_id: str) -> Path | None:
+    """Return a strictly addressed durable user conversation, if it exists.
+
+    Mobile routes are public identifiers, not filesystem paths. Checking the
+    name before joining prevents traversal and checking the origin marker keeps
+    subagent/scheduled transcripts out of the human conversation surface.
+    """
     from local_operator.paths import config_dir
+    from local_operator.resume import is_user_session
+
+    if session_id in ("", ".", "..") or Path(session_id).name != session_id:
+        return None
+    directory = config_dir() / "sessions" / session_id
+    if not (directory / "transcript.jsonl").is_file() or not is_user_session(directory):
+        return None
+    return directory
+
+
+def _durable_projection(session_id: str) -> SessionProjection | None:
+    """Fold a user conversation from disk when no execution host exists."""
+    from local_operator.mobile.projection import ProjectionFold
     from local_operator.resume import stored_session_title
     from local_operator.session.transcript import Transcript
 
-    directory = config_dir() / "sessions" / session_id
-    if not (directory / "transcript.jsonl").exists():
+    directory = _durable_user_session_dir(session_id)
+    if directory is None:
         return None
     projection = SessionProjection(
         session_id=session_id,
@@ -382,7 +399,9 @@ def _transcript_entry_json(entry: Any) -> dict[str, Any]:
     return entry.to_json()
 
 
-def _history_page(record: SessionRecord, before: str | None, limit: int) -> tuple[list[Any], bool]:
+def _history_page(
+    session_id: str, before: str | None, limit: int, *, durable_only: bool = True
+) -> tuple[list[Any], bool]:
     """Fold the session's full on-disk transcript and return the page of
     entries immediately OLDER than ``before`` (chronological within the page)
     plus whether more history exists beyond it.
@@ -391,18 +410,29 @@ def _history_page(record: SessionRecord, before: str | None, limit: int) -> tupl
     a long transcript rehydrates every message and is not loop-safe work.
     """
     from local_operator.mobile.projection import fold_messages_to_entries
-    from local_operator.paths import config_dir
     from local_operator.session.transcript import Transcript
 
-    directory = config_dir() / "sessions" / record.session_id
-    if not (directory / "transcript.jsonl").exists():
+    if durable_only:
+        directory = _durable_user_session_dir(session_id)
+    else:
+        # A live SessionEntry already established the route's identity. Keep
+        # the pre-existing live behavior (including non-user hosts) while still
+        # requiring one safe path component before touching disk.
+        from local_operator.paths import config_dir
+
+        directory = (
+            config_dir() / "sessions" / session_id
+            if session_id not in ("", ".", "..") and Path(session_id).name == session_id
+            else None
+        )
+    if directory is None or not (directory / "transcript.jsonl").is_file():
         return [], False
     try:
         transcript = Transcript(directory)
         history = transcript.build_llm_history()
         entries = fold_messages_to_entries(history)
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
-        logger.exception("history fold failed for session %s", record.session_id)
+        logger.exception("history fold failed for session %s", session_id)
         return [], False
 
     if before:
@@ -890,14 +920,20 @@ def build_app(daemon: MobileDaemon):
             return denied
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
-        if entry is None:
+        # A host generation is optional for reads: Previous conversations keep
+        # the same public route and page directly from their durable transcript.
+        # Live sessions retain the existing eligibility path; durable-only
+        # routes must prove they are user sessions before any filesystem read.
+        if entry is None and _durable_user_session_dir(session_id) is None:
             return JSONResponse({"error": "unknown session"}, status_code=404)
         before = request.query_params.get("before")
         try:
             limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
         except ValueError:
             limit = 80
-        page, has_more = await asyncio.to_thread(_history_page, entry.record, before, limit)
+        page, has_more = await asyncio.to_thread(
+            _history_page, session_id, before, limit, durable_only=entry is None
+        )
         return JSONResponse(
             {
                 "entries": [_transcript_entry_json(e) for e in page],
@@ -962,6 +998,11 @@ def build_app(daemon: MobileDaemon):
         try:
             entry = _entry_for_session(daemon, session_id)
             if op == "prompt" and entry is None:
+                # Only an existing durable user conversation may wake a host.
+                # Besides authorization, this prevents a malformed/unknown id
+                # from spawning a child that can never own a transcript.
+                if _durable_user_session_dir(session_id) is None:
+                    raise KeyError(session_id)
                 from local_operator.mobile.attach_client import continue_command
                 from local_operator.mobile.types import ContinuationCommand
 
@@ -980,6 +1021,11 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "session not connected"}, status_code=409)
         except TimeoutError:
             return JSONResponse({"error": "session did not answer"}, status_code=504)
+        except (ConnectionError, OSError) as exc:
+            # Child construction and daemon/socket failures are transport
+            # failures. The web composer maps every non-2xx continuation reply
+            # to its stable retry message while retaining the original command.
+            return JSONResponse({"error": str(exc)[:200]}, status_code=502)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
         return JSONResponse({"ok": True, "detail": reply.get("detail", "")})

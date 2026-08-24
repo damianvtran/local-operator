@@ -213,6 +213,8 @@ function EffortSheet({
 }
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
+const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
+const COMPOSER_PLACEHOLDER = "Message Local Operator…";
 
 export function Composer({
 	pid,
@@ -315,7 +317,16 @@ export function Composer({
 			}
 			setText("");
 		} catch (e) {
-			setError(String((e as Error).message ?? e));
+			/* Previous conversations can fail at every layer between fetch and
+			   provider construction. Those mechanics are intentionally invisible:
+			   retain the exact draft, images, and command id for a safe retry while
+			   giving every continuation failure one actionable product message. */
+			const continuingPrevious = projection.kind === "daemon" && !projection.streaming;
+			setError(
+				continuingPrevious
+					? CONTINUATION_ERROR
+					: String((e as Error).message ?? e),
+			);
 		} finally {
 			setSending(false);
 		}
@@ -363,7 +374,21 @@ export function Composer({
 				</button>
 			) : null}
 
-			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
+			{sending ? (
+				<p role="status" aria-live="polite" className="text-body-sm text-ink-muted">
+					Connecting…
+				</p>
+			) : null}
+
+			{error ? (
+				<p
+					role="alert"
+					aria-live="assertive"
+					className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2 text-body-sm text-danger"
+				>
+					{error}
+				</p>
+			) : null}
 
 			{images.length > 0 ? (
 				<div className="flex flex-wrap gap-1.5">
@@ -438,13 +463,7 @@ export function Composer({
 								void addFiles(files);
 							}
 						}}
-						placeholder={
-							disabled
-								? "session ended"
-								: projection.streaming
-									? "steer this turn…"
-									: "message…"
-						}
+						placeholder={COMPOSER_PLACEHOLDER}
 						disabled={disabled}
 						rows={1}
 						enterKeyHint="send"
@@ -475,10 +494,10 @@ export function Composer({
 					type="button"
 					onClick={() => void send(text)}
 					disabled={(!text.trim() && images.length === 0) || sending || disabled}
-					aria-label={projection.streaming ? "steer" : "send"}
+					aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
 					className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
 				>
-					↑
+					<span aria-hidden>{sending ? "…" : "↑"}</span>
 				</button>
 			</div>
 
