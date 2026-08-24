@@ -267,6 +267,46 @@ def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
     return raw.strip()[:500]
 
 
+#: Aggregators answer an UPSTREAM provider failure with an HTTP 400 whose body
+#: names nothing: the outer message is exactly "Provider returned error" and
+#: ``metadata.raw`` holds a bare sentinel instead of the origin provider's
+#: diagnostics. Session e13d092c093c recorded this shape intermittently on a
+#: request that live probes at ~750k tokens answered 200 seconds later — an
+#: upstream blip wearing a 400. Compared case-insensitively because the casing
+#: on the wire ("Provider returned error", raw "ERROR") is the aggregator's,
+#: not part of the signal.
+_OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
+
+#: Raw bodies short enough to prove nobody tried to say anything. A real
+#: upstream body — "context length exceeded", a JSON error object — is
+#: actionable and must keep its ``request`` classification.
+_OPAQUE_RAW_SENTINELS = frozenset({"error"})
+
+
+def _is_opaque_aggregator_400(error: Mapping[str, Any]) -> bool:
+    """An aggregator 400 carrying NO actionable upstream diagnostics.
+
+    OpenRouter forwards an upstream failure as ``{"message": "Provider
+    returned error", "metadata": {"raw": ...}}``. When ``raw`` holds real
+    diagnostics the composed message names the actual problem and the 400 is
+    an answer — kind ``request``, no retry. When ``raw`` is a bare sentinel
+    (observed: ``"ERROR"``, from a provider named "Stealth"), the body says
+    nothing a caller could fix, and the status line is the aggregator's relay
+    choice rather than evidence the request was wrong. Those are classified
+    transient so the failover cascade runs; the driver's server-fault budget
+    bounds the retries, and a genuinely broken request just burns a little of
+    it before surfacing — strictly better than aborting a turn that rotation
+    or a fallback could have served.
+    """
+    message = _first_text(error.get("message"))
+    if message.lower() != _OPAQUE_AGGREGATOR_MESSAGE:
+        return False
+    upstream = _openrouter_upstream_text(error)
+    # Strip quote pairs too: ``raw`` is defined as a JSON-encoded string, so a
+    # sentinel can arrive as ``"\"ERROR\""`` and parse straight back to quotes.
+    return upstream.strip().strip("\"'").lower() in _OPAQUE_RAW_SENTINELS
+
+
 def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
@@ -430,6 +470,13 @@ def raise_for_status(response: httpx.Response) -> None:
     # 408/504 are the two "ran out of time" statuses; 429 and 5xx are the
     # classic retryables. Everything else in 4xx is an answer, not a blip.
     retryable = status == 429 or status >= 500 or status in (408, 504)
+    # ...except an aggregator 400 whose body carries no usable diagnostics:
+    # that is an upstream failure relayed under a 400, not a request the
+    # provider read and refused, so it must reach the failover cascade. See
+    # :func:`_is_opaque_aggregator_400` for the shape and the evidence.
+    error = payload.get("error") if isinstance(payload, Mapping) else None
+    if status == 400 and isinstance(error, Mapping) and _is_opaque_aggregator_400(error):
+        retryable = True
     raise ProviderError(
         status,
         _extract_error_message(response, payload),
