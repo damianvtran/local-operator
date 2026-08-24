@@ -846,6 +846,30 @@ class HintButton(Static):
             self._action()
 
 
+class SubagentTranscriptView(TranscriptView):
+    """Transcript body whose top-edge command belongs to its reader page."""
+
+    BINDINGS = [
+        Binding("home", "load_earlier", "Load earlier transcript", show=False, priority=True)
+    ]
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        # Focused-widget handlers precede ScrollableContainer bindings. Stop
+        # Home here because its native y=0 no-op emits no edge-change signal.
+        if event.key == "home":
+            event.stop()
+            event.prevent_default()
+            self.action_load_earlier()
+
+    def action_load_earlier(self) -> None:
+        # Native ScrollableContainer Home wins while this widget has focus, but
+        # at y=0 it emits no scroll change. Delegate directly so the page's
+        # explicit error retry remains reachable from the advertised key.
+        parent = self.parent
+        if isinstance(parent, SubagentView):
+            parent.action_home()
+
+
 class SubagentView(Vertical):
     """The page: a title, a rule, the child's transcript, and the way out.
 
@@ -872,7 +896,7 @@ class SubagentView(Vertical):
         self._job_id = job_id
         self._title = Static(classes="subagent-view-title")
         self._rule = Static(classes="subagent-view-rule")
-        self._body = TranscriptView(classes="subagent-view-body")
+        self._body = SubagentTranscriptView(classes="subagent-view-body")
         # One widget per hint so each can be hovered and clicked. The row
         # still sheds whole hints at narrow widths; it does that by hiding
         # widgets rather than by rebuilding one string.
@@ -955,8 +979,11 @@ class SubagentView(Vertical):
         self._history_directory: str | None = "__unresolved__"
         self._history_cursor: str | None = None
         self._history_ids: set[str] = set()
-        # Results may be loaded one page before their calls. This cross-page
-        # index lets the later older-page fold settle those calls immediately.
+        # Folding a page in isolation cannot reconcile facts whose two durable
+        # forms straddle that arbitrary boundary (tool result/call and hub
+        # replay/fact are both real examples). Retain the bounded-by-user-load
+        # raw window and derive display rows from the whole canonical window.
+        self._history_rows: list[TranscriptEntry] = []
         self._history_tool_results: dict[str, tuple[str, bool]] = {}
         self._history_entries: list[SubagentEntry] = []
         self._history_loading = False
@@ -1122,6 +1149,7 @@ class SubagentView(Vertical):
         self._history_directory = directory
         self._history_cursor = None
         self._history_ids = set()
+        self._history_rows = []
         self._history_tool_results = {}
         self._history_entries = []
         self._history_loading = False
@@ -1155,6 +1183,10 @@ class SubagentView(Vertical):
     def _scroll_changed(self, *_args: Any) -> None:
         self._arm_arrows()
         if not self._initial_tail_pending and self._body.scroll_y <= 1:
+            # Edge arrival may discover another page, but an error parks here
+            # until a NEW Home command explicitly accepts another disk read.
+            # Otherwise the reconciliation repaint retriggers this watcher and
+            # turns a persistent filesystem failure into a hot retry loop.
             self._maybe_load_history()
 
     def action_home(self) -> None:
@@ -1169,18 +1201,21 @@ class SubagentView(Vertical):
         # intended offset explicitly prevents the disk worker from sampling the
         # old tail first and restoring it after the prepend, which made a real
         # keyboard Home press appear to load nothing.
-        self._maybe_load_history(anchor=0.0)
+        self._maybe_load_history(anchor=0.0, retry=True)
 
     def action_end(self) -> None:
         """Return to the live tail and re-acquire sticky following."""
         self._body.scroll_end(animate=False)
 
-    def _maybe_load_history(self, *, initial: bool = False, anchor: float | None = None) -> None:
+    def _maybe_load_history(
+        self, *, initial: bool = False, anchor: float | None = None, retry: bool = False
+    ) -> None:
         if (
             not self.is_mounted
             or self._history_loading
             or self._history_exhausted
             or self._history_unavailable
+            or (self._history_error and not retry)
             or not self._history_directory
         ):
             return
@@ -1240,22 +1275,36 @@ class SubagentView(Vertical):
         self._history_loading = False
         self._history_error = False
         rows = list(page.entries)
-        fresh_rows = [entry for entry in rows if entry.id not in self._history_ids]
         if page.reconciled:
-            # Replacement may invalidate ordering and payloads, not merely
-            # identities. Its page is a new canonical window, including a new
-            # cross-boundary outcome index.
-            self._history_tool_results = {}
-        fresh = fold_transcript_entries(fresh_rows, tool_results=self._history_tool_results)
-        self._history_ids.update(entry.id for entry in fresh_rows)
-        if page.reconciled:
-            self._history_entries = fresh
+            # Replacement is a new canonical window, not an additive page.
+            # Compaction may preserve every ID while rewriting payloads, so
+            # filtering through the old ID set before replacement can erase the
+            # entire visible history or retain stale content.
+            self._history_rows = rows
+            self._history_ids = {entry.id for entry in rows}
+            added_rows = rows
         else:
-            self._history_entries[0:0] = fresh
+            added_rows = [entry for entry in rows if entry.id not in self._history_ids]
+            self._history_rows[0:0] = added_rows
+            self._history_ids.update(entry.id for entry in added_rows)
+        # Re-derive from the accumulated raw window so superseding facts work
+        # in either chronological order across any page boundary. The viewer
+        # already retains one display row per loaded item, so retaining its raw
+        # source does not change the user-selected paging growth class.
+        self._history_tool_results = {}
+        self._history_entries = fold_transcript_entries(
+            self._history_rows, tool_results=self._history_tool_results
+        )
         self._history_cursor = rows[0].id if rows else self._history_cursor
         self._history_exhausted = not page.has_more
         self._paint_history_state()
-        self._reconcile_current_body(anchor=anchor, prepend=not initial and bool(fresh))
+        self._reconcile_current_body(
+            anchor=anchor,
+            # A reconciled page can rewrite or remove any loaded row, so the
+            # prepend-only fast path would leave stale blocks mounted beside
+            # the replacement even though the model is already canonical.
+            prepend=not initial and not page.reconciled and bool(added_rows),
+        )
         if initial:
 
             def settle_tail() -> None:

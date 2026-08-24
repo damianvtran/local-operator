@@ -22,10 +22,14 @@ from typing import Any
 import pytest
 from rich.cells import cell_len
 
-from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE
+from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
 from local_operator.harness.jobs import CANCELLED_BEFORE_START
-from local_operator.harness.types import Message, TextContent, ToolCall
-from local_operator.session.transcript import Transcript
+from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
+from local_operator.session.transcript import (
+    Transcript,
+    TranscriptEntry,
+    TranscriptPage,
+)
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
@@ -361,6 +365,45 @@ async def test_history_settles_tool_split_across_durable_page_boundary(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_history_replacement_adopts_changed_payloads_with_preserved_ids(tmp_path) -> None:
+    """Compaction can rewrite content without minting new entry identities."""
+    transcript = Transcript(tmp_path / "child")
+    original = await transcript.append_message(Message.assistant("before replacement"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        replacement_payload = dict(original.payload)
+        replacement_payload["content"] = [{"type": "text", "text": "after replacement"}]
+        replacement = TranscriptEntry(
+            id=original.id,
+            ts=original.ts,
+            type=original.type,
+            payload=replacement_payload,
+        )
+        view._apply_history_page(
+            view._history_generation,
+            TranscriptPage((replacement,), has_more=False, reconciled=True),
+            anchor=0.0,
+            initial=False,
+        )
+        await pilot.pause()
+
+        rendered = " ".join(view.rendered_rows())
+        assert "after replacement" in rendered
+        assert "before replacement" not in rendered
+        assert view._history_ids == {original.id}
+        assert [row.id for row in view._history_rows] == [original.id]
+
+
+@pytest.mark.asyncio
 async def test_history_job_switch_discards_a_late_page(tmp_path, monkeypatch) -> None:
     first = Transcript(tmp_path / "first")
     second = Transcript(tmp_path / "second")
@@ -396,6 +439,71 @@ async def test_history_job_switch_discards_a_late_page(tmp_path, monkeypatch) ->
         page = " ".join(view.rendered_rows())
         assert "from second" in page
         assert "from first" not in page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fact_first", [False, True])
+async def test_durable_communication_dedupes_across_page_boundary(
+    tmp_path, fact_first: bool
+) -> None:
+    """The human-facing fact supersedes replay XML in either page order."""
+    transcript = Transcript(tmp_path / "child")
+    replay = CustomMessage(
+        id="q1",
+        custom_type=HUB_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "direction": "to_child",
+            "body": "Which file?",
+            "expects_reply": True,
+            "text": "<parent-message>Which file?</parent-message>",
+        },
+    )
+
+    async def append_fact() -> None:
+        await transcript.append_custom(
+            HUB_COMMUNICATION_CUSTOM_TYPE,
+            {
+                "direction": "to_child",
+                "body": "Which file?",
+                "kind": "ask",
+                "communication_id": "q1",
+            },
+        )
+
+    if fact_first:
+        await append_fact()
+    else:
+        await transcript.append_message(replay)
+    # Ninety-nine rows put the two representations on opposite sides of the
+    # 100-row durable page boundary without relying on private reader details.
+    for index in range(99):
+        await transcript.append_message(Message.assistant(f"boundary filler {index}"))
+    if fact_first:
+        await transcript.append_message(replay)
+    else:
+        await append_fact()
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        await pilot.press("home")
+        await _wait_history(pilot, view)
+
+        notices = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent asked: Which file?"
+        ]
+        assert notices == ["Parent asked: Which file?"]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
 @pytest.mark.asyncio
@@ -471,12 +579,30 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
             ).read_transcript_page(*args, **kwargs)
 
         monkeypatch.setattr(SubagentView.__module__ + ".read_transcript_page", flaky)
+        # Inject the failure deterministically; the regression below exercises
+        # the real mounted Home binding for the explicit retry itself.
         view.action_home()
         await _wait_history(pilot, view)
         assert HISTORY_ERROR_NOTE in view._history_state_text()
-        view.action_home()
-        await _wait_history(pilot, view)
+        failed_attempts = attempts
+        # Repaints and the top-edge watcher may run freely, but the advertised
+        # retry must remain a user decision rather than an implicit hot loop.
+        for _ in range(50):
+            await asyncio.sleep(0.005)
+            await pilot.pause()
+        assert attempts == failed_attempts == 1
+
+        view.focus_body()
+        await pilot.pause()
+        assert app.focused is view._body
+        await pilot.press("home")
+        for _ in range(100):
+            await asyncio.sleep(0.005)
+            await pilot.pause()
+            if attempts == 2 and not view._history_loading:
+                break
         assert attempts == 2
+        assert view._history_unavailable
 
 
 @pytest.mark.asyncio
