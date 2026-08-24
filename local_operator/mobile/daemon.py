@@ -567,6 +567,32 @@ class MobileDaemon:
 
     # -- control requests ---------------------------------------------------------
 
+    def notify_watch_transition(self, pid: int, *, watching: bool) -> None:
+        """Push watch/unwatch to a session when its phone SSE subscriber
+        count crosses 0 <-> N.
+
+        Scheduled, not awaited: the SSE handshake must not block on a slow
+        (or old, op-rejecting) registrant. The fire-and-forget task rides the
+        daemon's loop; errors are swallowed at the task boundary — an OLD
+        registrant's `error: unknown op` reply arrives as a RuntimeError from
+        ``request`` and is expected during rolling upgrades."""
+
+        async def send() -> None:
+            try:
+                await self.request(pid, "watch" if watching else "unwatch")
+            except (RuntimeError, TimeoutError, KeyError, asyncio.CancelledError):
+                # KeyError: no dial yet (the SSE stream can open before the
+                # control connection is established). RuntimeError: old
+                # registrant or op rejected. Both are fine — the session's
+                # watch_supported latch stays unlatched and its reaper (if
+                # any) stays inert, which is the safe direction.
+                logger.debug("watch push to pid %s skipped (%s)", pid, watching)
+
+        try:
+            asyncio.get_running_loop().create_task(send())
+        except RuntimeError:  # no loop (tests constructing the daemon directly)
+            pass
+
     async def request(self, pid: int, op: str, **fields: Any) -> dict[str, Any]:
         """Send one control frame to a session and await its ack/error."""
         entry = self.table.entries.get(pid)
@@ -794,6 +820,13 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "unknown session"}, status_code=404)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
         entry.subscribers.add(queue)
+        # First subscriber = a phone just started watching: tell the session so
+        # its self-reaper (if any) counts this front end and holds the session
+        # in ACTIVE. Fire-and-forget on the already-open dial writer; an OLD
+        # registrant answers `error: unknown op` and that must not 500 the SSE
+        # handshake — RuntimeError/TimeoutError are swallowed by design.
+        if len(entry.subscribers) == 1:
+            daemon.notify_watch_transition(pid, watching=True)
 
         async def stream():
             try:
@@ -806,7 +839,13 @@ def build_app(daemon: MobileDaemon):
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
+                was_last = entry.subscribers == {queue}
                 entry.subscribers.discard(queue)
+                if was_last:
+                    # Last subscriber out = no phone is watching: the session's
+                    # grace timer (if it has one) may now start. Same swallow
+                    # rules as the watch push above.
+                    daemon.notify_watch_transition(pid, watching=False)
 
         return StreamingResponse(
             stream(),
