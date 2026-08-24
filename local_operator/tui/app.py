@@ -3191,13 +3191,14 @@ class OperatorApp(App[None]):
         ``_on_boot_failed`` exactly as a bad ``--resume`` does.
 
         A session that is ALREADY live in another process (a phone-started
-        child, another TUI) is not reopened here. Two writers on one
-        transcript is how a resume of a mobile session painted the splash:
-        the second process claimed the directory, replayed a mid-write
-        journal, and left the first process as the only one still appending.
-        The live process already publishes to the phone; this TUI stays
-        put and names that process so the user can watch and steer from
-        either front end.
+        child, another TUI) is not reopened here — it is ATTACHED to when the
+        owner is reachable over the mobile control socket (see
+        ``_attach_or_refuse``), and refused with today's copy otherwise. Two
+        writers on one transcript is how a resume of a mobile session painted
+        the splash: the second process claimed the directory, replayed a
+        mid-write journal, and left the first process as the only one still
+        appending. The live process already publishes to the phone; this TUI
+        follows and steers that process instead of racing it.
         """
         if self._resume_factory is None:
             self._system_notice("resume unavailable: no resume-capable launcher", "warning")
@@ -3219,19 +3220,61 @@ class OperatorApp(App[None]):
         if concrete != RESUME_LATEST:
             owner = live_session_owner(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
-                # A refused navigation is not conversation content: keep the
-                # splash, same as the other /resume rejections (D1). Name the
-                # owning process and the next step in user words (D2).
-                self._system_notice(
-                    f"session {concrete} is already open in another process "
-                    f"(pid {owner}) — watch and steer it there, or from the "
-                    "phone session list",
-                    "warning",
+                # Discovery scans the filesystem; run it as a worker so the
+                # UI thread never blocks on it, and settle attach-vs-refuse
+                # when the record is in hand.
+                self.run_worker(
+                    self._attach_or_refuse(config_dir(), concrete, owner),
+                    thread=False,
+                    group="session",
                 )
                 return
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
         self.run_worker(self._reload_session(), thread=False, group="session")
+
+    async def _attach_or_refuse(
+        self, config_dir, concrete: str, owner: int
+    ) -> None:
+        """Settle the owned-session branch of ``_resume_session``.
+
+        ATTACH when the owner is reachable over the control socket (record
+        found, protocol >= 2, pid match): push the AttachScreen and toast the
+        new state. Otherwise degrade to TODAY's refusal message verbatim —
+        graceful degradation for old binaries, registrant-start failures, and
+        rebind races. Runs as a worker: ``find_owner_record`` is filesystem
+        I/O.
+        """
+        from local_operator.mobile.attach_client import find_owner_record
+
+        record, found_owner = await asyncio.to_thread(
+            find_owner_record, config_dir, concrete
+        )
+        if record is not None and found_owner == owner:
+            from local_operator.tui.attach_screen import AttachScreen
+            from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS, Toast
+
+            self.push_screen(AttachScreen(record, concrete))
+            # The toast replaces the warning the refusal used to print: the
+            # user's navigation SUCCEEDED, it just landed on a follower view.
+            try:
+                self.query_one(Toast).show(
+                    f"attached to pid {owner} — /detach to return",
+                    duration_ms=TOAST_DEFAULT_MS,
+                    yield_to_actionable=True,
+                )
+            except Exception:  # noqa: BLE001 — a toast is decoration, never a gate
+                pass
+            return
+        # A refused navigation is not conversation content: keep the
+        # splash, same as the other /resume rejections (D1). Name the
+        # owning process and the next step in user words (D2).
+        self._system_notice(
+            f"session {concrete} is already open in another process "
+            f"(pid {owner}) — watch and steer it there, or from the "
+            "phone session list",
+            "warning",
+        )
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
