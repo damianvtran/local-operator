@@ -17,7 +17,7 @@ export function App() {
 		case "past":
 			return <PastSessionsScreen />;
 		case "session":
-			return <SessionScreen key={route.pid} pid={route.pid} />;
+			return <SessionScreen key={route.sessionId} sessionId={route.sessionId} />;
 		default:
 			return <SessionListScreen />;
 	}

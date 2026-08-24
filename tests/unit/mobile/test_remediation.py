@@ -70,12 +70,37 @@ async def test_f3_fanout_never_drops_a_repaint() -> None:
 
     queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=1)
     queue.put_nowait({"stale": True})  # exactly full at entry
-    entry.subscribers.add(queue)
+    daemon = MobileDaemon(port=0, password="pw")
+    daemon.table.session_subscribers.setdefault("s1", set()).add(queue)
 
-    _fan_out(entry)
+    _fan_out(entry, daemon)
     assert queue.qsize() == 1
     frame = queue.get_nowait()
     assert frame.get("session_id") == "s1"  # the NEW frame, not the stale one
+
+
+@pytest.mark.asyncio
+async def test_previous_subscriber_survives_new_process_generation() -> None:
+    """F6/U3: one durable queue receives every future host generation."""
+    from local_operator.mobile.daemon import _fan_out
+    from local_operator.mobile.types import SessionProjection
+
+    daemon = MobileDaemon(port=0, password="pw")
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=8)
+    daemon.table.session_subscribers.setdefault("s1", set()).add(queue)
+
+    first = SessionEntry(make_record(port=1))
+    first.record.pid = 101
+    first.projection = SessionProjection(session_id="s1", pid=101, streaming=True)
+    second = SessionEntry(make_record(port=2))
+    second.record.pid = 202
+    second.projection = SessionProjection(session_id="s1", pid=202, streaming=False)
+    _fan_out(first, daemon)
+    first.ended = True
+    _fan_out(second, daemon)
+
+    assert [queue.get_nowait()["pid"], queue.get_nowait()["pid"]] == [101, 202]
+    assert len(daemon.table.session_subscribers["s1"]) == 1
 
 
 def test_f9_password_newlines_rejected() -> None:

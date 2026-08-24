@@ -9,14 +9,14 @@ export type Route =
 	| { name: "list" }
 	| { name: "new" }
 	| { name: "past" }
-	| { name: "session"; pid: number };
+	| { name: "session"; sessionId: string };
 
 export function parseHash(hash: string): Route {
 	const path = hash.replace(/^#/, "") || "/";
 	if (path === "/new") return { name: "new" };
 	if (path === "/past") return { name: "past" };
-	const session = path.match(/^\/s\/(\d+)/);
-	if (session) return { name: "session", pid: Number(session[1]) };
+	const session = path.match(/^\/s\/([^/]+)/);
+	if (session) return { name: "session", sessionId: decodeURIComponent(session[1]) };
 	return { name: "list" };
 }
 

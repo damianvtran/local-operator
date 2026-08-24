@@ -43,7 +43,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -300,6 +300,11 @@ class Transcript:
         self.path = self.directory / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
+        # Command identities live beside the append-only rows that prove their
+        # admission.  Replay builds this once; hot-path lookups must not scan a
+        # transcript whose model-facing window may also have been compacted.
+        self._admitted_command_ids: set[str] = set()
+        self._admission_handlers: list[Callable[[str], None]] = []
         #: Shared content-addressed media store. Write path: image payloads
         #: are externalized to it on append. Read path: references are
         #: resolved back to inline base64 on replay, so anything downstream
@@ -313,21 +318,38 @@ class Transcript:
                     entry = TranscriptEntry.from_json(line)
                     if entry is not None:
                         self._entries.append(entry)
+                        command_id = _admitted_command_id(entry)
+                        if command_id is not None:
+                            self._admitted_command_ids.add(command_id)
 
     # -- append -------------------------------------------------------------
 
-    async def append_message(self, message: Message | CustomMessage) -> TranscriptEntry:
+    async def append_message(
+        self,
+        message: Message | CustomMessage,
+        *,
+        producer_command_id: str | None = None,
+    ) -> TranscriptEntry:
         """Append one LLM-visible message (or a custom transcript message).
 
         BOTH kinds persist the message's own ``id`` as the entry id (never
         mint a new one): compaction's ``first_kept_entry_id`` must be able to
         reference a custom entry that renders into LLM context.
+
+        ``producer_command_id`` is deliberately separate from that message id.
+        Hosts use message ids for several unrelated purposes, so treating every
+        user row as producer admission lets imported or seeded history suppress
+        a later command whose namespace happens to collide. The marker lives on
+        the transcript envelope, where replay preserves it without exposing
+        transport bookkeeping to either model-facing history or the UI.
         """
         kind = CUSTOM_KIND_MESSAGE if isinstance(message, Message) else CUSTOM_KIND_CUSTOM
         payload: dict[str, Any] = {
             "kind": kind,
             **encode_message_payload(message, self._attachments),
         }
+        if producer_command_id is not None:
+            payload["producer_command_id"] = producer_command_id
         return await self._append(ENTRY_MESSAGE, payload, message.id)
 
     async def append_compaction(
@@ -395,7 +417,6 @@ class Transcript:
             payload=payload,
         )
         async with self._lock:
-            self._entries.append(entry)
             # DELIBERATELY SYNCHRONOUS, and not an oversight — do not "fix"
             # this into a to_thread the way :meth:`compact_file` legitimately
             # is. This append has callers that never await it:
@@ -421,9 +442,9 @@ class Transcript:
             # type their first message, and the retention sweep's ``live_dir``
             # only protects the sweeping process's OWN session. Dying on
             # FileNotFoundError here costs the whole session for a directory
-            # one mkdir restores; ``self._entries`` still holds every prior
-            # entry, so the recreated file is rebuilt complete rather than
-            # starting truncated.
+            # one mkdir restores; the candidate joins ``self._entries`` only
+            # after the rebuilt file reaches its durability boundary, so a
+            # failed rebuild cannot resurrect a row on the next append.
             #
             # The FILE alone vanishing (directory intact) is the same wound
             # with a quieter symptom: ``"a"`` mode recreates the file without
@@ -431,25 +452,81 @@ class Transcript:
             # holds one row while memory holds the whole session — a resume
             # would then replay a single message as if the rest never
             # happened. Checked BEFORE the append because that path never
-            # raises; both cases rebuild from ``self._entries`` under the
-            # same lock.
+            # raises; both cases rebuild from the committed rows plus this
+            # unpublished candidate under the same lock.
             rebuild = not self.path.exists()
             if not rebuild:
                 try:
-                    with self.path.open("a", encoding="utf-8") as handle:
-                        handle.write(entry.to_json() + "\n")
-                        handle.flush()
+                    previous_size = self.path.stat().st_size
                 except FileNotFoundError:
-                    # Directory removed between the exists() check and the
-                    # open — the race is real, so the window is too.
                     rebuild = True
+                else:
+                    try:
+                        with self.path.open("a", encoding="utf-8") as handle:
+                            handle.write(entry.to_json() + "\n")
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                    except FileNotFoundError:
+                        # Directory removed between the exists() check and the
+                        # open — the race is real, so the window is too.
+                        rebuild = True
+                    except BaseException:
+                        # write/flush/fsync may raise after changing the file.
+                        # The append-only framing makes its old byte boundary
+                        # the only safe rollback point; the lock prevents a
+                        # successor from being truncated with this candidate.
+                        try:
+                            os.truncate(self.path, previous_size)
+                        except FileNotFoundError:
+                            pass
+                        raise
             if rebuild:
                 self.directory.mkdir(parents=True, exist_ok=True)
-                with self.path.open("w", encoding="utf-8") as handle:
-                    for row in self._entries:
-                        handle.write(row.to_json() + "\n")
-                    handle.flush()
+                try:
+                    with self.path.open("w", encoding="utf-8") as handle:
+                        for row in (*self._entries, entry):
+                            handle.write(row.to_json() + "\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except BaseException:
+                    # A failed rebuild started from a missing file. Removing
+                    # its partial journal preserves that pre-call state and
+                    # prevents a parseable prefix from becoming admitted after
+                    # restart even though this call failed.
+                    try:
+                        self.path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    raise
+            self._entries.append(entry)
+            command_id = _admitted_command_id(entry)
+            if command_id is not None:
+                # Update only after the append's flush boundary.  A crash after
+                # this point can replay the row; an ACK or callback before it
+                # would claim durability the transcript did not yet have.
+                self._admitted_command_ids.add(command_id)
+                for handler in list(self._admission_handlers):
+                    try:
+                        handler(command_id)
+                    except Exception:  # noqa: BLE001 - observers cannot undo durability
+                        logger.exception("transcript admission handler failed")
         return entry
+
+    def has_admitted_command(self, command_id: str) -> bool:
+        """Return whether an append-only user row already owns ``command_id``."""
+        return command_id in self._admitted_command_ids
+
+    def subscribe_admitted_commands(self, handler: Callable[[str], None]) -> Callable[[], None]:
+        """Observe user command IDs after their durable append boundary."""
+        self._admission_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            try:
+                self._admission_handlers.remove(handler)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     # -- replay -------------------------------------------------------------
 
@@ -844,12 +921,42 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
     return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
 
 
+def _admitted_command_id(entry: TranscriptEntry) -> str | None:
+    """Extract an explicitly marked producer identity from a transcript row.
+
+    Message IDs belong to the conversation namespace and can collide with
+    seeded, imported, compacted, custom, or locally-authored rows. Only the
+    transport marker proves that a producer command crossed the durable append
+    boundary; released transcripts and malformed fragments have no marker and
+    therefore cannot poison admission.
+    """
+    if entry.type != ENTRY_MESSAGE:
+        return None
+    payload = entry.payload
+    # Producer provenance was introduced with an explicit kind marker. Treating
+    # the legacy missing-kind default as producer-eligible lets imported rows
+    # claim IDs merely by carrying an unknown extra envelope field.
+    if payload.get("kind") != CUSTOM_KIND_MESSAGE:
+        return None
+    command_id = payload.get("producer_command_id")
+    if not isinstance(command_id, str) or not command_id.strip():
+        return None
+    message = _entry_to_message(entry)
+    if not isinstance(message, Message) or message.role != "user":
+        return None
+    return command_id
+
+
 def _entry_to_message(
     entry: TranscriptEntry, attachments: AttachmentStore | None = None
 ) -> AgentMessage | None:
     """Rehydrate one message entry; malformed rows are dropped individually."""
     payload = dict(entry.payload)
     kind = payload.pop("kind", CUSTOM_KIND_MESSAGE)
+    # Producer identity belongs to the transcript envelope, never the Message
+    # schema. Leaving it in makes strict Message decoding reject every valid
+    # producer row as an unknown field during both replay and admission checks.
+    payload.pop("producer_command_id", None)
     # The entry id IS the message id for BOTH kinds — the writer passes
     # ``message.id`` as the entry id and the encoder omits it from the
     # payload, so a custom entry that read its id from the payload would come

@@ -18,7 +18,7 @@ export function ModelSheet({
 	open: boolean;
 	onClose: () => void;
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
-	pid: number;
+	pid: string;
 	projection: SessionProjection;
 }) {
 	const [models, setModels] = useState<ModelEntry[]>([]);

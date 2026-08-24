@@ -34,13 +34,146 @@ binary and a stale registrant is re-registered on its next heartbeat.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class ContinuationCommand:
+    """Producer-owned prompt retained until its transcript row is durable.
+
+    Process discovery and request ids are transport details. This identity is
+    the conversation-level receipt that survives reconnects and host changes.
+    """
+
+    command_id: str
+    session_id: str
+    text: str
+    images: list[dict[str, str]] = field(default_factory=list)
+    submitted_at: float = field(default_factory=time.time)
+
+    @staticmethod
+    def create(
+        session_id: str, text: str, images: list[dict[str, str]] | None = None
+    ) -> "ContinuationCommand":
+        return ContinuationCommand(
+            command_id=str(uuid.uuid4()),
+            session_id=session_id,
+            text=text,
+            images=list(images or []),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> "ContinuationCommand":
+        """Validate an untrusted continuation payload without coercing types.
+
+        This constructor sits on both HTTP and control-socket boundaries. Silent
+        ``str(...)`` coercion turns missing, object, and list fields into model
+        input and lets malformed UUIDs escape as route-level 500s, so invalid
+        producer data is rejected before any owner is spawned or transcript is
+        opened.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("command payload must be an object")
+        command_id = data.get("command_id")
+        if not isinstance(command_id, str) or not command_id:
+            raise ValueError("command_id must be a UUID string")
+        try:
+            uuid.UUID(command_id)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("command_id must be a valid UUID") from exc
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        images = data.get("images", [])
+        if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
+            raise ValueError("images must be a list of objects")
+        submitted_at = data.get("submitted_at", time.time())
+        if not isinstance(submitted_at, (int, float)) or isinstance(submitted_at, bool):
+            raise ValueError("submitted_at must be a number")
+        return ContinuationCommand(
+            command_id=command_id,
+            session_id=session_id,
+            text=text,
+            images=[dict(item) for item in images],
+            submitted_at=float(submitted_at),
+        )
+
+
+def validate_control_frame(frame: dict[str, Any]) -> None:
+    """Reject malformed authenticated mutations before dispatch side effects."""
+    if not isinstance(frame, dict):
+        raise ValueError("control frame must be an object")
+    op = frame.get("op")
+    if not isinstance(op, str) or not op:
+        raise ValueError("op must be a non-empty string")
+    if op in ("prompt", "steer"):
+        text = frame.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        images = frame.get("images", [])
+        if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
+            raise ValueError("images must be a list of objects")
+        # Protocol-v3 producers send identity on both paths. Older authenticated
+        # loopback clients omitted it, so absence remains compatible; a supplied
+        # id is always validated before reaching transcript or steering state.
+        if "command_id" in frame:
+            ContinuationCommand.from_json(
+                {
+                    "command_id": frame.get("command_id"),
+                    "session_id": frame.get("session_id", "control-session"),
+                    "text": text,
+                    "images": images,
+                }
+            )
+    elif op == "approval_answer":
+        if not isinstance(frame.get("request_id"), str) or not frame["request_id"]:
+            raise ValueError("request_id must be a non-empty string")
+        if not isinstance(frame.get("approved"), bool):
+            raise ValueError("approved must be a boolean")
+        if "remember" in frame and not isinstance(frame.get("remember"), bool):
+            raise ValueError("remember must be a boolean")
+    elif op == "ask_answer":
+        if not isinstance(frame.get("request_id"), str) or not frame["request_id"]:
+            raise ValueError("request_id must be a non-empty string")
+        if not isinstance(frame.get("value"), str):
+            raise ValueError("value must be a string")
+
 
 #: Bumped on any breaking change to control frames or web payloads. The
 #: registrant and daemon always ship together; the phone UI learns the
 #: version in its bootstrap payload and can warn on a stale cached bundle.
-PROTOCOL_VERSION = 1
+#:
+#: v2 (attach + reaping) added the ``watch``/``unwatch`` ops, the auth
+#: frame's optional ``client`` field, and multi-connection registrants. The
+#: bump is load-bearing for ATTACH specifically: an old (v1) registrant
+#: treats any authenticated dial as THE daemon and evicts the real one, so
+#: an attach client must refuse to dial a record whose ``protocol`` is < 2
+#: rather than silently breaking the owner's phone bridge. The record's
+#: version field is the only pre-dial gate — the socket itself speaks the
+#: same frame shapes either side of the bump.
+PROTOCOL_VERSION = 3
+
+#: Which side of the owner relationship a control connection speaks for.
+#: ``daemon`` (the default when the auth frame omits ``client``) may rebind
+#: the owner's conversation; ``attach`` is a follower terminal that may
+#: watch and steer but never rebind. Absent-means-daemon keeps an OLD
+#: daemon dialing a NEW registrant on the same class it always had.
+ClientKind = Literal["daemon", "attach"]
+
+#: How many concurrent attach (follower terminal) connections one registrant
+#: accepts before evicting the least-recently-seen one. Connection close is
+#: detected anyway (the reader loop drops the registry entry); the cap is
+#: defense against leaked-but-open sockets — half-open TCP with no FIN —
+#: which liveness detection cannot see.
+ATTACH_MAX_CLIENTS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +235,7 @@ class SessionRecord:
 # Requests the daemon may send. Kept as Literal aliases rather than enums so
 # frames stay plain dicts — json.loads output needs no decoding step.
 ControlOp = Literal[
-    "prompt",  # {text, images?} — a full user turn (or queue while streaming)
+    "prompt",  # {command_id, text, images?} — durable idempotent user turn
     "steer",  # {text} — inject mid-turn
     "abort",  # {} — the stop button; never kills the session
     "set_model",  # {provider, model_id} — the model sheet's choice
@@ -114,6 +247,14 @@ ControlOp = Literal[
     "ask_answer",  # {request_id, value}
     "snapshot",  # {} — ask for a fresh welcome-equivalent projection
     "ping",  # {} — liveness probe; answered with {"op": "ack", ...}
+    # v2 (attach + reaping): phone SSE subscriber transitions, daemon ->
+    # registrant. "watch" = a phone just started following this session;
+    # "unwatch" = the last phone left. The child's self-reaper counts these
+    # to know whether a front end still holds the session. Additive on the
+    # wire: an OLD registrant answers `error: unknown op`, which the daemon
+    # tolerates (fire-and-forget), so a mixed-version machine keeps working.
+    "watch",  # {} — a phone SSE subscriber appeared for this session
+    "unwatch",  # {} — the last phone SSE subscriber left
 ]
 
 # Events the registrant streams to the daemon.
@@ -376,6 +517,70 @@ class SessionProjection:
 #: scrolling. History fetches page backwards beyond it. Matches omp mobile's
 #: finding that a phone renders a tail, not a log.
 PROJECTION_TRANSCRIPT_LIMIT = 80
+
+
+def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> SessionProjection:
+    """Rebuild a projection from a wire payload.
+
+    The registrant already serialized dataclasses; this tolerates missing
+    keys (a rolling upgrade mid-push) by constructing through the dataclass
+    with defaults. Lives in the wire-types module (not the daemon) because
+    BOTH consumers of the socket rebuild projections from the same frames —
+    the daemon for the phone, the attach client for a follower terminal —
+    and a copy in each is exactly how two renderers drift.
+
+    ``record`` supplies the pid: the fold stamps 0 (the registrant does not
+    know its own pid until the record is published), and the discovery record
+    is the source of truth.
+    """
+    from dataclasses import fields
+
+    def build(cls: type, items: list[dict[str, Any]]) -> list[Any]:
+        known = {f.name for f in fields(cls)}
+        return [cls(**{k: v for k, v in item.items() if k in known}) for item in items]
+
+    known = {f.name for f in fields(SessionProjection)}
+    base = {
+        k: v
+        for k, v in data.items()
+        if k in known and k not in ("transcript", "todos", "subagents", "pending")
+    }
+    projection = SessionProjection(**base)
+    projection.pid = record.pid
+    projection.transcript = build(TranscriptEntry, data.get("transcript", []))
+    # Todos arrive PHASED; rebuild the two nested dataclass levels, tolerating
+    # missing keys the same way ``build`` does for a rolling upgrade mid-push.
+    projection.todos = [
+        TodoPhase(
+            name=str(phase.get("name", "")),
+            items=build(TodoItem, phase.get("items", []) or []),
+        )
+        for phase in data.get("todos", []) or []
+    ]
+    projection.subagents = build(SubagentRow, data.get("subagents", []))
+    pending = data.get("pending")
+    if isinstance(pending, dict):
+        known_pending = {f.name for f in fields(PendingRequest)}
+        pending_kwargs = {k: v for k, v in pending.items() if k in known_pending}
+        # ``options`` crosses the wire as a list of {label, description} dicts;
+        # rebuild the dataclass so downstream code (and to_json round-trips)
+        # see AskOptionWire, not bare dicts.
+        raw_options = pending_kwargs.get("options") or []
+        pending_kwargs["options"] = [
+            (
+                AskOptionWire(
+                    label=str(opt.get("label", "")),
+                    description=str(opt.get("description", "")),
+                )
+                if isinstance(opt, dict)
+                else AskOptionWire(label=str(opt))
+            )
+            for opt in raw_options
+        ]
+        projection.pending = PendingRequest(**pending_kwargs)
+    else:
+        projection.pending = None
+    return projection
 
 
 # ---------------------------------------------------------------------------

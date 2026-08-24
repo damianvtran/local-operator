@@ -93,10 +93,10 @@ export function startSession(input: {
 }
 
 export function sendCommand(
-	pid: number,
+	sessionId: string,
 	op: CommandOp,
 ): Promise<{ ok: boolean; detail: string }> {
-	return request(`/api/sessions/${pid}/command`, {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/command`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(op),
@@ -108,9 +108,9 @@ export function sendCommand(
     id plus the image-only index the ref emitted. Same-origin, cacheable and
     immutable — a message's attachments never change — so an <img src> can use
     it directly. */
-export function imageUrl(pid: number, entryId: string, index: number): string {
+export function imageUrl(sessionId: string, entryId: string, index: number): string {
 	const q = new URLSearchParams({ entry: entryId, i: String(index) });
-	return `/api/sessions/${pid}/image?${q}`;
+	return `/api/sessions/${encodeURIComponent(sessionId)}/image?${q}`;
 }
 
 /** Older transcript entries for lazy loading. ``before`` is the id of the
@@ -118,11 +118,11 @@ export function imageUrl(pid: number, entryId: string, index: number): string {
     immediately older than it (chronological within the page) plus whether
     more history exists beyond. */
 export function getHistory(
-	pid: number,
+	sessionId: string,
 	before: string | null,
 	limit = 80,
 ): Promise<{ entries: TranscriptEntry[]; has_more: boolean }> {
 	const q = new URLSearchParams({ limit: String(limit) });
 	if (before) q.set("before", before);
-	return request(`/api/sessions/${pid}/history?${q}`);
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`);
 }

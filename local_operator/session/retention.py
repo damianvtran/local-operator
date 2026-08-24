@@ -297,6 +297,11 @@ def release_session(session_dir: Path) -> None:
     """
     if not _is_session_store_dir(session_dir):
         return
+    # A leased session releases its compatibility mirror through the lease's
+    # compare-token hook. Unconditional unlink here could erase a successor's
+    # mirror after an in-process generation handoff.
+    if (session_dir / ".execution-lease").exists():
+        return
     try:
         (session_dir / LIVE_MARKER_NAME).unlink()
     except OSError:

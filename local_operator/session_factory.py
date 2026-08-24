@@ -857,6 +857,9 @@ class _SessionPlan:
     system_blocks_provider: Callable[..., Awaitable[list[str]]]
     knowledge_hooks: _KnowledgeHooks
     auth_store: AuthStore | None = None
+    # Acquired before transcript construction and transferred to Session.dispose;
+    # benchmark-only preparation releases it directly because no Session exists.
+    session_lease: Any | None = None
 
 
 def _make_system_blocks_provider(
@@ -1003,6 +1006,15 @@ async def _prepare(
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
 
     from local_operator.session.retention import claim_session, sweep_from_config
+    from local_operator.session_lease import acquire_session_lease
+
+    # Sole-writer ownership is acquired at the shared construction boundary,
+    # before transcript creation. Edge checks remain useful UX, but only O_EXCL
+    # can make two simultaneous cold resumes safe. Agent training directories
+    # retain their established non-session semantics and are not leased here.
+    session_lease = (
+        acquire_session_lease(transcript_dir) if transcript_dir.parent.name == "sessions" else None
+    )
 
     # CLAIM BEFORE creating the directory, and in that order. The claim marker
     # is what tells every OTHER session's startup sweep that this directory
@@ -1212,6 +1224,7 @@ async def _prepare(
         system_blocks_provider=system_blocks_provider,
         knowledge_hooks=hooks,
         auth_store=auth_store,
+        session_lease=session_lease,
     )
 
 
@@ -1522,7 +1535,16 @@ async def create_session(
         has_ui=has_ui,
         cwd=effective_cwd,
     )
-    session = Session(**plan.session_kwargs)
+    try:
+        session = Session(**plan.session_kwargs)
+    except BaseException:
+        # Construction never transferred ownership to Session.dispose, so the
+        # factory must relinquish its generation without touching a successor.
+        if plan.session_lease is not None:
+            plan.session_lease.release()
+        raise
+    if plan.session_lease is not None:
+        session.add_dispose_hook(plan.session_lease.release)
 
     # Auth seam (CL-08): the AuthStore's SQLite connection is owned by this
     # session; fold its close into dispose so every front end releases the
@@ -1564,6 +1586,10 @@ async def build_initial_blocks(
     budget without instantiating the session facade.
     """
     plan = await _prepare(args, config_manager, credential_manager, agent_registry, has_ui=False)
+    # No session facade is built on this path, so the lease and store lifetimes
+    # end here rather than waiting for a Session.dispose that cannot happen.
+    if plan.session_lease is not None:
+        plan.session_lease.release()
     # No session facade is built on this path, so the store's lifetime ends
     # here: close it directly (CL-08) to release the SQLite lock. Pass the
     # spec's label so the measured startup prompt includes the model line the

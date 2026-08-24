@@ -16,7 +16,13 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import AskOption, AskQuestion
+from local_operator.harness.types import (
+    AskOption,
+    AskQuestion,
+    NoticeEvent,
+    SteeringDeliveredEvent,
+)
+from local_operator.mobile import owned as owned_mod
 from local_operator.mobile.owned import OwnedSessionHandle
 
 
@@ -31,11 +37,20 @@ class FakeSession:
         self.conversation_name = ""
         self.is_streaming = False
         self._handlers: list[Any] = []
+        self._admission_handlers: list[Any] = []
+        self._steer_rejection_handlers: list[Any] = []
+        self._admitted_ids: set[str] = set()
         self._named: list[tuple[str, bool]] = []
         self._complete_calls: list[tuple[str, str]] = []
+        self.prompt_calls: list[str] = []
+        self.steer_calls: list[str] = []
+        self.prompt_release = asyncio.Event()
         # Tagged or a short untagged title both parse; the default stays
         # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"
+        from local_operator.harness.jobs import AsyncJobManager
+
+        self.jobs = AsyncJobManager()
 
     # -- naming seams ----------------------------------------------------------
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
@@ -72,6 +87,58 @@ class FakeSession:
 
     def history(self):  # pragma: no cover - not exercised here
         return []
+
+    def has_admitted_command(self, command_id: str) -> bool:
+        return command_id in self._admitted_ids
+
+    def subscribe_admitted_commands(self, handler):  # noqa: ANN001, ANN202
+        self._admission_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            self._admission_handlers.remove(handler)
+
+        return unsubscribe
+
+    def admit(self, command_id: str) -> None:
+        self._admitted_ids.add(command_id)
+        for handler in list(self._admission_handlers):
+            handler(command_id)
+
+    def subscribe_rejected_steering(self, handler):  # noqa: ANN001, ANN202
+        self._steer_rejection_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            self._steer_rejection_handlers.remove(handler)
+
+        return unsubscribe
+
+    def reject_steer(self, command_id: str, reason: str) -> None:
+        for handler in list(self._steer_rejection_handlers):
+            handler(command_id, reason)
+        self.emit(
+            NoticeEvent(
+                text=(
+                    f"steering command {command_id} was not saved: {reason}; "
+                    "retry with the same command ID"
+                )
+            )
+        )
+        self.emit(SteeringDeliveredEvent(count=1))
+
+    def running_subagents(self) -> int:
+        return 0
+
+    async def prompt(self, text: str, images=None) -> None:  # noqa: ANN001
+        self.prompt_calls.append(text)
+        self.is_streaming = True
+        await self.prompt_release.wait()
+        self.is_streaming = False
+
+    def steer(self, text: str, images=None) -> None:  # noqa: ANN001
+        self.steer_calls.append(text)
+
+    async def dispose(self) -> None:
+        self.prompt_release.set()
 
     @property
     def reasoning_effort(self):  # pragma: no cover
@@ -139,6 +206,293 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
     assert await second is False
     await asyncio.sleep(0)
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_same_id_concurrent_steers_are_admitted_once() -> None:
+    handle, session = make_handle()
+    command_id = "same-steer"
+
+    receipts = await asyncio.gather(
+        handle.steer("correction", command_id=command_id),
+        handle.steer("correction", command_id=command_id),
+    )
+
+    assert receipts == ["steering queued", "already admitted"]
+    assert session.steer_calls == ["correction"]
+    assert [row.text for row in handle._fold.projection.transcript] == ["correction"]
+
+
+@pytest.mark.asyncio
+async def test_async_steer_rejection_releases_owned_slot_and_same_id() -> None:
+    handle, session = make_handle()
+    notified = 0
+
+    def notify() -> None:
+        nonlocal notified
+        notified += 1
+
+    handle.subscribe(notify)
+    assert await handle.steer("first", command_id="retry-id") == "steering queued"
+    assert handle._command_reservations._pending_steers == 1
+    assert handle.session_projection_seed.queued_count == 1
+
+    session.reject_steer("retry-id", "disk full")
+
+    assert handle._command_reservations._pending_steers == 0
+    assert "retry-id" not in handle._command_reservations._commands
+    assert handle.session_projection_seed.queued_count == 0
+    assert handle.session_projection_seed.transcript[-1].text == (
+        "steering command retry-id was not saved: disk full; retry with the same command ID"
+    )
+    assert notified >= 2
+    assert await handle.steer("retry", command_id="retry-id") == "steering queued"
+    assert session.steer_calls == ["first", "retry"]
+
+
+@pytest.mark.asyncio
+async def test_steer_ack_loss_retry_remains_admitted() -> None:
+    handle, session = make_handle()
+
+    assert await handle.steer("once", command_id="lost-ack") == "steering queued"
+    assert await handle.steer("once", command_id="lost-ack") == "already admitted"
+    assert session.steer_calls == ["once"]
+
+
+@pytest.mark.asyncio
+async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity() -> None:
+    handle, session = make_handle()
+
+    for index in range(32):
+        assert await handle.steer(f"steer {index}", command_id=f"id-{index}") == "steering queued"
+    assert len(session.steer_calls) == 32
+    assert await handle.steer("duplicate", command_id="id-0") == "already admitted"
+    with pytest.raises(RuntimeError, match=r"steering queue is full \(32\)"):
+        await handle.steer("overflow", command_id="overflow")
+    assert len(session.steer_calls) == 32
+
+    session.admit("id-0")
+    assert await handle.steer("replacement", command_id="replacement") == "steering queued"
+    assert await handle.steer("old retry", command_id="id-0") == "already admitted"
+
+
+@pytest.mark.asyncio
+async def test_terminal_steer_rejection_releases_identity() -> None:
+    handle, session = make_handle()
+    original = session.steer
+    attempts = 0
+
+    def reject_once(text, images=None):  # noqa: ANN001, ANN202
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("not accepted")
+        original(text, images)
+
+    session.steer = reject_once  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="not accepted"):
+        await handle.steer("retry", command_id="retry-id")
+    assert await handle.steer("retry", command_id="retry-id") == "steering queued"
+    assert session.steer_calls == ["retry"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_streaming_rejection_transfers_identity_to_steer() -> None:
+    handle, session = make_handle()
+
+    async def reject_prompt(  # noqa: ANN202
+        text, images=None, *, message_id=None, admitted=None  # noqa: ANN001
+    ):
+        raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+
+    session.prompt = reject_prompt  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="already streaming"):
+        await handle.prompt("raced", command_id="fallback-id")
+    assert await handle.steer("raced", command_id="fallback-id") == "steering queued"
+    assert await handle.steer("raced", command_id="fallback-id") == "already admitted"
+    assert session.steer_calls == ["raced"]
+
+
+@pytest.mark.asyncio
+async def test_distinct_concurrent_steers_keep_fifo_order() -> None:
+    handle, session = make_handle()
+
+    receipts = await asyncio.gather(
+        *(
+            handle.steer(text, command_id=f"id-{index}")
+            for index, text in enumerate(["a", "b", "c"])
+        )
+    )
+
+    assert receipts == ["steering queued"] * 3
+    assert session.steer_calls == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ordinary_prompts_are_admitted_fifo() -> None:
+    handle, session = make_handle()
+    first, second, third = await asyncio.gather(
+        handle.prompt("mobile"),
+        handle.prompt("attach one"),
+        handle.prompt("attach two"),
+    )
+    assert first == "prompt admitted"
+    assert second == "prompt queued (2)"
+    assert third == "prompt queued (3)"
+    await asyncio.sleep(0)
+    assert session.prompt_calls == ["mobile"]
+    assert handle.is_busy() is True
+
+    session.prompt_release.set()
+    deadline = asyncio.get_running_loop().time() + 5
+    while len(session.prompt_calls) < 3:
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.01)
+    assert session.prompt_calls == ["mobile", "attach one", "attach two"]
+    assert len(set(session.prompt_calls)) == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_admitted_prompt_is_visible_and_later_fifo_progresses() -> None:
+    handle, session = make_handle()
+    session.prompt_release.set()
+    calls: list[str] = []
+
+    async def prompt(text: str, images=None) -> None:  # noqa: ANN001
+        calls.append(text)
+        if text == "first":
+            raise ValueError("provider exploded")
+
+    session.prompt = prompt
+    assert await handle.prompt("first") == "prompt admitted"
+    assert await handle.prompt("second") == "prompt queued (2)"
+    drain = handle._prompt_drain_task
+    assert drain is not None
+    await drain
+
+    assert calls == ["first", "second"]
+    assert not handle._prompt_queue
+    assert handle.is_busy() is False
+    notices = [
+        entry.text for entry in handle.session_projection_seed.transcript if entry.kind == "notice"
+    ]
+    assert any("provider exploded" in notice for notice in notices)
+    assert drain.exception() is None
+
+
+@pytest.mark.asyncio
+async def test_dispose_rejects_queued_admissions_without_unhandled_task_error() -> None:
+    handle, session = make_handle()
+    assert await handle.prompt("running") == "prompt admitted"
+    assert await handle.prompt("queued") == "prompt queued (2)"
+    await asyncio.sleep(0)
+
+    await handle.dispose()
+
+    assert not handle._prompt_queue
+    assert handle.is_busy() is False
+    notices = [
+        entry.text for entry in handle.session_projection_seed.transcript if entry.kind == "notice"
+    ]
+    assert sum("session closed" in notice for notice in notices) == 2
+    drain = handle._prompt_drain_task
+    assert drain is not None and drain.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_queue_overflow_rejects_before_admission(monkeypatch) -> None:
+    monkeypatch.setattr(owned_mod, "MAX_QUEUED_PROMPTS", 1)
+    handle, _ = make_handle()
+    assert await handle.prompt("first") == "prompt admitted"
+    with pytest.raises(RuntimeError, match="prompt queue is full"):
+        await handle.prompt("overflow")
+    assert [text for text, _ in handle._prompt_queue] == ["first"]
+    drain = handle._prompt_drain_task
+    assert drain is not None
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_gate_answers_have_one_authoritative_winner() -> None:
+    handle, _ = make_handle()
+    gate = asyncio.create_task(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    request_id = next(iter(handle._pending_futures))
+    results = await asyncio.gather(
+        handle.approval_answer(request_id, True, False),
+        handle.approval_answer(request_id, False, False),
+        return_exceptions=True,
+    )
+    assert gate.done()
+    assert await gate in (True, False)
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    assert sum(isinstance(result, str) for result in results) == 1
+    assert request_id not in handle._pending_futures
+
+
+@pytest.mark.asyncio
+async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
+    handle, session = make_handle()
+    receipts = await asyncio.gather(
+        handle.steer("mobile steer"),
+        handle.steer("attach steer one"),
+        handle.steer("attach steer two"),
+    )
+    assert receipts == ["steering queued"] * 3
+    assert session.steer_calls == ["mobile steer", "attach steer one", "attach steer two"]
+
+
+@pytest.mark.asyncio
+async def test_pending_gate_is_busy_until_ordinary_timeout(monkeypatch) -> None:
+    """The child drain cannot deny WAITING_INPUT ahead of its 30s policy."""
+    monkeypatch.setattr(owned_mod, "PENDING_REQUEST_TIMEOUT_S", 0.05)
+    handle, _ = make_handle(auto_approve=False)
+    waiting = asyncio.ensure_future(handle._approval_gate("bash", "one"))
+    await asyncio.sleep(0)
+    assert handle.is_busy() is True
+    assert await waiting is False
+    assert handle.is_busy() is False
+    assert owned_mod.PENDING_REQUEST_TIMEOUT_S == 0.05
+
+
+@pytest.mark.asyncio
+async def test_real_background_bash_job_is_busy_until_done(tmp_path) -> None:
+    """The reaper reads the real bash job Session.dispose would terminate."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    handle, session = make_handle()
+    context = ToolContext(cwd=str(tmp_path), session_id="owned-bash", jobs=session.jobs)
+    tool = builtin.build_bash_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "call",
+        {"command": "sleep 0.4; echo settled", "background": True, "timeout": 5},
+        None,
+        None,
+        context,
+    )
+    job_id = str((result.details or {})["job_id"])
+    job = session.jobs.get(job_id)
+    assert job is not None and job.type == "bash"
+    assert handle.is_busy() is True
+    deadline = asyncio.get_running_loop().time() + 5
+    while job.status == "running":
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.01)
+    assert job.status == "completed"
+    assert handle.is_busy() is False
+    await session.jobs.dispose()
+
+
+@pytest.mark.asyncio
+async def test_detached_background_work_is_busy_until_done() -> None:
+    handle, _ = make_handle()
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    handle._background_tasks.add(future)
+    assert handle.is_busy() is True
+    future.set_result(None)
+    assert handle.is_busy() is False
 
 
 @pytest.mark.asyncio

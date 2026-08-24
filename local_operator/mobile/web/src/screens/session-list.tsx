@@ -30,11 +30,8 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 	return (
 		<button
 			type="button"
-			onClick={() => navigate(`/s/${s.pid}`)}
-			className={cn(
-				"flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated",
-				s.ended && "text-ink-disabled",
-			)}
+			onClick={() => navigate(`/s/${encodeURIComponent(s.session_id)}`)}
+			className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
 				{s.needs_attention && pendingLabel ? (
@@ -43,7 +40,7 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 						aria-hidden
 					/>
 				) : null}
-				{s.streaming && !s.ended ? (
+				{s.streaming ? (
 					/* The obvious in-progress mark beside the title: a small loading
 					   wheel, not just the text sweep — the sweep alone was too
 					   subtle to catch at a glance. */
@@ -52,7 +49,7 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 				<span
 					className={cn(
 						"min-w-0 flex-1 truncate text-body-sm font-medium",
-						s.streaming && !s.ended && "lo-shimmer",
+						s.streaming && "lo-shimmer",
 					)}
 				>
 					{s.conversation_name || "untitled"}
@@ -73,9 +70,6 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
 						{s.todos_open} todo
 					</span>
-				) : null}
-				{s.ended ? (
-					<span className="shrink-0 text-meta text-ink-dim">ended</span>
 				) : null}
 			</div>
 			<div className="flex items-baseline gap-2">
@@ -139,6 +133,14 @@ export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
+	const [query, setQuery] = useState("");
+	const visible = sessions.filter((session) =>
+		`${session.conversation_name} ${session.session_id} ${session.cwd}`
+			.toLowerCase()
+			.includes(query.toLowerCase()),
+	);
+	const active = visible.filter((session) => session.section === "active");
+	const previous = visible.filter((session) => session.section === "previous");
 
 	useEffect(() => retainSessionListStream(), []);
 	useEffect(() => {
@@ -162,7 +164,13 @@ export function SessionListScreen() {
 					local operator
 				</h1>
 			</header>
-			<main className="flex flex-1 flex-col px-1 pb-2">
+			<main className="flex flex-1 flex-col overflow-y-auto px-1 pb-2">
+				<input
+					value={query}
+					onChange={(event) => setQuery(event.target.value)}
+					placeholder="Search conversations…"
+					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+				/>
 				{sessions.length === 0 ? (
 					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
 						<p className="text-body text-ink-muted">
@@ -175,10 +183,15 @@ export function SessionListScreen() {
 						</p>
 					</div>
 				) : (
-					<div className="flex flex-col">
-						{sessions.map((s) => (
-							<SessionCard key={s.pid} s={s} home={home} />
-						))}
+					<div className="flex flex-col gap-3">
+						<section>
+							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
+							{active.map((s) => <SessionCard key={s.session_id} s={s} home={home} />)}
+						</section>
+						<section>
+							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
+							{previous.map((s) => <SessionCard key={s.session_id} s={s} home={home} />)}
+						</section>
 					</div>
 				)}
 			</main>
@@ -189,13 +202,6 @@ export function SessionListScreen() {
 					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated"
 				>
 					new session
-				</button>
-				<button
-					type="button"
-					onClick={() => navigate("/past")}
-					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-4 text-body-sm text-ink select-none active:bg-elevated"
-				>
-					past
 				</button>
 				<button
 					type="button"

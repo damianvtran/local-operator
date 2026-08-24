@@ -173,19 +173,17 @@ export interface SessionProjection {
 }
 
 export interface SessionSummary {
-	pid: number;
-	kind: string;
 	session_id: string;
+	section: "active" | "previous";
 	conversation_name: string;
 	cwd: string;
 	model_label: string;
 	streaming: boolean;
-	ended: boolean;
-	degraded: boolean;
 	needs_attention: boolean;
 	pending_kind: "approval" | "ask" | "" | null;
 	subagents_running: number;
-	todos_open: string;
+	todos_open: number;
+	mtime: number;
 }
 
 export interface SlashCommand {
@@ -218,7 +216,7 @@ export interface Directories {
 	tmp?: string;
 }
 
-/* ---- command ops (POST /api/sessions/{pid}/command) ---------------------- */
+/* ---- command ops (POST /api/sessions/{session_id}/command) --------------- */
 
 /** A pasted / dropped image, base64 — the wire form the handles decode. */
 export interface PromptImage {
@@ -227,7 +225,7 @@ export interface PromptImage {
 }
 
 export type CommandOp =
-	| { op: "prompt"; text: string; images?: PromptImage[] }
+	| { op: "prompt"; command_id: string; text: string; images?: PromptImage[] }
 	| { op: "steer"; text: string; images?: PromptImage[] }
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
