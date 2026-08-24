@@ -94,9 +94,11 @@ def _text(widget) -> str:  # noqa: ANN001
 async def _attached_screen(app: OperatorApp) -> tuple[AttachScreen, StubClient]:
     screen = AttachScreen(make_record(), "sess-42")
     app.push_screen(screen)
-    # Let the (unreachable) connect task fail into the dead-state first; the
-    # stub replaces it for deterministic routing assertions.
+    # This module tests the SCREEN, not socket dialing. Cancel the real connect
+    # task before replacing it so its expected port-1 failure cannot enqueue an
+    # owner-death repaint after the deterministic stub state below.
     await asyncio.sleep(0)
+    screen.run_task.cancel()
     await asyncio.sleep(0)
     stub = StubClient()
     screen._owner_dead = False
@@ -218,3 +220,35 @@ async def test_escape_detaches() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert screen not in app.screen_stack
+
+
+@pytest.mark.asyncio
+async def test_live_client_callback_schedules_on_ui_loop() -> None:
+    """AttachClient's pump runs on Textual's loop; a callback must use
+    call_later, not call_from_thread (which raises on the UI thread)."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen, _ = await _attached_screen(app)
+        screen._on_projection(make_projection())
+        await pilot.pause()
+        assert "Attach Demo" in _text(screen._banner)
+
+
+@pytest.mark.asyncio
+async def test_owner_death_r_key_runs_async_resume_callback() -> None:
+    resumed: list[str] = []
+
+    async def resume_here(session_id: str) -> None:
+        resumed.append(session_id)
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = AttachScreen(make_record(), "sess-42", on_resume_here=resume_here)
+        app.push_screen(screen)
+        await pilot.pause()
+        screen._owner_exited("owner exited")
+        await pilot.press("r")
+        await pilot.pause()
+        assert resumed == ["sess-42"]

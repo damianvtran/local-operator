@@ -158,6 +158,7 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
 
     BINDINGS = [
         Binding("escape", "detach", "Detach", show=False),
+        Binding("r", "resume_here", "Resume here", show=False),
     ]
 
     def __init__(
@@ -213,14 +214,17 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
     def _on_projection(self, projection: SessionProjection) -> None:
         self._projection = projection
         if self.is_running:
-            # The client's reader task is not the UI thread; hop over.
-            self.app.call_from_thread(self._render_projection, projection)
+            # AttachClient's pump is a task on the Textual loop (not a socket
+            # thread), so schedule on the next UI tick. call_from_thread is
+            # deliberately forbidden from the app's own thread and would turn
+            # the first live repaint into a RuntimeError.
+            self.app.call_later(self._render_projection, projection)
         else:
             self._render_projection(projection)
 
     def _on_disconnected(self, reason: str) -> None:
         try:
-            self.app.call_from_thread(self._owner_exited, reason)
+            self.app.call_later(self._owner_exited, reason)
         except Exception:  # noqa: BLE001 — screen may already be unmounting
             pass
 
@@ -264,8 +268,18 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         self._pending.update("owner exited — r: resume here · esc: detach")
         self._pending.display = True
         self._composer.placeholder = "owner exited — r to resume here, esc to detach"
+        # Disable the dead composer so printable keys bubble to the Screen's
+        # inline actions instead of becoming a draft that can never be sent.
+        self._composer.disabled = True
 
     # -- input ---------------------------------------------------------------------
+
+    def _resume_after_owner_death(self) -> None:
+        if self._on_resume_here is None:
+            return
+        outcome = self._on_resume_here(self._session_id)
+        if asyncio.iscoroutine(outcome):
+            asyncio.get_event_loop().create_task(outcome)
 
     async def on_input_submitted(self, event: Any) -> None:
         text = str(getattr(event, "value", "")).strip()
@@ -308,10 +322,10 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         """Minimal key answers for the pending gate, plus owner-death actions."""
         key = str(getattr(event, "key", ""))
         if self._owner_dead:
-            if key == "r" and self._on_resume_here is not None:
+            if key == "r":
                 event.prevent_default()
                 event.stop()
-                self._on_resume_here(self._session_id)
+                self._resume_after_owner_death()
             return
         pending = self._projection.pending if self._projection else None
         if pending is None or self._composer is None:
@@ -346,6 +360,10 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
 
     # -- actions --------------------------------------------------------------------
 
+    def action_resume_here(self) -> None:
+        if self._owner_dead:
+            self._resume_after_owner_death()
+
     def action_detach(self) -> None:
         """Leave the attach: pop (in-app) or exit (standalone)."""
         if self._client is not None:
@@ -370,7 +388,7 @@ class AttachApp(App[None]):
     standalone host deliberately does not boot an OperatorApp (no session, no
     workers, no claim)."""
 
-    CSS_PATH = "../local_operator.tcss"
+    CSS_PATH = "local_operator.tcss"
 
     def __init__(
         self,
@@ -409,7 +427,7 @@ class AttachApp(App[None]):
         # Exit 75 (EX_TEMPFAIL) is the sentinel the CLI's owned-resume branch
         # reads as 'relaunch without --resume' — by then the claim marker
         # names a dead pid, so the relaunch is the legitimate first writer.
-        self.exit(75, return_code=75)  # type: ignore[call-overload]
+        self.exit(return_code=75)
 
 
 def run_attach_app(record: SessionRecord, session_id: str) -> int:

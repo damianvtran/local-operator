@@ -54,10 +54,12 @@ def run_owned_resume_attach(config_dir: Path, session_id: str, owner: int) -> in
         # 'resume here': the owner is gone (the attach screen only offers this
         # after owner death), so re-enter the CLI with the resume flag dropped.
         # A fresh process is the honest shape: this one already decided NOT to
-        # build a session when it took the attach branch. ``-m local_operator.cli``
-        # because the package has no ``__main__``; the module's own tail runs
-        # ``main()``.
+        # build a session when it took the attach branch. Preserve the session
+        # id: by now the owner is dead, so the fresh guard falls through to the
+        # factory and this process becomes the legitimate first writer. ``-m
+        # local_operator.cli`` because the package has no ``__main__``; the
+        # module's own tail runs ``main()``.
         import subprocess
 
-        return subprocess.call([sys.executable, "-m", "local_operator.cli"])
+        return subprocess.call([sys.executable, "-m", "local_operator.cli", "--resume", session_id])
     return code

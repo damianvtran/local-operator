@@ -100,6 +100,33 @@ def test_owned_attach_refusal_copy_when_no_record(config: Path, capsys) -> None:
     assert "watch and steer" in err
 
 
+def test_resume_here_relaunch_preserves_session_id(config: Path, monkeypatch) -> None:
+    """Exit 75 from the attach app means the owner died; relaunch the SAME
+    transcript now that its claim is safe to take."""
+    from local_operator.mobile.types import SessionRecord
+
+    owner = os.getppid()
+    record = SessionRecord(
+        pid=owner,
+        kind="tui",
+        session_id="sess-relaunch",
+        conversation_name="",
+        cwd="/tmp",
+        model_label="",
+        control_port=1,
+        control_key="k",
+    )
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_owner_record",
+        lambda cfg, sid: (record, owner),
+    )
+    monkeypatch.setattr("local_operator.tui.attach_screen.run_attach_app", lambda *a: 75)
+    seen: list[list[str]] = []
+    monkeypatch.setattr("subprocess.call", lambda argv: seen.append(list(argv)) or 0)
+    assert cli_attach.run_owned_resume_attach(config, "sess-relaunch", owner) == 0
+    assert seen[0][-2:] == ["--resume", "sess-relaunch"]
+
+
 def test_startup_import_weight_unchanged() -> None:
     """The CLI startup guard: importing cli must not pull Textual or the
     mobile package's heavy half (attach imports are lazy on the owned branch)."""
