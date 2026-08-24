@@ -6568,16 +6568,17 @@ class OperatorApp(App[None]):
         self._notifier = Notifier(driver.write)
 
     def _notify_label(self) -> str:
-        """The session name a toast carries \u2014 the band's label, or the cwd.
+        """The current session title a toast carries, or the cwd before one exists.
 
-        Same fallback chain the window title uses, and for the same reason: a
-        conversation is named off its first substantive prompt, so a session
-        spends its opening minutes unnamed, and three identically-titled toasts
-        from three sessions identify none of them.
+        The provisional name is the title the status band and terminal tab show
+        while model-generated naming is still in flight (or unavailable), so a
+        notification that skipped it regressed to an unhelpful directory such
+        as ``tmp`` even though every visible session surface already had a useful
+        title. A stored or explicitly renamed title still wins immediately.
         """
         session = self._session
         name = getattr(session, "conversation_name", "") if session is not None else ""
-        return name or cwd_label(os.getcwd())
+        return name or self._provisional_name or cwd_label(os.getcwd())
 
     def _notify(self, kind: str, *, running_children: int | None = None) -> bool:
         """Fire one notification, if this app has a notifier and the event qualifies.

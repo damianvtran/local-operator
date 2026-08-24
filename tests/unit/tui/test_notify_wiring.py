@@ -293,6 +293,24 @@ async def test_the_toast_is_titled_with_the_conversation_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_toast_uses_the_current_provisional_session_title() -> None:
+    """Naming runs concurrently with the opening turn, so the display title is
+    often still provisional when completion or an ask edge arrives. Falling
+    through to the cwd here produced notifications titled ``tmp`` while the
+    status band and terminal tab already showed the useful session title."""
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app._provisional_name = "Improve notification context"
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        await pilot.pause()
+    assert session.conversation_name == ""
+    assert notifier.labels[-1] == "Improve notification context"
+
+
+@pytest.mark.asyncio
 async def test_focus_changes_reach_the_notifier() -> None:
     """`AppFocus`/`AppBlur` are what make "only when the user is elsewhere"
     true; a notifier that never heard about them would notify always."""

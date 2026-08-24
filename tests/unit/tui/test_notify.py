@@ -28,6 +28,7 @@ from local_operator.tui.notify import (
     APP_NAME,
     BEL,
     BODIES,
+    CONTEXTS,
     MAX_TITLE_CHARS,
     OSC9_PREFIX,
     OSC99_PREFIX,
@@ -222,15 +223,17 @@ def test_only_a_uuid_surface_identifies_a_pane() -> None:
     assert cmux_surface_id({}) is None
 
 
-def test_the_cmux_command_targets_the_surface_by_uuid() -> None:
+def test_the_cmux_command_targets_the_surface_with_structured_context() -> None:
     surface = "773d5e5e-1111-4222-8333-444455556666"
-    assert cmux_command(surface, "Fix quota reporting", "Task complete") == [
+    assert cmux_command(surface, "Fix quota reporting", "Complete", "Task complete") == [
         "cmux",
         "notify",
         "--surface",
         surface,
         "--title",
         "Fix quota reporting",
+        "--subtitle",
+        "Complete",
         "--body",
         "Task complete",
     ]
@@ -247,7 +250,7 @@ def test_cmux_wins_over_the_in_band_escape(monkeypatch: Any) -> None:
     notifier, sink = unfocused({**GHOSTTY_ENV, "CMUX_SURFACE_ID": surface})
     assert notifier.send("complete") is True
     assert sink.writes == []
-    assert spawned == [cmux_command(surface, APP_NAME, BODIES["complete"])]
+    assert spawned == [cmux_command(surface, APP_NAME, CONTEXTS["complete"], BODIES["complete"])]
 
 
 # -- the Linux D-Bus fallback ------------------------------------------------
@@ -333,9 +336,15 @@ def test_a_parked_turn_notifies_even_with_children_running() -> None:
 
 
 def test_each_kind_says_which_state_it_is() -> None:
-    """Four states, four distinct bodies: a user reads a toast in under a
-    second and 'Local Operator' alone tells them nothing to act on."""
+    """Four states have distinct details and actionable context: completion is
+    unlike a blocked turn, while ask and approval share the need for input."""
     assert len(set(BODIES.values())) == len(BODIES)
+    assert CONTEXTS == {
+        "complete": "Complete",
+        "approval": "Input required",
+        "ask": "Input required",
+        "error": "Needs attention",
+    }
     for kind in ("complete", "approval", "ask", "error"):
         notifier, sink = unfocused()
         notifier.send(kind)  # type: ignore[arg-type]
@@ -437,7 +446,7 @@ def test_a_dash_leading_session_name_cannot_become_a_notify_send_option() -> Non
 
 def test_a_dash_leading_session_name_is_neutralised_for_cmux() -> None:
     surface = "773d5e5e-1111-4222-8333-444455556666"
-    argv = cmux_command(surface, "-u critical", "Task complete")
+    argv = cmux_command(surface, "-u critical", "Complete", "Task complete")
     assert not argv[argv.index("--title") + 1].startswith("-")
 
 
