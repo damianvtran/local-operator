@@ -35,6 +35,8 @@ import logging
 import os
 import secrets
 import threading
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
@@ -43,7 +45,9 @@ if TYPE_CHECKING:
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registry import RecordPublisher
 from local_operator.mobile.types import (
+    ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
+    ClientKind,
     PendingRequest,
     SessionProjection,
     SessionRecord,
@@ -81,6 +85,23 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
+
+
+@dataclass
+class _ClientConn:
+    """One authenticated control connection in the registrant's registry.
+
+    Multiplexing is already half-there (frames carry caller-chosen ``req``
+    ids), so multi-front-end needs N concurrent connections on the ONE
+    socket rather than a second protocol: the daemon plus up to
+    ``ATTACH_MAX_CLIENTS`` attach terminals. ``last_seen`` is the LRU clock
+    for attach eviction — stamped on every request so the least-recently-ACTIVE
+    follower is the one dropped when the cap is hit.
+    """
+
+    writer: asyncio.StreamWriter
+    kind: ClientKind
+    last_seen: float = field(default_factory=time.monotonic)
 
 
 class SessionHandle(Protocol):
@@ -144,7 +165,11 @@ class Registrant:
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
-        self._writer: asyncio.StreamWriter | None = None
+        # N authenticated connections keyed by id(writer): one daemon (a new
+        # daemon dial evicts the old — that IS its reconnect story) plus up to
+        # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
+        # the phone bridge and a follower terminal at once.
+        self._clients: dict[int, _ClientConn] = {}
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -152,6 +177,18 @@ class Registrant:
         self._push_scheduled = False
         self._send_lock: asyncio.Lock | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        # -- front-end accounting (the child reaper's inputs, §4) --------------
+        # Phone SSE watchers, fed by the daemon's watch/unwatch pushes. Floored
+        # at 0: a daemon restart redials without unwatching, and a counter that
+        # went negative would read as "watchers" to an == 0 check forever.
+        self.phone_watchers: int = 0
+        # Latched True on the first watch/unwatch EVER received. Until then
+        # watcher count is UNKNOWN (an old daemon never sends the ops), and
+        # unknown must be treated as "present" — a new child under an old
+        # daemon must not reap a session a phone is actively watching. The
+        # latch never resets: once a watch-capable daemon has spoken, absence
+        # of the op means absence of watchers.
+        self.watch_supported: bool = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -256,11 +293,12 @@ class Registrant:
             self._heartbeat_task.cancel()
         if self._server is not None:
             self._server.close()
-        if self._writer is not None:
+        for conn in list(self._clients.values()):
             try:
-                self._writer.close()
+                conn.writer.close()
             except Exception:  # noqa: BLE001
                 pass
+        self._clients.clear()
 
     async def _heartbeat_loop(self) -> None:
         while not self._closed.is_set():
@@ -284,16 +322,19 @@ class Registrant:
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """One daemon connection. Auth is the first frame: ``{"key": ...}``
+        """One control connection. Auth is the first frame: ``{"key": ...}``
         within a short deadline, constant-time compared. Anything else closes
         without a reply — an open port that answers wrong keys with errors is
         an oracle, however small.
 
-        One control connection at a time — the daemon is the only legitimate
-        client, and a second one racing it would interleave repaints on the
-        same socket. A new dial REPLACES the old, which is also the reconnect
-        story: the daemon re-dials after any drop and the stale socket is
-        evicted."""
+        Protocol v2 carries N connections: one ``daemon`` plus up to
+        ``ATTACH_MAX_CLIENTS`` ``attach`` followers. A new daemon dial still
+        REPLACES the old one (that is its reconnect story, preserved from the
+        single-writer era); a further attach dial past the cap evicts the
+        least-recently-seen attach client. Connection close is detected by
+        the reader loop's ``finally``; the cap only guards leaked-but-open
+        sockets liveness detection cannot see.
+        """
         peer = writer.get_extra_info("peername")
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=5.0)
@@ -306,47 +347,102 @@ class Registrant:
             logger.warning("mobile control: rejected bad key from %s", peer)
             writer.close()
             return
+        # Absent client field means daemon: an OLD daemon dialing a NEW
+        # registrant must land on the class it always had, or every rolling
+        # upgrade would demote the phone bridge to a follower.
+        raw_kind = frame.get("client", "daemon")
+        kind: ClientKind = "attach" if raw_kind == "attach" else "daemon"
 
-        # Authenticated: this becomes THE daemon connection. A prior one is
-        # evicted — reconnect after a drop is the normal path here.
-        if self._writer is not None:
-            try:
-                self._writer.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self._writer = writer
-        await self._push()  # the welcome: a full projection, unprompted
+        if kind == "daemon":
+            # At most ONE daemon connection — a new dial evicts the old, which
+            # is also the reconnect path after a daemon restart.
+            for other in [
+                c for c in self._clients.values() if c.kind == "daemon" and c.writer is not writer
+            ]:
+                self._drop_client(other)
+        else:
+            # Attach cap with LRU eviction: the least-recently-seen follower
+            # goes. Sending on the evicted socket first (a goodbye) is not
+            # worth the failure modes — its reader loop is still alive and
+            # will observe the close as EOF, which is the attach screen's
+            # owner-death signal minus a corpse.
+            attaches = [c for c in self._clients.values() if c.kind == "attach"]
+            if len(attaches) >= ATTACH_MAX_CLIENTS:
+                victim = min(attaches, key=lambda c: c.last_seen)
+                logger.info("mobile control: evicting attach client %s (cap)", peer)
+                self._drop_client(victim)
+
+        conn = _ClientConn(writer=writer, kind=kind)
+        self._clients[id(writer)] = conn
+        await self._push_to(conn)  # the welcome: a full projection, unprompted
         try:
             while not self._closed.is_set():
                 line = await reader.readline()
                 if not line:
-                    return  # daemon hung up
+                    return  # client hung up
                 try:
                     frame = json.loads(line.decode("utf-8", "replace"))
                 except ValueError:
                     continue
-                await self._on_request(frame)
+                conn.last_seen = time.monotonic()
+                await self._on_request(frame, conn)
         except (ConnectionResetError, BrokenPipeError):
             return
         finally:
-            if self._writer is writer:
-                self._writer = None
-            try:
-                writer.close()
-            except Exception:  # noqa: BLE001
-                pass
+            self._drop_client(conn)
 
-    async def _on_request(self, frame: dict[str, Any]) -> None:
+    def _drop_client(self, conn: _ClientConn) -> None:
+        """Remove one connection from the registry and close its socket.
+
+        The ONLY removal path: reader-loop exit, shutdown, daemon eviction,
+        and attach-cap eviction all funnel here so the registry can never
+        retain an entry whose socket is closed (the reaper counts them)."""
+        self._clients.pop(id(conn.writer), None)
+        try:
+            conn.writer.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def attach_clients(self) -> int:
+        """How many attach (follower terminal) connections are live.
+
+        The child reaper's front-end count: an attached TUI is a front end
+        exactly like a phone, so it must hold the child in ACTIVE."""
+        return sum(1 for c in self._clients.values() if c.kind == "attach")
+
+    async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         op = str(frame.get("op") or "")
         req = frame.get("req")
         try:
-            detail = await self._dispatch(op, frame)
-            await self._send({"op": "ack", "req": req, "detail": detail})
-            # Mutations change the projection; push what the phone should see.
-            await self._handle.refresh()
-            await self._push()
+            # Attach clients are followers: rebinding the owner's conversation
+            # from a follower terminal surprises the user AT THAT TERMINAL's
+            # owner. The error frame is the reply — the attach screen surfaces
+            # it like any other rejected op. The daemon keeps both ops (the
+            # phone's resume button rides them).
+            if conn.kind == "attach" and op in ("new_conversation", "resume_session"):
+                raise ValueError(
+                    "attached front ends cannot rebind the session; detach and /resume instead"
+                )
+            if op in ("watch", "unwatch"):
+                # The reaper's phone-watcher signal (§2.8). watch_supported
+                # latches on the FIRST op seen so a mixed-version child never
+                # mistakes silence for zero watchers.
+                self.watch_supported = True
+                if op == "watch":
+                    self.phone_watchers += 1
+                else:
+                    self.phone_watchers = max(0, self.phone_watchers - 1)
+                detail = f"watchers: {self.phone_watchers}"
+            else:
+                detail = await self._dispatch(op, frame)
+            await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
+            # Mutations change the projection; push what every front end
+            # should see.
+            if op not in ("watch", "unwatch"):
+                await self._handle.refresh()
+                await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
-            await self._send({"op": "error", "req": req, "message": str(exc)[:400]})
+            await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
             await self._push()
 
     async def _dispatch(self, op: str, frame: dict[str, Any]) -> str:
@@ -428,17 +524,41 @@ class Registrant:
         await self._push()
 
     async def _push(self) -> None:
-        await self._send({"op": "projection", "data": self._fold.projection.to_json()})
+        """Broadcast a projection repaint to every live connection.
 
-    async def _send(self, frame: dict[str, Any]) -> None:
-        if self._writer is None or self._send_lock is None:
+        Projections are snapshots (no deltas), so every front end wants each
+        one — the daemon fans it to the phone, each attach terminal renders
+        it directly. Sending is per-connection: one dead socket must not
+        block or corrupt the others' frames."""
+        await self._broadcast({"op": "projection", "data": self._fold.projection.to_json()})
+
+    async def _push_to(self, conn: _ClientConn) -> None:
+        """The welcome form of a push: one full projection to one connection."""
+        await self._send_to(conn, {"op": "projection", "data": self._fold.projection.to_json()})
+
+    async def _broadcast(self, frame: dict[str, Any]) -> None:
+        # Copy the registry: a send failure drops its own entry, and mutating
+        # the dict mid-iteration is exactly the failure being handled.
+        for conn in list(self._clients.values()):
+            await self._send_to(conn, frame)
+
+    async def _send_to(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
+        """One frame to one connection. A failed send drops ONLY that client
+        from the registry (never retried — the reader loop will observe the
+        close and its finally is a no-op second removal)."""
+        if self._send_lock is None:
             return
         async with self._send_lock:
             try:
-                self._writer.write(json.dumps(frame).encode() + b"\n")
-                await self._writer.drain()
-            except (ConnectionResetError, BrokenPipeError):
-                self._writer = None
+                conn.writer.write(json.dumps(frame).encode() + b"\n")
+                await conn.writer.drain()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                self._drop_client(conn)
+
+    async def _send(self, frame: dict[str, Any]) -> None:
+        """Broadcast alias kept for the pre-v2 call shape (tests, hosts that
+        grabbed a reference before the bump)."""
+        await self._broadcast(frame)
 
     # -- host-facing helpers ----------------------------------------------------
 
