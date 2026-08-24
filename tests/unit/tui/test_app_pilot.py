@@ -103,27 +103,212 @@ class _FakeJobs:
 def test_idle_mounted_terminal_never_reaps() -> None:
     """Idle duration is irrelevant while the owning TUI reader is alive."""
     reaper = _TerminalFrontendReaper(grace_s=10.0)
-    assert not reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=0.0)
-    assert not reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=10_000.0)
+    assert (
+        reaper.observe(
+            reader_alive=True, busy=False, gate_pending=False, remote_holders=False, now=0.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=True,
+            busy=False,
+            gate_pending=False,
+            remote_holders=False,
+            now=10_000.0,
+        )
+        is None
+    )
     assert reaper.quiescent_since is None
 
 
 def test_frontend_gone_busy_defers_reap_until_work_finishes() -> None:
     reaper = _TerminalFrontendReaper(grace_s=10.0)
-    reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=0.0)
-    assert not reaper.observe(reader_alive=False, busy=True, remote_holders=False, now=100.0)
+    reaper.observe(reader_alive=True, busy=False, gate_pending=False, remote_holders=False, now=0.0)
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=True, gate_pending=False, remote_holders=False, now=100.0
+        )
+        is None
+    )
     assert reaper.quiescent_since is None
-    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=110.0)
-    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=119.9)
-    assert reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=120.0)
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=False, remote_holders=False, now=110.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=False, remote_holders=False, now=119.9
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=False,
+            gate_pending=False,
+            remote_holders=False,
+            now=120.0,
+        )
+        == "exit"
+    )
 
 
-def test_frontend_gone_quiescent_reaps_after_grace() -> None:
-    reaper = _TerminalFrontendReaper(grace_s=10.0)
-    reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=0.0)
-    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=1.0)
-    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=10.9)
-    assert reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=11.0)
+def test_frontend_gate_gets_grace_then_fresh_exit_grace() -> None:
+    reaper = _TerminalFrontendReaper(grace_s=3.0)
+    reaper.observe(reader_alive=True, busy=False, gate_pending=False, remote_holders=False, now=0.0)
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=True, remote_holders=False, now=1.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=False,
+            gate_pending=True,
+            remote_holders=False,
+            now=30.9,
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=False,
+            gate_pending=True,
+            remote_holders=False,
+            now=31.0,
+        )
+        == "settle"
+    )
+    reaper.gates_settled()
+    assert (
+        reaper.observe(
+            reader_alive=False, busy=False, gate_pending=False, remote_holders=False, now=31.0
+        )
+        is None
+    )
+    assert (
+        reaper.observe(
+            reader_alive=False,
+            busy=False,
+            gate_pending=False,
+            remote_holders=False,
+            now=34.0,
+        )
+        == "exit"
+    )
+
+
+class _FrontendRegistrant:
+    def __init__(
+        self,
+        *,
+        watch_supported: bool,
+        phone_watchers: int = 0,
+        attach_clients: int = 0,
+    ) -> None:
+        self.watch_supported = watch_supported
+        self.phone_watchers = phone_watchers
+        self._attach_clients = attach_clients
+
+    def attach_clients(self) -> int:
+        return self._attach_clients
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("work", ["model", "tool", "compaction", "subagent"])
+async def test_terminal_loss_never_settles_or_exits_during_active_work(work: str) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    app._terminal_frontend_reaper = _TerminalFrontendReaper(grace_s=3.0, reader_seen=True)
+    approval = ApprovalPrompt("bash", "run a command")
+    app._approval = approval
+    session = FakeSession()
+    app._session = session
+    if work in ("model", "tool"):
+        session.streaming = True
+    elif work == "compaction":
+        app._compacting = True
+    else:
+        session.running_children = 1
+    exits: list[bool] = []
+    with (
+        patch.object(app, "_terminal_reader_alive", return_value=False),
+        patch.object(app, "exit", side_effect=lambda: exits.append(True)),
+        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 100.0]),
+    ):
+        app._check_terminal_frontend()
+        app._check_terminal_frontend()
+    assert approval.answered is False
+    assert exits == []
+
+
+@pytest.mark.asyncio
+async def test_pending_gate_waits_for_reconnect_then_settles_and_reaps_after_work() -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    app._terminal_frontend_reaper = _TerminalFrontendReaper(grace_s=3.0, reader_seen=True)
+    approval = ApprovalPrompt("bash", "run a command")
+    app._approval = approval
+    session = FakeSession()
+    app._session = session
+    exits: list[bool] = []
+    readers = iter([False, True, False, False, False, False, False])
+    times = iter([0.0, 2.0, 3.0, 33.0, 34.0, 40.0, 43.0])
+
+    def deny_and_resume() -> None:
+        approval.resolve(False, answer="n")
+        session.streaming = True
+
+    with (
+        patch.object(app, "_terminal_reader_alive", side_effect=lambda: next(readers)),
+        patch.object(app, "_deny_queued_approvals", side_effect=deny_and_resume),
+        patch.object(app, "_settle_ask_picker"),
+        patch.object(app, "_settle_key_prompt"),
+        patch.object(app, "exit", side_effect=lambda: exits.append(True)),
+        patch("local_operator.tui.app.time.monotonic", side_effect=lambda: next(times)),
+    ):
+        app._check_terminal_frontend()  # gate grace starts
+        app._check_terminal_frontend()  # reconnect preserves the gate
+        assert approval.answered is False
+        app._check_terminal_frontend()  # replacement grace starts
+        app._check_terminal_frontend()  # grace expires and resumes work
+        assert approval.answered is True
+        app._check_terminal_frontend()  # resumed work cannot exit
+        session.streaming = False
+        app._check_terminal_frontend()  # fresh clean-exit grace starts
+        app._check_terminal_frontend()  # only now may the owner exit
+    assert exits == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "registrant",
+    [
+        _FrontendRegistrant(watch_supported=True, attach_clients=1),
+        _FrontendRegistrant(watch_supported=True, phone_watchers=1),
+        _FrontendRegistrant(watch_supported=False),
+    ],
+)
+async def test_terminal_loss_reaps_independently_of_remote_viewers(
+    registrant: _FrontendRegistrant,
+) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    app._mobile_registrant = registrant
+    app._session = FakeSession()
+    app._terminal_frontend_reaper = _TerminalFrontendReaper(grace_s=3.0, reader_seen=True)
+    exits: list[bool] = []
+    with (
+        patch.object(app, "_terminal_reader_alive", return_value=False),
+        patch.object(app, "exit", side_effect=lambda: exits.append(True)),
+        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 3.0]),
+    ):
+        app._check_terminal_frontend()
+        app._check_terminal_frontend()
+    assert exits == [True]
 
 
 class FakeSession:

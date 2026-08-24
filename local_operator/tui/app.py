@@ -637,26 +637,27 @@ logger = logging.getLogger("local_operator.tui.app")
 #: resume command — where omp's only clears the editor.)
 DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
-#: Terminal-reader liveness is a lifecycle signal, not an idle timer. Textual's
-#: POSIX input thread exits on tty EOF but does not exit the app, so a closed
-#: terminal can otherwise leave the owning pid and session claim alive forever.
-TERMINAL_LIFECYCLE_CHECK_S = 1.0
+#: Terminal-reader liveness is a lifecycle signal, not an idle timer. Fine
+#: polling bounds the 3-second drain without turning user inactivity into input.
+TERMINAL_LIFECYCLE_CHECK_S = 0.25
+TERMINAL_GATE_TIMEOUT_S = 30.0
 
 
 @dataclass
 class _TerminalFrontendReaper:
-    """Turn terminal-reader death into a bounded, holder-aware app exit.
+    """Sequence terminal-loss gate settlement and clean exit safely.
 
-    ``reader_alive=True`` means a genuinely mounted terminal front end and
-    therefore NEVER starts a countdown, however long it is idle. ``False`` is
-    trusted only after a live reader was observed: drivers without a reader and
-    startup races must not look like terminal loss. Busy work and a remote phone
-    or attach holder both cancel the grace window, so work can finish and a new
-    front end can take over before this process releases the session.
+    A front-end-only gate gets one grace window for a replacement viewer before
+    it is settled. Work unblocked by that settlement then gets as long as it
+    needs, and clean exit requires a fresh quiescent grace. Keeping those clocks
+    separate prevents terminal EOF from becoming either an immediate denial or
+    an implicit turn cancellation.
     """
 
     grace_s: float
+    gate_timeout_s: float = TERMINAL_GATE_TIMEOUT_S
     reader_seen: bool = False
+    gate_since: float | None = None
     quiescent_since: float | None = None
 
     def observe(
@@ -664,22 +665,46 @@ class _TerminalFrontendReaper:
         *,
         reader_alive: bool | None,
         busy: bool,
+        gate_pending: bool,
         remote_holders: bool,
         now: float,
-    ) -> bool:
+    ) -> str | None:
         if reader_alive is None:
-            return False
+            return None
         if reader_alive:
             self.reader_seen = True
+            self.gate_since = None
             self.quiescent_since = None
-            return False
-        if not self.reader_seen or busy or remote_holders:
+            return None
+        if not self.reader_seen:
+            return None
+        if gate_pending:
             self.quiescent_since = None
-            return False
+            if self.gate_since is None:
+                self.gate_since = now
+                return None
+            # The deadline is total answerability time, independent of work,
+            # but settlement waits until it cannot disturb unrelated activity.
+            if now - self.gate_since >= self.gate_timeout_s and not busy:
+                self.gate_since = None
+                return "settle"
+            return None
+        if busy:
+            self.gate_since = None
+            self.quiescent_since = None
+            return None
+        self.gate_since = None
         if self.quiescent_since is None:
             self.quiescent_since = now
-            return False
-        return now - self.quiescent_since >= self.grace_s
+            return None
+        if now - self.quiescent_since >= self.grace_s:
+            return "exit"
+        return None
+
+    def gates_settled(self) -> None:
+        """Require a fresh grace after settlement, even if callbacks drain inline."""
+        self.gate_since = None
+        self.quiescent_since = None
 
 
 #: How long a second Esc counts as the "also stop the subagents" press. Longer
@@ -6804,22 +6829,25 @@ class OperatorApp(App[None]):
             return None
         return bool(reader.is_alive())
 
-    def _remote_frontend_holds_session(self) -> bool:
-        registrant = self._mobile_registrant
-        if registrant is None:
-            return False
-        try:
-            return bool(registrant.phone_watchers) or registrant.attach_clients() > 0
-        except Exception:  # noqa: BLE001 — uncertainty keeps the owner alive
-            logger.debug("mobile holder check failed", exc_info=True)
-            return True
+    def _terminal_frontend_gate_pending(self) -> bool:
+        approval = self._approval
+        approval_pending = approval is not None and not approval.answered
+        ask_pending = self._ask_pending is not None and not self._ask_pending.done()
+        return approval_pending or ask_pending or self._key_prompt is not None
 
-    def _terminal_loss_busy(self) -> bool:
+    def _terminal_loss_busy(self, *, gate_pending: bool) -> bool:
         session = self._session
-        if self._turn_is_live() or self._compacting:
+        if self._compacting:
             return True
         if session is None:
-            return False
+            return self._turn_is_live() and not gate_pending
+        # A gate parks the app's runner, so that flag alone is not autonomous
+        # work while WAITING_INPUT. The session streaming flag still catches an
+        # unrelated model/tool phase that happens to overlap the visible gate.
+        if bool(getattr(session, "is_streaming", False)):
+            return True
+        if self._turn_is_live() and not gate_pending:
+            return True
         try:
             return session.running_subagents() > 0
         except Exception:  # noqa: BLE001 — uncertainty keeps the owner alive
@@ -6828,21 +6856,23 @@ class OperatorApp(App[None]):
     def _check_terminal_frontend(self) -> None:
         """Reap a TUI whose tty reader is gone, without truncating live work."""
         reader_alive = self._terminal_reader_alive()
-        remote_holders = self._remote_frontend_holds_session()
-        if reader_alive is False and not remote_holders:
-            # These futures require a front end response. Settling them is not
-            # an agent abort: it lets the parked turn finish normally so busy
-            # work and subagents can drain before the grace window begins.
+        gate_pending = self._terminal_frontend_gate_pending()
+        action = self._terminal_frontend_reaper.observe(
+            reader_alive=reader_alive,
+            busy=self._terminal_loss_busy(gate_pending=gate_pending),
+            gate_pending=gate_pending,
+            remote_holders=False,
+            now=time.monotonic(),
+        )
+        if action == "settle":
+            # Only grace expiry makes an unreachable front-end gate disposable.
+            # Its callback may resume real work, which the next observations let
+            # finish before a separate clean-exit grace can begin.
             self._deny_queued_approvals()
             self._settle_ask_picker()
             self._settle_key_prompt()
-        should_exit = self._terminal_frontend_reaper.observe(
-            reader_alive=reader_alive,
-            busy=self._terminal_loss_busy(),
-            remote_holders=remote_holders,
-            now=time.monotonic(),
-        )
-        if should_exit:
+            self._terminal_frontend_reaper.gates_settled()
+        elif action == "exit":
             logger.info("terminal front end closed; session is quiescent — exiting cleanly")
             self.exit()
 

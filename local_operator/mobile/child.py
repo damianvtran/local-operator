@@ -10,9 +10,9 @@ session its work.
 
 The child builds a session with the CLI's composition root, wraps it in the
 owned-session handle (approval/ask gates resolved from the phone), registers
-it through the normal record + control socket path, and idles until its work
-ends, a signal arrives, or — since the attach/reaping design — no front end
-holds it any longer (see :func:`_reaper`). Environment variables are the
+it through the normal record + control socket path, and idles until a signal
+arrives or its work and pending gates drain long enough for self-reaping (see
+:func:`_reaper`). Environment variables are the
 spawn contract (``LOP_MOBILE_CHILD_CWD``, ``_PROVIDER``, ``_MODEL``) — argv
 would be ps-readable.
 """
@@ -28,17 +28,13 @@ import time
 
 logger = logging.getLogger(__name__)
 
-#: How often the reaper re-evaluates "is anyone still holding this session?".
-#: Short enough that a front end leaving is noticed within the grace budget's
-#: own resolution, long enough that five-second polls cost nothing.
-REAP_CHECK_S = 5.0
+#: Fine polling makes the 3-second drain predictable while remaining cheap for
+#: one event loop. Viewer traffic is deliberately not an input to this loop.
+REAP_CHECK_S = 0.25
 
-#: Default grace before a held-by-nobody session exits, overridable with
-#: ``LOP_SESSION_GRACE_S``. Long enough that a phone screen-lock / tunnel
-#: blip (SSE drop + reconnect) never kills a session the user is coming back
-#: to; short enough that unattended sessions cannot accumulate as live
-#: processes — the buildup this reaper exists to prevent.
-DEFAULT_GRACE_S = 120.0
+#: Idle execution hosts are disposable once their durable session state is
+#: quiescent. This is a drain for newly arriving work, not a reconnect grace.
+DEFAULT_GRACE_S = 3.0
 
 
 def _grace_seconds() -> float:
@@ -51,43 +47,19 @@ def _grace_seconds() -> float:
 
 
 def _should_exit(handle: object, registrant: object) -> bool:
-    """True iff NO front end holds the session and no work is running.
-
-    The mixed-version guard is load-bearing: until the registrant has SEEN a
-    watch/unwatch op (``watch_supported``), phone watchers are UNKNOWN — an
-    old daemon never sends the ops — and unknown must count as present, or a
-    new child under an old daemon would reap a session a phone is actively
-    watching. The latch never resets, so once a watch-capable daemon has
-    spoken, a true zero is trusted forever after.
-    """
-    watchers_known_empty = (
-        bool(getattr(registrant, "watch_supported", False))
-        and getattr(registrant, "phone_watchers", 1) == 0
-    )
-    if not watchers_known_empty:
-        return False
-    if getattr(registrant, "attach_clients", lambda: 0)() > 0:
-        return False
+    """True when the execution host is quiescent, regardless of viewers."""
+    del registrant  # Watchers and replicas observe work; they do not own it.
     is_busy = getattr(handle, "is_busy", None)
-    if is_busy is not None and is_busy():
-        return False
-    return True
+    return not (is_busy is not None and is_busy())
 
 
 async def _clean_exit(handle: object, registrant: object) -> None:
-    """Deny gates, dispose the session (releases the claim), unpublish.
+    """Dispose the quiescent session, then unpublish its owner record.
 
-    Ordering mirrors OperatorApp.on_unmount: the gates are refused BEFORE
-    dispose because dispose awaits teardown and a turn parked on an
-    unanswered card would never reach it; the record is unpublished LAST so
-    a scanner never sees a gone record while the claim is still held.
+    The reaper reaches this only after ordinary gate timeouts and all resumed
+    work have drained, so injecting a shutdown denial here would violate the
+    same no-interruption invariant that selected this state.
     """
-    deny = getattr(handle, "_deny_pending_gates", None)
-    if deny is not None:
-        try:
-            deny()
-        except Exception:  # noqa: BLE001 — shutdown must proceed
-            logger.debug("child gate deny failed", exc_info=True)
     try:
         await handle.dispose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
@@ -99,15 +71,10 @@ async def _clean_exit(handle: object, registrant: object) -> None:
 
 
 async def _reaper(handle: object, registrant: object, stop: asyncio.Event) -> None:
-    """Exit the child cleanly once no front end has held it for a grace period.
+    """Exit the disposable execution host after one uninterrupted idle drain.
 
-    The child is the only party with the authoritative liveness facts (its
-    turn, its subagents, its connections), so the child reaps ITSELF — the
-    daemon never kills children. The grace timer starts at the earliest
-    moment all hold conditions are false: a turn mid-flight when the last
-    front end leaves simply defers the start (``is_busy`` gates it), so the
-    grace outlives the turn by construction. Any holder returning mid-grace
-    cancels the countdown.
+    Autonomous work and ordinary pending-gate timeouts are authoritative. Any
+    new activity resets the drain; viewer count intentionally does not.
     """
     grace_s = _grace_seconds()
     while not stop.is_set():
@@ -118,9 +85,9 @@ async def _reaper(handle: object, registrant: object, stop: asyncio.Event) -> No
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if stop.is_set() or not _should_exit(handle, registrant):
-                break  # a front end came back (or shutdown began)
+                break  # work arrived (or shutdown began)
         else:
-            logger.info("mobile child: no front end for %.0fs — exiting cleanly", grace_s)
+            logger.info("mobile child: idle for %.1fs; exiting cleanly", grace_s)
             await _clean_exit(handle, registrant)
             stop.set()  # amain's wait() returns; exit code stays 0
             return

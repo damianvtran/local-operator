@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import AskOption, AskQuestion
+from local_operator.mobile import owned as owned_mod
 from local_operator.mobile.owned import OwnedSessionHandle
 
 
@@ -72,6 +73,9 @@ class FakeSession:
 
     def history(self):  # pragma: no cover - not exercised here
         return []
+
+    def running_subagents(self) -> int:
+        return 0
 
     @property
     def reasoning_effort(self):  # pragma: no cover
@@ -139,6 +143,29 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
     assert await second is False
     await asyncio.sleep(0)
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_pending_gate_is_busy_until_ordinary_timeout(monkeypatch) -> None:
+    """The child drain cannot deny WAITING_INPUT ahead of its 30s policy."""
+    monkeypatch.setattr(owned_mod, "PENDING_REQUEST_TIMEOUT_S", 0.05)
+    handle, _ = make_handle(auto_approve=False)
+    waiting = asyncio.ensure_future(handle._approval_gate("bash", "one"))
+    await asyncio.sleep(0)
+    assert handle.is_busy() is True
+    assert await waiting is False
+    assert handle.is_busy() is False
+    assert owned_mod.PENDING_REQUEST_TIMEOUT_S == 0.05
+
+
+@pytest.mark.asyncio
+async def test_detached_background_work_is_busy_until_done() -> None:
+    handle, _ = make_handle()
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    handle._background_tasks.add(future)
+    assert handle.is_busy() is True
+    future.set_result(None)
+    assert handle.is_busy() is False
 
 
 @pytest.mark.asyncio

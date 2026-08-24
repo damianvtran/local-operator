@@ -30,6 +30,7 @@ class FakeHandle:
         self._busy = busy
         self.disposed = False
         self.denied = False
+        self.dispose_order: list[str] = []
 
     def is_busy(self) -> bool:
         return self._busy
@@ -38,44 +39,24 @@ class FakeHandle:
         self.denied = True
 
     async def dispose(self) -> None:
+        self.dispose_order.append("dispose")
         self.disposed = True
 
 
-def test_unknown_watchers_never_exit() -> None:
-    """The mixed-version guard: an old daemon never sends watch/unwatch, so
-    watchers are UNKNOWN and _should_exit must read as present."""
-    reg = FakeRegistrant(supported=False, watchers=0)
-    assert _should_exit(FakeHandle(), reg) is False
-
-
-def test_known_zero_watchers_idle_session_exits() -> None:
-    reg = FakeRegistrant(supported=True, watchers=0)
+@pytest.mark.parametrize(
+    "reg",
+    [
+        FakeRegistrant(supported=False),
+        FakeRegistrant(supported=True, watchers=1),
+        FakeRegistrant(supported=True, watchers=5, attaches=3),
+    ],
+)
+def test_viewer_counts_never_pin_idle_host(reg: FakeRegistrant) -> None:
     assert _should_exit(FakeHandle(), reg) is True
 
 
-def test_present_watchers_hold() -> None:
-    reg = FakeRegistrant(supported=True, watchers=1)
-    assert _should_exit(FakeHandle(), reg) is False
-
-
-def test_attach_client_holds() -> None:
-    reg = FakeRegistrant(supported=True, watchers=0, attaches=1)
-    assert _should_exit(FakeHandle(), reg) is False
-
-
-def test_busy_session_holds() -> None:
-    reg = FakeRegistrant(supported=True, watchers=0)
-    assert _should_exit(FakeHandle(busy=True), reg) is False
-
-
-def test_latch_never_resets() -> None:
-    """Once watch-capable, silence means zero — but the latch itself must
-    survive a watchers count that rises again (it gates on the flag, not the
-    count's history)."""
-    reg = FakeRegistrant(supported=True, watchers=2)
-    assert _should_exit(FakeHandle(), reg) is False
-    reg.phone_watchers = 0
-    assert _should_exit(FakeHandle(), reg) is True
+def test_active_work_holds() -> None:
+    assert _should_exit(FakeHandle(busy=True), FakeRegistrant()) is False
 
 
 @pytest.mark.asyncio
@@ -94,7 +75,7 @@ async def test_clean_exit_orders_gates_dispose_unpublish(monkeypatch) -> None:
     handle.dispose = dispose  # type: ignore[method-assign]
     reg.aclose = aclose  # type: ignore[method-assign]
     await _clean_exit(handle, reg)
-    assert order == ["deny", "dispose", "unpublish"]
+    assert order == ["dispose", "unpublish"]
 
 
 @pytest.mark.asyncio
@@ -111,25 +92,23 @@ async def test_grace_elapses_then_clean_exit(monkeypatch) -> None:
             break
         await asyncio.sleep(0.05)
     assert stop.is_set()
-    assert handle.disposed and handle.denied and reg.closed
+    assert handle.disposed and not handle.denied and reg.closed
     await task
 
 
 @pytest.mark.asyncio
-async def test_front_end_returning_mid_grace_cancels(monkeypatch) -> None:
-    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
-    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.5")
-    reg = FakeRegistrant(supported=True)
-    handle = FakeHandle()
-    stop = asyncio.Event()
-    task = asyncio.ensure_future(_reaper(handle, reg, stop))
-    # Inside the grace window, a phone comes back.
-    await asyncio.sleep(0.15)
-    reg.phone_watchers = 1
-    await asyncio.sleep(0.8)  # well past the original grace
-    assert not stop.is_set()
-    assert not handle.disposed
-    task.cancel()
+async def test_viewers_do_not_change_idle_timing(monkeypatch) -> None:
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.08")
+    elapsed: list[float] = []
+    for watchers, attaches in ((0, 0), (1, 0), (5, 3)):
+        reg = FakeRegistrant(supported=bool(watchers), watchers=watchers, attaches=attaches)
+        handle = FakeHandle()
+        stop = asyncio.Event()
+        started = asyncio.get_running_loop().time()
+        await _reaper(handle, reg, stop)
+        elapsed.append(asyncio.get_running_loop().time() - started)
+    assert max(elapsed) - min(elapsed) < 0.04
 
 
 @pytest.mark.asyncio
@@ -154,12 +133,30 @@ async def test_busy_session_defers_grace_start(monkeypatch) -> None:
     await task
 
 
+@pytest.mark.asyncio
+async def test_new_activity_resets_idle_drain(monkeypatch) -> None:
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.02)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.12")
+    reg = FakeRegistrant(watchers=3, attaches=2)
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+    await asyncio.sleep(0.08)
+    handle._busy = True
+    await asyncio.sleep(0.1)
+    handle._busy = False
+    await asyncio.sleep(0.08)
+    assert not stop.is_set()
+    await task
+    assert stop.is_set()
+
+
 def test_grace_env_override_and_defaults(monkeypatch) -> None:
     monkeypatch.delenv("LOP_SESSION_GRACE_S", raising=False)
-    assert child_mod._grace_seconds() == child_mod.DEFAULT_GRACE_S == 120.0
+    assert child_mod._grace_seconds() == child_mod.DEFAULT_GRACE_S == 3.0
     monkeypatch.setenv("LOP_SESSION_GRACE_S", "10")
     assert child_mod._grace_seconds() == 10.0
     monkeypatch.setenv("LOP_SESSION_GRACE_S", "not-a-number")
-    assert child_mod._grace_seconds() == 120.0
+    assert child_mod._grace_seconds() == 3.0
     monkeypatch.setenv("LOP_SESSION_GRACE_S", "-5")
-    assert child_mod._grace_seconds() == 120.0
+    assert child_mod._grace_seconds() == 3.0
