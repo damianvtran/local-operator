@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -24,6 +25,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     TextContent,
 )
+from local_operator.paths import config_dir
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
@@ -605,6 +607,83 @@ def test_exit_quit_collapsed_to_one_command() -> None:
     assert "quit" not in names  # not a separate command
     exit_command = next(c for c in SLASH_COMMANDS if c.name == "exit")
     assert exit_command.aliases == ("quit",)
+
+
+@pytest.mark.asyncio
+async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) -> None:
+    """The owned-session branch of _resume_session attaches when the owner
+    publishes a protocol>=2 record (design §2.5); the factory never runs."""
+    from local_operator.mobile import registry as mobile_registry
+    from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
+    from local_operator.tui.attach_screen import AttachScreen
+
+    session = FakeSession()
+
+    async def resume_factory(resume_id):
+        return session
+
+    app = OperatorApp(lambda: _factory(session), resume_factory=resume_factory)
+    # A live pid that is not the app: this test's own parent (the xdist
+    # worker shell) is alive and distinct.
+    owner = os.getppid()
+    marker_dir = config_dir() / "sessions" / "sess-owned"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / ".session.pid").write_text(str(owner))
+    record = SessionRecord(
+        pid=owner,
+        kind="tui",
+        session_id="sess-owned",
+        conversation_name="Owned",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        protocol=PROTOCOL_VERSION,
+    )
+    mobile_registry.publish(record, root=config_dir())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._resume_session("sess-owned", lambda *a, **k: None)
+        for _ in range(50):
+            await pilot.pause()
+            if app.screen_stack and isinstance(app.screen, AttachScreen):
+                break
+            await asyncio.sleep(0.05)
+        assert isinstance(app.screen, AttachScreen)
+        assert session.prompts == []  # no second writer ever built
+
+
+@pytest.mark.asyncio
+async def test_resume_owned_session_without_record_keeps_refusal(
+    monkeypatch, capsys
+) -> None:
+    """No record (old binary / registrant failure) keeps today's refusal copy
+    verbatim — graceful degradation."""
+    session = FakeSession()
+
+    async def resume_factory(resume_id):
+        return session
+
+    app = OperatorApp(lambda: _factory(session), resume_factory=resume_factory)
+    owner = os.getppid()
+    marker_dir = config_dir() / "sessions" / "sess-owned2"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / ".session.pid").write_text(str(owner))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._resume_session("sess-owned2", lambda *a, **k: None)
+        for _ in range(20):
+            await pilot.pause()
+        out = capsys.readouterr().out
+        # The refusal lands as a transcript notice (rendered), not stdout;
+        # assert on the app's notice bookkeeping instead of the pipe.
+        from local_operator.tui.widgets.transcript import NoticeBlock
+
+        notices = list(app.query(NoticeBlock))
+        assert any(
+            "already open in another process" in (n.text() or "") for n in notices
+        )
+        assert session.prompts == []
 
 
 @pytest.mark.asyncio
