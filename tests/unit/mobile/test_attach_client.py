@@ -4,7 +4,6 @@ correlation, and the no-reconnect contract."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 
@@ -48,6 +47,29 @@ class FakeHandle:
 
     async def slash(self, command, args):  # noqa: ANN001, ANN202
         raise ValueError(f"/{command} is terminal-only here")
+
+    # The rest of the SessionHandle surface the registrant's protocol demands;
+    # these tests never drive them, but the protocol check is structural.
+    async def abort(self):  # noqa: ANN202
+        return "stopping"
+
+    async def set_model(self, provider, model_id):  # noqa: ANN001, ANN202
+        return "model"
+
+    async def set_effort(self, effort):  # noqa: ANN001, ANN202
+        return "effort"
+
+    async def new_conversation(self):  # noqa: ANN202
+        raise ValueError("not here")
+
+    async def resume_session(self, session_id):  # noqa: ANN001, ANN202
+        raise ValueError("not here")
+
+    async def approval_answer(self, request_id, approved, remember):  # noqa: ANN001, ANN202
+        return "done"
+
+    async def ask_answer(self, request_id, value, question_index=None):  # noqa: ANN001, ANN202
+        return "done"
 
 
 async def _wait_record() -> registry.SessionRecord:

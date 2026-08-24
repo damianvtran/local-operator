@@ -51,6 +51,7 @@ def _resolve_gate_future(future: asyncio.Future[Any], value: Any) -> None:
     except (InvalidStateError, TypeError):
         pass
 
+
 #: How long an approval/ask may sit unanswered before the tool is denied and
 #: the turn told why. A phone in a pocket is the common case; an unbounded
 #: wait would pin the turn (and its tool slot) forever.

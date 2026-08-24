@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,9 +49,7 @@ from local_operator.mobile.types import (
 ACK_TIMEOUT_S = 15.0
 
 
-def find_owner_record(
-    config_dir: Path, session_id: str
-) -> tuple[SessionRecord | None, int | None]:
+def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
 
     Returns ``(record, owner_pid)``. The normal case matches a record whose
@@ -130,9 +127,7 @@ class AttachClient:
         retry mechanism, by design.
         """
         if record.protocol < 2:
-            raise ConnectionError(
-                f"owner runs protocol v{record.protocol}; attach needs >= 2"
-            )
+            raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
         try:
             reader, writer = await asyncio.open_connection(
@@ -162,9 +157,7 @@ class AttachClient:
             raise ConnectionError(f"owner replied {frame.get('op')!r}, not its state")
         projection = _projection_from_json(frame.get("data") or {}, record)
         if projection.session_id != session_id:
-            raise ConnectionError(
-                f"owner moved to another conversation ({projection.session_id})"
-            )
+            raise ConnectionError(f"owner moved to another conversation ({projection.session_id})")
         self._connected = True
         self._reader_task = asyncio.get_running_loop().create_task(self._pump())
         # Deliver the welcome synchronously so the host paints before any

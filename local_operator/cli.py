@@ -1963,9 +1963,7 @@ def main() -> int:
                 if owner is not None and owner != os.getpid():
                     from local_operator.cli_attach import run_owned_resume_attach
 
-                    return run_owned_resume_attach(
-                        config_dir(), str(args.resume), owner
-                    )
+                    return run_owned_resume_attach(config_dir(), str(args.resume), owner)
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
         # (CL-12) No env_config binding here: the scheduler wrapper resolves its

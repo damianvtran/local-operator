@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+from typing import Any
 
 import pytest
 
@@ -96,9 +96,7 @@ async def _wait_record() -> registry.SessionRecord:
 
 async def _dial(record: registry.SessionRecord, *, client: str | None = None):
     """Open + auth one connection; consume the welcome projection."""
-    reader, writer = await asyncio.open_connection(
-        "127.0.0.1", record.control_port, limit=1 << 20
-    )
+    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port, limit=1 << 20)
     auth: dict[str, object] = {"key": record.control_key}
     if client is not None:
         auth["client"] = client
@@ -111,7 +109,7 @@ async def _dial(record: registry.SessionRecord, *, client: str | None = None):
 
 async def _until(
     reader: asyncio.StreamReader, want_op: str, want_req: object = None, n: int = 30
-) -> dict:
+) -> dict[str, Any]:
     """Read until a frame matching (op, req) arrives; skip broadcasts."""
     for _ in range(n):
         raw = await asyncio.wait_for(reader.readline(), timeout=5)
@@ -319,7 +317,7 @@ async def test_watch_unwatch_accounting_and_floor() -> None:
         rd, wd = await _dial(record)
         wd.write(json.dumps({"op": "unwatch", "req": 1}).encode() + b"\n")
         await wd.drain()
-        ack = await _until(rd, "ack", 1)
+        await _until(rd, "ack", 1)
         # The unwatch-before-watch case floors at zero: a daemon restart
         # redials without unwatching and the counter must not go negative.
         assert registrant.phone_watchers == 0

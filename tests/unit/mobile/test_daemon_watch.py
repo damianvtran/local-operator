@@ -5,13 +5,11 @@ error reply is swallowed rather than 500ing the handshake."""
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
-from starlette.testclient import TestClient
 
 from local_operator.mobile import registry
-from local_operator.mobile.daemon import MobileDaemon, SessionEntry, build_app
+from local_operator.mobile.daemon import MobileDaemon, SessionEntry
 from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import SessionProjection
 
@@ -33,6 +31,36 @@ class FakeHandle:
 
     def subscribe(self, on_projection):  # noqa: ANN001, ANN202
         return lambda: None
+
+    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
+        return "sent"
+
+    async def steer(self, text, images=None):  # noqa: ANN001, ANN202
+        return "queued"
+
+    async def abort(self):  # noqa: ANN202
+        return "stopping"
+
+    async def set_model(self, provider, model_id):  # noqa: ANN001, ANN202
+        return "model"
+
+    async def set_effort(self, effort):  # noqa: ANN001, ANN202
+        return "effort"
+
+    async def slash(self, command, args):  # noqa: ANN001, ANN202
+        return "done"
+
+    async def new_conversation(self):  # noqa: ANN202
+        return "done"
+
+    async def resume_session(self, session_id):  # noqa: ANN001, ANN202
+        return "done"
+
+    async def approval_answer(self, request_id, approved, remember):  # noqa: ANN001, ANN202
+        return "done"
+
+    async def ask_answer(self, request_id, value, question_index=None):  # noqa: ANN001, ANN202
+        return "done"
 
     async def refresh(self) -> None:
         pass

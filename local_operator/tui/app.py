@@ -3233,9 +3233,7 @@ class OperatorApp(App[None]):
         notice(f"resuming session {resume_id}…")
         self.run_worker(self._reload_session(), thread=False, group="session")
 
-    async def _attach_or_refuse(
-        self, config_dir, concrete: str, owner: int
-    ) -> None:
+    async def _attach_or_refuse(self, config_dir, concrete: str, owner: int) -> None:
         """Settle the owned-session branch of ``_resume_session``.
 
         ATTACH when the owner is reachable over the control socket (record
@@ -3247,9 +3245,7 @@ class OperatorApp(App[None]):
         """
         from local_operator.mobile.attach_client import find_owner_record
 
-        record, found_owner = await asyncio.to_thread(
-            find_owner_record, config_dir, concrete
-        )
+        record, found_owner = await asyncio.to_thread(find_owner_record, config_dir, concrete)
         if record is not None and found_owner == owner:
             from local_operator.tui.attach_screen import AttachScreen
             from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS, Toast

@@ -120,9 +120,7 @@ async def _reaper(handle: object, registrant: object, stop: asyncio.Event) -> No
             if stop.is_set() or not _should_exit(handle, registrant):
                 break  # a front end came back (or shutdown began)
         else:
-            logger.info(
-                "mobile child: no front end for %.0fs — exiting cleanly", grace_s
-            )
+            logger.info("mobile child: no front end for %.0fs — exiting cleanly", grace_s)
             await _clean_exit(handle, registrant)
             stop.set()  # amain's wait() returns; exit code stays 0
             return

@@ -46,12 +46,8 @@ def make_projection(
         activity="auditing merged MRs" if streaming else "",
         transcript=[
             TranscriptEntry(id="u1", kind="user", text="summarise the ingest path"),
-            TranscriptEntry(
-                id="a1", kind="assistant", text="The ingest path has three stages"
-            ),
-            TranscriptEntry(
-                id="t1", kind="tool", tool_name="bash", summary="grep -r ingest src/"
-            ),
+            TranscriptEntry(id="a1", kind="assistant", text="The ingest path has three stages"),
+            TranscriptEntry(id="t1", kind="tool", tool_name="bash", summary="grep -r ingest src/"),
             TranscriptEntry(id="n1", kind="notice", text="queued as steering"),
         ],
         pending=pending,
@@ -165,9 +161,7 @@ async def test_pending_approval_renders_and_y_n_answers() -> None:
         screen, stub = await _attached_screen(app)
         screen._render_projection(
             make_projection(
-                pending=PendingRequest(
-                    request_id="r1", kind="approval", title="bash: rm -rf build"
-                )
+                pending=PendingRequest(request_id="r1", kind="approval", title="bash: rm -rf build")
             )
         )
         await pilot.pause()

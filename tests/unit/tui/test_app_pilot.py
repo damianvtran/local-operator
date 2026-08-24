@@ -654,9 +654,7 @@ async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_resume_owned_session_without_record_keeps_refusal(
-    monkeypatch, capsys
-) -> None:
+async def test_resume_owned_session_without_record_keeps_refusal(monkeypatch, capsys) -> None:
     """No record (old binary / registrant failure) keeps today's refusal copy
     verbatim — graceful degradation."""
     session = FakeSession()
@@ -674,15 +672,13 @@ async def test_resume_owned_session_without_record_keeps_refusal(
         app._resume_session("sess-owned2", lambda *a, **k: None)
         for _ in range(20):
             await pilot.pause()
-        out = capsys.readouterr().out
+        capsys.readouterr()
         # The refusal lands as a transcript notice (rendered), not stdout;
         # assert on the app's notice bookkeeping instead of the pipe.
         from local_operator.tui.widgets.transcript import NoticeBlock
 
         notices = list(app.query(NoticeBlock))
-        assert any(
-            "already open in another process" in (n.text() or "") for n in notices
-        )
+        assert any("already open in another process" in (n.text() or "") for n in notices)
         assert session.prompts == []
 
 

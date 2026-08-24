@@ -30,14 +30,18 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable, Optional
 
-from textual.app import App, ComposeResult
+from textual.app import App
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widget import Widget
-from textual.binding import Binding
 from textual.widgets import Input, Static
+
 from local_operator.mobile.attach_client import AttachClient
-from local_operator.mobile.types import SessionProjection, SessionRecord, TranscriptEntry
+from local_operator.mobile.types import (
+    SessionProjection,
+    SessionRecord,
+    TranscriptEntry,
+)
 
 #: Submitted text that starts with this word is a screen command, not a steer.
 #: Only one exists (/detach); parsed by prefix so the composer stays a plain
@@ -162,7 +166,7 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         session_id: str,
         *,
         on_detached: Optional[Callable[[], None]] = None,
-        on_resume_here: Optional[Callable[[str], None]] = None,
+        on_resume_here: Callable[[str], Awaitable[None]] | Callable[[str], None] | None = None,
         standalone: bool = False,
     ) -> None:
         super().__init__()
@@ -208,13 +212,15 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
 
     def _on_projection(self, projection: SessionProjection) -> None:
         self._projection = projection
-        self.call_from_thread(self._render_projection, projection) if self.is_running else (
+        if self.is_running:
+            # The client's reader task is not the UI thread; hop over.
+            self.app.call_from_thread(self._render_projection, projection)
+        else:
             self._render_projection(projection)
-        )
 
     def _on_disconnected(self, reason: str) -> None:
         try:
-            self.call_from_thread(self._owner_exited, reason)
+            self.app.call_from_thread(self._owner_exited, reason)
         except Exception:  # noqa: BLE001 — screen may already be unmounting
             pass
 
@@ -287,20 +293,14 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         try:
             if streaming:
                 detail = await client.steer(text)
-                self._transcript.mount(
-                    Static(f"↪ {text}", classes="attach-row attach-steer")
-                )
+                self._transcript.mount(Static(f"↪ {text}", classes="attach-row attach-steer"))
                 self._banner.update(
                     f"attached · pid {self._record.pid} — queued as steering ({detail})"
                 )
             else:
                 detail = await client.prompt(text)
-                self._transcript.mount(
-                    Static(f"❯ {text}", classes="attach-row attach-user")
-                )
-                self._banner.update(
-                    f"attached · pid {self._record.pid} — {detail}"
-                )
+                self._transcript.mount(Static(f"❯ {text}", classes="attach-row attach-user"))
+                self._banner.update(f"attached · pid {self._record.pid} — {detail}")
         except (RuntimeError, ConnectionError) as exc:
             self._banner.update(f"attached · pid {self._record.pid} — {exc}")
 
@@ -376,7 +376,7 @@ class AttachApp(App[None]):
         self,
         record: SessionRecord,
         session_id: str,
-        on_resume_here: Callable[[str], Awaitable[None]] | None = None,
+        on_resume_here: Callable[[str], Awaitable[None]] | Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
         self._record = record
@@ -406,12 +406,10 @@ class AttachApp(App[None]):
         mission. The standalone host cannot resume in-place (it owns no
         session machinery), so it exits with a sentinel the CLI reads to
         relaunch the real TUI on that transcript."""
-        from local_operator.reexec import REEXEC_CODE, plan_reexec, take_plan  # noqa: F401
-
-        # Simplest correct v1: exit 75 (EX_TEMPFAIL) with the id on stdout;
-        # the CLI wrapper re-runs itself WITHOUT --resume, which now finds the
-        # owner gone and opens normally.
-        self.exit(75, return_code=75)
+        # Exit 75 (EX_TEMPFAIL) is the sentinel the CLI's owned-resume branch
+        # reads as 'relaunch without --resume' — by then the claim marker
+        # names a dead pid, so the relaunch is the legitimate first writer.
+        self.exit(75, return_code=75)  # type: ignore[call-overload]
 
 
 def run_attach_app(record: SessionRecord, session_id: str) -> int:

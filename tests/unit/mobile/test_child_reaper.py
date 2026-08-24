@@ -12,9 +12,7 @@ from local_operator.mobile.child import _clean_exit, _reaper, _should_exit
 
 
 class FakeRegistrant:
-    def __init__(
-        self, *, supported: bool = False, watchers: int = 0, attaches: int = 0
-    ) -> None:
+    def __init__(self, *, supported: bool = False, watchers: int = 0, attaches: int = 0) -> None:
         self.watch_supported = supported
         self.phone_watchers = watchers
         self._attaches = attaches

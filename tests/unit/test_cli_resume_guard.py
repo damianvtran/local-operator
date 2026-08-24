@@ -27,9 +27,7 @@ def _own(config: Path, session_id: str, pid: int) -> None:
     (d / ".session.pid").write_text(str(pid))
 
 
-def test_exec_resume_owned_refuses_exit_1(
-    config: Path, monkeypatch, capsys
-) -> None:
+def test_exec_resume_owned_refuses_exit_1(config: Path, monkeypatch, capsys) -> None:
     sleeper_pid = os.getppid()  # a live pid that is not this process
     _own(config, "sess-owned", sleeper_pid)
     monkeypatch.setattr(
@@ -62,17 +60,13 @@ def test_exec_resume_unowned_proceeds_to_exec(config: Path, monkeypatch) -> None
 
     monkeypatch.setattr(cli_mod, "_preflight_api_key", lambda *a, **k: None)
     monkeypatch.setattr("local_operator.exec_mode.run_exec", fake_run_exec)
-    monkeypatch.setattr(
-        "sys.argv", ["local-operator", "exec", "--resume", "sess-free", "task"]
-    )
+    monkeypatch.setattr("sys.argv", ["local-operator", "exec", "--resume", "sess-free", "task"])
     code = cli_main()
     assert code == 0
     assert seen and seen[0][0] == "task"
 
 
-def test_interactive_resume_owned_runs_attach_path(
-    config: Path, monkeypatch
-) -> None:
+def test_interactive_resume_owned_runs_attach_path(config: Path, monkeypatch) -> None:
     sleeper_pid = os.getppid()
     _own(config, "sess-owned2", sleeper_pid)
     called: list[tuple[object, object, object]] = []
@@ -81,9 +75,7 @@ def test_interactive_resume_owned_runs_attach_path(
         called.append((cfg, session_id, owner))
         return 0
 
-    monkeypatch.setattr(
-        cli_attach, "run_owned_resume_attach", fake_attach, raising=False
-    )
+    monkeypatch.setattr(cli_attach, "run_owned_resume_attach", fake_attach, raising=False)
     # cli imports the function lazily inside main; patch the module attribute
     # the lazy import resolves against.
     import local_operator.cli_attach as mod
@@ -96,9 +88,7 @@ def test_interactive_resume_owned_runs_attach_path(
     assert called[0][2] == sleeper_pid
 
 
-def test_owned_attach_refusal_copy_when_no_record(
-    config: Path, capsys
-) -> None:
+def test_owned_attach_refusal_copy_when_no_record(config: Path, capsys) -> None:
     """The attach gate's graceful degradation: an owner with no record gets
     today's refusal line and exit 1."""
     sleeper_pid = os.getppid()
