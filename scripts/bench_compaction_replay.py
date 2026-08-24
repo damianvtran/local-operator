@@ -43,6 +43,10 @@ from local_operator.harness.types import (  # noqa: E402
 
 CutSelector = Callable[[Sequence[AgentMessage], int], int | None]
 
+# The canonical workload currently saves 73.03%. Keep enough headroom for
+# estimator tuning while refusing a regression to a merely positive result.
+MIN_CUMULATIVE_REPLAY_REDUCTION = 0.50
+
 
 @dataclass(frozen=True)
 class Result:
@@ -243,7 +247,7 @@ def main() -> int:
         and args.threshold_tokens > 0
         and args.keep_recent_tokens > 0
         and args.summary_repetitions > 0
-        and reduction > 0
+        and reduction >= MIN_CUMULATIVE_REPLAY_REDUCTION
         and before.starved_boundaries > 0
         and after.compactions > 0
         and after.starved_boundaries == 0

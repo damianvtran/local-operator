@@ -1,7 +1,11 @@
 """The replay benchmark must measure the incident, not merely print numbers."""
 
 from local_operator.compaction.cutpoint import find_cut_point
-from scripts.bench_compaction_replay import _legacy_find_cut_point, _run
+from scripts.bench_compaction_replay import (
+    MIN_CUMULATIVE_REPLAY_REDUCTION,
+    _legacy_find_cut_point,
+    _run,
+)
 
 
 def test_mid_turn_fix_reduces_cumulative_replay_without_starving():
@@ -21,5 +25,6 @@ def test_mid_turn_fix_reduces_cumulative_replay_without_starving():
     assert before.compactions == 0
     assert after.starved_boundaries == 0
     assert after.compactions > 0
-    assert after.cumulative_replay_tokens < before.cumulative_replay_tokens
+    reduction = 1 - (after.cumulative_replay_tokens / before.cumulative_replay_tokens)
+    assert reduction >= MIN_CUMULATIVE_REPLAY_REDUCTION
     assert after.peak_context_tokens < before.peak_context_tokens
