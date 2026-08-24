@@ -371,15 +371,18 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
     job = _job_with(TRAJECTORY, status="completed")
     session = FakeSession()
     session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
         assert "Reading the ingest path." in " ".join(view.rendered_rows())
 
+        child_dir.mkdir()
         view._history_unavailable = False
-        view._history_directory = str(tmp_path / "child")
-        (tmp_path / "child").mkdir()
         attempts = 0
 
         def flaky(*args, **kwargs):
