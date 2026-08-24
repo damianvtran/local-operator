@@ -34,6 +34,7 @@ from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
+from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle
 from local_operator.mobile.registrant import image_blocks as _image_blocks
@@ -151,6 +152,10 @@ class OwnedSessionHandle(SessionHandle):
         # completed duplicates are recognized from transcript-backed history.
         self._prompt_commands: dict[str, _PromptCommand] = {}
         self._prompt_drain_task: asyncio.Task[None] | None = None
+        # Prompt and steer share one identity namespace. In particular, an idle
+        # projection may race a turn start and transfer the rejected prompt's
+        # identity to steer rather than admitting the same producer twice.
+        self._command_reservations = CommandReservations()
         self._disposing = False
         self._install_gates()
 
@@ -277,6 +282,7 @@ class OwnedSessionHandle(SessionHandle):
                 )
             self._fold.note_prompt_rejected("session closed before the prompt was admitted")
         self._notify()
+        self._command_reservations.clear()
         await self._session.dispose()
 
     def is_busy(self) -> bool:
@@ -413,11 +419,13 @@ class OwnedSessionHandle(SessionHandle):
         if existing is not None:
             await existing.admitted
             return "already admitted"
-        if any(getattr(message, "id", None) == command_id for message in self._session.history()):
+        if not self._command_reservations.reserve(command_id, self._session.history()):
             return "already admitted"
         if self._disposing:
+            self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
+            self._command_reservations.reject(command_id)
             raise RuntimeError(
                 f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
             )
@@ -438,6 +446,7 @@ class OwnedSessionHandle(SessionHandle):
             self._prompt_drain_task.add_done_callback(self._observe_prompt_drain)
         # ACK is the durable transcript append, never insertion into this queue.
         await admitted
+        self._command_reservations.accept(command_id)
         if legacy_prompt and position > 1:
             return f"prompt queued ({position})"
         return "prompt admitted"
@@ -554,6 +563,10 @@ class OwnedSessionHandle(SessionHandle):
                 raise
             except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
                 if not command.admitted.done():
+                    self._command_reservations.reject(
+                        command.command_id,
+                        transfer_to_steer="already streaming" in str(exc),
+                    )
                     command.admitted.set_exception(exc)
                 # Provider, transcript, and tool failures are all terminal for
                 # this one admission. Surface the failure asynchronously, then
@@ -578,8 +591,11 @@ class OwnedSessionHandle(SessionHandle):
         command_id: str | None = None,
     ) -> str:
         self._check_loop_thread()
-        if command_id and any(
-            getattr(message, "id", None) == command_id for message in self._session.history()
+        command_id = command_id or str(uuid.uuid4())
+        if not self._command_reservations.reserve(
+            command_id,
+            self._session.history(),
+            prompt_transfer=True,
         ):
             return "already admitted"
         # Images ride the steer too. Producer identity follows the queued user
@@ -587,7 +603,14 @@ class OwnedSessionHandle(SessionHandle):
         fields: dict[str, Any] = {}
         if "message_id" in inspect.signature(self._session.steer).parameters:
             fields["message_id"] = command_id
-        self._session.steer(text, _image_blocks(images), **fields)
+        try:
+            self._session.steer(text, _image_blocks(images), **fields)
+        except Exception:
+            # No queue insertion means no durable acceptance exists; the same
+            # producer identity must remain retryable after this terminal reject.
+            self._command_reservations.reject(command_id)
+            raise
+        self._command_reservations.accept(command_id)
         self._projection.queued_count += 1
         self._fold.note_user_message(text, steer=True)
         self._notify()

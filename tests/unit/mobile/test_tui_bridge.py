@@ -10,7 +10,39 @@ import json
 
 import pytest
 
+from local_operator.mobile.tui_handle import TuiSessionHandle
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+
+@pytest.mark.asyncio
+async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
+    class Session(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.steer_calls: list[tuple[str, str | None]] = []
+
+        def steer(self, text, images=None, *, message_id=None):  # noqa: ANN001, ANN202
+            self.steer_calls.append((text, message_id))
+
+    class App:
+        def __init__(self, session) -> None:  # noqa: ANN001
+            self._session = session
+
+        def call_from_thread(self, callback) -> None:  # noqa: ANN001
+            # The callback is the Textual loop's atomic admission section. This
+            # fake runs it inline while concurrent bridge tasks contend for it.
+            callback()
+
+    session = Session()
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    receipts = await asyncio.gather(
+        handle.steer("correction", command_id="same-id"),
+        handle.steer("correction", command_id="same-id"),
+    )
+
+    assert receipts == ["steering queued", "already admitted"]
+    assert session.steer_calls == [("correction", "same-id")]
+    assert [row.text for row in handle._fold.projection.transcript] == ["correction"]
 
 
 @pytest.mark.asyncio

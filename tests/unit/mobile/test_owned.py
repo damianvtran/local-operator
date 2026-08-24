@@ -164,6 +164,82 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
 
 
 @pytest.mark.asyncio
+async def test_same_id_concurrent_steers_are_admitted_once() -> None:
+    handle, session = make_handle()
+    command_id = "same-steer"
+
+    receipts = await asyncio.gather(
+        handle.steer("correction", command_id=command_id),
+        handle.steer("correction", command_id=command_id),
+    )
+
+    assert receipts == ["steering queued", "already admitted"]
+    assert session.steer_calls == ["correction"]
+    assert [row.text for row in handle._fold.projection.transcript] == ["correction"]
+
+
+@pytest.mark.asyncio
+async def test_steer_ack_loss_retry_remains_admitted() -> None:
+    handle, session = make_handle()
+
+    assert await handle.steer("once", command_id="lost-ack") == "steering queued"
+    assert await handle.steer("once", command_id="lost-ack") == "already admitted"
+    assert session.steer_calls == ["once"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_steer_rejection_releases_identity() -> None:
+    handle, session = make_handle()
+    original = session.steer
+    attempts = 0
+
+    def reject_once(text, images=None):  # noqa: ANN001, ANN202
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("not accepted")
+        original(text, images)
+
+    session.steer = reject_once  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="not accepted"):
+        await handle.steer("retry", command_id="retry-id")
+    assert await handle.steer("retry", command_id="retry-id") == "steering queued"
+    assert session.steer_calls == ["retry"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_streaming_rejection_transfers_identity_to_steer() -> None:
+    handle, session = make_handle()
+
+    async def reject_prompt(  # noqa: ANN202
+        text, images=None, *, message_id=None, admitted=None  # noqa: ANN001
+    ):
+        raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+
+    session.prompt = reject_prompt  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="already streaming"):
+        await handle.prompt("raced", command_id="fallback-id")
+    assert await handle.steer("raced", command_id="fallback-id") == "steering queued"
+    assert await handle.steer("raced", command_id="fallback-id") == "already admitted"
+    assert session.steer_calls == ["raced"]
+
+
+@pytest.mark.asyncio
+async def test_distinct_concurrent_steers_keep_fifo_order() -> None:
+    handle, session = make_handle()
+
+    receipts = await asyncio.gather(
+        *(
+            handle.steer(text, command_id=f"id-{index}")
+            for index, text in enumerate(["a", "b", "c"])
+        )
+    )
+
+    assert receipts == ["steering queued"] * 3
+    assert session.steer_calls == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
 async def test_concurrent_ordinary_prompts_are_admitted_fifo() -> None:
     handle, session = make_handle()
     first, second, third = await asyncio.gather(

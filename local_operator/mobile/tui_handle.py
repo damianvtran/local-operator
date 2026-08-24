@@ -37,6 +37,7 @@ import logging
 import secrets
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle, image_blocks
 from local_operator.mobile.types import SessionProjection, ask_pending_request
@@ -77,6 +78,9 @@ class TuiSessionHandle(SessionHandle):
         self._fold = ProjectionFold(self._projection)
         self._on_projection: Callable[[], None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        # Mutated only on Textual's loop, making admission atomic even though
+        # several registrant coroutines may cross from its socket thread.
+        self._command_reservations = CommandReservations()
         # request_id -> the live AskPickerScreen for every ask picker this
         # handle has projected to the phone. Keyed by a token_hex request id
         # (owned.py's scheme) because the phone answers by request id and never
@@ -120,6 +124,7 @@ class TuiSessionHandle(SessionHandle):
         # so a late phone answer for a question that no longer exists reports
         # "no longer waiting" instead of settling into the new conversation.
         self._ask_pending.clear()
+        self._command_reservations.clear()
         if self._on_projection is not None:
             self.subscribe(self._on_projection)
 
@@ -171,15 +176,37 @@ class TuiSessionHandle(SessionHandle):
         if not command_id:
             raise ValueError("command_id is required")
         image_blocks = _image_blocks(images)
-        owner_loop: asyncio.AbstractEventLoop = await self._on_app(asyncio.get_running_loop)
-        session = self._session()
-        if any(getattr(message, "id", None) == command_id for message in session.history()):
+
+        def begin_prompt() -> tuple[asyncio.AbstractEventLoop, asyncio.Future[None], Any] | None:
+            session = self._session()
+            if not self._command_reservations.reserve(command_id, session.history()):
+                return None
+            owner_loop = asyncio.get_running_loop()
+            admitted: asyncio.Future[None] = owner_loop.create_future()
+
+            async def run_turn() -> None:
+                try:
+                    await session.prompt(
+                        text,
+                        image_blocks,
+                        message_id=command_id,
+                        admitted=admitted,
+                    )
+                except BaseException as exc:
+                    if not admitted.done():
+                        self._command_reservations.reject(
+                            command_id,
+                            transfer_to_steer="already streaming" in str(exc),
+                        )
+                        admitted.set_exception(exc)
+                    raise
+
+            return owner_loop, admitted, asyncio.run_coroutine_threadsafe(run_turn(), owner_loop)
+
+        started = await self._on_app(begin_prompt)
+        if started is None:
             return "already admitted"
-        admitted: asyncio.Future[None] = owner_loop.create_future()
-        turn = asyncio.run_coroutine_threadsafe(
-            session.prompt(text, image_blocks, message_id=command_id, admitted=admitted),
-            owner_loop,
-        )
+        owner_loop, admitted, turn = started
         try:
             await asyncio.wrap_future(
                 asyncio.run_coroutine_threadsafe(_await_future(admitted), owner_loop)
@@ -187,6 +214,7 @@ class TuiSessionHandle(SessionHandle):
         except Exception:
             turn.cancel()
             raise
+        await self._on_app(lambda: self._command_reservations.accept(command_id))
         return "prompt admitted"
 
     async def steer(
@@ -195,17 +223,28 @@ class TuiSessionHandle(SessionHandle):
         images: list[dict[str, str]] | None = None,
         command_id: str | None = None,
     ) -> str:
+        if not command_id:
+            raise ValueError("command_id is required")
         image_blocks = _image_blocks(images)
 
-        def do_steer() -> None:
+        def do_steer() -> bool:
             session = self._session()
-            if command_id and any(
-                getattr(message, "id", None) == command_id for message in session.history()
+            if not self._command_reservations.reserve(
+                command_id,
+                session.history(),
+                prompt_transfer=True,
             ):
-                return
-            session.steer(text, image_blocks, message_id=command_id)
+                return False
+            try:
+                session.steer(text, image_blocks, message_id=command_id)
+            except Exception:
+                self._command_reservations.reject(command_id)
+                raise
+            self._command_reservations.accept(command_id)
+            return True
 
-        await self._on_app(do_steer)
+        if not await self._on_app(do_steer):
+            return "already admitted"
         self._fold.note_user_message(text, steer=True)
         if self._on_projection is not None:
             self._on_projection()
