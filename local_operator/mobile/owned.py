@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import logging
 import secrets
+from asyncio import InvalidStateError
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
@@ -39,6 +40,16 @@ from local_operator.mobile.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_gate_future(future: asyncio.Future[Any], value: Any) -> None:
+    """Set a gate future's result if it can still take one, swallowing the
+    InvalidStateError otherwise. Module-level so ``call_soon_threadsafe``
+    callbacks (which must never raise) can share it."""
+    try:
+        future.set_result(value)
+    except (InvalidStateError, TypeError):
+        pass
 
 #: How long an approval/ask may sit unanswered before the tool is denied and
 #: the turn told why. A phone in a pocket is the common case; an unbounded
@@ -212,6 +223,59 @@ class OwnedSessionHandle(SessionHandle):
         self._ask_gate = ask_gate
         self._session.set_approval_handler(approval_gate)
         self._session.set_ask_handler(ask_gate)
+
+    async def dispose(self) -> None:
+        """Dispose the underlying session (release the claim, flush, abort).
+
+        The child's clean-exit path calls this rather than reaching through
+        to ``self._session`` so the ordering (deny gates first) stays in one
+        place and hosts cannot forget the claim release."""
+        await self._session.dispose()
+
+    def is_busy(self) -> bool:
+        """True while the session holds work a clean exit would destroy.
+
+        The child reaper's WORK signal (design §4.1): a turn under the lock,
+        an on-demand compaction, live subagents, or a gate parked on the
+        user's answer. A parked approval IS a running turn — the tool slot is
+        held and the conversation is mid-flight, so a reaper that counted it
+        idle would kill sessions waiting on a phone that is merely slow.
+
+        Reads private session state (``_turn_lock``, ``_compacting``) the way
+        the session's own prompt guard does; the alternative — exposing each
+        flag — would widen the session's public surface for one caller."""
+        session = self._session
+        if getattr(session, "is_streaming", False):
+            return True
+        if getattr(session, "_compacting", False):
+            return True
+        if getattr(session, "_turn_lock", None) is not None and session._turn_lock.locked():
+            return True
+        try:
+            if session.running_subagents() > 0:
+                return True
+        except Exception:  # noqa: BLE001 — a broken counter must not wedge the reaper
+            return True
+        if self._pending_futures:
+            return True
+        return False
+
+    def _deny_pending_gates(self) -> None:
+        """Refuse every parked approval/ask so teardown cannot hang on them.
+
+        The clean-exit ordering mirror of OperatorApp.on_unmount (deny gates
+        BEFORE dispose): dispose awaits teardown, and a turn parked on an
+        unanswered card would never reach it. Resolving False/None here is
+        the same answer a timeout would eventually deliver, minus the wait."""
+        for request_id, future in list(self._pending_futures.items()):
+            if not future.done():
+                # None answers an ask ("user escaped"); False would be wrong
+                # there, and None is meaningless to an approval future typed
+                # bool — so resolve by the gate the future serves. Both are
+                # the deny answer their timeout would deliver.
+                value = None if request_id in self._pending_question_ids else False
+                self._loop.call_soon_threadsafe(_resolve_gate_future, future, value)
+        self._pending_futures.clear()
 
     def _resolve_pending(self, request_id: str, value: Any) -> None:
         future = self._pending_futures.get(request_id)
