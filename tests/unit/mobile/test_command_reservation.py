@@ -111,6 +111,34 @@ async def test_pending_steers_are_bounded_without_evicting_accepted_ids(tmp_path
     assert not reservations.reserve("steer-0", kind="steer")
 
 
+def test_async_steer_rejection_releases_identity_and_capacity(tmp_path) -> None:
+    class Session(_SessionAuthority):
+        def __init__(self, transcript):  # noqa: ANN001
+            super().__init__(transcript)
+            self._rejection_handlers = []
+
+        def subscribe_rejected_steering(self, handler):  # noqa: ANN001, ANN202
+            self._rejection_handlers.append(handler)
+            return lambda: self._rejection_handlers.remove(handler)
+
+        def reject(self, command_id: str, reason: str) -> None:
+            for handler in list(self._rejection_handlers):
+                handler(command_id, reason)
+
+    session = Session(Transcript(tmp_path / "session"))
+    reservations = CommandReservations(session)
+    unsubscribe = reservations.subscribe_durable()
+    assert reservations.reserve("retry-id", kind="steer")
+    assert reservations._pending_steers == 1
+
+    session.reject("retry-id", "disk full")
+
+    assert reservations._pending_steers == 0
+    assert not reservations._commands
+    assert reservations.reserve("retry-id", kind="steer")
+    unsubscribe()
+
+
 def test_prompt_transfer_consumes_one_steer_slot_and_rejection_releases_it(tmp_path) -> None:
     reservations = CommandReservations(_SessionAuthority(Transcript(tmp_path / "session")))
     assert reservations.reserve("race", kind="prompt")

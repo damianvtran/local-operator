@@ -16,7 +16,12 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import AskOption, AskQuestion
+from local_operator.harness.types import (
+    AskOption,
+    AskQuestion,
+    NoticeEvent,
+    SteeringDeliveredEvent,
+)
 from local_operator.mobile import owned as owned_mod
 from local_operator.mobile.owned import OwnedSessionHandle
 
@@ -33,6 +38,7 @@ class FakeSession:
         self.is_streaming = False
         self._handlers: list[Any] = []
         self._admission_handlers: list[Any] = []
+        self._steer_rejection_handlers: list[Any] = []
         self._admitted_ids: set[str] = set()
         self._named: list[tuple[str, bool]] = []
         self._complete_calls: list[tuple[str, str]] = []
@@ -97,6 +103,27 @@ class FakeSession:
         self._admitted_ids.add(command_id)
         for handler in list(self._admission_handlers):
             handler(command_id)
+
+    def subscribe_rejected_steering(self, handler):  # noqa: ANN001, ANN202
+        self._steer_rejection_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            self._steer_rejection_handlers.remove(handler)
+
+        return unsubscribe
+
+    def reject_steer(self, command_id: str, reason: str) -> None:
+        for handler in list(self._steer_rejection_handlers):
+            handler(command_id, reason)
+        self.emit(
+            NoticeEvent(
+                text=(
+                    f"steering command {command_id} was not saved: {reason}; "
+                    "retry with the same command ID"
+                )
+            )
+        )
+        self.emit(SteeringDeliveredEvent(count=1))
 
     def running_subagents(self) -> int:
         return 0
@@ -194,6 +221,33 @@ async def test_same_id_concurrent_steers_are_admitted_once() -> None:
     assert receipts == ["steering queued", "already admitted"]
     assert session.steer_calls == ["correction"]
     assert [row.text for row in handle._fold.projection.transcript] == ["correction"]
+
+
+@pytest.mark.asyncio
+async def test_async_steer_rejection_releases_owned_slot_and_same_id() -> None:
+    handle, session = make_handle()
+    notified = 0
+
+    def notify() -> None:
+        nonlocal notified
+        notified += 1
+
+    handle.subscribe(notify)
+    assert await handle.steer("first", command_id="retry-id") == "steering queued"
+    assert handle._command_reservations._pending_steers == 1
+    assert handle.session_projection_seed.queued_count == 1
+
+    session.reject_steer("retry-id", "disk full")
+
+    assert handle._command_reservations._pending_steers == 0
+    assert "retry-id" not in handle._command_reservations._commands
+    assert handle.session_projection_seed.queued_count == 0
+    assert handle.session_projection_seed.transcript[-1].text == (
+        "steering command retry-id was not saved: disk full; retry with the same command ID"
+    )
+    assert notified >= 2
+    assert await handle.steer("retry", command_id="retry-id") == "steering queued"
+    assert session.steer_calls == ["first", "retry"]
 
 
 @pytest.mark.asyncio

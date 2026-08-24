@@ -187,6 +187,58 @@ async def test_failed_first_rebuild_is_retryable_without_resurrection(
     assert reopened.has_admitted_command(command_id)
 
 
+def test_only_valid_user_message_rows_claim_producer_markers(tmp_path) -> None:
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    valid_payload = {
+        "kind": "message",
+        "role": "user",
+        "content": [{"text": "valid"}],
+        "producer_command_id": "valid",
+    }
+    invalid_payloads = [
+        {**valid_payload, "producer_command_id": "missing-kind", "kind": None},
+        {**valid_payload, "producer_command_id": "custom-kind", "kind": "custom"},
+        {**valid_payload, "producer_command_id": "assistant", "role": "assistant"},
+        {**valid_payload, "producer_command_id": "system", "role": "system"},
+        {**valid_payload, "producer_command_id": "malformed-content", "content": "text"},
+        {**valid_payload, "producer_command_id": "malformed-block", "content": [42]},
+        {**valid_payload, "producer_command_id": "   "},
+    ]
+    entries = [
+        TranscriptEntry(id="valid-row", ts=1, type=ENTRY_MESSAGE, payload=valid_payload),
+        *[
+            TranscriptEntry(
+                id=f"invalid-{index}", ts=2 + index, type=ENTRY_MESSAGE, payload=payload
+            )
+            for index, payload in enumerate(invalid_payloads)
+        ],
+        TranscriptEntry(
+            id="import-collision",
+            ts=20,
+            type="custom",
+            payload={**valid_payload, "producer_command_id": "import-collision"},
+        ),
+    ]
+    (directory / "transcript.jsonl").write_text(
+        "".join(entry.to_json() + "\n" for entry in entries), encoding="utf-8"
+    )
+
+    transcript = Transcript(directory)
+
+    assert transcript.has_admitted_command("valid")
+    for command_id in [
+        "missing-kind",
+        "custom-kind",
+        "assistant",
+        "system",
+        "malformed-content",
+        "malformed-block",
+        "import-collision",
+    ]:
+        assert not transcript.has_admitted_command(command_id)
+
+
 @pytest.mark.asyncio
 async def test_reloads_from_disk(tmp_path):
     directory = tmp_path / "sess"

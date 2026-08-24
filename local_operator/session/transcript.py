@@ -879,10 +879,18 @@ def _admitted_command_id(entry: TranscriptEntry) -> str | None:
     if entry.type != ENTRY_MESSAGE:
         return None
     payload = entry.payload
-    if payload.get("kind", CUSTOM_KIND_MESSAGE) != CUSTOM_KIND_MESSAGE:
+    # Producer provenance was introduced with an explicit kind marker. Treating
+    # the legacy missing-kind default as producer-eligible lets imported rows
+    # claim IDs merely by carrying an unknown extra envelope field.
+    if payload.get("kind") != CUSTOM_KIND_MESSAGE:
         return None
     command_id = payload.get("producer_command_id")
-    return command_id if isinstance(command_id, str) and command_id else None
+    if not isinstance(command_id, str) or not command_id.strip():
+        return None
+    message = _entry_to_message(entry)
+    if not isinstance(message, Message) or message.role != "user":
+        return None
+    return command_id
 
 
 def _entry_to_message(
@@ -891,6 +899,10 @@ def _entry_to_message(
     """Rehydrate one message entry; malformed rows are dropped individually."""
     payload = dict(entry.payload)
     kind = payload.pop("kind", CUSTOM_KIND_MESSAGE)
+    # Producer identity belongs to the transcript envelope, never the Message
+    # schema. Leaving it in makes strict Message decoding reject every valid
+    # producer row as an unknown field during both replay and admission checks.
+    payload.pop("producer_command_id", None)
     # The entry id IS the message id for BOTH kinds — the writer passes
     # ``message.id`` as the entry id and the encoder omits it from the
     # payload, so a custom entry that read its id from the payload would come

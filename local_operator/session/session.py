@@ -1110,6 +1110,11 @@ class Session:
         # it beside queued messages so ordinary callers can still choose ids
         # without accidentally entering the mobile admission namespace.
         self._steering_producers: dict[int, str] = {}
+        # Hosts reserve producer identities before a steer reaches its durable
+        # boundary. A failed append must hand that identity back explicitly;
+        # otherwise one disk error consumes both the retry ID and a bounded
+        # steering slot for the lifetime of the owner.
+        self._steering_rejection_handlers: list[Callable[[str, str], None]] = []
         # Count of courtesy wake_prompt messages sitting in the steering
         # queue. The immediate-interrupt poll may cancel a RUNNING tool only
         # for steering the user actually typed (see ``_has_urgent_steering``):
@@ -1752,6 +1757,20 @@ class Session:
     def subscribe_admitted_commands(self, handler: Callable[[str], None]) -> Callable[[], None]:
         """Observe command IDs once their transcript append has succeeded."""
         return self._transcript.subscribe_admitted_commands(handler)
+
+    def subscribe_rejected_steering(
+        self, handler: Callable[[str, str], None]
+    ) -> Callable[[], None]:
+        """Observe producer steers that failed before durable admission."""
+        self._steering_rejection_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            try:
+                self._steering_rejection_handlers.remove(handler)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     def history(self) -> list[AgentMessage]:
         """The conversation as replayed into LLM context, in order.
@@ -3737,6 +3756,25 @@ class Session:
         )
         self._spawn_background(self._prompt_messages([message]))
 
+    async def _reject_steering(self, command_id: str, reason: str) -> None:
+        """Terminally reject one accepted-but-undurable producer steer."""
+        for handler in list(self._steering_rejection_handlers):
+            try:
+                handler(command_id, reason)
+            except Exception:  # noqa: BLE001 - one owner cannot hide rejection from others
+                logger.exception("steering rejection handler failed")
+        await self._emit(
+            NoticeEvent(
+                text=(
+                    f"steering command {command_id} was not saved: {reason}; "
+                    "retry with the same command ID"
+                )
+            )
+        )
+        # Mobile projections optimistically count accepted steers. Rejection is
+        # another terminal exit from that queue, even though it was not delivered.
+        await self._emit(SteeringDeliveredEvent(count=1))
+
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
         turns, so they are persisted here — the loop never returns them in its
@@ -3760,6 +3798,12 @@ class Session:
                     message,
                     producer_command_id=producer_command_id,
                 )
+            except OSError as exc:
+                if producer_command_id is not None:
+                    await self._reject_steering(producer_command_id, str(exc))
+                else:
+                    logger.warning("could not journal steering message", exc_info=True)
+                continue
             finally:
                 self._steering_producers.pop(id(message), None)
             messages.append(message)
@@ -5697,6 +5741,14 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
+        # No later boundary can drain producer steers once disposal starts.
+        # Reject them while owner callbacks and viewers are still attached so
+        # capacity is released and the producer can safely reuse the same ID.
+        while not self._steering_queue.empty():
+            message = self._steering_queue.get_nowait()
+            command_id = self._steering_producers.pop(id(message), None)
+            if command_id is not None:
+                await self._reject_steering(command_id, "session closed before durable admission")
         # A courtesy wake still queued here was never delivered, so its count
         # must not survive to misclassify a later enqueue on a reused Session.
         self._courtesy_wake_count = 0

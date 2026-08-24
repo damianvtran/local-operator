@@ -179,6 +179,112 @@ async def test_steer_marks_only_explicit_producer_commands(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["write", "flush", "fsync"])
+async def test_failed_steer_append_rejects_identity_and_allows_same_id_retry(
+    tmp_path, monkeypatch, failure
+):
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    rejected: list[tuple[str, str]] = []
+    events: list[AgentEvent] = []
+    session.subscribe_rejected_steering(
+        lambda command_id, reason: rejected.append((command_id, reason))
+    )
+    session.subscribe(events.append)
+    command_id = f"retry-{failure}"
+    session.steer("first", message_id="first", producer_command_id=command_id)
+    from pathlib import Path
+
+    real_open = Path.open
+    real_fsync = __import__("os").fsync
+    fail_once = True
+
+    class FailingHandle:
+        def __init__(self, handle):  # noqa: ANN001
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002, ANN202
+            return self._handle.__exit__(*args)
+
+        def write(self, value):  # noqa: ANN001, ANN201
+            if failure == "write":
+                raise OSError("injected write failure")
+            return self._handle.write(value)
+
+        def flush(self):
+            if failure == "flush":
+                raise OSError("injected flush failure")
+            return self._handle.flush()
+
+        def fileno(self):
+            return self._handle.fileno()
+
+    def failing_open(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal fail_once
+        handle = real_open(path, *args, **kwargs)
+        if fail_once and path == session._transcript.path:
+            fail_once = False
+            return FailingHandle(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    if failure == "fsync":
+        fsync_failed = False
+
+        def failing_fsync(fd):  # noqa: ANN001, ANN202
+            nonlocal fsync_failed
+            if not fsync_failed:
+                fsync_failed = True
+                raise OSError("injected fsync failure")
+            return real_fsync(fd)
+
+        monkeypatch.setattr("local_operator.session.transcript.os.fsync", failing_fsync)
+
+    assert await session._drain_steering() == []
+    assert rejected == [(command_id, f"injected {failure} failure")]
+    assert not session.has_admitted_command(command_id)
+    assert session.queued_steering() == []
+    assert not session._steering_producers
+    assert any(
+        isinstance(event, NoticeEvent)
+        and command_id in event.text
+        and "retry with the same command ID" in event.text
+        for event in events
+    )
+
+    session.steer("retry", message_id="retry", producer_command_id=command_id)
+    drained = await session._drain_steering()
+    assert [message.text for message in drained if isinstance(message, Message)] == ["retry"]
+    assert session.has_admitted_command(command_id)
+    reopened = Transcript(tmp_path / "sess")
+    assert reopened.has_admitted_command(command_id)
+    assert [
+        message.text for message in reopened.build_llm_history() if isinstance(message, Message)
+    ] == ["retry"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dispose_rejects_queued_producer_steer(tmp_path):
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    rejected: list[tuple[str, str]] = []
+    session.subscribe_rejected_steering(
+        lambda command_id, reason: rejected.append((command_id, reason))
+    )
+    session.steer("queued", producer_command_id="dispose-id")
+
+    await session.dispose()
+
+    assert rejected == [("dispose-id", "session closed before durable admission")]
+    assert session.queued_steering() == []
+    assert not session._steering_producers
+    assert not session.has_admitted_command("dispose-id")
+
+
+@pytest.mark.asyncio
 async def test_prompt_full_turn_events_and_persistence(tmp_path):
     """prompt() drives a text→tool→text turn; handlers see ordered events;
     every produced message lands in the transcript."""

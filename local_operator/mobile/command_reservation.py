@@ -37,16 +37,26 @@ class CommandReservations:
         self._pending_steers = 0
 
     def subscribe_durable(self) -> Callable[[], None]:
-        subscribe = getattr(self._session, "subscribe_admitted_commands", None)
-        if callable(subscribe):
-            unsubscribe = subscribe(self.mark_durable)
-            if callable(unsubscribe):
+        subscribe_durable = getattr(self._session, "subscribe_admitted_commands", None)
+        unsubscribe_durable = (
+            subscribe_durable(self.mark_durable) if callable(subscribe_durable) else None
+        )
+        subscribe_rejected = getattr(self._session, "subscribe_rejected_steering", None)
+        unsubscribe_rejected = (
+            subscribe_rejected(self._on_steer_rejected) if callable(subscribe_rejected) else None
+        )
 
-                def stop() -> None:
-                    unsubscribe()
+        def stop() -> None:
+            if callable(unsubscribe_durable):
+                unsubscribe_durable()
+            if callable(unsubscribe_rejected):
+                unsubscribe_rejected()
 
-                return stop
-        return lambda: None
+        return stop
+
+    def _on_steer_rejected(self, command_id: str, _reason: str) -> None:
+        """Release the retry identity and its bounded steering capacity."""
+        self.reject(command_id)
 
     def reserve(
         self,
