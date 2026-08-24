@@ -155,7 +155,8 @@ class OwnedSessionHandle(SessionHandle):
         # Prompt and steer share one identity namespace. In particular, an idle
         # projection may race a turn start and transfer the rejected prompt's
         # identity to steer rather than admitting the same producer twice.
-        self._command_reservations = CommandReservations()
+        self._command_reservations = CommandReservations(session)
+        self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         self._disposing = False
         self._install_gates()
 
@@ -282,6 +283,7 @@ class OwnedSessionHandle(SessionHandle):
                 )
             self._fold.note_prompt_rejected("session closed before the prompt was admitted")
         self._notify()
+        self._unsubscribe_admitted_commands()
         self._command_reservations.clear()
         await self._session.dispose()
 
@@ -419,7 +421,7 @@ class OwnedSessionHandle(SessionHandle):
         if existing is not None:
             await existing.admitted
             return "already admitted"
-        if not self._command_reservations.reserve(command_id, self._session.history()):
+        if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
         if self._disposing:
             self._command_reservations.reject(command_id)
@@ -594,7 +596,7 @@ class OwnedSessionHandle(SessionHandle):
         command_id = command_id or str(uuid.uuid4())
         if not self._command_reservations.reserve(
             command_id,
-            self._session.history(),
+            kind="steer",
             prompt_transfer=True,
         ):
             return "already admitted"

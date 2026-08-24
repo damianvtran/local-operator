@@ -1741,6 +1741,14 @@ class Session:
         spec = self.effective_model
         return f"{spec.provider}/{spec.model_id}"
 
+    def has_admitted_command(self, command_id: str) -> bool:
+        """Return whether a producer command is durably in this transcript."""
+        return self._transcript.has_admitted_command(command_id)
+
+    def subscribe_admitted_commands(self, handler: Callable[[str], None]) -> Callable[[], None]:
+        """Observe command IDs once their transcript append has succeeded."""
+        return self._transcript.subscribe_admitted_commands(handler)
+
     def history(self) -> list[AgentMessage]:
         """The conversation as replayed into LLM context, in order.
 

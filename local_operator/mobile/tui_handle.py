@@ -80,7 +80,8 @@ class TuiSessionHandle(SessionHandle):
         self._unsubscribe: Callable[[], None] | None = None
         # Mutated only on Textual's loop, making admission atomic even though
         # several registrant coroutines may cross from its socket thread.
-        self._command_reservations = CommandReservations()
+        self._command_reservations = CommandReservations(session)
+        self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         # request_id -> the live AskPickerScreen for every ask picker this
         # handle has projected to the phone. Keyed by a token_hex request id
         # (owned.py's scheme) because the phone answers by request id and never
@@ -124,7 +125,10 @@ class TuiSessionHandle(SessionHandle):
         # so a late phone answer for a question that no longer exists reports
         # "no longer waiting" instead of settling into the new conversation.
         self._ask_pending.clear()
+        self._unsubscribe_admitted_commands()
         self._command_reservations.clear()
+        self._command_reservations = CommandReservations(session)
+        self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         if self._on_projection is not None:
             self.subscribe(self._on_projection)
 
@@ -179,7 +183,7 @@ class TuiSessionHandle(SessionHandle):
 
         def begin_prompt() -> tuple[asyncio.AbstractEventLoop, asyncio.Future[None], Any] | None:
             session = self._session()
-            if not self._command_reservations.reserve(command_id, session.history()):
+            if not self._command_reservations.reserve(command_id, kind="prompt"):
                 return None
             owner_loop = asyncio.get_running_loop()
             admitted: asyncio.Future[None] = owner_loop.create_future()
@@ -231,7 +235,7 @@ class TuiSessionHandle(SessionHandle):
             session = self._session()
             if not self._command_reservations.reserve(
                 command_id,
-                session.history(),
+                kind="steer",
                 prompt_transfer=True,
             ):
                 return False

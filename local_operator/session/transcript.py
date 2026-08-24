@@ -42,7 +42,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -246,6 +246,11 @@ class Transcript:
         self.path = self.directory / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
+        # Command identities live beside the append-only rows that prove their
+        # admission.  Replay builds this once; hot-path lookups must not scan a
+        # transcript whose model-facing window may also have been compacted.
+        self._admitted_command_ids: set[str] = set()
+        self._admission_handlers: list[Callable[[str], None]] = []
         #: Shared content-addressed media store. Write path: image payloads
         #: are externalized to it on append. Read path: references are
         #: resolved back to inline base64 on replay, so anything downstream
@@ -259,6 +264,9 @@ class Transcript:
                     entry = TranscriptEntry.from_json(line)
                     if entry is not None:
                         self._entries.append(entry)
+                        command_id = _admitted_command_id(entry)
+                        if command_id is not None:
+                            self._admitted_command_ids.add(command_id)
 
     # -- append -------------------------------------------------------------
 
@@ -395,7 +403,34 @@ class Transcript:
                     for row in self._entries:
                         handle.write(row.to_json() + "\n")
                     handle.flush()
+            command_id = _admitted_command_id(entry)
+            if command_id is not None:
+                # Update only after the append's flush boundary.  A crash after
+                # this point can replay the row; an ACK or callback before it
+                # would claim durability the transcript did not yet have.
+                self._admitted_command_ids.add(command_id)
+                for handler in list(self._admission_handlers):
+                    try:
+                        handler(command_id)
+                    except Exception:  # noqa: BLE001 - observers cannot undo durability
+                        logger.exception("transcript admission handler failed")
         return entry
+
+    def has_admitted_command(self, command_id: str) -> bool:
+        """Return whether an append-only user row already owns ``command_id``."""
+        return command_id in self._admitted_command_ids
+
+    def subscribe_admitted_commands(self, handler: Callable[[str], None]) -> Callable[[], None]:
+        """Observe user command IDs after their durable append boundary."""
+        self._admission_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            try:
+                self._admission_handlers.remove(handler)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     # -- replay -------------------------------------------------------------
 
@@ -788,6 +823,22 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
     provider_payload[SHRUNK_KEY] = True
     payload["provider_payload"] = provider_payload
     return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
+
+
+def _admitted_command_id(entry: TranscriptEntry) -> str | None:
+    """Extract only durable user-message identities from a transcript row.
+
+    Compaction/prune/custom rows also carry IDs, while malformed and legacy
+    fragments may carry incomplete payloads.  None of those are producer
+    commands and therefore none may poison the admission namespace.
+    """
+    if entry.type != ENTRY_MESSAGE:
+        return None
+    payload = entry.payload
+    if payload.get("kind", CUSTOM_KIND_MESSAGE) != CUSTOM_KIND_MESSAGE:
+        return None
+    command_id = entry.id
+    return command_id if command_id and payload.get("role") == "user" else None
 
 
 def _entry_to_message(

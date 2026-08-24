@@ -32,6 +32,8 @@ class FakeSession:
         self.conversation_name = ""
         self.is_streaming = False
         self._handlers: list[Any] = []
+        self._admission_handlers: list[Any] = []
+        self._admitted_ids: set[str] = set()
         self._named: list[tuple[str, bool]] = []
         self._complete_calls: list[tuple[str, str]] = []
         self.prompt_calls: list[str] = []
@@ -79,6 +81,22 @@ class FakeSession:
 
     def history(self):  # pragma: no cover - not exercised here
         return []
+
+    def has_admitted_command(self, command_id: str) -> bool:
+        return command_id in self._admitted_ids
+
+    def subscribe_admitted_commands(self, handler):  # noqa: ANN001, ANN202
+        self._admission_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            self._admission_handlers.remove(handler)
+
+        return unsubscribe
+
+    def admit(self, command_id: str) -> None:
+        self._admitted_ids.add(command_id)
+        for handler in list(self._admission_handlers):
+            handler(command_id)
 
     def running_subagents(self) -> int:
         return 0
@@ -185,6 +203,23 @@ async def test_steer_ack_loss_retry_remains_admitted() -> None:
     assert await handle.steer("once", command_id="lost-ack") == "steering queued"
     assert await handle.steer("once", command_id="lost-ack") == "already admitted"
     assert session.steer_calls == ["once"]
+
+
+@pytest.mark.asyncio
+async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity() -> None:
+    handle, session = make_handle()
+
+    for index in range(32):
+        assert await handle.steer(f"steer {index}", command_id=f"id-{index}") == "steering queued"
+    assert len(session.steer_calls) == 32
+    assert await handle.steer("duplicate", command_id="id-0") == "already admitted"
+    with pytest.raises(RuntimeError, match=r"steering queue is full \(32\)"):
+        await handle.steer("overflow", command_id="overflow")
+    assert len(session.steer_calls) == 32
+
+    session.admit("id-0")
+    assert await handle.steer("replacement", command_id="replacement") == "steering queued"
+    assert await handle.steer("old retry", command_id="id-0") == "already admitted"
 
 
 @pytest.mark.asyncio
