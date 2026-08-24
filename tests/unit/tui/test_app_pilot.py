@@ -39,6 +39,7 @@ from local_operator.tui.app import (
     SLASH_COMMANDS,
     OperatorApp,
     _splash_toast_headline,
+    _TerminalFrontendReaper,
 )
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.events import TurnEnded, TurnStarted
@@ -97,6 +98,32 @@ class _FakeJobs:
             for i in range(self._session.running_bash_jobs)
         ]
         return rows
+
+
+def test_idle_mounted_terminal_never_reaps() -> None:
+    """Idle duration is irrelevant while the owning TUI reader is alive."""
+    reaper = _TerminalFrontendReaper(grace_s=10.0)
+    assert not reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=0.0)
+    assert not reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=10_000.0)
+    assert reaper.quiescent_since is None
+
+
+def test_frontend_gone_busy_defers_reap_until_work_finishes() -> None:
+    reaper = _TerminalFrontendReaper(grace_s=10.0)
+    reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=0.0)
+    assert not reaper.observe(reader_alive=False, busy=True, remote_holders=False, now=100.0)
+    assert reaper.quiescent_since is None
+    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=110.0)
+    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=119.9)
+    assert reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=120.0)
+
+
+def test_frontend_gone_quiescent_reaps_after_grace() -> None:
+    reaper = _TerminalFrontendReaper(grace_s=10.0)
+    reaper.observe(reader_alive=True, busy=False, remote_holders=False, now=0.0)
+    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=1.0)
+    assert not reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=10.9)
+    assert reaper.observe(reader_alive=False, busy=False, remote_holders=False, now=11.0)
 
 
 class FakeSession:

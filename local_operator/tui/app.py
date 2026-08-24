@@ -637,6 +637,51 @@ logger = logging.getLogger("local_operator.tui.app")
 #: resume command — where omp's only clears the editor.)
 DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
+#: Terminal-reader liveness is a lifecycle signal, not an idle timer. Textual's
+#: POSIX input thread exits on tty EOF but does not exit the app, so a closed
+#: terminal can otherwise leave the owning pid and session claim alive forever.
+TERMINAL_LIFECYCLE_CHECK_S = 1.0
+
+
+@dataclass
+class _TerminalFrontendReaper:
+    """Turn terminal-reader death into a bounded, holder-aware app exit.
+
+    ``reader_alive=True`` means a genuinely mounted terminal front end and
+    therefore NEVER starts a countdown, however long it is idle. ``False`` is
+    trusted only after a live reader was observed: drivers without a reader and
+    startup races must not look like terminal loss. Busy work and a remote phone
+    or attach holder both cancel the grace window, so work can finish and a new
+    front end can take over before this process releases the session.
+    """
+
+    grace_s: float
+    reader_seen: bool = False
+    quiescent_since: float | None = None
+
+    def observe(
+        self,
+        *,
+        reader_alive: bool | None,
+        busy: bool,
+        remote_holders: bool,
+        now: float,
+    ) -> bool:
+        if reader_alive is None:
+            return False
+        if reader_alive:
+            self.reader_seen = True
+            self.quiescent_since = None
+            return False
+        if not self.reader_seen or busy or remote_holders:
+            self.quiescent_since = None
+            return False
+        if self.quiescent_since is None:
+            self.quiescent_since = now
+            return False
+        return now - self.quiescent_since >= self.grace_s
+
+
 #: How long a second Esc counts as the "also stop the subagents" press. Longer
 #: than the Ctrl+C window because the two gestures answer different questions.
 #: Ctrl+C's second press QUITS, so its window is deliberately too short to hit
@@ -1531,6 +1576,11 @@ class OperatorApp(App[None]):
         #: first session is adopted; torn down in ``on_unmount``.
         self._mobile_registrant: Any = None
         self._mobile_handle: Any = None
+        # Separate from user inactivity: this watches the OS-backed terminal
+        # reader. A mounted but untouched TUI remains alive indefinitely.
+        from local_operator.mobile.child import _grace_seconds
+
+        self._terminal_frontend_reaper = _TerminalFrontendReaper(_grace_seconds())
         # What a NEW session opens in, read from config at mount and rewritten
         # by `/approvals default <mode>`. Held beside `_approve_all` rather than
         # re-read per use because the two are ONE state to a reader — "is the
@@ -1800,6 +1850,11 @@ class OperatorApp(App[None]):
         editor.focus()
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
+        self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
+        # Prime the reader observation while mount still owns a known-live
+        # driver. A tty can EOF before the first interval tick, and requiring a
+        # prior observation is what keeps headless/alternate drivers safe.
+        self._check_terminal_frontend()
         # Keep the active provider's quota warm in the shared cache so `/usage`
         # answers from disk (see USAGE_WARM_INTERVAL_S).
         self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
@@ -6732,6 +6787,64 @@ class OperatorApp(App[None]):
                 logger.debug("mobile registrant close failed", exc_info=True)
             self._mobile_registrant = None
             self._mobile_handle = None
+
+    def _terminal_reader_alive(self) -> bool | None:
+        """Return the Textual tty reader's lifecycle, when the driver has one.
+
+        Textual's POSIX driver exits ``_key_thread`` when ``os.read`` returns
+        EOF. The app loop keeps running, so thread liveness is the normal
+        terminal-loss signal that distinguishes a closed front end from an idle
+        mounted TUI. Headless and alternate drivers expose no such thread and
+        are deliberately outside this policy.
+        """
+        if self.is_headless or self._driver is None:
+            return None
+        reader = getattr(self._driver, "_key_thread", None)
+        if reader is None:
+            return None
+        return bool(reader.is_alive())
+
+    def _remote_frontend_holds_session(self) -> bool:
+        registrant = self._mobile_registrant
+        if registrant is None:
+            return False
+        try:
+            return bool(registrant.phone_watchers) or registrant.attach_clients() > 0
+        except Exception:  # noqa: BLE001 — uncertainty keeps the owner alive
+            logger.debug("mobile holder check failed", exc_info=True)
+            return True
+
+    def _terminal_loss_busy(self) -> bool:
+        session = self._session
+        if self._turn_is_live() or self._compacting:
+            return True
+        if session is None:
+            return False
+        try:
+            return session.running_subagents() > 0
+        except Exception:  # noqa: BLE001 — uncertainty keeps the owner alive
+            return True
+
+    def _check_terminal_frontend(self) -> None:
+        """Reap a TUI whose tty reader is gone, without truncating live work."""
+        reader_alive = self._terminal_reader_alive()
+        remote_holders = self._remote_frontend_holds_session()
+        if reader_alive is False and not remote_holders:
+            # These futures require a front end response. Settling them is not
+            # an agent abort: it lets the parked turn finish normally so busy
+            # work and subagents can drain before the grace window begins.
+            self._deny_queued_approvals()
+            self._settle_ask_picker()
+            self._settle_key_prompt()
+        should_exit = self._terminal_frontend_reaper.observe(
+            reader_alive=reader_alive,
+            busy=self._terminal_loss_busy(),
+            remote_holders=remote_holders,
+            now=time.monotonic(),
+        )
+        if should_exit:
+            logger.info("terminal front end closed; session is quiescent — exiting cleanly")
+            self.exit()
 
     async def on_unmount(self) -> None:
         # Unpublish the discovery record BEFORE anything can block: the mobile
