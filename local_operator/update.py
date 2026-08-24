@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 #: Same cache root the model catalogue uses, so there is one place to clear.
 _CACHE_DIR = Path("~/.local-operator/cache")
@@ -67,6 +67,25 @@ class InstallKind(str, Enum):
 
 class UpdateError(Exception):
     """Refused or failed upgrade; the message is what the CLI/TUI print."""
+
+
+#: Bound the child so a hung ``launchctl kickstart`` cannot stall the
+#: successful-upgrade path. The daemon itself is not waited on.
+_MOBILE_RESTART_TIMEOUT_S = 30.0
+
+#: Default loopback probe used only for the unsupervised warning. Must
+#: match ``mobile.daemon.DEFAULT_PORT``; do not import that module here.
+_MOBILE_HEALTHZ = "http://127.0.0.1:4098/healthz"
+
+MobileRefreshKind = Literal["skipped", "restarted", "failed", "unsupervised"]
+
+
+@dataclass(frozen=True)
+class MobileRefresh:
+    """Outcome of the post-upgrade LaunchAgent bounce. Never an exception."""
+
+    kind: MobileRefreshKind
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -459,6 +478,118 @@ def perform_upgrade(
     return target
 
 
+def _mobile_plist_path() -> Path:
+    """Well-known LaunchAgent path. Isolated so tests can patch it.
+
+    Same one-liner as ``install.plist_path`` / ``install.LABEL``
+    (``com.local-operator.mobile.plist``). Duplicated on purpose:
+    ``local_operator.mobile.install`` imports ``daemon`` (Starlette),
+    and folding that into the updater would pull the web stack into
+    every ``lop update`` and every TUI ``/update`` worker.
+    """
+    return Path.home() / "Library" / "LaunchAgents" / "com.local-operator.mobile.plist"
+
+
+def _mobile_healthz_answers() -> bool:
+    """True only when something already answers on the default port.
+
+    Used solely to warn about an unsupervised ``lop mobile serve``. Do
+    not SIGTERM that process: it is not ours to bounce.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(_MOBILE_HEALTHZ, timeout=1.0) as response:
+            return 200 <= int(response.status) < 300
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+def _mobile_restart_argv() -> list[str] | None:
+    """Argv for the *new* distribution's ``mobile restart``.
+
+    ``sys.executable -m local_operator.cli`` is the post-upgrade
+    interpreter — the same interpreter the LaunchAgent's ProgramArguments
+    already name, so its site-packages are the wheel the installer just
+    wrote. There is deliberately NO PATH ``lop`` fallback: a PATH hit can
+    be a *different* installation (another tool env, a brew shim) than
+    the one just upgraded, and restarting that would serve the wrong
+    build while reporting success. If this interpreter is gone after the
+    upgrade, the refresh fails honestly and the copy names the recovery.
+    """
+    if sys.executable and Path(sys.executable).exists():
+        return [sys.executable, "-m", "local_operator.cli", "mobile", "restart"]
+    return None
+
+
+def refresh_mobile_after_upgrade() -> MobileRefresh:
+    """Bounce the supervised mobile daemon after a successful wheel install.
+
+    Kept out of :func:`perform_upgrade` so existing installer tests cannot
+    kickstart a real LaunchAgent. Never raises: the package upgrade already
+    succeeded, and a failed bounce must not roll it back.
+
+    ``restart``, not ``install``: the wheel already ships ``mobile/web/dist``,
+    cookies live in the Keychain, and ``install`` would regenerate a
+    password. In-process ``service_action`` would run *this* (old) code
+    and import Starlette into the TUI worker.
+    """
+    import subprocess
+
+    try:
+        if not _mobile_plist_path().exists():
+            if _mobile_healthz_answers():
+                return MobileRefresh(kind="unsupervised")
+            return MobileRefresh(kind="skipped")
+        argv = _mobile_restart_argv()
+        if argv is None:
+            return MobileRefresh(
+                kind="failed",
+                error="this interpreter vanished after the upgrade",
+            )
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_MOBILE_RESTART_TIMEOUT_S,
+        )
+        if completed.returncode != 0:
+            tail = (completed.stderr or completed.stdout or "").strip()
+            detail = tail.splitlines()[-1][:200] if tail else f"exit {completed.returncode}"
+            return MobileRefresh(kind="failed", error=detail)
+        return MobileRefresh(kind="restarted")
+    except subprocess.TimeoutExpired:
+        return MobileRefresh(kind="failed", error="timed out")
+    except FileNotFoundError as exc:
+        return MobileRefresh(kind="failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — bounce must never fail the update
+        return MobileRefresh(kind="failed", error=str(exc))
+
+
+def _print_cli_mobile_refresh(result: MobileRefresh) -> None:
+    if result.kind == "restarted":
+        print("mobile daemon restarted — refresh the phone UI")
+    elif result.kind == "failed":
+        # U1: name the recovery, not just the failure — the update itself
+        # succeeded, so the only action left is the bounce the update could
+        # not perform.
+        print(
+            f"warning: mobile daemon did not restart: {result.error}; run lop mobile restart",
+            file=sys.stderr,
+        )
+    elif result.kind == "unsupervised":
+        # U2: no LaunchAgent owns this daemon, so `lop mobile restart` is not
+        # the fix — that path is launchd-only. The operator of a foreground
+        # serve must stop and relaunch the process they started.
+        print(
+            "warning: a mobile daemon is running unsupervised; "
+            "stop and relaunch the foreground lop mobile serve process to pick up the new UI",
+            file=sys.stderr,
+        )
+
+
 def update_command(*, check: bool = False) -> int:
     """``lop update`` / ``lop update --check``. See the architect table for codes."""
     result = check_latest(force=True)
@@ -498,4 +629,5 @@ def update_command(*, check: bool = False) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"installed {installed}")
+    _print_cli_mobile_refresh(refresh_mobile_after_upgrade())
     return 0
