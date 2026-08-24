@@ -37,6 +37,9 @@ class FakeSession:
         # Tagged or a short untagged title both parse; the default stays
         # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"
+        from local_operator.harness.jobs import AsyncJobManager
+
+        self.jobs = AsyncJobManager()
 
     # -- naming seams ----------------------------------------------------------
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
@@ -156,6 +159,35 @@ async def test_pending_gate_is_busy_until_ordinary_timeout(monkeypatch) -> None:
     assert await waiting is False
     assert handle.is_busy() is False
     assert owned_mod.PENDING_REQUEST_TIMEOUT_S == 0.05
+
+
+@pytest.mark.asyncio
+async def test_real_background_bash_job_is_busy_until_done(tmp_path) -> None:
+    """The reaper reads the real bash job Session.dispose would terminate."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    handle, session = make_handle()
+    context = ToolContext(cwd=str(tmp_path), session_id="owned-bash", jobs=session.jobs)
+    tool = builtin.build_bash_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "call",
+        {"command": "sleep 0.4; echo settled", "background": True, "timeout": 5},
+        None,
+        None,
+        context,
+    )
+    job_id = str((result.details or {})["job_id"])
+    job = session.jobs.get(job_id)
+    assert job is not None and job.type == "bash"
+    assert handle.is_busy() is True
+    deadline = asyncio.get_running_loop().time() + 5
+    while job.status == "running":
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.01)
+    assert job.status == "completed"
+    assert handle.is_busy() is False
+    await session.jobs.dispose()
 
 
 @pytest.mark.asyncio

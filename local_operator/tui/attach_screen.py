@@ -110,6 +110,21 @@ class _PendingCard(Static):
     """
 
 
+class _AttachComposer(Input):
+    """Composer that lets a displayed authority gate consume its shortcuts.
+
+    Textual's Input handles printable keys before they bubble to the Screen, so
+    screen-only bindings cannot make y/n or ask initials reachable from normal
+    focus. Calling the screen handler here gives a valid gate first refusal;
+    unrecognized keys retain ordinary Input editing.
+    """
+
+    def on_key(self, event: Any) -> None:
+        screen = self.screen
+        if isinstance(screen, AttachScreen):
+            screen._handle_gate_key(event)
+
+
 class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the doc
     CSS = """
     AttachScreen {
@@ -179,6 +194,7 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         self._client: AttachClient | None = None
         self._projection: SessionProjection | None = None
         self._owner_dead = False
+        self._answering_request: str | None = None
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -186,7 +202,9 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         self._banner = _Banner(id="attach-banner")
         self._transcript = _Transcript(id="attach-transcript")
         self._pending = _PendingCard(id="attach-pending")
-        self._composer = Input(placeholder="steer the attached session — /detach to leave")
+        self._composer = _AttachComposer(
+            placeholder="steer the attached session — /detach to leave"
+        )
         self._composer.id = "attach-composer"
         self.mount(self._banner, self._transcript, self._pending, self._composer)
         self._set_banner()
@@ -234,11 +252,15 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         name = (self._projection.conversation_name if self._projection else "") or "untitled"
         pid = self._record.pid
         if dead:
-            self._banner.update(f"owner exited (pid {pid}) — r: resume here · esc: detach")
+            self._banner.update(f"owner exited · pid {pid}")
         else:
             self._banner.update(f"attached · pid {pid} · {name} — /detach to release")
 
     def _render_projection(self, projection: SessionProjection) -> None:
+        # EOF is terminal for this connection. A projection already queued on
+        # the UI tick must not repaint the screen back to "live" afterward.
+        if self._owner_dead:
+            return
         self._projection = projection
         self._set_banner()
         self._transcript.render_projection(projection)
@@ -265,9 +287,9 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
             return
         self._owner_dead = True
         self._set_banner(dead=True)
-        self._pending.update("owner exited — r: resume here · esc: detach")
+        self._pending.update("r: resume here · esc: detach")
         self._pending.display = True
-        self._composer.placeholder = "owner exited — r to resume here, esc to detach"
+        self._composer.placeholder = "attached session inactive"
         # Disable the dead composer so printable keys bubble to the Screen's
         # inline actions instead of becoming a draft that can never be sent.
         self._composer.disabled = True
@@ -276,7 +298,9 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
 
     def _resume_after_owner_death(self) -> None:
         if self._on_resume_here is None:
+            self._pending.update("resume unavailable here · esc: detach")
             return
+        self._pending.update("resuming here…")
         outcome = self._on_resume_here(self._session_id)
         if asyncio.iscoroutine(outcome):
             asyncio.get_event_loop().create_task(outcome)
@@ -291,9 +315,6 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
             self.action_detach()
             return
         if self._owner_dead:
-            # Inputs while dead other than the two commands are meaningless;
-            # the banner restates the choice rather than silently eating keys.
-            self._pending.update("owner exited — r: resume here · esc: detach")
             return
         client = self._client
         if client is None or not client.connected:
@@ -320,6 +341,10 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
 
     def on_key(self, event: Any) -> None:
         """Minimal key answers for the pending gate, plus owner-death actions."""
+        self._handle_gate_key(event)
+
+    def _handle_gate_key(self, event: Any) -> None:
+        """Consume only keys that answer the currently displayed state."""
         key = str(getattr(event, "key", ""))
         if self._owner_dead:
             if key == "r":
@@ -330,30 +355,40 @@ class AttachScreen(Screen[None]):  # noqa: D101 — the module docstring is the 
         pending = self._projection.pending if self._projection else None
         if pending is None or self._composer is None:
             return
-        if self._composer.has_focus:
-            return  # typing goes to the composer
         client = self._client
         if client is None:
             return
 
+        option = next(
+            (opt for opt in pending.options if key and opt.label.lower().startswith(key.lower())),
+            None,
+        )
+
         async def answer() -> None:
+            self._answering_request = pending.request_id
+            self._pending.update("answering…")
             try:
                 if pending.kind == "approval":
-                    approved = key == "y"
-                    await client.approval_answer(pending.request_id, approved)
-                elif pending.options:
-                    for opt in pending.options:
-                        if opt.label.lower().startswith(key.lower()) and key:
-                            await client.ask_answer(pending.request_id, opt.label)
-                            break
-            except (RuntimeError, ConnectionError):
-                pass
+                    detail = await client.approval_answer(pending.request_id, key == "y")
+                elif option is not None:
+                    detail = await client.ask_answer(pending.request_id, option.label)
+                else:
+                    return
+                # A projection normally removes the card. This receipt covers
+                # the interval before that repaint and makes stale rejection
+                # visible instead of swallowing the key silently.
+                if self._answering_request == pending.request_id:
+                    self._pending.update(detail or "answer accepted")
+            except (RuntimeError, ConnectionError) as exc:
+                self._pending.update(f"answer not accepted: {exc}")
+            finally:
+                self._answering_request = None
 
         if pending.kind == "approval" and key in ("y", "n"):
             event.prevent_default()
             event.stop()
             asyncio.get_event_loop().create_task(answer())
-        elif pending.kind == "ask" and pending.options and len(key) == 1:
+        elif pending.kind == "ask" and option is not None and len(key) == 1:
             event.prevent_default()
             event.stop()
             asyncio.get_event_loop().create_task(answer())

@@ -178,7 +178,7 @@ def test_frontend_gate_gets_grace_then_fresh_exit_grace() -> None:
     assert (
         reaper.observe(
             reader_alive=False,
-            busy=False,
+            busy=True,
             gate_pending=True,
             remote_holders=False,
             now=31.0,
@@ -222,7 +222,7 @@ class _FrontendRegistrant:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("work", ["model", "tool", "compaction", "subagent"])
-async def test_terminal_loss_never_settles_or_exits_during_active_work(work: str) -> None:
+async def test_terminal_loss_settles_gate_without_exiting_during_active_work(work: str) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     app._terminal_frontend_reaper = _TerminalFrontendReaper(grace_s=3.0, reader_seen=True)
     approval = ApprovalPrompt("bash", "run a command")
@@ -243,7 +243,9 @@ async def test_terminal_loss_never_settles_or_exits_during_active_work(work: str
     ):
         app._check_terminal_frontend()
         app._check_terminal_frontend()
-    assert approval.answered is False
+    # The 30-second authority deadline is independent of unrelated activity;
+    # settling it does not abort that activity and therefore cannot exit.
+    assert approval.answered is True
     assert exits == []
 
 
@@ -823,16 +825,17 @@ def test_exit_quit_collapsed_to_one_command() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) -> None:
-    """The owned-session branch of _resume_session attaches when the owner
-    publishes a protocol>=2 record (design §2.5); the factory never runs."""
+    """The owned-session branch attaches, then can recover after owner EOF."""
     from local_operator.mobile import registry as mobile_registry
     from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
     from local_operator.tui.attach_screen import AttachScreen
 
     session = FakeSession()
+    resumed = FakeSession()
 
     async def resume_factory(resume_id):
-        return session
+        assert resume_id == "sess-owned"
+        return resumed
 
     app = OperatorApp(lambda: _factory(session), resume_factory=resume_factory)
     # A live pid that is not the app: this test's own parent (the xdist
@@ -863,6 +866,18 @@ async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) 
             await asyncio.sleep(0.05)
         assert isinstance(app.screen, AttachScreen)
         assert session.prompts == []  # no second writer ever built
+        # Exact production construction carries the recovery callback. Owner EOF
+        # followed by r replaces the follower with the durable resumed session.
+        app.screen._owner_exited("owner exited")
+        await pilot.press("r")
+        for _ in range(100):
+            await pilot.pause()
+            if not isinstance(app.screen, AttachScreen) and app._session is resumed:
+                break
+            await asyncio.sleep(0.02)
+        assert app._session is resumed
+        assert not isinstance(app.screen, AttachScreen)
+        assert app.query_one(Editor).disabled is False
 
 
 @pytest.mark.asyncio

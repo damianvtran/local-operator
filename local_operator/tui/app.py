@@ -683,9 +683,10 @@ class _TerminalFrontendReaper:
             if self.gate_since is None:
                 self.gate_since = now
                 return None
-            # The deadline is total answerability time, independent of work,
-            # but settlement waits until it cannot disturb unrelated activity.
-            if now - self.gate_since >= self.gate_timeout_s and not busy:
+            # Settling the front-end future is not an interruption: it is the
+            # only event that lets this gate-owned streaming turn progress. Any
+            # unrelated work remains untouched and is observed after settlement.
+            if now - self.gate_since >= self.gate_timeout_s:
                 self.gate_since = None
                 return "settle"
             return None
@@ -3330,7 +3331,9 @@ class OperatorApp(App[None]):
             from local_operator.tui.attach_screen import AttachScreen
             from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS, Toast
 
-            self.push_screen(AttachScreen(record, concrete))
+            self.push_screen(
+                AttachScreen(record, concrete, on_resume_here=self._resume_attached_here)
+            )
             # The toast replaces the warning the refusal used to print: the
             # user's navigation SUCCEEDED, it just landed on a follower view.
             try:
@@ -3351,6 +3354,24 @@ class OperatorApp(App[None]):
             "phone session list",
             "warning",
         )
+
+    async def _resume_attached_here(self, session_id: str) -> None:
+        """Replace a dead follower with this app's normal writable resume path.
+
+        The factory owns atomic lease arbitration, so a successor that appeared
+        after EOF becomes an actionable boot failure rather than a second writer.
+        Pop first so progress and any failure render in the app's native surface.
+        """
+        if self._resume_factory is None:
+            screen = self.screen
+            pending = getattr(screen, "_pending", None)
+            if pending is not None:
+                pending.update("resume unavailable: no resume-capable launcher")
+            return
+        self.pop_screen()
+        self._session_factory = lambda: self._resume_factory(session_id)  # type: ignore[misc]
+        self._system_notice(f"resuming session {session_id} here…", "info")
+        await self._reload_session()
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -6841,10 +6862,10 @@ class OperatorApp(App[None]):
             return True
         if session is None:
             return self._turn_is_live() and not gate_pending
-        # A gate parks the app's runner, so that flag alone is not autonomous
-        # work while WAITING_INPUT. The session streaming flag still catches an
-        # unrelated model/tool phase that happens to overlap the visible gate.
-        if bool(getattr(session, "is_streaming", False)):
+        # Streaming and the turn task are expected to remain live while their
+        # displayed gate is parked. They matter again immediately after the gate
+        # is settled; before then they must not prevent its hard deadline.
+        if bool(getattr(session, "is_streaming", False)) and not gate_pending:
             return True
         if self._turn_is_live() and not gate_pending:
             return True

@@ -85,6 +85,10 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
+# A projection is replaceable state. If a peer cannot accept one within this
+# bound, dropping that peer is safer than blocking authority-bearing ACKs for
+# every healthy front end.
+_SEND_TIMEOUT_S = 1.0
 
 
 @dataclass
@@ -102,6 +106,9 @@ class _ClientConn:
     writer: asyncio.StreamWriter
     kind: ClientKind
     last_seen: float = field(default_factory=time.monotonic)
+    # Frames on one TCP stream must stay ordered, while unrelated streams must
+    # never queue behind its backpressure.
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class SessionHandle(Protocol):
@@ -175,7 +182,6 @@ class Registrant:
         self._unsubscribe: Callable[[], None] | None = None
         self._closed = threading.Event()
         self._push_scheduled = False
-        self._send_lock: asyncio.Lock | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         # -- front-end accounting (the child reaper's inputs, §4) --------------
         # Phone SSE watchers, fed by the daemon's watch/unwatch pushes. Floored
@@ -208,7 +214,6 @@ class Registrant:
         if self._server is not None:
             return
         self._loop = asyncio.get_running_loop()
-        self._send_lock = asyncio.Lock()
         await self._serve()
 
     def close(self) -> None:
@@ -255,7 +260,6 @@ class Registrant:
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
-        self._send_lock = asyncio.Lock()
         try:
             loop.run_until_complete(self._serve())
         except Exception:  # noqa: BLE001 — a dead registrant must not kill the host
@@ -539,20 +543,17 @@ class Registrant:
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating
         # the dict mid-iteration is exactly the failure being handled.
-        for conn in list(self._clients.values()):
-            await self._send_to(conn, frame)
+        await asyncio.gather(*(self._send_to(conn, frame) for conn in list(self._clients.values())))
 
     async def _send_to(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
         """One frame to one connection. A failed send drops ONLY that client
         from the registry (never retried — the reader loop will observe the
         close and its finally is a no-op second removal)."""
-        if self._send_lock is None:
-            return
-        async with self._send_lock:
+        async with conn.send_lock:
             try:
                 conn.writer.write(json.dumps(frame).encode() + b"\n")
-                await conn.writer.drain()
-            except (ConnectionResetError, BrokenPipeError, OSError):
+                await asyncio.wait_for(conn.writer.drain(), timeout=_SEND_TIMEOUT_S)
+            except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
                 self._drop_client(conn)
 
     async def _send(self, frame: dict[str, Any]) -> None:

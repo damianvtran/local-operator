@@ -175,6 +175,33 @@ async def test_broadcast_reaches_every_client() -> None:
 
 
 @pytest.mark.asyncio
+async def test_nonreading_socket_cannot_block_active_ack_and_projection() -> None:
+    """A real authenticated peer that applies backpressure loses only itself."""
+    handle = FakeHandle()
+    # Each repaint is large enough that a handful fill the non-reader's kernel
+    # window, while remaining below the protocol's one-megabyte frame limit.
+    handle._projection.conversation_name = "x" * 700_000
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    try:
+        record = await _wait_record()
+        slow_reader, slow_writer = await _dial(record, client="attach")
+        del slow_reader  # authenticate and consume welcome, then never read again
+        active_reader, active_writer = await _dial(record, client="attach")
+        for req in range(12):
+            active_writer.write(json.dumps({"op": "ping", "req": req}).encode() + b"\n")
+            await active_writer.drain()
+            ack = await asyncio.wait_for(_until(active_reader, "ack", req), timeout=2.5)
+            assert ack["detail"] == "pong"
+            projection = await asyncio.wait_for(_until(active_reader, "projection"), timeout=2.5)
+            assert projection["data"]["session_id"] == "s1"
+        active_writer.close()
+        slow_writer.close()
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
 async def test_acks_stay_point_to_point_under_concurrent_ops() -> None:
     handle = FakeHandle()
     registrant = Registrant(handle, kind="tui")

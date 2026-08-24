@@ -9,6 +9,7 @@ import asyncio
 import pytest
 
 from local_operator.mobile.types import (
+    AskOptionWire,
     PendingRequest,
     SessionProjection,
     SessionRecord,
@@ -169,13 +170,37 @@ async def test_pending_approval_renders_and_y_n_answers() -> None:
         await pilot.pause()
         assert screen._pending.display
         assert "rm -rf build" in _text(screen._pending)
-        # Composer holds focus; y/n still answer because the handler checks
-        # focus only for ask pickers. Press with the composer BLURRED.
-        screen._composer.blur() if hasattr(screen._composer, "blur") else None
-        screen.set_focus(None)
+        # Normal entry focus stays on the composer; the displayed gate owns its
+        # answer shortcut and the key must not become draft text.
+        screen._composer.focus()
         await pilot.press("y")
         await pilot.pause()
         assert ("approval", ("r1", True)) in stub.sent
+        assert screen._composer.value == ""
+
+
+@pytest.mark.asyncio
+async def test_pending_ask_option_answers_from_composer_focus() -> None:
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen, stub = await _attached_screen(app)
+        screen._render_projection(
+            make_projection(
+                pending=PendingRequest(
+                    request_id="q1",
+                    kind="ask",
+                    title="Choose",
+                    options=[AskOptionWire(label="Alpha", description="first")],
+                )
+            )
+        )
+        await pilot.pause()
+        screen._composer.focus()
+        await pilot.press("a")
+        await pilot.pause()
+        assert ("ask", ("q1", "Alpha")) in stub.sent
+        assert screen._composer.value == ""
 
 
 @pytest.mark.asyncio
@@ -191,6 +216,17 @@ async def test_owner_death_state() -> None:
         assert "owner exited" in _text(screen._banner)
         assert "resume here" in _text(screen._pending)
         assert screen._owner_dead
+        assert "resume here" not in _text(screen._banner)
+        assert "resume here" not in screen._composer.placeholder
+        # A late projection queued before EOF cannot repaint contradictory live
+        # state or resurrect the approval card after owner death.
+        screen._render_projection(
+            make_projection(
+                pending=PendingRequest(request_id="late", kind="approval", title="late")
+            )
+        )
+        assert "attached ·" not in _text(screen._banner)
+        assert "late" not in _text(screen._pending)
 
 
 @pytest.mark.asyncio

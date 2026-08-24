@@ -261,6 +261,16 @@ class OwnedSessionHandle(SessionHandle):
             # Ordinary gate timeout owns the non-authorizing answer. Keeping the
             # host busy until then prevents the reaper from denying it early.
             return True
+        manager = getattr(session, "jobs", None)
+        if manager is not None:
+            try:
+                # Session.dispose tears down the whole manager, not only task jobs.
+                # Background bash and capacity-queued jobs therefore carry the same
+                # liveness weight as subagents until their manager row settles.
+                if any(getattr(job, "status", None) == "running" for job in manager.list()):
+                    return True
+            except Exception:  # noqa: BLE001 — uncertainty must fail closed
+                return True
         if any(not task.done() for task in self._background_tasks):
             return True
         return False
