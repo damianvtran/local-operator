@@ -22,6 +22,7 @@ from local_operator.mobile.types import (
     ATTACH_MAX_CLIENTS,
     PROTOCOL_VERSION,
     SessionProjection,
+    TranscriptEntry,
 )
 
 
@@ -82,6 +83,41 @@ class FakeHandle:
 
     async def refresh(self) -> None:
         pass
+
+
+class ConcurrentHandle(FakeHandle):
+    """Owner-side admission model for real-socket multi-producer tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._admission_lock = asyncio.Lock()
+        self._notify = None
+        self.admitted: list[tuple[str, str]] = []
+
+    def subscribe(self, on_projection):  # noqa: ANN001, ANN202
+        self._notify = on_projection
+        return lambda: None
+
+    async def _admit(self, kind: str, text: str) -> str:
+        async with self._admission_lock:
+            self.admitted.append((kind, text))
+            self._projection.transcript.append(
+                TranscriptEntry(
+                    id=f"{kind}-{len(self.admitted)}",
+                    kind="steer" if kind == "steer" else "user",
+                    text=text,
+                )
+            )
+            if self._notify is not None:
+                self._notify()
+            await asyncio.sleep(0)
+            return f"{kind} admitted"
+
+    async def prompt(self, text, images=None):  # noqa: ANN001, ANN202
+        return await self._admit("prompt", text)
+
+    async def steer(self, text, images=None):  # noqa: ANN001, ANN202
+        return await self._admit("steer", text)
 
 
 async def _wait_record() -> registry.SessionRecord:
@@ -170,6 +206,53 @@ async def test_broadcast_reaches_every_client() -> None:
         assert frame["data"]["session_id"] == "s1"
         wd.close()
         wa.close()
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["prompt", "steer"])
+async def test_concurrent_producers_ack_once_and_converge(op: str) -> None:
+    """Daemon plus two attaches submit together through one transcript owner."""
+    handle = ConcurrentHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    try:
+        record = await _wait_record()
+        clients = [
+            await _dial(record),
+            await _dial(record, client="attach"),
+            await _dial(record, client="attach"),
+        ]
+        texts = ["from mobile", "from attach one", "from attach two"]
+        for req, ((_, writer), text) in enumerate(zip(clients, texts)):
+            writer.write(json.dumps({"op": op, "req": req, "text": text}).encode() + b"\n")
+        await asyncio.gather(*(writer.drain() for _, writer in clients))
+
+        acks = await asyncio.gather(
+            *(_until(reader, "ack", req) for req, (reader, _) in enumerate(clients))
+        )
+        assert [ack["req"] for ack in acks] == [0, 1, 2]
+        assert sorted(text for kind, text in handle.admitted if kind == op) == sorted(texts)
+        assert len(handle.admitted) == 3
+
+        expected = [(kind, text) for kind, text in handle.admitted]
+
+        async def reconciled(reader: asyncio.StreamReader) -> dict[str, Any]:
+            for _ in range(10):
+                projection = await _until(reader, "projection")
+                if len(projection["data"]["transcript"]) == len(expected):
+                    return projection
+            raise AssertionError("viewer never received the reconciled projection")
+
+        projections = await asyncio.gather(*(reconciled(reader) for reader, _ in clients))
+        for projection in projections:
+            rows = projection["data"]["transcript"]
+            assert [
+                ("steer" if row["kind"] == "steer" else "prompt", row["text"]) for row in rows
+            ] == expected
+        for _, writer in clients:
+            writer.close()
     finally:
         registrant.close()
 

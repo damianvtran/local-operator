@@ -34,6 +34,9 @@ class FakeSession:
         self._handlers: list[Any] = []
         self._named: list[tuple[str, bool]] = []
         self._complete_calls: list[tuple[str, str]] = []
+        self.prompt_calls: list[str] = []
+        self.steer_calls: list[str] = []
+        self.prompt_release = asyncio.Event()
         # Tagged or a short untagged title both parse; the default stays
         # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"
@@ -79,6 +82,15 @@ class FakeSession:
 
     def running_subagents(self) -> int:
         return 0
+
+    async def prompt(self, text: str, images=None) -> None:  # noqa: ANN001
+        self.prompt_calls.append(text)
+        self.is_streaming = True
+        await self.prompt_release.wait()
+        self.is_streaming = False
+
+    def steer(self, text: str, images=None) -> None:  # noqa: ANN001
+        self.steer_calls.append(text)
 
     @property
     def reasoning_effort(self):  # pragma: no cover
@@ -146,6 +158,42 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
     assert await second is False
     await asyncio.sleep(0)
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ordinary_prompts_are_admitted_fifo() -> None:
+    handle, session = make_handle()
+    first, second, third = await asyncio.gather(
+        handle.prompt("mobile"),
+        handle.prompt("attach one"),
+        handle.prompt("attach two"),
+    )
+    assert first == "prompt admitted"
+    assert second == "prompt queued (2)"
+    assert third == "prompt queued (3)"
+    await asyncio.sleep(0)
+    assert session.prompt_calls == ["mobile"]
+    assert handle.is_busy() is True
+
+    session.prompt_release.set()
+    deadline = asyncio.get_running_loop().time() + 5
+    while len(session.prompt_calls) < 3:
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.01)
+    assert session.prompt_calls == ["mobile", "attach one", "attach two"]
+    assert len(set(session.prompt_calls)) == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
+    handle, session = make_handle()
+    receipts = await asyncio.gather(
+        handle.steer("mobile steer"),
+        handle.steer("attach steer one"),
+        handle.steer("attach steer two"),
+    )
+    assert receipts == ["steering queued"] * 3
+    assert session.steer_calls == ["mobile steer", "attach steer one", "attach steer two"]
 
 
 @pytest.mark.asyncio

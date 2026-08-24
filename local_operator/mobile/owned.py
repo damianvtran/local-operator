@@ -24,6 +24,7 @@ import asyncio
 import logging
 import secrets
 from asyncio import InvalidStateError
+from collections import deque
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
@@ -56,6 +57,9 @@ def _resolve_gate_future(future: asyncio.Future[Any], value: Any) -> None:
 #: the turn told why. A phone in a pocket is the common case; an unbounded
 #: wait would pin the turn (and its tool slot) forever.
 PENDING_REQUEST_TIMEOUT_S = 30.0
+# Socket admission is intentionally bounded: many front ends may produce input,
+# but an abandoned automation loop must not grow one owner's memory forever.
+MAX_QUEUED_PROMPTS = 32
 
 
 class OwnedSessionHandle(SessionHandle):
@@ -122,6 +126,12 @@ class OwnedSessionHandle(SessionHandle):
         # request_id -> the AskQuestion.id the harness is waiting on (the
         # answer map's key — see ask_gate).
         self._pending_question_ids: dict[str, str] = {}
+        # One owner process, many producers: ordinary prompts enter this FIFO
+        # and exactly one drain invokes Session.prompt at a time. Session itself
+        # deliberately rejects concurrent calls, so serialization belongs at
+        # this control/admission boundary rather than by adding another writer.
+        self._prompt_queue: deque[tuple[str, list["ImageContent"]]] = deque()
+        self._prompt_drain_task: asyncio.Task[None] | None = None
         self._install_gates()
 
     # -- gates -----------------------------------------------------------------
@@ -231,6 +241,11 @@ class OwnedSessionHandle(SessionHandle):
         The child's clean-exit path calls this rather than reaching through
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
+        drain = self._prompt_drain_task
+        if drain is not None and not drain.done():
+            drain.cancel()
+            await asyncio.gather(drain, return_exceptions=True)
+        self._prompt_queue.clear()
         await self._session.dispose()
 
     def is_busy(self) -> bool:
@@ -256,6 +271,10 @@ class OwnedSessionHandle(SessionHandle):
             if session.running_subagents() > 0:
                 return True
         except Exception:  # noqa: BLE001 — a broken counter must not wedge the reaper
+            return True
+        if self._prompt_queue or (
+            self._prompt_drain_task is not None and not self._prompt_drain_task.done()
+        ):
             return True
         if self._pending_futures:
             # Ordinary gate timeout owns the non-authorizing answer. Keeping the
@@ -331,16 +350,16 @@ class OwnedSessionHandle(SessionHandle):
 
     async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
-        image_blocks = _image_blocks(images)
-        # A rejected prompt must not leave a ghost user row on the phone, so
-        # the echo waits until Session.prompt has ACCEPTED the turn (the lock
-        # is the honest signal) — see _run_turn_task. Check the cheap guard up
-        # front so the common busy case answers immediately without a task.
-        if self._session.is_streaming or getattr(self._session, "_compacting", False):
-            return "not sent: session is busy — steer instead, or retry in a moment"
+        if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
+            raise RuntimeError(
+                f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
+            )
         self._maybe_name_conversation(text)
-        self._run_turn_task(text, image_blocks)
-        return "prompt sent"
+        self._prompt_queue.append((text, _image_blocks(images)))
+        position = len(self._prompt_queue)
+        if self._prompt_drain_task is None or self._prompt_drain_task.done():
+            self._prompt_drain_task = asyncio.ensure_future(self._drain_prompt_queue())
+        return "prompt admitted" if position == 1 else f"prompt queued ({position})"
 
     def _maybe_name_conversation(self, text: str) -> None:
         """Name a still-unnamed conversation from its first real prompt.
@@ -404,29 +423,26 @@ class OwnedSessionHandle(SessionHandle):
         self._refresh_state()
         self._notify()
 
-    def _run_turn_task(self, text: str, image_blocks: list["ImageContent"]) -> None:
-        """Run the turn as a background task; a rejection surfaces as a notice,
-        never as a ghost user row.
+    async def _drain_prompt_queue(self) -> None:
+        """Run admitted ordinary prompts in owner order, one safe turn at a time.
 
-        The session emits MessageStartEvent for a user turn only AFTER the
-        turn lock is acquired (see Session._run_turn), so that event IS the
-        acceptance signal — the fold paints the row from it, and there is no
-        optimistic echo to undo. Session.prompt raises RuntimeError when a
-        turn started in the gap between the guard above and the lock; catching
-        it here keeps the un-awaited-future warning out of the log and gives
-        the phone a quiet "not sent" notice instead of a fake sent row.
+        Accepted input remains in memory until its turn reaches Session.prompt;
+        only that call emits the user row and persists it, giving every viewer
+        one shared projection row rather than one optimistic echo per producer.
         """
-
-        async def run() -> None:
+        while self._prompt_queue:
+            text, image_blocks = self._prompt_queue[0]
             try:
                 await self._session.prompt(text, image_blocks)
             except RuntimeError as exc:
+                # Disposal is a terminal rejection. Other RuntimeErrors are
+                # surfaced but cannot make a later accepted FIFO item disappear.
                 self._projection.streaming = self._session.is_streaming
                 self._fold.note_prompt_rejected(str(exc))
                 self._notify()
-                logger.warning("mobile prompt rejected: %s", exc)
-
-        asyncio.ensure_future(run())
+                logger.warning("mobile prompt rejected after admission: %s", exc)
+            finally:
+                self._prompt_queue.popleft()
 
     async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
