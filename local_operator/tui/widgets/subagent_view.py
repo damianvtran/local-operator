@@ -144,7 +144,7 @@ LEDGER_GONE_NOTE = "this subagent has left the ledger — what is above was capt
 READ_ONLY_NOTE = "read-only"
 HISTORY_PAGE_ROWS = 100
 HISTORY_LOADING_NOTE = "loading earlier…"
-HISTORY_START_NOTE = "start"
+HISTORY_START_NOTE = "transcript start"
 HISTORY_UNAVAILABLE_NOTE = "history unavailable"
 HISTORY_ERROR_NOTE = "load failed · Home retry"
 
@@ -258,7 +258,11 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
     return False
 
 
-def fold_transcript_entries(entries: Sequence[TranscriptEntry]) -> list[SubagentEntry]:
+def fold_transcript_entries(
+    entries: Sequence[TranscriptEntry],
+    *,
+    tool_results: dict[str, tuple[str, bool]] | None = None,
+) -> list[SubagentEntry]:
     """Fold durable transcript rows into the viewer's stable row model.
 
     Durable rows are canonical for completed history; trajectory remains the
@@ -268,6 +272,16 @@ def fold_transcript_entries(entries: Sequence[TranscriptEntry]) -> list[Subagent
     """
     folded: list[SubagentEntry] = []
     calls: dict[str, int] = {}
+    # Durable page boundaries are arbitrary. A result may arrive in the newer
+    # page before its call is loaded from the older one, so retain outcomes
+    # across folds instead of treating every page as a complete conversation.
+    results = tool_results if tool_results is not None else {}
+    for entry in entries:
+        payload = entry.payload
+        if entry.type == ENTRY_MESSAGE and payload.get("role") == "tool":
+            call_id = str(payload.get("tool_call_id") or "")
+            if call_id:
+                results[call_id] = (_content_text(payload), bool(payload.get("is_error")))
     communication_ids: set[str] = set()
     # Host communication facts supersede their replay-visible custom message:
     # the former include replies and correlation while the latter contain XML
@@ -326,30 +340,22 @@ def fold_transcript_entries(entries: Sequence[TranscriptEntry]) -> list[Subagent
                 if not call_id:
                     continue
                 calls[call_id] = len(folded)
+                result = results.get(call_id)
                 folded.append(
                     SubagentEntry(
                         call_id,
                         "tool",
                         tool_name=str(raw_call.get("name") or "tool"),
                         tool_args=dict(raw_call.get("arguments") or {}),
+                        outcome=("error" if result[1] else "success") if result else None,
+                        result_text=result[0] if result else "",
                     )
                 )
             continue
         if role == "tool":
-            call_id = str(payload.get("tool_call_id") or "")
-            index = calls.get(call_id)
-            if index is None:
-                continue
-            previous = folded[index]
-            result = _content_text(payload)
-            folded[index] = SubagentEntry(
-                key=previous.key,
-                kind="tool",
-                tool_name=previous.tool_name,
-                tool_args=previous.tool_args,
-                outcome="error" if payload.get("is_error") else "success",
-                result_text=result,
-            )
+            # Outcomes were indexed before folding so result-before-call works
+            # within one page too. Tool messages never render as their own row.
+            continue
     return folded
 
 
@@ -743,6 +749,20 @@ class HintButton(Static):
         self._label, self._lead = label, lead
         self._repaint()
 
+    def set_key(self, key: str) -> None:
+        """Replace state copy and let Textual remeasure this auto-width hint.
+
+        Hover only changes ink, so ordinary repaints deliberately skip layout.
+        History state is different: its key grows from ``read-only`` to loading,
+        error, or completion copy. Reusing the no-layout path pins the widget to
+        its old width and clips a semantically important label despite free row
+        space.
+        """
+        if key == self._key:
+            return
+        self._key = key
+        self.update(self._text(), layout=True)
+
     def preview(self, label: str, *, lead: bool) -> str:
         """What this hint WOULD read as, without painting it.
 
@@ -935,6 +955,9 @@ class SubagentView(Vertical):
         self._history_directory: str | None = "__unresolved__"
         self._history_cursor: str | None = None
         self._history_ids: set[str] = set()
+        # Results may be loaded one page before their calls. This cross-page
+        # index lets the later older-page fold settle those calls immediately.
+        self._history_tool_results: dict[str, tuple[str, bool]] = {}
         self._history_entries: list[SubagentEntry] = []
         self._history_loading = False
         self._history_exhausted = False
@@ -1099,6 +1122,7 @@ class SubagentView(Vertical):
         self._history_directory = directory
         self._history_cursor = None
         self._history_ids = set()
+        self._history_tool_results = {}
         self._history_entries = []
         self._history_loading = False
         self._history_exhausted = False
@@ -1122,8 +1146,7 @@ class SubagentView(Vertical):
         return READ_ONLY_NOTE
 
     def _paint_history_state(self) -> None:
-        self._state_hint._key = self._history_state_text()
-        self._state_hint._repaint()
+        self._state_hint.set_key(self._history_state_text())
         self._hint_width = None
         self._chrome_state = None
         if self.is_mounted:
@@ -1142,13 +1165,17 @@ class SubagentView(Vertical):
         requests that later prepend the same page several times.
         """
         self._body.scroll_home(animate=False)
-        self._maybe_load_history()
+        # ``scroll_home`` is applied on Textual's next refresh. Passing the
+        # intended offset explicitly prevents the disk worker from sampling the
+        # old tail first and restoring it after the prepend, which made a real
+        # keyboard Home press appear to load nothing.
+        self._maybe_load_history(anchor=0.0)
 
     def action_end(self) -> None:
         """Return to the live tail and re-acquire sticky following."""
         self._body.scroll_end(animate=False)
 
-    def _maybe_load_history(self, *, initial: bool = False) -> None:
+    def _maybe_load_history(self, *, initial: bool = False, anchor: float | None = None) -> None:
         if (
             not self.is_mounted
             or self._history_loading
@@ -1166,7 +1193,10 @@ class SubagentView(Vertical):
         directory = self._history_directory
         assert directory is not None  # narrowed by the guard above
         cursor = self._history_cursor
-        anchor = None if initial else self._body.scroll_y
+        if initial:
+            anchor = None
+        elif anchor is None:
+            anchor = self._body.scroll_y
         self._reconcile_current_body()
 
         async def load() -> None:
@@ -1211,11 +1241,14 @@ class SubagentView(Vertical):
         self._history_error = False
         rows = list(page.entries)
         fresh_rows = [entry for entry in rows if entry.id not in self._history_ids]
-        fresh = fold_transcript_entries(fresh_rows)
+        if page.reconciled:
+            # Replacement may invalidate ordering and payloads, not merely
+            # identities. Its page is a new canonical window, including a new
+            # cross-boundary outcome index.
+            self._history_tool_results = {}
+        fresh = fold_transcript_entries(fresh_rows, tool_results=self._history_tool_results)
         self._history_ids.update(entry.id for entry in fresh_rows)
         if page.reconciled:
-            # Replacement may invalidate ordering but not identities. Rebuild
-            # from the current page and let live trajectory fill its own tail.
             self._history_entries = fresh
         else:
             self._history_entries[0:0] = fresh

@@ -1,0 +1,4 @@
+screen_size=Size(width=118, height=38) screen_virtual=Size(width=118, height=38) screen_scrollbar=False
+body_size=Size(width=116, height=22) body_virtual=Size(width=115, height=102) max_scroll=80 scroll_y=80
+loaded=100 state='read-only'
+footer='↑↓ scroll · esc back to conversation · read-only' state_region_width=12

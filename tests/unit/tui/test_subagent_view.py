@@ -24,7 +24,7 @@ from rich.cells import cell_len
 
 from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE
 from local_operator.harness.jobs import CANCELLED_BEFORE_START
-from local_operator.harness.types import Message
+from local_operator.harness.types import Message, TextContent, ToolCall
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -238,6 +238,39 @@ async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) ->
         assert "durable 0" in page
         assert HISTORY_START_NOTE in page
         assert len(view._history_ids) == 230
+        assert view._state_hint.rendered().endswith("transcript start · read-only")
+        assert view._state_hint.region.width >= len("transcript start · read-only")
+
+
+@pytest.mark.asyncio
+async def test_history_home_key_lands_on_newly_loaded_page(tmp_path) -> None:
+    """The binding path must not sample the old tail before Home settles."""
+    transcript = Transcript(tmp_path / "child")
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert view._body.scroll_y >= view._body.max_scroll_y - 1
+        before_max = view._body.max_scroll_y
+
+        await pilot.press("home")
+        await _wait_history(pilot, view)
+        for _ in range(5):
+            await pilot.pause()
+
+        growth = view._body.max_scroll_y - before_max
+        # Block gap settlement can add a few rows after anchor restoration; the
+        # invariant is that Home lands with the prepended page, not at the tail.
+        assert growth <= view._body.scroll_y <= growth + 4
+        assert view._body.scroll_y < view._body.max_scroll_y - 1
 
 
 @pytest.mark.asyncio
@@ -282,6 +315,49 @@ async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
         assert calls == 1
         growth = view._body.max_scroll_y - before_max
         assert abs(view._body.scroll_y - (before + growth)) <= 1
+
+
+@pytest.mark.asyncio
+async def test_history_settles_tool_split_across_durable_page_boundary(tmp_path) -> None:
+    """A result at newer[0] must settle its call once older[-1] is loaded."""
+    transcript = Transcript(tmp_path / "child")
+    for index in range(98):
+        await transcript.append_message(Message.assistant(f"older {index}"))
+    await transcript.append_message(
+        Message(
+            role="assistant",
+            content=[],
+            tool_calls=[ToolCall(id="boundary-call", name="bash", arguments={"command": "true"})],
+        )
+    )
+    await transcript.append_message(
+        Message(
+            role="tool",
+            tool_call_id="boundary-call",
+            tool_name="bash",
+            content=[TextContent(text="done")],
+        )
+    )
+    for index in range(99):
+        await transcript.append_message(Message.assistant(f"newer {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert all(entry.key != "boundary-call" for entry in view._history_entries)
+
+        await pilot.press("home")
+        await _wait_history(pilot, view)
+
+        call = next(entry for entry in view._history_entries if entry.key == "boundary-call")
+        assert call.outcome == "success"
+        assert call.result_text == "done"
 
 
 @pytest.mark.asyncio
