@@ -11,12 +11,14 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal
 
 LEASE_NAME = ".execution-lease"
 MIRROR_NAME = ".session.pid"
+RECOVERY_LOCK_NAME = ".execution-lease.recovery"
 
 
 class SessionLeaseHeldError(RuntimeError):
@@ -72,6 +74,68 @@ def _read_claim(path: Path) -> tuple[str | None, int | None]:
         return None, None
 
 
+@contextmanager
+def _stale_recovery_right(session_dir: Path) -> Iterator[bool]:
+    """Try to serialize stale takeover with a crash-released kernel lock.
+
+    A persistent side file avoids the same pathname replacement race as the
+    lease itself. The kernel lock, not the file's lifetime, is authoritative:
+    process death releases it automatically, so recovery cannot become
+    immortal. Windows lock failures stay closed because access denial and a
+    live contender are intentionally indistinguishable here.
+    """
+    path = session_dir / RECOVERY_LOCK_NAME
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    token = secrets.token_hex(16)
+    acquired = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError:
+                yield False
+                return
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                yield False
+                return
+        # Metadata is diagnostic only, but records both process identity and a
+        # per-attempt token so a surviving file is never mistaken for authority.
+        os.ftruncate(fd, 0)
+        os.write(
+            fd,
+            json.dumps({"pid": os.getpid(), "token": token}, separators=(",", ":")).encode(),
+        )
+        os.fsync(fd)
+        yield True
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
 @dataclass(frozen=True)
 class SessionLease:
     """One generation claim; release removes only this exact generation."""
@@ -125,28 +189,45 @@ def acquire_session_lease(session_dir: Path, pid: int | None = None) -> SessionL
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            _, existing_pid = _read_claim(path)
-            if existing_pid is None or _pid_state(existing_pid) != "dead":
-                raise SessionLeaseHeldError(session_dir, existing_pid)
-            tombstone = session_dir / f"{LEASE_NAME}.stale.{secrets.token_hex(8)}"
-            try:
-                os.replace(path, tombstone)
-            except OSError:
-                # Another contender recovered it, or Windows would not permit
-                # the rename. Re-read rather than granting ourselves ownership.
-                continue
-            try:
-                tombstone.unlink()
-            except OSError:
-                pass
-            continue
+            inspected_generation, inspected_pid = _read_claim(path)
+            if inspected_pid is None or _pid_state(inspected_pid) != "dead":
+                raise SessionLeaseHeldError(session_dir, inspected_pid)
+            with _stale_recovery_right(session_dir) as may_recover:
+                if not may_recover:
+                    # A live recoverer is indistinguishable from ownership until
+                    # it publishes its successor. Fail closed instead of racing it.
+                    _, current_pid = _read_claim(path)
+                    raise SessionLeaseHeldError(session_dir, current_pid)
+                current_generation, current_pid = _read_claim(path)
+                if (
+                    current_generation != inspected_generation
+                    or current_pid != inspected_pid
+                    or current_pid is None
+                    or _pid_state(current_pid) != "dead"
+                ):
+                    # The exact generation/process pair changed, became live, or
+                    # cannot still be proven dead. Never move that successor.
+                    raise SessionLeaseHeldError(session_dir, current_pid)
+                tombstone = session_dir / f"{LEASE_NAME}.stale.{secrets.token_hex(8)}"
+                try:
+                    os.replace(path, tombstone)
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                except OSError:
+                    # Windows rename denial and any unexpected successor both
+                    # stay closed; neither permits speculative ownership.
+                    raise SessionLeaseHeldError(session_dir, current_pid) from None
+                finally:
+                    try:
+                        tombstone.unlink()
+                    except OSError:
+                        pass
         try:
             os.write(fd, payload)
             os.fsync(fd)
         finally:
             os.close(fd)
         try:
-            (session_dir / MIRROR_NAME).write_text(str(owner_pid), encoding="utf-8")
+            mirror.write_text(str(owner_pid), encoding="utf-8")
         except OSError:
             pass
         return SessionLease(session_dir, generation, owner_pid)

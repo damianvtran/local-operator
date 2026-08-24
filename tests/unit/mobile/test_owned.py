@@ -92,6 +92,9 @@ class FakeSession:
     def steer(self, text: str, images=None) -> None:  # noqa: ANN001
         self.steer_calls.append(text)
 
+    async def dispose(self) -> None:
+        self.prompt_release.set()
+
     @property
     def reasoning_effort(self):  # pragma: no cover
         return "auto"
@@ -182,6 +185,67 @@ async def test_concurrent_ordinary_prompts_are_admitted_fifo() -> None:
         await asyncio.sleep(0.01)
     assert session.prompt_calls == ["mobile", "attach one", "attach two"]
     assert len(set(session.prompt_calls)) == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_admitted_prompt_is_visible_and_later_fifo_progresses() -> None:
+    handle, session = make_handle()
+    session.prompt_release.set()
+    calls: list[str] = []
+
+    async def prompt(text: str, images=None) -> None:  # noqa: ANN001
+        calls.append(text)
+        if text == "first":
+            raise ValueError("provider exploded")
+
+    session.prompt = prompt
+    assert await handle.prompt("first") == "prompt admitted"
+    assert await handle.prompt("second") == "prompt queued (2)"
+    drain = handle._prompt_drain_task
+    assert drain is not None
+    await drain
+
+    assert calls == ["first", "second"]
+    assert not handle._prompt_queue
+    assert handle.is_busy() is False
+    notices = [
+        entry.text for entry in handle.session_projection_seed.transcript if entry.kind == "notice"
+    ]
+    assert any("provider exploded" in notice for notice in notices)
+    assert drain.exception() is None
+
+
+@pytest.mark.asyncio
+async def test_dispose_rejects_queued_admissions_without_unhandled_task_error() -> None:
+    handle, session = make_handle()
+    assert await handle.prompt("running") == "prompt admitted"
+    assert await handle.prompt("queued") == "prompt queued (2)"
+    await asyncio.sleep(0)
+
+    await handle.dispose()
+
+    assert not handle._prompt_queue
+    assert handle.is_busy() is False
+    notices = [
+        entry.text for entry in handle.session_projection_seed.transcript if entry.kind == "notice"
+    ]
+    assert sum("session closed" in notice for notice in notices) == 2
+    drain = handle._prompt_drain_task
+    assert drain is not None and drain.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_queue_overflow_rejects_before_admission(monkeypatch) -> None:
+    monkeypatch.setattr(owned_mod, "MAX_QUEUED_PROMPTS", 1)
+    handle, _ = make_handle()
+    assert await handle.prompt("first") == "prompt admitted"
+    with pytest.raises(RuntimeError, match="prompt queue is full"):
+        await handle.prompt("overflow")
+    assert [text for text, _ in handle._prompt_queue] == ["first"]
+    drain = handle._prompt_drain_task
+    assert drain is not None
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
 
 
 @pytest.mark.asyncio

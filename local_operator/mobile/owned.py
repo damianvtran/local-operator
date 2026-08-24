@@ -132,6 +132,7 @@ class OwnedSessionHandle(SessionHandle):
         # this control/admission boundary rather than by adding another writer.
         self._prompt_queue: deque[tuple[str, list["ImageContent"]]] = deque()
         self._prompt_drain_task: asyncio.Task[None] | None = None
+        self._disposing = False
         self._install_gates()
 
     # -- gates -----------------------------------------------------------------
@@ -241,11 +242,18 @@ class OwnedSessionHandle(SessionHandle):
         The child's clean-exit path calls this rather than reaching through
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
+        self._disposing = True
         drain = self._prompt_drain_task
         if drain is not None and not drain.done():
             drain.cancel()
             await asyncio.gather(drain, return_exceptions=True)
-        self._prompt_queue.clear()
+        # Every prompt below was already acknowledged to its producer. Reject
+        # each explicitly in the shared projection instead of silently erasing
+        # admissions that never reached Session.prompt.
+        while self._prompt_queue:
+            self._prompt_queue.popleft()
+            self._fold.note_prompt_rejected("session closed before the admitted prompt could run")
+        self._notify()
         await self._session.dispose()
 
     def is_busy(self) -> bool:
@@ -260,6 +268,10 @@ class OwnedSessionHandle(SessionHandle):
         Reads private session state (``_turn_lock``, ``_compacting``) the way
         the session's own prompt guard does; the alternative — exposing each
         flag — would widen the session's public surface for one caller."""
+        if self._disposing:
+            # Disposal has explicitly rejected the admission queue and owns
+            # teardown now; stale provider streaming flags must not wedge exit.
+            return False
         session = self._session
         if getattr(session, "is_streaming", False):
             return True
@@ -350,6 +362,8 @@ class OwnedSessionHandle(SessionHandle):
 
     async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
+        if self._disposing:
+            raise RuntimeError("session is closing; prompt was not admitted")
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
             raise RuntimeError(
                 f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
@@ -359,7 +373,19 @@ class OwnedSessionHandle(SessionHandle):
         position = len(self._prompt_queue)
         if self._prompt_drain_task is None or self._prompt_drain_task.done():
             self._prompt_drain_task = asyncio.ensure_future(self._drain_prompt_queue())
+            # Retrieving an unexpected BaseException prevents a background-task
+            # warning while preserving cancellation/SystemExit semantics.
+            self._prompt_drain_task.add_done_callback(self._observe_prompt_drain)
         return "prompt admitted" if position == 1 else f"prompt queued ({position})"
+
+    @staticmethod
+    def _observe_prompt_drain(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
 
     def _maybe_name_conversation(self, text: str) -> None:
         """Name a still-unnamed conversation from its first real prompt.
@@ -434,13 +460,29 @@ class OwnedSessionHandle(SessionHandle):
             text, image_blocks = self._prompt_queue[0]
             try:
                 await self._session.prompt(text, image_blocks)
-            except RuntimeError as exc:
-                # Disposal is a terminal rejection. Other RuntimeErrors are
-                # surfaced but cannot make a later accepted FIFO item disappear.
+            except asyncio.CancelledError:
+                # The in-flight admission is popped by finally, so record its
+                # terminal rejection here; dispose handles only those still queued.
+                self._projection.streaming = False
+                self._fold.note_prompt_rejected(
+                    "session closed before the admitted prompt could complete"
+                )
+                self._notify()
+                # Cancellation is control flow and must remain cancellation.
+                raise
+            except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
+                # Provider, transcript, and tool failures are all terminal for
+                # this one admission. Surface the failure asynchronously, then
+                # continue in FIFO order without retrying the failed head.
                 self._projection.streaming = self._session.is_streaming
                 self._fold.note_prompt_rejected(str(exc))
                 self._notify()
-                logger.warning("mobile prompt rejected after admission: %s", exc)
+                logger.exception("mobile prompt failed after admission")
+            except BaseException:
+                # KeyboardInterrupt/SystemExit retain their process semantics;
+                # the finally block still removes exactly the failed admission.
+                logger.critical("mobile prompt drain terminated", exc_info=True)
+                raise
             finally:
                 self._prompt_queue.popleft()
 
