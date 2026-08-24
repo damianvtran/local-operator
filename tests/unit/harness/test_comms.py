@@ -1171,6 +1171,17 @@ async def test_a_question_reaches_a_busy_child_and_its_answer_comes_back(tmp_pat
         and "are you stuck?" in message.details["text"]
         for message in history
     )
+    communication_rows = [
+        entry.payload["details"]
+        for entry in Transcript(comms.session_dir_of(job_id)).entries()
+        if entry.payload.get("custom_type") == "hub_communication"
+    ]
+    question = next(row for row in communication_rows if row.get("kind") == "ask")
+    answer = next(row for row in communication_rows if row.get("direction") == "to_parent")
+    assert question["body"] == "are you stuck?"
+    assert answer["body"] == "not stuck; fixtures are slow"
+    assert answer["reply_to"] == question["communication_id"]
+    assert "<parent-message>" not in question["body"]
     await parent.dispose()
 
 

@@ -1,0 +1,1 @@
+size=Size(width=38, height=18) virtual=Size(width=38, height=18) scrollbar=False body=Size(width=35, height=3) body_virtual=Size(width=34, height=306) max_scroll=303 scroll_y=303 loaded=100 state='read-only'

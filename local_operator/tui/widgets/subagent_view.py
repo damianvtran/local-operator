@@ -47,6 +47,7 @@ down.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
@@ -61,7 +62,16 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
 from local_operator.harness.jobs import CANCELLED_BEFORE_START
+from local_operator.session.transcript import (
+    CUSTOM_KIND_CUSTOM,
+    ENTRY_CUSTOM,
+    ENTRY_MESSAGE,
+    TranscriptEntry,
+    TranscriptPage,
+    read_transcript_page,
+)
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -132,6 +142,11 @@ LEDGER_GONE_NOTE = "this subagent has left the ledger — what is above was capt
 #: when they opened the page would otherwise have nothing on screen saying why
 #: their keys do nothing.
 READ_ONLY_NOTE = "read-only"
+HISTORY_PAGE_ROWS = 100
+HISTORY_LOADING_NOTE = "loading earlier…"
+HISTORY_START_NOTE = "start"
+HISTORY_UNAVAILABLE_NOTE = "history unavailable"
+HISTORY_ERROR_NOTE = "load failed · Home retry"
 
 
 def _as_dict(event: Any) -> dict[str, Any]:
@@ -168,7 +183,12 @@ def _content_text(payload: Any) -> str:
         return ""
     parts: list[str] = []
     for block in content:
-        if isinstance(block, dict) and block.get("type") == "text":
+        # Transcript encoding excludes pydantic defaults, including the text
+        # block's ``type`` discriminator. The presence of ``text`` is therefore
+        # the durable signal; trajectory events still carry the explicit type.
+        if isinstance(block, dict) and (
+            block.get("type") == "text" or ("text" in block and "data" not in block)
+        ):
             parts.append(str(block.get("text", "")))
     return "".join(parts)
 
@@ -194,7 +214,7 @@ class SubagentEntry:
     """
 
     key: str
-    kind: Literal["prompt", "text", "tool", "notice"]
+    kind: Literal["prompt", "user", "text", "tool", "notice"]
     text: str = ""
     notice_kind: NoticeKind = "info"
     tool_name: str = ""
@@ -236,6 +256,101 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
     # (The instruction does not reach here today — `show()` owns its key — but
     # the rule is the same one, so the fallthrough is the right home for it.)
     return False
+
+
+def fold_transcript_entries(entries: Sequence[TranscriptEntry]) -> list[SubagentEntry]:
+    """Fold durable transcript rows into the viewer's stable row model.
+
+    Durable rows are canonical for completed history; trajectory remains the
+    live overlay. Both use message/tool IDs, so the view can reconcile pages,
+    compaction replacement and the rolling trajectory window without a second
+    event log or positional guesses.
+    """
+    folded: list[SubagentEntry] = []
+    calls: dict[str, int] = {}
+    communication_ids: set[str] = set()
+    # Host communication facts supersede their replay-visible custom message:
+    # the former include replies and correlation while the latter contain XML
+    # wrappers intended for the model, never for a person.
+    for entry in entries:
+        if (
+            entry.type == ENTRY_CUSTOM
+            and entry.payload.get("custom_type") == HUB_COMMUNICATION_CUSTOM_TYPE
+        ):
+            communication_id = entry.payload.get("details", {}).get("communication_id")
+            if communication_id:
+                communication_ids.add(str(communication_id))
+    for entry in entries:
+        payload = entry.payload
+        if entry.type == ENTRY_CUSTOM:
+            if payload.get("custom_type") != HUB_COMMUNICATION_CUSTOM_TYPE:
+                continue
+            details = payload.get("details") or {}
+            direction = details.get("direction")
+            body = strip_control_sequences(str(details.get("body") or "")).strip()
+            if not body:
+                continue
+            kind = str(details.get("kind") or "")
+            if direction == "to_child":
+                lead = {"ask": "Parent asked", "steer": "Parent redirected"}.get(
+                    kind, "Parent sent"
+                )
+            else:
+                lead = "Subagent replied" if details.get("reply_to") else "Subagent sent"
+            folded.append(_notice(f"comm:{entry.id}", f"{lead}: {body}", "info"))
+            continue
+        if entry.type != ENTRY_MESSAGE:
+            continue
+        if payload.get("kind") == CUSTOM_KIND_CUSTOM:
+            if payload.get("custom_type") != HUB_MESSAGE_TYPE or entry.id in communication_ids:
+                continue
+            details = payload.get("details") or {}
+            body = strip_control_sequences(str(details.get("body") or "")).strip()
+            if body:
+                lead = "Parent asked" if details.get("expects_reply") else "Parent sent"
+                folded.append(_notice(entry.id, f"{lead}: {body}", "info"))
+            continue
+        role = payload.get("role")
+        text = strip_control_sequences(_content_text(payload)).strip()
+        if role == "user":
+            if text:
+                folded.append(SubagentEntry(entry.id, "user", text=text))
+            continue
+        if role == "assistant":
+            if text:
+                folded.append(SubagentEntry(entry.id, "text", text=text))
+            for raw_call in payload.get("tool_calls") or ():
+                if not isinstance(raw_call, dict):
+                    continue
+                call_id = str(raw_call.get("id") or raw_call.get("tool_call_id") or "")
+                if not call_id:
+                    continue
+                calls[call_id] = len(folded)
+                folded.append(
+                    SubagentEntry(
+                        call_id,
+                        "tool",
+                        tool_name=str(raw_call.get("name") or "tool"),
+                        tool_args=dict(raw_call.get("arguments") or {}),
+                    )
+                )
+            continue
+        if role == "tool":
+            call_id = str(payload.get("tool_call_id") or "")
+            index = calls.get(call_id)
+            if index is None:
+                continue
+            previous = folded[index]
+            result = _content_text(payload)
+            folded[index] = SubagentEntry(
+                key=previous.key,
+                kind="tool",
+                tool_name=previous.tool_name,
+                tool_args=previous.tool_args,
+                outcome="error" if payload.get("is_error") else "success",
+                result_text=result,
+            )
+    return folded
 
 
 def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[SubagentEntry]:
@@ -547,6 +662,8 @@ def entry_block(entry: SubagentEntry) -> TranscriptBlock:
     """
     if entry.kind == "prompt":
         return InstructionBlock(entry.text)
+    if entry.kind == "user":
+        return UserBlock(entry.text)
     if entry.kind == "text":
         block = AssistantBlock()
         block.update_text(entry.text)
@@ -725,6 +842,11 @@ class SubagentView(Vertical):
     take the app down; classes make the collision legal.
     """
 
+    BINDINGS = [
+        Binding("home", "home", "Load earlier transcript", show=False),
+        Binding("end", "end", "Follow live tail", show=False),
+    ]
+
     def __init__(self, job_id: str) -> None:
         super().__init__(classes="subagent-view")
         self._job_id = job_id
@@ -805,6 +927,20 @@ class SubagentView(Vertical):
         #: ran, so its duration is parked time and the bare word ``cancelled``
         #: beside it reads as a run that burned that long.
         self._outcome = ""
+        #: Durable transcript paging is generation-scoped because a slow disk
+        #: read can finish after the reader retargets this reusable page. The
+        #: generation check is the boundary that prevents child A's history
+        #: from being prepended into child B.
+        self._history_generation = 0
+        self._history_directory: str | None = "__unresolved__"
+        self._history_cursor: str | None = None
+        self._history_ids: set[str] = set()
+        self._history_entries: list[SubagentEntry] = []
+        self._history_loading = False
+        self._history_exhausted = False
+        self._history_error = False
+        self._history_unavailable = True
+        self._initial_tail_pending = False
 
     @property
     def job_id(self) -> str:
@@ -841,7 +977,8 @@ class SubagentView(Vertical):
         # deferred `scroll_end` lands) would stay dead until the 1 Hz poll
         # happened to notice. Watching the reactive is the only signal that
         # fires exactly when the answer changes.
-        self.watch(self._body, "scroll_y", self._arm_arrows, init=False)
+        self.watch(self._body, "scroll_y", self._scroll_changed, init=False)
+        self._maybe_load_history(initial=True)
 
     def on_unmount(self) -> None:
         self._stop_spinner()
@@ -866,6 +1003,7 @@ class SubagentView(Vertical):
         progress: str = "",
         agent_role: str = "",
         effort: str = "",
+        transcript_directory: str | None = None,
     ) -> None:
         """Point the page at a job's current state and reconcile the body.
 
@@ -884,8 +1022,11 @@ class SubagentView(Vertical):
             self._entries = []
             self._blocks = []
             self._head_block = None
+            self._reset_history(transcript_directory)
             if self._body.is_mounted:
                 self._body.clear_blocks()
+        elif transcript_directory != self._history_directory:
+            self._reset_history(transcript_directory)
         self._label = strip_control_sequences(label or job_id)
         self._status = status
         self._queued = queued
@@ -937,18 +1078,188 @@ class SubagentView(Vertical):
                 self._known[entry.key] = entry
             elif _supersedes(entry, known):
                 self._known[entry.key] = entry
-        body = [self._known[key] for key in self._order]
+        live = [self._known[key] for key in self._order]
+        durable_keys = {entry.key for entry in self._history_entries}
+        body = [*self._history_entries, *(entry for entry in live if entry.key not in durable_keys)]
 
         tail = self._tail_entry(gone, progress)
         if tail is not None:
             body.append(tail)
         self._pending, self._pending_head = body, head
         self._sync_body(body, head)
+        self._paint_history_state()
         self._paint_chrome()
         if self._running:
             self._start_spinner()
         else:
             self._stop_spinner()
+
+    def _reset_history(self, directory: str | None) -> None:
+        self._history_generation += 1
+        self._history_directory = directory
+        self._history_cursor = None
+        self._history_ids = set()
+        self._history_entries = []
+        self._history_loading = False
+        self._history_exhausted = False
+        self._history_error = False
+        self._history_unavailable = not bool(directory)
+        # ``show`` runs immediately after ``screen.mount`` but before Textual
+        # has mounted this child. ``on_mount`` owns the first request; later
+        # retargets are already mounted and can start immediately.
+        if directory:
+            self.call_after_refresh(self._maybe_load_history, initial=True)
+
+    def _history_state_text(self) -> str:
+        if self._history_loading:
+            return f"{HISTORY_LOADING_NOTE} · {READ_ONLY_NOTE}"
+        if self._history_error:
+            return f"{HISTORY_ERROR_NOTE} · {READ_ONLY_NOTE}"
+        if self._history_unavailable:
+            return f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"
+        if self._history_exhausted and self._history_entries:
+            return f"{HISTORY_START_NOTE} · {READ_ONLY_NOTE}"
+        return READ_ONLY_NOTE
+
+    def _paint_history_state(self) -> None:
+        self._state_hint._key = self._history_state_text()
+        self._state_hint._repaint()
+        self._hint_width = None
+        self._chrome_state = None
+        if self.is_mounted:
+            self._paint_chrome()
+
+    def _scroll_changed(self, *_args: Any) -> None:
+        self._arm_arrows()
+        if not self._initial_tail_pending and self._body.scroll_y <= 1:
+            self._maybe_load_history()
+
+    def action_home(self) -> None:
+        """Reach the earliest loaded row and request one missing page.
+
+        Repeated Home presses while the worker is active are intentionally a
+        no-op: one edge crossing means one disk read, not a queue of duplicate
+        requests that later prepend the same page several times.
+        """
+        self._body.scroll_home(animate=False)
+        self._maybe_load_history()
+
+    def action_end(self) -> None:
+        """Return to the live tail and re-acquire sticky following."""
+        self._body.scroll_end(animate=False)
+
+    def _maybe_load_history(self, *, initial: bool = False) -> None:
+        if (
+            not self.is_mounted
+            or self._history_loading
+            or self._history_exhausted
+            or self._history_unavailable
+            or not self._history_directory
+        ):
+            return
+        self._history_loading = True
+        self._history_error = False
+        if initial:
+            self._initial_tail_pending = True
+        self._paint_history_state()
+        generation = self._history_generation
+        directory = self._history_directory
+        assert directory is not None  # narrowed by the guard above
+        cursor = self._history_cursor
+        anchor = None if initial else self._body.scroll_y
+        self._reconcile_current_body()
+
+        async def load() -> None:
+            try:
+                page = await asyncio.to_thread(
+                    read_transcript_page,
+                    directory,
+                    before_id=cursor,
+                    limit=HISTORY_PAGE_ROWS,
+                )
+            except FileNotFoundError:
+                self._finish_history_unavailable(generation)
+            except Exception:  # noqa: BLE001 — an observability surface degrades
+                self._finish_history_error(generation)
+            else:
+                self._apply_history_page(generation, page, anchor=anchor, initial=initial)
+
+        self.run_worker(load(), group="subagent-history", exclusive=False, exit_on_error=False)
+
+    def _finish_history_unavailable(self, generation: int) -> None:
+        if generation != self._history_generation:
+            return
+        self._history_loading = False
+        self._history_unavailable = True
+        self._paint_history_state()
+        self._reconcile_current_body()
+
+    def _finish_history_error(self, generation: int) -> None:
+        if generation != self._history_generation:
+            return
+        self._history_loading = False
+        self._history_error = True
+        self._paint_history_state()
+        self._reconcile_current_body()
+
+    def _apply_history_page(
+        self, generation: int, page: TranscriptPage, *, anchor: float | None, initial: bool
+    ) -> None:
+        if generation != self._history_generation:
+            return
+        self._history_loading = False
+        self._history_error = False
+        rows = list(page.entries)
+        fresh_rows = [entry for entry in rows if entry.id not in self._history_ids]
+        fresh = fold_transcript_entries(fresh_rows)
+        self._history_ids.update(entry.id for entry in fresh_rows)
+        if page.reconciled:
+            # Replacement may invalidate ordering but not identities. Rebuild
+            # from the current page and let live trajectory fill its own tail.
+            self._history_entries = fresh
+        else:
+            self._history_entries[0:0] = fresh
+        self._history_cursor = rows[0].id if rows else self._history_cursor
+        self._history_exhausted = not page.has_more
+        self._paint_history_state()
+        self._reconcile_current_body(anchor=anchor, prepend=not initial and bool(fresh))
+        if initial:
+
+            def settle_tail() -> None:
+                self._body.scroll_end(animate=False)
+                self._initial_tail_pending = False
+
+            self.call_after_refresh(settle_tail)
+
+    def _reconcile_current_body(
+        self, *, anchor: float | None = None, prepend: bool = False
+    ) -> None:
+        live = [self._known[key] for key in self._order]
+        durable_keys = {entry.key for entry in self._history_entries}
+        entries = [
+            *self._history_entries,
+            *(entry for entry in live if entry.key not in durable_keys),
+        ]
+        tail = self._tail_entry(self._status == "gone", "")
+        if tail is not None:
+            entries.append(tail)
+        if prepend and self._body.is_mounted:
+            common_suffix = 0
+            for previous, current in zip(reversed(self._entries), reversed(entries)):
+                if previous != current:
+                    break
+                common_suffix += 1
+            count = len(entries) - common_suffix
+            if count > 0:
+                new_entries = entries[:count]
+                new_blocks = [entry_block(entry) for entry in new_entries]
+                self._body.prepend_blocks(new_blocks, anchor_offset=anchor)
+                self._blocks[0:0] = new_blocks
+                self._entries[0:0] = new_entries
+                self._pending = entries
+                return
+        self._pending = entries
+        self._sync_body(entries, self._pending_head)
 
     def _tail_entry(self, gone: bool, progress: str) -> SubagentEntry | None:
         """The row that TERMINATES the page, when the page needs one.
@@ -970,7 +1281,9 @@ class SubagentView(Vertical):
         # the prompt counted, a settled job that recorded no activity showed
         # the instruction and then nothing — no row admitting the run left
         # nothing behind, which is the state this slot exists to name.
-        activity = any(key != "__prompt__" for key in self._order)
+        activity = bool(self._history_entries) or any(key != "__prompt__" for key in self._order)
+        if self._history_loading and not activity:
+            return None
         if not self._running and not self._queued:
             return None if activity else _notice("__empty__", self._empty_state(), "info")
         if not activity:
