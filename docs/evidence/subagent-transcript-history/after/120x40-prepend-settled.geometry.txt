@@ -1,0 +1,1 @@
+size=Size(width=118, height=38) virtual=Size(width=118, height=38) scrollbar=False body=Size(width=115, height=19) body_virtual=Size(width=114, height=148) max_scroll=129 scroll_y=43 loaded=143 state='start of durable transcript · read-only'

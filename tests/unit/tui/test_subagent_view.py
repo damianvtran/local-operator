@@ -16,12 +16,20 @@ test there is.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 from rich.cells import cell_len
 
+from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
 from local_operator.harness.jobs import CANCELLED_BEFORE_START
+from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
+from local_operator.session.transcript import (
+    Transcript,
+    TranscriptEntry,
+    TranscriptPage,
+)
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
@@ -29,6 +37,9 @@ from local_operator.tui.widgets.subagent_panel import GLYPH_DONE
 from local_operator.tui.widgets.subagent_view import (
     COLLAPSE_AFFORDANCE,
     EXPAND_HINT,
+    HISTORY_ERROR_NOTE,
+    HISTORY_START_NOTE,
+    HISTORY_UNAVAILABLE_NOTE,
     INSTRUCTION_ROWS,
     LEDGER_GONE_NOTE,
     TRAJECTORY_MAX_EVENTS,
@@ -191,6 +202,407 @@ async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
     app._open_subagent_view(str(job.id))
     await pilot.pause()
     return app.query_one(SubagentView)
+
+
+@pytest.mark.asyncio
+async def _wait_history(pilot: Any, view: SubagentView) -> None:
+    started = view._history_loading
+    for _ in range(100):
+        await asyncio.sleep(0.005)
+        await pilot.pause()
+        started = started or view._history_loading or bool(view._history_entries)
+        if started and not view._history_loading:
+            return
+    raise AssertionError("history worker did not settle")
+
+
+@pytest.mark.asyncio
+async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) -> None:
+    transcript = Transcript(tmp_path / "child")
+    for index in range(230):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert view._body.scroll_y >= view._body.max_scroll_y - 1
+        assert "durable 229" in " ".join(view.rendered_rows())
+        assert "durable 0" not in " ".join(view.rendered_rows())
+
+        while not view._history_exhausted:
+            view.action_home()
+            await _wait_history(pilot, view)
+        page = " ".join(view.rendered_rows())
+        assert "durable 0" in page
+        assert HISTORY_START_NOTE in page
+        assert len(view._history_ids) == 230
+        assert view._state_hint.rendered().endswith("transcript start · read-only")
+        assert view._state_hint.region.width >= len("transcript start · read-only")
+
+
+@pytest.mark.asyncio
+async def test_history_home_key_lands_on_newly_loaded_page(tmp_path) -> None:
+    """The binding path must not sample the old tail before Home settles."""
+    transcript = Transcript(tmp_path / "child")
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert view._body.scroll_y >= view._body.max_scroll_y - 1
+        before_max = view._body.max_scroll_y
+
+        await pilot.press("home")
+        await _wait_history(pilot, view)
+        for _ in range(5):
+            await pilot.pause()
+
+        growth = view._body.max_scroll_y - before_max
+        # Block gap settlement can add a few rows after anchor restoration; the
+        # invariant is that Home lands with the prepended page, not at the tail.
+        assert growth <= view._body.scroll_y <= growth + 4
+        assert view._body.scroll_y < view._body.max_scroll_y - 1
+
+
+@pytest.mark.asyncio
+async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
+    tmp_path, monkeypatch
+) -> None:
+    transcript = Transcript(tmp_path / "child")
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        calls = 0
+        original = __import__(
+            view.__module__, fromlist=["read_transcript_page"]
+        ).read_transcript_page
+
+        def slow(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(view.__module__ + ".read_transcript_page", slow)
+        view._initial_tail_pending = True
+        view._body.scroll_home(animate=False)
+        await pilot.pause()
+        view._initial_tail_pending = False
+        before_max = view._body.max_scroll_y
+        before = view._body.scroll_y
+        view.action_home()
+        view.action_home()
+        await _wait_history(pilot, view)
+        for _ in range(5):
+            await pilot.pause()
+        assert calls == 1
+        growth = view._body.max_scroll_y - before_max
+        assert abs(view._body.scroll_y - (before + growth)) <= 1
+
+
+@pytest.mark.asyncio
+async def test_history_settles_tool_split_across_durable_page_boundary(tmp_path) -> None:
+    """A result at newer[0] must settle its call once older[-1] is loaded."""
+    transcript = Transcript(tmp_path / "child")
+    for index in range(98):
+        await transcript.append_message(Message.assistant(f"older {index}"))
+    await transcript.append_message(
+        Message(
+            role="assistant",
+            content=[],
+            tool_calls=[ToolCall(id="boundary-call", name="bash", arguments={"command": "true"})],
+        )
+    )
+    await transcript.append_message(
+        Message(
+            role="tool",
+            tool_call_id="boundary-call",
+            tool_name="bash",
+            content=[TextContent(text="done")],
+        )
+    )
+    for index in range(99):
+        await transcript.append_message(Message.assistant(f"newer {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert all(entry.key != "boundary-call" for entry in view._history_entries)
+
+        await pilot.press("home")
+        await _wait_history(pilot, view)
+
+        call = next(entry for entry in view._history_entries if entry.key == "boundary-call")
+        assert call.outcome == "success"
+        assert call.result_text == "done"
+
+
+@pytest.mark.asyncio
+async def test_history_replacement_adopts_changed_payloads_with_preserved_ids(tmp_path) -> None:
+    """Compaction can rewrite content without minting new entry identities."""
+    transcript = Transcript(tmp_path / "child")
+    original = await transcript.append_message(Message.assistant("before replacement"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        replacement_payload = dict(original.payload)
+        replacement_payload["content"] = [{"type": "text", "text": "after replacement"}]
+        replacement = TranscriptEntry(
+            id=original.id,
+            ts=original.ts,
+            type=original.type,
+            payload=replacement_payload,
+        )
+        view._apply_history_page(
+            view._history_generation,
+            TranscriptPage((replacement,), has_more=False, reconciled=True),
+            anchor=0.0,
+            initial=False,
+        )
+        await pilot.pause()
+
+        rendered = " ".join(view.rendered_rows())
+        assert "after replacement" in rendered
+        assert "before replacement" not in rendered
+        assert view._history_ids == {original.id}
+        assert [row.id for row in view._history_rows] == [original.id]
+
+
+@pytest.mark.asyncio
+async def test_history_job_switch_discards_a_late_page(tmp_path, monkeypatch) -> None:
+    first = Transcript(tmp_path / "first")
+    second = Transcript(tmp_path / "second")
+    await first.append_message(Message.assistant("from first"))
+    await second.append_message(Message.assistant("from second"))
+    job_a = _Job("a", "first", status="completed")
+    job_b = _Job("b", "second", status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job_a, job_b)
+    directories = {"a": first.directory, "b": second.directory}
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, job_id: directories[job_id]}
+    )()
+    original = __import__(
+        SubagentView.__module__, fromlist=["read_transcript_page"]
+    ).read_transcript_page
+
+    def delayed(directory, **kwargs):
+        if str(directory) == str(first.directory):
+            import time
+
+            time.sleep(0.05)
+        return original(directory, **kwargs)
+
+    monkeypatch.setattr(SubagentView.__module__ + ".read_transcript_page", delayed)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job_a)
+        app._open_subagent_view("b")
+        await _wait_history(pilot, view)
+        for _ in range(20):
+            await pilot.pause()
+        page = " ".join(view.rendered_rows())
+        assert "from second" in page
+        assert "from first" not in page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fact_first", [False, True])
+async def test_durable_communication_dedupes_across_page_boundary(
+    tmp_path, fact_first: bool
+) -> None:
+    """The human-facing fact supersedes replay XML in either page order."""
+    transcript = Transcript(tmp_path / "child")
+    replay = CustomMessage(
+        id="q1",
+        custom_type=HUB_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "direction": "to_child",
+            "body": "Which file?",
+            "expects_reply": True,
+            "text": "<parent-message>Which file?</parent-message>",
+        },
+    )
+
+    async def append_fact() -> None:
+        await transcript.append_custom(
+            HUB_COMMUNICATION_CUSTOM_TYPE,
+            {
+                "direction": "to_child",
+                "body": "Which file?",
+                "kind": "ask",
+                "communication_id": "q1",
+            },
+        )
+
+    if fact_first:
+        await append_fact()
+    else:
+        await transcript.append_message(replay)
+    # Ninety-nine rows put the two representations on opposite sides of the
+    # 100-row durable page boundary without relying on private reader details.
+    for index in range(99):
+        await transcript.append_message(Message.assistant(f"boundary filler {index}"))
+    if fact_first:
+        await transcript.append_message(replay)
+    else:
+        await append_fact()
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        await pilot.press("home")
+        await _wait_history(pilot, view)
+
+        notices = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent asked: Which file?"
+        ]
+        assert notices == ["Parent asked: Which file?"]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_durable_communications_are_human_facing_and_correlated(tmp_path) -> None:
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Which file failed?",
+            "kind": "ask",
+            "communication_id": "q1",
+        },
+    )
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {"direction": "to_parent", "body": "tests/test_api.py", "reply_to": "q1"},
+    )
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Focus on retries",
+            "kind": "steer",
+            "communication_id": "s1",
+        },
+    )
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        page = " ".join(view.rendered_rows())
+        assert "Parent asked: Which file failed?" in page
+        assert "Subagent replied: tests/test_api.py" in page
+        assert "Parent redirected: Focus on retries" in page
+        assert "<parent-message>" not in page
+
+
+@pytest.mark.asyncio
+async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    job = _job_with(TRAJECTORY, status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        assert "Reading the ingest path." in " ".join(view.rendered_rows())
+
+        child_dir.mkdir()
+        view._history_unavailable = False
+        attempts = 0
+
+        def flaky(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("disk busy")
+            return __import__(
+                "local_operator.session.transcript", fromlist=["read_transcript_page"]
+            ).read_transcript_page(*args, **kwargs)
+
+        monkeypatch.setattr(SubagentView.__module__ + ".read_transcript_page", flaky)
+        # Inject the failure deterministically; the regression below exercises
+        # the real mounted Home binding for the explicit retry itself.
+        view.action_home()
+        await _wait_history(pilot, view)
+        assert HISTORY_ERROR_NOTE in view._history_state_text()
+        failed_attempts = attempts
+        # Repaints and the top-edge watcher may run freely, but the advertised
+        # retry must remain a user decision rather than an implicit hot loop.
+        for _ in range(50):
+            await asyncio.sleep(0.005)
+            await pilot.pause()
+        assert attempts == failed_attempts == 1
+
+        view.focus_body()
+        await pilot.pause()
+        assert app.focused is view._body
+        await pilot.press("home")
+        for _ in range(100):
+            await asyncio.sleep(0.005)
+            await pilot.pause()
+            if attempts == 2 and not view._history_loading:
+                break
+        assert attempts == 2
+        assert view._history_unavailable
 
 
 @pytest.mark.asyncio
