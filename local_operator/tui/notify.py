@@ -101,15 +101,29 @@ _ENV_DISABLE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
 #: the two deliberately differ.
 APP_NAME = "Local Operator"
 
-#: Notification body for a finished turn, and for a turn parked on the user.
-#: Fixed strings rather than the model's own words: a notification is delivered
-#: by the OS to a surface this app cannot sanitise twice, and the point of the
-#: toast is the STATE, which the user reads in under a second. The session name
-#: (the title) says which conversation it was.
+#: Notification context and body for a finished turn, and for a turn parked on
+#: the user. Fixed strings rather than the model's own words: a notification is
+#: delivered by the OS to a surface this app cannot sanitise twice, and the
+#: point of the toast is the STATE, which the user reads in under a second. The
+#: session name remains the title so several simultaneous sessions are distinct;
+#: cmux's subtitle carries the action category even when the body is truncated.
+CONTEXT_COMPLETE = "Complete"
+CONTEXT_INPUT_REQUIRED = "Input required"
+CONTEXT_ATTENTION = "Needs attention"
 BODY_COMPLETE = "Task complete"
 BODY_APPROVAL = "Waiting for approval"
 BODY_ASK = "Waiting for your answer"
 BODY_ERROR = "Stopped with an error"
+
+#: Short state categories for notification surfaces with a title/subtitle/body
+#: split. Approval and ask intentionally share the category: both mean the turn
+#: cannot advance until the user returns, while the body says what it needs.
+CONTEXTS: dict[str, str] = {
+    "complete": CONTEXT_COMPLETE,
+    "approval": CONTEXT_INPUT_REQUIRED,
+    "ask": CONTEXT_INPUT_REQUIRED,
+    "error": CONTEXT_ATTENTION,
+}
 
 #: Notification kinds. ``complete`` is an edge the user may ignore; the two
 #: waiting kinds are edges the turn is BLOCKED on, which is why they are
@@ -390,8 +404,8 @@ def argv_safe(value: str) -> str:
     return f" {value}" if value.startswith("-") else value
 
 
-def cmux_command(surface_id: str, title: str, body: str) -> list[str]:
-    """argv delivering one notification to a specific cmux surface.
+def cmux_command(surface_id: str, title: str, subtitle: str, body: str) -> list[str]:
+    """argv delivering one structured notification to a specific cmux surface.
 
     Pure so a test asserts the exact wire shape without spawning anything.
     """
@@ -408,6 +422,8 @@ def cmux_command(surface_id: str, title: str, body: str) -> list[str]:
         # call. The surface id is already UUID-validated by `cmux_surface_id`.
         "--title",
         argv_safe(title or APP_NAME),
+        "--subtitle",
+        argv_safe(subtitle),
         "--body",
         argv_safe(body),
     ]
@@ -626,11 +642,12 @@ class Notifier:
         if self._focused:
             return False
         title = self._label or APP_NAME
+        subtitle = CONTEXTS.get(kind, CONTEXT_COMPLETE)
         body = BODIES.get(kind, BODY_COMPLETE)
 
         surface = cmux_surface_id(self._env)
         if surface is not None:
-            _spawn_detached(cmux_command(surface, title, body))
+            _spawn_detached(cmux_command(surface, title, subtitle, body))
             return True
 
         for chunk in notification_writes(
