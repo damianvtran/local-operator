@@ -40,7 +40,30 @@ from typing import Any, Literal
 #: Bumped on any breaking change to control frames or web payloads. The
 #: registrant and daemon always ship together; the phone UI learns the
 #: version in its bootstrap payload and can warn on a stale cached bundle.
-PROTOCOL_VERSION = 1
+#:
+#: v2 (attach + reaping) added the ``watch``/``unwatch`` ops, the auth
+#: frame's optional ``client`` field, and multi-connection registrants. The
+#: bump is load-bearing for ATTACH specifically: an old (v1) registrant
+#: treats any authenticated dial as THE daemon and evicts the real one, so
+#: an attach client must refuse to dial a record whose ``protocol`` is < 2
+#: rather than silently breaking the owner's phone bridge. The record's
+#: version field is the only pre-dial gate — the socket itself speaks the
+#: same frame shapes either side of the bump.
+PROTOCOL_VERSION = 2
+
+#: Which side of the owner relationship a control connection speaks for.
+#: ``daemon`` (the default when the auth frame omits ``client``) may rebind
+#: the owner's conversation; ``attach`` is a follower terminal that may
+#: watch and steer but never rebind. Absent-means-daemon keeps an OLD
+#: daemon dialing a NEW registrant on the same class it always had.
+ClientKind = Literal["daemon", "attach"]
+
+#: How many concurrent attach (follower terminal) connections one registrant
+#: accepts before evicting the least-recently-seen one. Connection close is
+#: detected anyway (the reader loop drops the registry entry); the cap is
+#: defense against leaked-but-open sockets — half-open TCP with no FIN —
+#: which liveness detection cannot see.
+ATTACH_MAX_CLIENTS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +137,14 @@ ControlOp = Literal[
     "ask_answer",  # {request_id, value}
     "snapshot",  # {} — ask for a fresh welcome-equivalent projection
     "ping",  # {} — liveness probe; answered with {"op": "ack", ...}
+    # v2 (attach + reaping): phone SSE subscriber transitions, daemon ->
+    # registrant. "watch" = a phone just started following this session;
+    # "unwatch" = the last phone left. The child's self-reaper counts these
+    # to know whether a front end still holds the session. Additive on the
+    # wire: an OLD registrant answers `error: unknown op`, which the daemon
+    # tolerates (fire-and-forget), so a mixed-version machine keeps working.
+    "watch",  # {} — a phone SSE subscriber appeared for this session
+    "unwatch",  # {} — the last phone SSE subscriber left
 ]
 
 # Events the registrant streams to the daemon.
