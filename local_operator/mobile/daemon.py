@@ -244,71 +244,13 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
 
 
 def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> SessionProjection:
-    """Rebuild a projection from a wire payload. The registrant already
-    serialized dataclasses; here we tolerate missing keys (a rolling upgrade
-    mid-push) by constructing through the dataclass with defaults."""
-    from dataclasses import fields
+    """The daemon's rebuild seam: the shared wire-types rebuild, plus the
+    opening-user-message pin (a DAEMON-side repair for older sessions — see
+    :func:`_pin_opening_user_message`), which no other consumer wants."""
+    from local_operator.mobile.types import _projection_from_json as _rebuild
 
-    from local_operator.mobile.types import (
-        AskOptionWire,
-        PendingRequest,
-        SubagentRow,
-        TodoItem,
-        TodoPhase,
-        TranscriptEntry,
-    )
-
-    def build(cls: type, items: list[dict[str, Any]]) -> list[Any]:
-        known = {f.name for f in fields(cls)}
-        return [cls(**{k: v for k, v in item.items() if k in known}) for item in items]
-
-    known = {f.name for f in fields(SessionProjection)}
-    base = {
-        k: v
-        for k, v in data.items()
-        if k in known and k not in ("transcript", "todos", "subagents", "pending")
-    }
-    projection = SessionProjection(**base)
-    # The fold stamps pid=0 (the registrant does not know its own listen
-    # pid until after the record is published). The discovery record is
-    # the source of truth, and the phone keys drafts and commands on it.
-    projection.pid = record.pid
-    projection.transcript = build(TranscriptEntry, data.get("transcript", []))
+    projection = _rebuild(data, record)
     _pin_opening_user_message(projection, record)
-    # Todos arrive PHASED (``[{"name", "items":[{...}]}]``); rebuild the two
-    # nested dataclass levels, tolerating missing keys the same way ``build``
-    # does for a rolling upgrade mid-push.
-    projection.todos = [
-        TodoPhase(
-            name=str(phase.get("name", "")),
-            items=build(TodoItem, phase.get("items", []) or []),
-        )
-        for phase in data.get("todos", []) or []
-    ]
-    projection.subagents = build(SubagentRow, data.get("subagents", []))
-    pending = data.get("pending")
-    if isinstance(pending, dict):
-        known_pending = {f.name for f in fields(PendingRequest)}
-        pending_kwargs = {k: v for k, v in pending.items() if k in known_pending}
-        # ``options`` crosses the wire as a list of {label, description} dicts;
-        # rebuild the dataclass so downstream code (and to_json round-trips) see
-        # AskOptionWire, not bare dicts. Tolerant of the label-only shape a
-        # rolling upgrade mid-push could still send.
-        raw_options = pending_kwargs.get("options") or []
-        pending_kwargs["options"] = [
-            (
-                AskOptionWire(
-                    label=str(opt.get("label", "")),
-                    description=str(opt.get("description", "")),
-                )
-                if isinstance(opt, dict)
-                else AskOptionWire(label=str(opt))
-            )
-            for opt in raw_options
-        ]
-        projection.pending = PendingRequest(**pending_kwargs)
-    else:
-        projection.pending = None
     return projection
 
 

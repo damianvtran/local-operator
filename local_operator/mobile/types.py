@@ -409,6 +409,70 @@ class SessionProjection:
 PROJECTION_TRANSCRIPT_LIMIT = 80
 
 
+def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> SessionProjection:
+    """Rebuild a projection from a wire payload.
+
+    The registrant already serialized dataclasses; this tolerates missing
+    keys (a rolling upgrade mid-push) by constructing through the dataclass
+    with defaults. Lives in the wire-types module (not the daemon) because
+    BOTH consumers of the socket rebuild projections from the same frames —
+    the daemon for the phone, the attach client for a follower terminal —
+    and a copy in each is exactly how two renderers drift.
+
+    ``record`` supplies the pid: the fold stamps 0 (the registrant does not
+    know its own pid until the record is published), and the discovery record
+    is the source of truth.
+    """
+    from dataclasses import fields
+
+    def build(cls: type, items: list[dict[str, Any]]) -> list[Any]:
+        known = {f.name for f in fields(cls)}
+        return [cls(**{k: v for k, v in item.items() if k in known}) for item in items]
+
+    known = {f.name for f in fields(SessionProjection)}
+    base = {
+        k: v
+        for k, v in data.items()
+        if k in known and k not in ("transcript", "todos", "subagents", "pending")
+    }
+    projection = SessionProjection(**base)
+    projection.pid = record.pid
+    projection.transcript = build(TranscriptEntry, data.get("transcript", []))
+    # Todos arrive PHASED; rebuild the two nested dataclass levels, tolerating
+    # missing keys the same way ``build`` does for a rolling upgrade mid-push.
+    projection.todos = [
+        TodoPhase(
+            name=str(phase.get("name", "")),
+            items=build(TodoItem, phase.get("items", []) or []),
+        )
+        for phase in data.get("todos", []) or []
+    ]
+    projection.subagents = build(SubagentRow, data.get("subagents", []))
+    pending = data.get("pending")
+    if isinstance(pending, dict):
+        known_pending = {f.name for f in fields(PendingRequest)}
+        pending_kwargs = {k: v for k, v in pending.items() if k in known_pending}
+        # ``options`` crosses the wire as a list of {label, description} dicts;
+        # rebuild the dataclass so downstream code (and to_json round-trips)
+        # see AskOptionWire, not bare dicts.
+        raw_options = pending_kwargs.get("options") or []
+        pending_kwargs["options"] = [
+            (
+                AskOptionWire(
+                    label=str(opt.get("label", "")),
+                    description=str(opt.get("description", "")),
+                )
+                if isinstance(opt, dict)
+                else AskOptionWire(label=str(opt))
+            )
+            for opt in raw_options
+        ]
+        projection.pending = PendingRequest(**pending_kwargs)
+    else:
+        projection.pending = None
+    return projection
+
+
 # ---------------------------------------------------------------------------
 # Slash command surface (exported to the phone)
 # ---------------------------------------------------------------------------
