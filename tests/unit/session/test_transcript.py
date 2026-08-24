@@ -8,7 +8,12 @@ import shutil
 import pytest
 
 from local_operator.harness.types import CustomMessage, Message
-from local_operator.session.transcript import ENTRY_MESSAGE, Transcript, TranscriptEntry
+from local_operator.session.transcript import (
+    ENTRY_MESSAGE,
+    Transcript,
+    TranscriptEntry,
+    read_transcript_page,
+)
 
 
 @pytest.fixture
@@ -109,6 +114,53 @@ async def test_malformed_lines_dropped_individually(tmp_path):
 
     reopened = Transcript(directory)
     assert len(reopened.entries()) == 2  # corrupt line dropped, rest survives
+
+
+@pytest.mark.asyncio
+async def test_backward_pages_reach_start_with_stable_ids_and_skip_malformed_rows(tmp_path):
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    expected = []
+    for index in range(235):
+        entry = await transcript.append_message(Message.user(f"row {index}"))
+        expected.append(entry.id)
+    with transcript.path.open("a") as handle:
+        handle.write("{malformed\n")
+
+    seen = []
+    cursor = None
+    while True:
+        page = read_transcript_page(directory, before_id=cursor, limit=100)
+        seen[0:0] = [entry.id for entry in page.entries]
+        if not page.has_more:
+            break
+        cursor = page.entries[0].id
+
+    assert seen == expected
+
+
+@pytest.mark.asyncio
+async def test_backward_page_reconciles_a_cursor_removed_by_replacement(tmp_path):
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    for index in range(5):
+        await transcript.append_message(Message.user(f"old {index}"))
+    stale_cursor = transcript.entries()[2].id
+    replacement = TranscriptEntry("replacement", 1.0, ENTRY_MESSAGE, {"role": "user"})
+    transcript.path.write_text(replacement.to_json() + "\n")
+
+    page = read_transcript_page(directory, before_id=stale_cursor, limit=100)
+
+    assert page.reconciled is True
+    assert [entry.id for entry in page.entries] == ["replacement"]
+    assert page.has_more is False
+
+
+def test_backward_page_reports_missing_transcript_without_creating_it(tmp_path):
+    directory = tmp_path / "missing"
+    with pytest.raises(FileNotFoundError):
+        read_transcript_page(directory)
+    assert not directory.exists()
 
 
 @pytest.mark.asyncio

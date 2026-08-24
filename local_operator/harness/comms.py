@@ -69,6 +69,12 @@ logger = logging.getLogger(__name__)
 #: other message entry, so a resumed child still sees what it was told.
 HUB_MESSAGE_TYPE = "hub_message"
 
+#: Additive host-only rows used by the subagent viewer. Child-facing hub
+#: messages remain ordinary message entries because replay must still deliver
+#: them to the model; these lifecycle facts never enter LLM history and exist
+#: only to correlate the parent's action with a later child reply.
+HUB_COMMUNICATION_CUSTOM_TYPE = "hub_communication"
+
 #: How many child records to keep. A record is ~4 short strings and outlives
 #: its job row on purpose (job rows are swept 5 minutes after settling, and
 #: resuming a child an hour later is a legitimate thing to want). The cap
@@ -248,6 +254,10 @@ class _ChildRecord:
     #: before injection: the child may have been mid-sentence about something
     #: else when the question was asked.
     armed: bool = False
+    #: Stable id of the question currently armed in the child. The Future
+    #: identifies a waiter inside one process, but only the communication id can
+    #: correlate a durable reply after restart or transcript paging.
+    ask_message_id: str | None = None
     settled: bool = False
     #: When ``detach`` released the child; the eviction order. ``None`` on a
     #: record whose child never started, which is why those evict FIRST — a
@@ -819,7 +829,15 @@ class SubagentComms:
             # It arrives before any work is done, which is the point.
             record.pending.append(self._to_child_message(text, expects_reply=False, steer=True))
             return Delivery(job_id, record.label, "queued")
-        record.child.steer(self._format_to_child(text, expects_reply=False, steer=True))
+        message = self._to_child_message(text, expects_reply=False, steer=True)
+        self._journal_communication(
+            record,
+            direction="to_child",
+            body=text,
+            communication_id=message.id,
+            kind="steer",
+        )
+        record.child.steer(str(message.details["text"]))
         return Delivery(job_id, record.label, "injected")
 
     async def _await_child(self, record: _ChildRecord, timeout_s: float) -> bool:
@@ -1165,9 +1183,18 @@ class SubagentComms:
         record = self._records.get(job_id)
         label = record.label if record is not None else job_id
         if record is not None and record.armed and record.ask is not None and not record.ask.done():
+            self._journal_communication(
+                record,
+                direction="to_parent",
+                body=text,
+                reply_to=record.ask_message_id,
+            )
             record.ask.set_result(text)
             record.armed = False
+            record.ask_message_id = None
             return "answered the parent's question"
+        if record is not None:
+            self._journal_communication(record, direction="to_parent", body=text)
         message = CustomMessage(
             custom_type=HUB_MESSAGE_TYPE,
             attribution="user",
@@ -1330,6 +1357,18 @@ class SubagentComms:
                 if record.ask is not awaiting or awaiting.done():
                     return StaleAside(message)
                 record.armed = True
+                record.ask_message_id = message.id
+            self._journal_communication(
+                record,
+                direction="to_child",
+                body=str(message.details.get("body") or ""),
+                communication_id=message.id,
+                kind=(
+                    "steer"
+                    if bool(message.details.get("steer"))
+                    else "ask" if bool(message.details.get("expects_reply")) else "send"
+                ),
+            )
             return message
 
         if awaiting is not None:
@@ -1363,7 +1402,14 @@ class SubagentComms:
             text = message.text.strip()
             if not text:
                 return
+            self._journal_communication(
+                record,
+                direction="to_parent",
+                body=text,
+                reply_to=record.ask_message_id,
+            )
             record.armed = False
+            record.ask_message_id = None
             record.ask.set_result(text)
 
         return watcher
@@ -1378,6 +1424,7 @@ class SubagentComms:
                 "direction": "to_child",
                 "body": text,
                 "expects_reply": expects_reply,
+                "steer": steer,
                 "text": self._format_to_child(text, expects_reply=expects_reply, steer=steer),
             },
         )
@@ -1401,6 +1448,41 @@ class SubagentComms:
             )
         return f"<parent-message>\n{instruction}\n\n{text}\n</parent-message>"
 
+    def _journal_communication(
+        self,
+        record: _ChildRecord,
+        *,
+        direction: str,
+        body: str,
+        communication_id: str | None = None,
+        reply_to: str | None = None,
+        kind: str | None = None,
+    ) -> None:
+        """Append a human-facing communication fact to the child's transcript.
+
+        This is intentionally additive beside the replay-visible hub message.
+        Reusing that row cannot represent replies consumed by ``ask`` (they
+        never enter either model context), while changing it would alter resume
+        semantics. Fire-and-forget matches aside persistence; transcript append
+        itself is synchronous before its coroutine first yields.
+        """
+        child = record.child
+        transcript = getattr(child, "_transcript", None) if child is not None else None
+        if transcript is None:
+            return
+        details = {
+            "direction": direction,
+            "job_id": record.job_id,
+            "label": record.label,
+            "body": body,
+            "communication_id": communication_id,
+            "reply_to": reply_to,
+            "kind": kind,
+        }
+        self._session._spawn_background(  # type: ignore[attr-defined]
+            transcript.append_custom(HUB_COMMUNICATION_CUSTOM_TYPE, details)
+        )
+
     def _fail_ask(
         self,
         record: _ChildRecord,
@@ -1418,12 +1500,14 @@ class SubagentComms:
             return
         pending.set_exception(RuntimeError(reason))
         record.armed = False
+        record.ask_message_id = None
 
     @staticmethod
     def _clear_ask(record: _ChildRecord, future: asyncio.Future[str]) -> None:
         if record.ask is future:
             record.ask = None
         record.armed = False
+        record.ask_message_id = None
 
     @staticmethod
     def _withdraw_pending(record: _ChildRecord, message: CustomMessage) -> None:

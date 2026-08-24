@@ -36,6 +36,7 @@ class FakeSession:
         self.disposed = False
         self._handlers: list[Any] = []
         self.jobs: Any = None
+        self._subagent_comms: Any = None
         self._history: list[Any] = []
         self.asides: list[list[Any]] = []
         self.adopted: list[list[Any]] = []

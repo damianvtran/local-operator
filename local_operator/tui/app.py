@@ -7970,6 +7970,11 @@ class OperatorApp(App[None]):
             job = manager.get(job_id) if manager is not None else None
         except Exception:
             job = None
+        comms = getattr(session, "_subagent_comms", None) if session is not None else None
+        try:
+            transcript_directory = comms.session_dir_of(job_id) if comms is not None else None
+        except Exception:
+            transcript_directory = None
         view.show(
             job_id=job_id,
             label=str(getattr(job, "label", "") or job_id),
@@ -8001,6 +8006,9 @@ class OperatorApp(App[None]):
             # because it belongs to the model segment there.
             agent_role=str(getattr(job, "agent_role", None) or ""),
             effort=str(getattr(job, "effort", None) or ""),
+            transcript_directory=(
+                str(transcript_directory) if transcript_directory is not None else None
+            ),
         )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(job_id)

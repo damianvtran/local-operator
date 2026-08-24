@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from typing import Callable, ClassVar, Iterator, Literal
+from typing import Callable, ClassVar, Iterator, Literal, Sequence
 
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
@@ -1841,6 +1841,39 @@ class TranscriptView(ScrollableContainer):
         self.mount_all(blocks)
         self.call_after_refresh(self._settle_gaps, blocks)
         self._remeasure_empty_state()
+
+    def prepend_blocks(
+        self, blocks: Sequence[TranscriptBlock], *, anchor_offset: float | None = None
+    ) -> None:
+        """Mount older blocks above the viewport without moving its content.
+
+        History paging is the only prepend path. Textual cannot preserve the
+        visual anchor automatically because mounting changes ``virtual_size``
+        before the next layout pass, so remember the old virtual height and add
+        exactly its growth to ``scroll_y`` after refresh. The optional offset is
+        captured by the caller before asynchronous I/O starts; using the later
+        value would apply the prepend to wherever the user moved meanwhile.
+        """
+        additions = list(blocks)
+        if not additions:
+            return
+        old_height = self.virtual_size.height
+        old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
+        before = self._blocks[0] if self._blocks else None
+        if before is None:
+            self.mount(*additions)
+        else:
+            self.mount(*additions, before=before)
+        self._blocks[0:0] = additions
+        self._name_col_cache = None
+
+        def restore_anchor() -> None:
+            growth = max(0, self.virtual_size.height - old_height)
+            self.scroll_to(y=max(0, old_scroll + growth), animate=False)
+            self._settle_gaps(additions)
+            self._remeasure_empty_state()
+
+        self.call_after_refresh(restore_anchor)
 
     def append_block(self, block: TranscriptBlock) -> None:
         """Mount ``block`` at the bottom.

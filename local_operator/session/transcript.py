@@ -40,6 +40,7 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -231,6 +232,59 @@ def _resolve_attachments(payload: dict[str, Any], attachments: AttachmentStore) 
 #: number that keeps genuinely tiny images (thumbnails, 1px spacers) out of
 #: the store entirely.
 _ATTACHMENT_FLOOR_BYTES = 1024
+
+
+@dataclass(frozen=True)
+class TranscriptPage:
+    """One stable-ID page read from the durable JSONL transcript.
+
+    ``before_id`` is deliberately an entry ID rather than a byte offset. File
+    compaction replaces the JSONL atomically, so offsets become lies while IDs
+    remain meaningful and let callers reconcile a replacement without keeping
+    an unbounded mirror in memory.
+    """
+
+    entries: tuple[TranscriptEntry, ...]
+    has_more: bool
+    reconciled: bool = False
+
+
+def read_transcript_page(
+    directory: str | Path, *, before_id: str | None = None, limit: int = 100
+) -> TranscriptPage:
+    """Read a tail page, or the page immediately before ``before_id``.
+
+    The scan is streaming and retains at most ``limit + 1`` parsed rows. This
+    costs a sequential disk pass for older pages, which is intentional: the UI
+    runs it in a thread, transcripts are append-mostly, and permanent offsets
+    cannot survive ``compact_file`` replacing the file. Malformed rows are
+    skipped independently, matching normal replay. If a requested ID vanished
+    during replacement, return the current tail with ``reconciled=True`` so a
+    reader can dedupe by stable ID instead of getting stuck on a stale cursor.
+    """
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(path)
+    retained: deque[TranscriptEntry] = deque(maxlen=limit + 1)
+    found = before_id is None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            entry = TranscriptEntry.from_json(line)
+            if entry is None:
+                continue
+            if before_id is not None and entry.id == before_id:
+                found = True
+                break
+            retained.append(entry)
+    if before_id is not None and not found:
+        tail = read_transcript_page(directory, limit=limit)
+        return TranscriptPage(tail.entries, tail.has_more, True)
+    rows = tuple(retained)
+    return TranscriptPage(entries=rows[-limit:], has_more=len(rows) > limit)
 
 
 class Transcript:
