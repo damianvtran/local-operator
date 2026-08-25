@@ -44,9 +44,20 @@ boundary. Do not shorten it to “browser automation.”
 
 > Local Operator uses `chrome.webNavigation` events for the agent-owned tab to detect when a navigation completes or fails and to pause redirects that reach a site the user has not allowed. This replaces polling and ensures the agent reports the final live URL. It is not used to build browser history or observe navigation in the user's other tabs.
 
+### `notifications`
+
+> When the agent asks to open a site the user has not yet allowed, the extension raises a system notification naming the site so the user notices the pending decision even if the popup is closed. Without it, an approval the agent is blocked on could go unseen until it times out. Notifications are only shown for a pending site-permission decision; the extension does not send marketing or background notifications.
+
 ### Host permission: `<all_urls>`
 
 > Users may ask their Local Operator agent to browse any HTTP or HTTPS site, so the extension cannot declare a fixed site list. Access is denied by default: before the agent-owned tab enters a new origin, the extension displays an in-browser prompt with Allow once, Always allow, and Deny choices, and it repeats the check for redirect destinations. `<all_urls>` is required for `chrome.scripting` and debugger-backed actions on the specific origins the user approves. The extension independently rejects non-HTTP(S) schemes and does not use this permission on the user's other tabs.
+
+**Submission check (finding N2):** before uploading, diff this file against the
+**built** `extension/dist/manifest.json`, not the source list. The built name is
+`Local Operator`, and the permission set that must match here is
+`debugger, tabs, scripting, storage, alarms, webNavigation, notifications` plus
+host `<all_urls>`. Any implementation change to the manifest updates this file,
+not the reverse.
 
 **Implementation assumption to verify:** `<all_urls>` in Chrome includes schemes
 beyond HTTP(S), while the design requires independent runtime rejection of

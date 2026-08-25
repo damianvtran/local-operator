@@ -125,7 +125,17 @@ second one:
 - **Sessions come and go** without the extension noticing: the daemon holds
   the one extension socket; sessions are stateless callers.
 - **Multiple concurrent sessions share one browser connection**: the daemon
-  serializes commands per tab and owns the session→tab table.
+  serializes commands per tab behind a per-tab lock so two sessions cannot
+  interleave commands on the one surface.
+
+> **v1 scope: a single active browser surface.** The extension owns exactly one
+> dedicated tab, and a full per-session→tab table is deliberately deferred
+> (section 12 / non-goals). Two concurrent `lop` sessions therefore SHARE that
+> one tab rather than each getting an isolated surface: the daemon's per-tab
+> lock keeps their commands from interleaving, and a second `open` degrades to
+> the existing tab exactly as the cmux backend's one-surface rule does. This is
+> the honest v1 contract; multi-surface isolation (a real session→tab table) is
+> future work, not a silent gap.
 
 ### 3.1 The session leg is plain HTTP, not a second WebSocket
 

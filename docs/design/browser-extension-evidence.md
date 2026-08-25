@@ -1,5 +1,78 @@
 # Browser extension bridge: execution evidence
 
+## Round 1 remediation: real Chrome, real extension, real daemon (A9/D4 closed)
+
+The round-1 reviews flagged that the earlier `--load-extension` was ignored by
+recent Chrome. Resolved this round: the built `extension/dist` was loaded into a
+real Google Chrome 151 via the CDP `Extensions.loadUnpacked` command (the
+`--load-extension` switch is removed in current Chrome; the
+`--disable-features=DisableLoadExtensionCommandLineSwitch` flag no longer exists
+either, so CDP is the working route on this host). The extension's MV3 service
+worker connected to a real bridge daemon on loopback, paired with the real
+6-digit code, and drove a real tab.
+
+**Connection proof** (`GET /health`, live):
+
+```json
+{"status":"ok","proto":1,"extension_connected":true,"paired":true,
+ "browser":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"}
+```
+
+### All eight actions exercised end to end through the extension
+
+Against a local test page, every browser action ran through the real RPC ->
+WS -> extension -> CDP path and returned the real result (full transcript:
+`/tmp/lop-actions-evidence.txt`, summarized):
+
+| action | request | real response |
+|---|---|---|
+| `open` | `http://127.0.0.1:8791/lop-testpage.html` | `ok`, `tab bridge:1512442283:833e…`, title `Bridge Test Page` |
+| `read` | full page | `"Local Operator bridge test\nHello from the test page.\nGo to page two\n\nClick me"` |
+| `snapshot` | — | `- RootWebArea "Bridge Test Page" [e1]` |
+| `type` | `#box` = `hello bridge` | `value: "hello bridge"` (A2 fix: read-back correct, no false failure) |
+| `click` | `#btn` (no nav) | `navigated: false`; a following `read #para` returned **`"clicked"`** — the onclick side effect fired |
+| `click` | `#link` (nav) | `navigated: true`, url advanced to `…/page2.html` (A7 fix: navigation detected) |
+| `goto` | `…/lop-page2.html` | `url …/lop-page2.html`, title `Page Two` |
+| `screenshot` | — | 29,339-byte PNG of Page Two (`docs/evidence/browser-extension/action-screenshot-page2.png`) |
+| `status` | — | live `url`/`title`, `origin_mode: default-deny` |
+| `close` | — | `ok`, tab removed |
+
+**Background-tab input defect found and fixed (A9/A7).** Real-Chrome testing
+revealed that current Chrome drops CDP `Input.dispatchMouseEvent` on a hidden
+(inactive) tab entirely — the agent tab is intentionally inactive, and the
+compositor never delivered the synthetic press, so `#btn`'s onclick did not fire
+and `#link` did not navigate. Confirmed directly: `document.hidden === true`, a
+native `.click()` set `#para` to `clicked`, but a CDP mouse sequence at the
+button's center left it unchanged. Fixed by driving click and type on the
+resolved DOM node through the debugger's own `Runtime.callFunctionOn` (a full
+pointer/mouse event sequence and value-setter + input/change events), which
+fires handlers and default actions reliably on a background tab. Re-verified
+above: `#btn` → `clicked`, `#link` → `navigated: true`. This is exactly the class
+of defect the reviewers predicted a real run would catch.
+
+### Rendered popup and options states (real extension, live daemon)
+
+Captured from the actual extension pages backed by the live daemon (not static
+HTML), under `docs/evidence/browser-extension/`:
+
+- `popup-connected.png` — **Connected.**, and **“Driving: Page Two — http://127.0.0.1:8791/lop-page2.html”** (U3: the driven site is shown; N4: the URL wraps within 300 px).
+- `popup-origin-prompt.png` — the three consent choices **Allow once / Always allow / Deny** as one coherent decision, fitting the 300 px popup even with the long hostname `accounts.corp.internal.example.com` (D1; D5/N3).
+- `popup-incompatible.png` — the **Update needed.** state with product-level recovery copy (D2).
+- `popup-pairing.png`, `popup-pairing-error.png` — pairing entry and the live-region error (D7/U8).
+- `popup-disconnected.png` — the corrected “Local Operator isn't reachable… (`lop browser status`)” copy (U4).
+- `options-empty.png`, `options-populated.png` — the settings page showing live pairing status, the empty-state line, and long origins wrapping with the Remove action intact (D8).
+- `icons-on-light.png`, `icons-on-dark.png` — all four icon sizes on light and dark chrome, now legible on dark surfaces via the rounded backplate (D3).
+
+### Security fixes verified against the running daemon
+
+- **A1** (pairing lockout): 5 wrong guesses rotate the code and the original stops working — covered by `test_a1_pairing_locks_out_and_rotates_after_max_attempts`, reproducing the reviewer's scenario.
+- **A5/U1** (revoke severs live session): an out-of-process `reset_pairing` makes the very next authenticated RPC fail `not_paired` and flips `link.paired` false; the options-page `unpair` event drops the live socket. Covered by `test_a5_u1_out_of_process_revoke_severs_live_rpc` and `test_a5_u1_unpair_event_drops_live_socket`.
+- **A3** (approval budget): a command blocked on a human decision extends its deadline past the base command timeout while `awaiting_origin` holds, and still times out otherwise. Covered by `test_a3_wait_extends_while_awaiting_origin` / `test_a3_wait_times_out_without_awaiting_flag`.
+
+---
+
+# Browser extension bridge: execution evidence (round 0)
+
 Captured on macOS with Local Operator 0.34.0 source from `dev-webbridge`.
 Secrets below are redacted; the actual requests used the daemon-generated key.
 
