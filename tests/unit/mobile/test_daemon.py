@@ -238,6 +238,107 @@ def test_every_published_subagent_resolves_beyond_legacy_256_limit() -> None:
     assert client.get("/api/sessions/root-session/agents/job-299").status_code == 200
 
 
+def test_retained_projection_routes_survive_more_than_16_root_sessions() -> None:
+    """Projection and detail ownership cannot diverge at the old cache boundary."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    for index in range(20):
+        projection = SessionProjection(session_id=f"root-{index:02d}", pid=index, version=index)
+        projection.subagents = [
+            SubagentRow(job_id="child", label=f"child {index}", session_id=f"child-{index:02d}")
+        ]
+        daemon.capture_subagent_details(projection)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    assert "root-00" in daemon.session_projections
+    assert "root-19" in daemon.session_projections
+    assert client.get("/api/sessions/root-00/agents/child").status_code == 200
+    assert client.get("/api/sessions/root-19/agents/child").status_code == 200
+
+
+def test_projection_and_detail_evict_as_one_bounded_unit() -> None:
+    """The only allowed dead route is one no retained projection advertises."""
+    from local_operator.mobile.daemon import MAX_RETAINED_SESSION_PROJECTIONS
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    for index in range(MAX_RETAINED_SESSION_PROJECTIONS + 1):
+        projection = SessionProjection(session_id=f"root-{index:03d}", pid=index)
+        projection.subagents = [SubagentRow(job_id="child", label="child")]
+        daemon.capture_subagent_details(projection)
+
+    assert len(daemon.session_projections) == MAX_RETAINED_SESSION_PROJECTIONS
+    assert "root-000" not in daemon.session_projections
+    assert ("root-000", "child") not in daemon.subagent_details
+    for session_id, projection in daemon.session_projections.items():
+        assert all(
+            (session_id, row.job_id) in daemon.subagent_details for row in projection.subagents
+        )
+
+
+def test_durable_subagent_routes_reconstruct_after_daemon_restart(tmp_path, monkeypatch) -> None:
+    """Restart/reconnect rebuilds detail and child history from durable lineage."""
+    from local_operator.harness.types import Message
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    (child_dir / "origin.json").write_text('{"origin":"subagent"}')
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(Transcript(child_dir).append_message(Message.user("oldest", id="child-oldest")))
+    asyncio.run(
+        Transcript(child_dir).append_message(Message.assistant("newest", id="child-newest"))
+    )
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "completed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "prompt": "inspect durable state",
+                        "session_dir": str(child_dir),
+                        "outcome": "completed",
+                        "result_text": "done",
+                    }
+                ],
+            },
+        )
+    )
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    detail = client.get("/api/sessions/root-session/agents/child-job")
+    assert detail.status_code == 200
+    assert detail.json()["prompt"] == "inspect durable state"
+    assert [row["id"] for row in detail.json()["transcript"]] == [
+        "child-oldest",
+        "child-newest",
+    ]
+    history = client.get("/api/sessions/root-session/agents/child-job/history", params={"limit": 1})
+    assert history.status_code == 200
+    assert [row["id"] for row in history.json()["entries"]] == ["child-newest"]
+
+    restarted = MobileDaemon(port=0, password="pw123")
+    restarted_client = TestClient(build_app(restarted), follow_redirects=False)
+    restarted_client.post("/login", data={"password": "pw123"})
+    assert restarted_client.get("/api/sessions/root-session/agents/child-job").status_code == 200
+    assert (
+        restarted_client.get(
+            "/api/sessions/root-session/agents/child-job/history",
+            params={"before": "child-newest", "limit": 1},
+        ).json()["entries"][0]["id"]
+        == "child-oldest"
+    )
+
+
 def test_unknown_session_command_is_a_409() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     app = build_app(daemon)
