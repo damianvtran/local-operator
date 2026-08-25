@@ -21,6 +21,7 @@ from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import (
     ATTACH_MAX_CLIENTS,
     PROTOCOL_VERSION,
+    PendingRequest,
     SessionProjection,
     TranscriptEntry,
 )
@@ -39,6 +40,8 @@ class FakeHandle:
             model_label="test/model",
         )
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+        self._event_handler = None
+        self.event_pending: PendingRequest | None = None
 
     @property
     def session_projection_seed(self) -> SessionProjection:
@@ -46,6 +49,14 @@ class FakeHandle:
 
     def subscribe(self, on_projection):  # noqa: ANN001, ANN202
         return lambda: None
+
+    def subscribe_events(self, on_event):  # noqa: ANN001, ANN202
+        self._event_handler = on_event
+        return lambda: None
+
+    def emit_event(self, event) -> None:  # noqa: ANN001
+        if self._event_handler is not None:
+            self._event_handler(event.model_dump(mode="json"))
 
     async def _record(self, name: str, *args: object, **kwargs: object) -> str:
         self.calls.append((name, args, kwargs))
@@ -56,6 +67,9 @@ class FakeHandle:
 
     async def steer(self, text, images=None):  # noqa: ANN001, ANN202
         return await self._record("steer", text)
+
+    async def recall_steer(self, command_id):  # noqa: ANN001, ANN202
+        return await self._record("recall_steer", command_id)
 
     async def abort(self):  # noqa: ANN202
         return await self._record("abort")
@@ -79,7 +93,7 @@ class FakeHandle:
         return await self._record("approval_answer", request_id, approved, remember)
 
     async def ask_answer(self, request_id, value, question_index=None):  # noqa: ANN001, ANN202
-        return await self._record("ask_answer", request_id, value)
+        return await self._record("ask_answer", request_id, value, question_index)
 
     async def refresh(self) -> None:
         pass
@@ -159,9 +173,146 @@ async def _until(
 
 
 @pytest.mark.asyncio
-async def test_protocol_version_is_three_and_cap_constant() -> None:
-    assert PROTOCOL_VERSION == 3
+async def test_protocol_version_is_four_and_cap_constant() -> None:
+    assert PROTOCOL_VERSION == 4
     assert ATTACH_MAX_CLIENTS == 4
+
+
+@pytest.mark.asyncio
+async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() -> None:
+    """Raw AgentEvents are opt-in attach frames; phone daemon stays byte-identical."""
+    from local_operator.harness.types import AgentStartEvent, NoticeEvent
+
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    daemon_writer = attach_writer = None
+    try:
+        record = await _wait_record()
+        daemon_reader, daemon_writer = await _dial(record)
+        attach_reader, attach_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        attach_writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await attach_writer.drain()
+        assert json.loads(await attach_reader.readline())["op"] == "projection"
+        seed = json.loads(await attach_reader.readline())
+        assert seed["op"] == "attach_sync"
+        assert seed["data"]["streaming"] is False
+
+        handle.emit_event(AgentStartEvent(generation=9))
+        handle.emit_event(NoticeEvent(text="live", kind="info"))
+        first = await _until(attach_reader, "event")
+        second = await _until(attach_reader, "event")
+        assert [first["data"]["type"], second["data"]["type"]] == [
+            "agent_start",
+            "notice",
+        ]
+        # A projection refresh is the only owner push a daemon may see. There
+        # is no event frame queued on its byte stream.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(daemon_reader.readline(), timeout=0.1)
+    finally:
+        for writer in (daemon_writer, attach_writer):
+            if writer is not None:
+                writer.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_event_pending_is_overlaid_only_for_event_clients() -> None:
+    """A TUI approval reaches followers without changing phone daemon bytes."""
+    handle = FakeHandle()
+    pending = PendingRequest(
+        request_id="approval-1", kind="approval", title="bash", detail="echo hi"
+    )
+    handle.event_pending = pending
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    daemon_writer = attach_writer = None
+    try:
+        record = await _wait_record()
+        daemon_reader, daemon_writer = await _dial(record)
+        attach_reader, attach_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port
+        )
+        attach_writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await attach_writer.drain()
+        follower = json.loads(await attach_reader.readline())
+        assert json.loads(await attach_reader.readline())["op"] == "attach_sync"
+        # _dial consumed the daemon welcome; trigger a fresh ordinary repaint
+        # and compare it to the event client's overlaid form.
+        await registrant._push()
+        daemon = json.loads(await daemon_reader.readline())
+        follower_repaint = json.loads(await attach_reader.readline())
+        assert daemon["data"]["pending"] is None
+        assert follower["data"]["pending"]["request_id"] == "approval-1"
+        assert follower_repaint["data"]["pending"]["request_id"] == "approval-1"
+    finally:
+        for writer in (daemon_writer, attach_writer):
+            if writer is not None:
+                writer.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_event_seed_covers_events_before_client_is_ready() -> None:
+    """A mid-turn join gets open state once in attach_sync, then later events."""
+    from local_operator.harness.types import AgentStartEvent, NoticeEvent
+
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        handle.emit_event(AgentStartEvent(generation=4))
+        await asyncio.sleep(0.05)
+        reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+        writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        assert json.loads(await reader.readline())["op"] == "projection"
+        seed = json.loads(await reader.readline())
+        assert seed["op"] == "attach_sync"
+        assert seed["data"]["streaming"] is True
+        assert seed["data"]["generation"] == 4
+        handle.emit_event(NoticeEvent(text="after seed", kind="info"))
+        frame = await _until(reader, "event")
+        assert frame["data"]["text"] == "after seed"
+    finally:
+        if writer is not None:
+            writer.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_steer_dispatches_by_command_id() -> None:
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(
+            json.dumps({"op": "recall_steer", "req": 8, "command_id": "m1"}).encode() + b"\n"
+        )
+        await writer.drain()
+        assert (await _until(reader, "ack", 8))["detail"] == "recall_steer ok"
+        assert handle.calls[-1][0:2] == ("recall_steer", ("m1",))
+    finally:
+        if writer is not None:
+            writer.close()
+        registrant.close()
 
 
 @pytest.mark.asyncio
@@ -299,6 +450,81 @@ async def test_concurrent_producers_ack_once_and_converge(op: str) -> None:
             writer.close()
     finally:
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_order(
+    monkeypatch,
+) -> None:
+    """One slow writer has one bounded task; a healthy peer sees ordered events."""
+    from local_operator.harness.types import NoticeEvent
+    from local_operator.mobile import registrant as registrant_module
+
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    await registrant.start_in_process()
+    slow_reader = slow_writer = healthy_writer = None
+    blocked = asyncio.Event()
+    original_send = registrant._send_to
+    try:
+        record = registrant._record
+        slow_reader, slow_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        slow_writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await slow_writer.drain()
+        assert json.loads(await slow_reader.readline())["op"] == "projection"
+        assert json.loads(await slow_reader.readline())["op"] == "attach_sync"
+        assert len(registrant._clients) == 1
+        slow_conn = next(iter(registrant._clients.values()))
+
+        healthy_reader, healthy_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        healthy_writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await healthy_writer.drain()
+        assert json.loads(await healthy_reader.readline())["op"] == "projection"
+        assert json.loads(await healthy_reader.readline())["op"] == "attach_sync"
+
+        async def block_only_slow(conn, frame):  # noqa: ANN001, ANN202
+            if conn is slow_conn and frame.get("op") == "event":
+                await blocked.wait()
+                return
+            await original_send(conn, frame)
+
+        monkeypatch.setattr(registrant, "_send_to", block_only_slow)
+        total = registrant_module._EVENT_QUEUE_MAX * 2
+        for index in range(total):
+            handle.emit_event(NoticeEvent(text=f"event-{index}", kind="info"))
+            # Healthy writer gets scheduling opportunities while the deliberately
+            # blocked peer's one writer remains unable to consume its FIFO.
+            await asyncio.sleep(0)
+
+        # The slow client is dropped on overflow rather than retaining one task
+        # per event. The only remaining event writer belongs to the healthy peer.
+        assert id(slow_conn.writer) not in registrant._clients
+        assert len(registrant._event_sends) <= 1
+        assert slow_conn.event_queue.qsize() <= registrant_module._EVENT_QUEUE_MAX
+
+        received = []
+        deadline = asyncio.get_running_loop().time() + 2
+        while len(received) < total and asyncio.get_running_loop().time() < deadline:
+            frame = json.loads(await asyncio.wait_for(healthy_reader.readline(), timeout=1))
+            if frame.get("op") == "event":
+                received.append(frame["data"]["text"])
+        assert received == [f"event-{index}" for index in range(total)]
+    finally:
+        blocked.set()
+        for writer in (slow_writer, healthy_writer):
+            if writer is not None:
+                writer.close()
+        await registrant.aclose()
 
 
 @pytest.mark.asyncio

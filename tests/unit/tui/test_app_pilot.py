@@ -824,22 +824,40 @@ def test_exit_quit_collapsed_to_one_command() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) -> None:
-    """The owned-session branch attaches, then can recover after owner EOF."""
+async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, tmp_path) -> None:
+    """A live owner becomes a RemoteSession in the existing OperatorApp.
+
+    There is no pushed screen or attach vocabulary: the standard transcript and
+    composer remain the only surface, and the old local writer is disposed.
+    """
     from local_operator.mobile import registry as mobile_registry
     from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
-    from local_operator.tui.attach_screen import AttachScreen
+    from local_operator.session.remote import RemoteSession
+    from local_operator.tui.widgets.transcript import NoticeBlock
 
     session = FakeSession()
-    resumed = FakeSession()
+
+    class _RemoteFake(FakeSession):
+        is_remote = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.takeover_callback: Any | None = None
+
+        def set_takeover_callback(self, callback: Any) -> None:
+            self.takeover_callback = callback
+
+    remote = _RemoteFake()
 
     async def resume_factory(resume_id):
         assert resume_id == "sess-owned"
-        return resumed
+        return FakeSession()
 
+    async def connect(*args, **kwargs):  # noqa: ANN002, ANN003
+        return remote
+
+    monkeypatch.setattr(RemoteSession, "connect", connect)
     app = OperatorApp(lambda: _factory(session), resume_factory=resume_factory)
-    # A live pid that is not the app: this test's own parent (the xdist
-    # worker shell) is alive and distinct.
     owner = os.getppid()
     marker_dir = config_dir() / "sessions" / "sess-owned"
     marker_dir.mkdir(parents=True, exist_ok=True)
@@ -857,25 +875,116 @@ async def test_resume_owned_session_pushes_attach_screen(monkeypatch, tmp_path) 
     )
     mobile_registry.publish(record, root=config_dir())
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        for _ in range(50):
+            await pilot.pause()
+            if app._session is session:
+                break
+        assert app._session is session
         app._resume_session("sess-owned", lambda *a, **k: None)
         for _ in range(50):
             await pilot.pause()
-            if app.screen_stack and isinstance(app.screen, AttachScreen):
+            if app._session is remote:
                 break
             await asyncio.sleep(0.05)
-        assert isinstance(app.screen, AttachScreen)
-        assert session.prompts == []  # no second writer ever built
-        # Owner loss is invisible plumbing. The conversation surface remains
-        # mounted and composer-ready; printable keys are ordinary draft input.
-        app.screen._owner_exited("owner exited")
-        await pilot.press("r")
-        await pilot.pause()
-        assert app._session is session
-        assert isinstance(app.screen, AttachScreen)
-        assert app.screen._composer.value == "r"
-        assert not app.screen._composer.disabled
+        assert app._session is remote
+        assert session.disposed
+        assert app.screen is app.screen_stack[0]
         assert app.query_one(Editor).disabled is False
+        assert callable(remote.takeover_callback)
+        assert not any(
+            "attach" in (notice.text() or "").lower() for notice in app.query(NoticeBlock)
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_resume_atomically_gates_submission_then_recovers_success_and_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """Pending live resume never routes a draft to the session being left."""
+    from local_operator.mobile import registry as mobile_registry
+    from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
+    from local_operator.session.remote import RemoteSession
+
+    old = FakeSession()
+    replacement = FakeSession()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    attempts = 0
+
+    async def resume_factory(resume_id):  # noqa: ANN001, ANN202
+        return FakeSession()
+
+    async def connect(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal attempts
+        attempts += 1
+        started.set()
+        await release.wait()
+        if attempts == 1:
+            return replacement
+        raise ConnectionError("owner sync failed")
+
+    monkeypatch.setattr(RemoteSession, "connect", connect)
+    app = OperatorApp(lambda: _factory(old), resume_factory=resume_factory)
+    owner = os.getppid()
+    marker_dir = config_dir() / "sessions" / "sess-transition"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / ".session.pid").write_text(str(owner))
+    mobile_registry.publish(
+        SessionRecord(
+            pid=owner,
+            kind="tui",
+            session_id="sess-transition",
+            conversation_name="Owned",
+            cwd=str(tmp_path),
+            model_label="test/model",
+            control_port=1,
+            control_key="k",
+            protocol=PROTOCOL_VERSION,
+        ),
+        root=config_dir(),
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        app._resume_session("sess-transition", lambda *a, **k: None)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        _set_editor_line(editor, "must reach replacement")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == "must reach replacement"
+        assert old.prompts == []
+        assert editor.disabled is False
+
+        release.set()
+        for _ in range(50):
+            await pilot.pause()
+            if app._session is replacement:
+                break
+        assert app._session is replacement
+        await pilot.press("enter")
+        await pilot.pause()
+        assert replacement.prompts == ["must reach replacement"]
+
+        # A failed transition restores the old/current session's ordinary input
+        # boundary. No visible mode or status is needed to make it routable again.
+        started.clear()
+        release.clear()
+        app._resume_session("sess-transition", lambda *a, **k: None)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        _set_editor_line(editor, "send after failure")
+        await pilot.press("enter")
+        assert replacement.prompts == ["must reach replacement"]
+        release.set()
+        for _ in range(50):
+            await pilot.pause()
+            if not app._session_transition_pending:
+                break
+        assert app._session is replacement
+        assert editor.text == "send after failure"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert replacement.prompts == ["must reach replacement", "send after failure"]
 
 
 @pytest.mark.asyncio
@@ -903,7 +1012,7 @@ async def test_resume_owned_session_without_record_keeps_refusal(monkeypatch, ca
         from local_operator.tui.widgets.transcript import NoticeBlock
 
         notices = list(app.query(NoticeBlock))
-        assert any("already open in another process" in (n.text() or "") for n in notices)
+        assert any("older Local Operator process" in (n.text() or "") for n in notices)
         assert session.prompts == []
 
 

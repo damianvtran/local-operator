@@ -145,6 +145,13 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("request_id must be a non-empty string")
         if not isinstance(frame.get("value"), str):
             raise ValueError("value must be a string")
+    elif op == "recall_steer":
+        # v4: a follower unsending a queued steer names the message identity it
+        # queued (the ContinuationCommand id that became the Message id). The
+        # owner matches by id in its steering queue; a drained or unknown id is
+        # an ordinary "no longer queued" error, never a crash.
+        if not isinstance(frame.get("command_id"), str) or not frame["command_id"]:
+            raise ValueError("command_id must be a non-empty string")
 
 
 #: Bumped on any breaking change to control frames or web payloads. The
@@ -159,7 +166,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
 #: rather than silently breaking the owner's phone bridge. The record's
 #: version field is the only pre-dial gate — the socket itself speaks the
 #: same frame shapes either side of the bump.
-PROTOCOL_VERSION = 3
+#:
+#: v4 (full-TUI attach) is ADDITIVE: an attach client's auth frame may carry
+#: ``"events": true`` to subscribe to the owner's raw ``AgentEvent`` relay
+#: (``event`` frames) plus the one-shot ``attach_sync`` live-turn seed, and
+#: the ``recall_steer`` op lets a follower unsend a queued steer. A v3 attach
+#: client that omits the flag gets exactly the v3 behaviour (projection
+#: frames only), and daemon connections never see the new frames, so the
+#: phone path is byte-identical across the bump.
+PROTOCOL_VERSION = 4
 
 #: Which side of the owner relationship a control connection speaks for.
 #: ``daemon`` (the default when the auth frame omits ``client``) may rebind
@@ -255,6 +270,10 @@ ControlOp = Literal[
     # tolerates (fire-and-forget), so a mixed-version machine keeps working.
     "watch",  # {} — a phone SSE subscriber appeared for this session
     "unwatch",  # {} — the last phone SSE subscriber left
+    # v4 (full-TUI attach): unsend one queued steering message by identity.
+    # Follower Esc-recall parity — the TUI matches queue contents by the
+    # Message id it queued, and the owner recalls exactly that entry.
+    "recall_steer",  # {command_id}
 ]
 
 # Events the registrant streams to the daemon.
@@ -263,6 +282,15 @@ EventOp = Literal[
     "projection",  # full projection repaint (the only push form — no deltas)
     "ack",  # {req, detail} — a request landed
     "error",  # {req, message} — a request was rejected/failed
+    # v4, event-subscribed attach clients ONLY (never the daemon): the owner
+    # session's raw AgentEvent stream, serialized with model_dump(mode="json").
+    # Fidelity by construction — the follower renders the same events the
+    # owner's own EventController consumes, so nothing is inverse-folded.
+    "event",  # {data: <AgentEvent dump>}
+    # v4: one-shot live-turn seed pushed right after the welcome projection to
+    # event clients, so a mid-turn join can rebuild the in-flight bubble and
+    # running tool cards (see LiveTurnSeed).
+    "attach_sync",  # {data: <LiveTurnSeed>}
 ]
 
 
@@ -517,6 +545,52 @@ class SessionProjection:
 #: scrolling. History fetches page backwards beyond it. Matches omp mobile's
 #: finding that a phone renders a tail, not a log.
 PROJECTION_TRANSCRIPT_LIMIT = 80
+
+
+@dataclass
+class LiveTurnSeed:
+    """The in-flight turn, for an event client joining mid-turn (v4).
+
+    Durable history covers everything up to the last persisted boundary and
+    the event relay covers everything from "now" — this seed is the gap
+    between them. Messages persist at turn boundaries, so a follower joining
+    mid-turn would otherwise show no streaming bubble and no running tool
+    cards until the turn ended. The owner's ``LiveTurnTracker`` maintains it
+    from the same event stream the relay forwards; it is bounded state (one
+    accumulated assistant message plus the open tool calls of one batch).
+
+    ``open_tools`` carries the serialized ``tool_call_compose`` /
+    ``tool_execution_start`` events (``model_dump(mode="json")``) for calls
+    started but not yet ended, in emission order, so a joining client can
+    replay them through its normal event path and rebuild the running cards
+    exactly as a continuously-connected client painted them.
+    """
+
+    streaming: bool = False
+    generation: int = 0
+    #: Accumulated in-flight assistant text (MessageUpdateEvent carries the
+    #: accumulated message, so the tracker keeps only the latest).
+    assistant_text: str = ""
+    #: Whether an assistant message is currently open (message_start seen,
+    #: message_end not). Distinct from ``assistant_text`` being empty: a
+    #: bubble can be open with no tokens yet.
+    assistant_open: bool = False
+    #: The open assistant message's id, so a joiner can dedupe the synthetic
+    #: seed bubble against the same message's own later ``message_end`` (the
+    #: relay delivers the real end; the seed only pre-paints the middle).
+    assistant_message_id: str = ""
+    open_tools: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> "LiveTurnSeed":
+        # Same tolerant rebuild as the other wire dataclasses: unknown keys
+        # from a newer owner are dropped, missing keys default (rolling
+        # upgrade mid-push must not kill the join).
+        known = {f for f in LiveTurnSeed.__dataclass_fields__}
+        return LiveTurnSeed(**{k: v for k, v in (data or {}).items() if k in known})
 
 
 def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> SessionProjection:

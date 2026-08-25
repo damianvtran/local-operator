@@ -1491,6 +1491,7 @@ async def create_session(
     *,
     has_ui: bool = False,
     cwd: str | None = None,
+    _force_local_takeover: bool = False,
 ) -> "SessionProtocol":
     """Build a fully-wired harness session from parsed CLI args.
 
@@ -1527,6 +1528,49 @@ async def create_session(
         pass
 
     effective_cwd = cwd if cwd is not None else os.getcwd()
+
+    # A full-screen TUI resuming a session already owned elsewhere consumes
+    # that owner's v4 event relay through RemoteSession. This lives at the
+    # shared session-factory seam (not in cli.py) so cold ``--resume`` and any
+    # future TUI launcher cannot accidentally construct a second writer or
+    # invent another attach UI. Headless/exec callers still take the lease and
+    # get the existing refusal: they have no full front end to host the facade.
+    resume_id = getattr(args, "resume", None)
+    if has_ui and resume_id is not None and not _force_local_takeover:
+        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.session.remote import RemoteSession
+
+        root = Path(agent_registry.config_dir)
+        record, owner = await asyncio.to_thread(find_owner_record, root, str(resume_id))
+        if owner is not None and owner != os.getpid():
+            if record is None or record.protocol < 4:
+                raise ValueError(
+                    f"session {resume_id} is open in an older Local Operator process "
+                    f"(pid {owner}); update or close it, then resume again"
+                )
+
+            async def takeover_factory() -> "SessionProtocol":
+                # Owner death is the one time this process may try the writer
+                # path. The lease is still the arbiter: racing followers call
+                # this concurrently, one wins, losers get SessionLeaseHeldError
+                # and RemoteSession rediscovers the winner.
+                return await create_session(
+                    args,
+                    config_manager,
+                    credential_manager,
+                    agent_registry,
+                    has_ui=True,
+                    cwd=effective_cwd,
+                    _force_local_takeover=True,
+                )
+
+            return await RemoteSession.connect(
+                record,
+                str(resume_id),
+                config_dir=root,
+                takeover_factory=takeover_factory,
+            )
+
     plan = await _prepare(
         args,
         config_manager,
