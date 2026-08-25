@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Set up and use the Local Operator browser extension so the browser tool can drive the user's real Chromium browser (Chrome, Edge, Arc, Brave). Covers install, pairing, per-site permissions, what to ask the user for, focus safety, and the cmux/playwright fallbacks.
+description: Set up and use the Local Operator browser extension to drive the user's real Chromium browser — install, pairing, permissions, focus safety, and the cmux/playwright fallbacks.
 ---
 
 # Browser: drive the user's real browser with the Local Operator extension
