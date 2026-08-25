@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.harness.types import CustomMessage, Message
+from local_operator.harness.types import CustomMessage, Message, ToolContext
+from local_operator.mcp.tool_bridge import format_mcp_result
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
     Transcript,
@@ -413,6 +414,41 @@ async def test_message_round_trip_keeps_provider_payload(transcript):
     assert isinstance(restored, Message)
     assert restored.provider_payload == {"details": {"path": "/tmp/x"}, "useless": False}
     assert restored.tool_call_id == "c1"
+
+
+@pytest.mark.asyncio
+async def test_spilled_mcp_metadata_round_trip_omits_duplicate_text(
+    transcript, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    body = "large MCP row\n" * 1_000
+    result = format_mcp_result(
+        {
+            "content": [{"type": "text", "text": body}],
+            "structuredContent": {"rowCount": 1_000},
+            "isError": False,
+        },
+        "c1",
+        "mcp__demo_rows",
+        ToolContext(session_id="transcript-spill"),
+    )
+    message = Message(
+        role="tool",
+        content=result.content,
+        tool_call_id=result.tool_call_id,
+        tool_name=result.tool_name,
+        provider_payload={"details": result.details},
+    )
+    await transcript.append_message(message)
+
+    restored = transcript.build_llm_history()[0]
+    assert isinstance(restored, Message)
+    assert restored.provider_payload is not None
+    details = restored.provider_payload["details"]
+    assert details["server_result"]["content"] == []
+    assert details["server_result"]["structuredContent"] == {"rowCount": 1_000}
+    assert details["spill"]["handle"].startswith("spill://")
+    assert body not in transcript.path.read_text()
 
 
 @pytest.mark.asyncio

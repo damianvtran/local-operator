@@ -572,6 +572,33 @@ class TestToolCallHygieneAndRetry:
         await manager.disconnect_all()
 
     @pytest.mark.asyncio
+    async def test_call_finalizes_with_context_off_event_loop(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = McpManager(str(project))
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        calls: list[tuple[Any, ...]] = []
+
+        async def capture_to_thread(function: Any, *args: Any) -> ToolResult:
+            calls.append((function, *args))
+            return function(*args)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        monkeypatch.setattr(asyncio, "to_thread", capture_to_thread)
+        await manager.discover_and_connect()
+
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+        context = ToolContext(session_id="mcp-context")
+        result = await tool.execute("c1", {"q": "x"}, None, None, context)
+        assert result.text == "ok"
+        assert len(calls) == 1
+        assert calls[0][-1] is context
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
     async def test_non_retriable_error_returns_error_result_without_reconnect(
         self, project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
