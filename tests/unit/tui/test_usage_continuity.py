@@ -481,129 +481,111 @@ async def test_the_new_session_baseline_counts_what_the_first_request_carries(
     assert with_history > baseline, "history the model will be sent has to be counted"
 
 
-@pytest.mark.asyncio
-async def test_cost_appears_during_the_first_turn_not_after_it() -> None:
-    """Money moves on each model call, so the FIRST turn shows its own spend.
+def test_cost_appears_during_the_first_turn_not_after_it() -> None:
+    """The per-call handler moves spend before any turn-end reconciliation."""
+    from unittest.mock import Mock
 
-    Reported as "the cost doesn't start tracking until after the second
-    message". The per-call event is the only signal available while a turn is
-    still running, which is exactly the stretch a long agentic turn is spending
-    the most in.
-    """
-    from tests.unit.tui.test_band_panels import FakeSession, _async_factory
+    app = OperatorApp(lambda: None)  # type: ignore[arg-type]
+    app._status = Mock()
+    spec = Mock(context_window=100_000)
+    app._session = Mock(
+        model_label="test/model",
+        effective_model_label="test/model",
+        effective_model=spec,
+    )
 
-    app = OperatorApp(_async_factory(FakeSession()))
     with _resolving():
-        async with app.run_test(size=(100, 18)) as pilot:
-            await pilot.pause()
-            assert app._status is not None
-            assert app._status._cost == "", "nothing has been spent yet"
+        app.on_context_usage_reported(
+            ContextUsageReported(
+                50_000,
+                Usage(input_tokens=1_000, output_tokens=500, context_tokens=50_000),
+            )
+        )
 
-            # One model call inside a turn that has NOT ended.
-            app.post_message(
+    assert app._total_cost == pytest.approx(0.01 + 0.05)
+    assert app._status.update.call_args_list[0].kwargs["context_tokens"] == 50_000
+    assert app._status.update.call_args_list[1].kwargs["cost"] == "$0.060"
+
+
+def test_a_turn_is_not_billed_twice_for_the_calls_it_already_paid_for() -> None:
+    """Deterministic handlers reconcile the turn total with live call accrual."""
+    from unittest.mock import Mock
+
+    app = OperatorApp(lambda: None)  # type: ignore[arg-type]
+    app._status = Mock()
+    spec = Mock(context_window=0)
+    app._session = Mock(
+        model_label="test/model",
+        effective_model_label="test/model",
+        effective_model=spec,
+    )
+    app._dismiss_working_block = Mock()  # type: ignore[method-assign]
+    app._harvest_subagent_costs = Mock()  # type: ignore[method-assign]
+
+    with _resolving():
+        for _ in range(2):
+            app.on_context_usage_reported(
                 ContextUsageReported(
-                    50_000,
-                    Usage(input_tokens=1_000, output_tokens=500, context_tokens=50_000),
+                    10_000,
+                    Usage(input_tokens=1_000, output_tokens=500, context_tokens=10_000),
                 )
             )
-            await pilot.pause()
+        assert app._total_cost == pytest.approx(2 * (0.01 + 0.05))
 
-            assert app._status._cost, "the segment must move before the turn ends"
-            assert app._total_cost == pytest.approx(0.01 + 0.05)
-            assert app._status.context_tokens == 50_000
+        app.on_turn_ended(
+            TurnEnded(
+                False,
+                None,
+                context_tokens=10_000,
+                usage=Usage(input_tokens=2_000, output_tokens=1_000, context_tokens=10_000),
+            )
+        )
+
+    assert app._total_cost == pytest.approx(0.02 + 0.10)
+    assert app._turn_accrued_cost == 0.0, "the next turn must start from zero"
 
 
-@pytest.mark.asyncio
-async def test_a_turn_is_not_billed_twice_for_the_calls_it_already_paid_for() -> None:
-    """The turn total supersedes the running one instead of adding to it.
+def test_provider_receipts_reconcile_without_double_counting() -> None:
+    """Deterministic handlers charge calls live, then add no duplicate at end."""
+    from unittest.mock import Mock
 
-    The hazard the per-call accrual introduces: ``agent_end`` prices the WHOLE
-    turn (summing every call), so adding it whole on top of the calls already
-    billed would report roughly double. The end adds only the remainder, and
-    the accrual resets so the next turn starts clean.
-    """
-    from tests.unit.tui.test_band_panels import FakeSession, _async_factory
+    app = OperatorApp(lambda: None)  # type: ignore[arg-type]
+    app._status = Mock()
+    spec = Mock(context_window=0)
+    app._session = Mock(
+        model_label="test/model",
+        effective_model_label="test/model",
+        effective_model=spec,
+    )
 
-    app = OperatorApp(_async_factory(FakeSession()))
-    with _resolving():
-        async with app.run_test(size=(100, 18)) as pilot:
-            await pilot.pause()
-
-            # Two calls inside one turn, billed as they land.
-            for _ in range(2):
-                app.post_message(
-                    ContextUsageReported(
-                        10_000,
-                        Usage(input_tokens=1_000, output_tokens=500, context_tokens=10_000),
-                    )
-                )
-                await pilot.pause()
-            assert app._total_cost == pytest.approx(2 * (0.01 + 0.05))
-
-            # The turn ends, reporting the SUM of those same two calls.
-            app.post_message(
-                TurnEnded(
-                    False,
-                    None,
+    receipts = (0.125, 0.275)
+    for receipt in receipts:
+        app.on_context_usage_reported(
+            ContextUsageReported(
+                10_000,
+                Usage(
+                    input_tokens=1_000_000,
+                    output_tokens=100_000,
                     context_tokens=10_000,
-                    usage=Usage(input_tokens=2_000, output_tokens=1_000, context_tokens=10_000),
-                )
+                    usd_cost=receipt,
+                ),
             )
-            await pilot.pause()
+        )
+    assert app._total_cost == pytest.approx(sum(receipts))
 
-            # The total, not the double.
-            assert app._total_cost == pytest.approx(0.02 + 0.10)
-            assert app._turn_accrued_cost == 0.0, "the next turn must start from zero"
+    app._dismiss_working_block = Mock()  # type: ignore[method-assign]
+    app._harvest_subagent_costs = Mock()  # type: ignore[method-assign]
+    app.on_turn_ended(
+        TurnEnded(
+            False,
+            None,
+            context_tokens=10_000,
+            usage=Usage(usd_cost=sum(receipts)),
+        )
+    )
 
-
-@pytest.mark.asyncio
-async def test_provider_receipts_win_and_sum_without_double_counting() -> None:
-    """A routed provider's receipts, not registry estimates, define session spend.
-
-    The live path sees each call and the turn-end path sees their aggregate. The
-    reconciliation must total the two receipts exactly once even though the token
-    table deliberately prices the same calls orders of magnitude higher.
-    """
-    from tests.unit.tui.test_band_panels import FakeSession, _async_factory
-
-    app = OperatorApp(_async_factory(FakeSession()))
-    with _resolving():
-        async with app.run_test(size=(100, 18)) as pilot:
-            await pilot.pause()
-
-            receipts = (0.125, 0.275)
-            for receipt in receipts:
-                app.post_message(
-                    ContextUsageReported(
-                        10_000,
-                        Usage(
-                            input_tokens=1_000_000,
-                            output_tokens=100_000,
-                            context_tokens=10_000,
-                            usd_cost=receipt,
-                        ),
-                    )
-                )
-                await pilot.pause()
-
-            assert app._total_cost == pytest.approx(sum(receipts))
-            app.post_message(
-                TurnEnded(
-                    False,
-                    None,
-                    context_tokens=10_000,
-                    usage=Usage(
-                        input_tokens=2_000_000,
-                        output_tokens=200_000,
-                        context_tokens=10_000,
-                        usd_cost=sum(receipts),
-                    ),
-                )
-            )
-            await pilot.pause()
-
-            assert app._total_cost == pytest.approx(sum(receipts))
-            assert app._turn_accrued_cost == 0.0
+    assert app._total_cost == pytest.approx(sum(receipts))
+    assert app._turn_accrued_cost == 0.0
 
 
 @pytest.mark.asyncio

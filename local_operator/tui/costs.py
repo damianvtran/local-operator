@@ -69,11 +69,30 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
             resolve_model_info,
         )
 
+        provider, _, model_id = model_label.partition("/")
+        components = getattr(usage, "cost_components", None)
+        if components:
+            # A mixed aggregate cannot put a partial receipt in ``usd_cost``:
+            # that would make the pricing helper skip estimates for every other
+            # call. Price each original call on its serving identity instead.
+            total = 0.0
+            for component in components:
+                component_provider = getattr(component, "provider", None) or provider
+                component_model = getattr(component, "model_id", None) or model_id
+                reported = _usage_cost(component)
+                if reported is not None:
+                    total += reported
+                    continue
+                info = resolve_model_info(component_provider, component_model)
+                if not (info.input_price or info.output_price):
+                    return None
+                total += cost_for_usage(component_provider, info, component)
+            return total
+
         reported = _usage_cost(usage)
         if reported is not None:
             return reported
 
-        provider, _, model_id = model_label.partition("/")
         info = resolve_model_info(provider, model_id)
         if not (info.input_price or info.output_price):
             return None
