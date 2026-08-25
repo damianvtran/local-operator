@@ -32,6 +32,8 @@ jobs:
           node-version: '24'
           cache: pnpm
           cache-dependency-path: extension/pnpm-lock.yaml
+      - name: Install protocol dependencies
+        run: python -m pip install pydantic
       - name: Install extension dependencies
         working-directory: extension
         run: pnpm install --frozen-lockfile
