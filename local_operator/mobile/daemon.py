@@ -304,6 +304,7 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             parent_job_id=parent_id,
             session_id=child_dir.name if child_dir else None,
             prompt=str(record.get("prompt") or ""),
+            launch_message_id=str(record.get("launch_message_id") or ""),
             effort=str(record.get("effort") or job.get("effort") or ""),
             ancestors=ancestors,
             ancestor_ids=ancestor_ids,
@@ -672,6 +673,7 @@ class MobileDaemon:
             # prompt or terminal payload. Those can each be many kilobytes and
             # belong to selected detail exactly like transcript and todos.
             row.prompt = ""
+            row.launch_message_id = ""
             row.result_text = ""
             row.error_text = ""
             row.transcript = []

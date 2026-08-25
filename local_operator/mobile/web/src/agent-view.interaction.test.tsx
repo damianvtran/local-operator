@@ -22,7 +22,7 @@ function row(jobId: string, parentJobId: string | null): SubagentRow {
 	return {
 		job_id: jobId, label: jobId, agent: "coder", status: "running", progress: "working",
 		elapsed_s: 1, model_label: "", result_text: "", error_text: "",
-		parent_job_id: parentJobId, session_id: `${jobId}-session`, prompt: "", effort: "high",
+		parent_job_id: parentJobId, session_id: `${jobId}-session`, prompt: "", launch_message_id: "", effort: "high",
 		ancestors: [], ancestor_ids: [], child_ids: [], peer_ids: [], transcript: [], todos: [], activity: "working",
 	};
 }
@@ -31,9 +31,10 @@ function fixture(): { detail: SubagentDetail; projection: SessionProjection } {
 	const detail: SubagentDetail = {
 		...row("current", "parent"), version: 3, label: "current-agent",
 		ancestor_ids: ["ancestor", "parent"], peer_ids: ["peer"], child_ids: ["child"],
-		prompt: "One request", transcript: [
-			entry("parent", "parent_message", "One request"),
+		prompt: "One request", launch_message_id: "subagent-launch:current", transcript: [
+			entry("subagent-launch:current", "user", "Role instructions\n\nOne request"),
 			entry("assistant", "assistant", "One response"),
+			entry("steer", "user", "Preserve this later steering message"),
 		],
 	};
 	const projection = {
@@ -109,11 +110,18 @@ describe("AgentConversation", () => {
 		expect(screen.queryByText(/handoff/i)).toBeNull();
 
 		const retry = vi.fn();
-		rerender(<AgentUnavailable sessionId="root" onRetry={retry} />);
+		history.replaceState({}, "", "#/s/root/a/unavailable");
+		const replaceState = vi.spyOn(history, "replaceState");
+		const pushState = vi.spyOn(history, "pushState");
+		rerender(<AgentUnavailable sessionId="root" parentPath="/s/root/a/parent" onRetry={retry} />);
 		expect(screen.getByText("Unavailable")).toBeTruthy();
 		expect(screen.queryByText("Loading activity")).toBeNull();
 		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 		expect(retry).toHaveBeenCalledOnce();
+		fireEvent.click(screen.getByRole("button", { name: "Back to parent" }));
+		expect(replaceState).toHaveBeenCalledWith(expect.anything(), "", "#/s/root/a/parent");
+		fireEvent.click(screen.getByRole("button", { name: "View root" }));
+		expect(pushState).toHaveBeenCalledWith(expect.anything(), "", "#/s/root");
 	});
 
 	it("gives tool, task, and child disclosures the shared mobile target floor", () => {
@@ -144,7 +152,8 @@ describe("AgentConversation", () => {
 	it("keeps the delegated request singular and removes dominant legacy chrome", () => {
 		const { detail, projection } = fixture();
 		render(<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={detail} />);
-		expect(screen.getAllByText("One request")).toHaveLength(1);
+		expect(screen.getAllByText(/One request/)).toHaveLength(1);
+		expect(screen.getByText("Preserve this later steering message")).toBeTruthy();
 		expect(screen.queryByRole("navigation", { name: "agent lineage" })).toBeNull();
 		expect(screen.queryByText("Parent request")).toBeNull();
 		expect(screen.queryByText(/send commands from the root conversation/i)).toBeNull();

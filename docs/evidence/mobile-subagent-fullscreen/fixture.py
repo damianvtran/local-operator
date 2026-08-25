@@ -9,6 +9,7 @@ sys.path.insert(0, str(REPO_ROOT))
 PORT = int(os.environ.get("LO_MOBILE_FIXTURE_PORT", "4179"))
 DISCONNECT_SENTINEL = Path(f"/tmp/lop-fixture-disconnect-{PORT}")
 DETAIL_FAILURE_SENTINEL = Path(f"/tmp/lop-fixture-detail-failure-{PORT}")
+DETAIL_DELAY_SENTINEL = Path(f"/tmp/lop-fixture-detail-delay-{PORT}")
 
 from local_operator.mobile.daemon import (  # noqa: E402
     MobileDaemon,
@@ -57,7 +58,9 @@ conversation once, rather than finding a tiny nested scroller.
 """
 child_transcript = [
     entry(
-        "c-user", "parent_message", "Implement all round-one findings with real mobile evidence."
+        "subagent-launch:child",
+        "user",
+        "[role: coder]\n\nImplement all round-one findings with real mobile evidence.",
     ),
     entry(
         "c-assistant",
@@ -90,6 +93,7 @@ projection.subagents = [
         parent_job_id=None,
         session_id="fixture-child",
         prompt="Remediate code, design, and UX findings.",
+        launch_message_id="subagent-launch:child",
         effort="high",
         child_ids=["grandchild"],
         peer_ids=["peer-complete", "peer-failed"],
@@ -114,17 +118,19 @@ projection.subagents = [
         parent_job_id="child",
         session_id="fixture-grandchild",
         prompt="Build nested mobile fixture.",
+        launch_message_id="subagent-launch:grandchild",
         ancestor_ids=["child"],
         ancestors=["mobile-fullscreen-remediation"],
         peer_ids=["grandchild-peer"],
         child_ids=["great-grandchild"],
         result_text=long_result,
         transcript=[
+            entry("subagent-launch:grandchild", "user", "Build nested mobile fixture."),
             entry(
                 "g-assistant",
                 "assistant",
                 "The nested fixture is populated and ready for route testing.",
-            )
+            ),
         ],
     ),
     SubagentRow(
@@ -150,6 +156,20 @@ projection.subagents = [
         ancestor_ids=["child", "grandchild"],
         ancestors=["mobile-fullscreen-remediation", "fixture-builder"],
         result_text="Captured nested evidence without horizontal overflow.",
+    ),
+    SubagentRow(
+        job_id="empty-running",
+        label="waiting-for-first-response",
+        agent="coder",
+        status="running",
+        progress="waiting for the first response",
+        elapsed_s=2,
+        parent_job_id=None,
+        session_id="fixture-empty-running",
+        prompt="Validate the empty running state.",
+        peer_ids=["child", "peer-complete", "peer-failed"],
+        transcript=[],
+        activity="waiting for the first response",
     ),
     SubagentRow(
         job_id="peer-complete",
@@ -206,22 +226,46 @@ class FixtureRecovery:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if (
-            scope["type"] == "http"
-            and scope["path"] == f"/api/sessions/{SESSION}/agents/child"
-            and DETAIL_FAILURE_SENTINEL.exists()
-        ):
-            body = b'{"error":"temporary detail failure"}'
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 503,
-                    "headers": [(b"content-type", b"application/json")],
-                }
+        detail_prefix = f"/api/sessions/{SESSION}/agents/"
+        detail_job = scope["path"].removeprefix(detail_prefix)
+        if scope["type"] == "http" and scope["path"].startswith(detail_prefix):
+            # Delay is checked before the one-shot failure so a real in-flight
+            # request can span SSE recovery, fail afterward, and expose whether
+            # the browser retained exactly one coalesced retry.
+            delay_job = (
+                DETAIL_DELAY_SENTINEL.read_text().strip() or "child"
+                if DETAIL_DELAY_SENTINEL.exists()
+                else ""
             )
-            await send({"type": "http.response.body", "body": body})
-            return
+            if delay_job == detail_job:
+                print(f"fixture detail delay start {detail_job}", flush=True)
+                await asyncio.sleep(8)
+            # A sentinel may name a nested route so the evidence walk can prove
+            # parent and root recovery are distinct without changing fixture data.
+            failure_spec = (
+                DETAIL_FAILURE_SENTINEL.read_text().strip() or "child"
+                if DETAIL_FAILURE_SENTINEL.exists()
+                else ""
+            )
+            persistent_failure = failure_spec.startswith("persistent:")
+            failure_job = failure_spec.removeprefix("persistent:")
+            if failure_job == detail_job:
+                if not persistent_failure:
+                    DETAIL_FAILURE_SENTINEL.unlink(missing_ok=True)
+                print(f"fixture detail one-shot failure {detail_job}", flush=True)
+                body = b'{"error":"temporary detail failure"}'
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 503,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+            print(f"fixture detail success {detail_job}", flush=True)
         if scope["type"] == "http" and scope["path"] == f"/api/sessions/{SESSION}/events":
+            print("fixture SSE connected", flush=True)
             await send(
                 {
                     "type": "http.response.start",
@@ -236,6 +280,7 @@ class FixtureRecovery:
             await send({"type": "http.response.body", "body": body, "more_body": True})
             while not DISCONNECT_SENTINEL.exists():
                 await asyncio.sleep(0.1)
+            print("fixture SSE disconnected", flush=True)
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
         await self.app(scope, receive, send)

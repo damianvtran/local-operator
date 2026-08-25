@@ -137,6 +137,21 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert isinstance(stream.requests[0].messages[0], Message)
     assert stream.requests[0].messages[0].text == "go do a thing"
 
+    # Drive the same durable transcript fold the mobile detail endpoint uses.
+    # The raw task and role-expanded first user row correlate by identity, while
+    # the completed handoff remains terminal metadata after the ordered messages.
+    fold = ProjectionFold(SessionProjection(session_id="root", pid=1))
+    fold.set_subagent_details(parent.subagent_comms)
+    [row] = fold.projection.subagents
+    assert row.prompt == "go do a thing"
+    assert row.launch_message_id == f"subagent-launch:{job_id}"
+    assert [(entry.kind, entry.text) for entry in row.transcript] == [
+        ("user", "go do a thing"),
+        ("assistant", "child did the work"),
+    ]
+    assert row.transcript[0].id == f"subagent-launch:{job_id}"
+    assert row.result_text == "child did the work"
+
     # Item 12: once the task settles, the idle TOP-LEVEL parent re-wakes with
     # the result instead of polling `jobs`; the shared provider sees a second
     # request carrying that job-result custom message.

@@ -12,6 +12,7 @@ export class DetailRequestCoordinator {
 	private completedVersion = -1;
 	private activeVersion = -1;
 	private pendingVersion = -1;
+	private retryActiveOnFailure = false;
 	private disposed = false;
 
 	constructor(
@@ -25,6 +26,11 @@ export class DetailRequestCoordinator {
 		if (this.inFlight) {
 			if (version > this.activeVersion) {
 				this.pendingVersion = Math.max(this.pendingVersion, version);
+			} else if (version === this.activeVersion) {
+				/* Reconnect is allowed to race the active GET. Remember one retry,
+				   but consume it only if that GET fails so a healthy response does
+				   not create a same-version request loop. */
+				this.retryActiveOnFailure = true;
 			}
 			return;
 		}
@@ -38,6 +44,8 @@ export class DetailRequestCoordinator {
 	private start(version: number): void {
 		this.inFlight = true;
 		this.activeVersion = version;
+		this.retryActiveOnFailure = false;
+		let failed = false;
 		void this.load()
 			.then((detail) => {
 				/* Only a successful response satisfies a version. A transient failure
@@ -46,13 +54,18 @@ export class DetailRequestCoordinator {
 				if (!this.disposed) this.accept(detail);
 			})
 			.catch((reason: unknown) => {
+				failed = true;
 				if (!this.disposed) this.reject(reason);
 			})
 			.finally(() => {
 				this.inFlight = false;
 				if (this.disposed) return;
-				const followUp = this.pendingVersion;
+				const followUp = Math.max(
+					this.pendingVersion,
+					failed && this.retryActiveOnFailure ? version : -1,
+				);
 				this.pendingVersion = -1;
+				this.retryActiveOnFailure = false;
 				if (followUp > this.completedVersion) this.start(followUp);
 			});
 	}

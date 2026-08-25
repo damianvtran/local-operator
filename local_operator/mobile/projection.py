@@ -664,6 +664,7 @@ class ProjectionFold:
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
             row.prompt = node.prompt
+            row.launch_message_id = node.launch_message_id
             row.effort = node.effort
             ancestors = comms.ancestors(node.job_id)
             row.ancestors = [ancestor.label for ancestor in ancestors]

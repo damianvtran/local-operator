@@ -15,7 +15,7 @@ function row(jobId: string, parentJobId: string | null): SubagentRow {
 	return {
 		job_id: jobId, label: jobId, agent: "coder", status: "running", progress: "",
 		elapsed_s: 1, model_label: "", result_text: "", error_text: "",
-		parent_job_id: parentJobId, session_id: `${jobId}-session`, prompt: "", effort: "high",
+		parent_job_id: parentJobId, session_id: `${jobId}-session`, prompt: "", launch_message_id: "", effort: "high",
 		ancestors: [], ancestor_ids: [], child_ids: [], peer_ids: [], transcript: [], todos: [], activity: "thinking",
 	};
 }
@@ -28,6 +28,22 @@ function detail(overrides: Partial<SubagentDetail> = {}): SubagentDetail {
 }
 
 describe("agent conversation composition", () => {
+	it("uses durable launch identity while preserving later steering messages", () => {
+		const launch = entry("subagent-launch:current", "user", "Role preamble\n\nImplement the route");
+		const steer = entry("steer", "user", "Implement the route more narrowly");
+		const messages = agentConversationEntries(detail({
+			prompt: "Implement the route",
+			launch_message_id: launch.id,
+			transcript: [launch, entry("reply", "assistant", "Working on it"), steer],
+		}));
+		expect(messages).toEqual([
+			expect.objectContaining({ id: launch.id, kind: "parent_message" }),
+			expect.objectContaining({ id: "reply", kind: "assistant" }),
+			steer,
+		]);
+		expect(messages.filter((message) => message.kind === "parent_message")).toHaveLength(1);
+	});
+
 	it("does not duplicate a delegated request already carried by parent_message", () => {
 		const parent = entry("parent-message", "parent_message", "Implement the route");
 		const messages = agentConversationEntries(detail({

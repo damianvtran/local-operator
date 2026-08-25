@@ -402,6 +402,7 @@ class SubagentRow:
     parent_job_id: str | None = None
     session_id: str | None = None
     prompt: str = ""
+    launch_message_id: str = ""
     effort: str = ""
     ancestors: list[str] = field(default_factory=list)
     ancestor_ids: list[str] = field(default_factory=list)

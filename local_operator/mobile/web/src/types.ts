@@ -107,6 +107,7 @@ export interface SubagentRow {
 	parent_job_id: string | null;
 	session_id: string | null;
 	prompt: string;
+	launch_message_id: string;
 	effort: string;
 	ancestors: string[];
 	ancestor_ids: string[];

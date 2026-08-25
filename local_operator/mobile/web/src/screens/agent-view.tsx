@@ -32,10 +32,21 @@ function agentPath(sessionId: string, jobId: string): string {
 	return `/s/${encodeURIComponent(sessionId)}/a/${encodeURIComponent(jobId)}`;
 }
 
-/** A prompt is legacy fallback context. Current projections also carry the
- * authored parent_message in the transcript; rendering both makes one request
- * look like two distinct turns. */
+/** The launch prompt is durable child history, while `prompt` is the raw
+ * parent task retained for queued/legacy rows. Correlation identity lets the
+ * opening role-expanded user row carry that task's visual semantics without
+ * text matching or hiding later user/parent steering turns. */
 export function agentConversationEntries(detail: SubagentDetail): TranscriptEntry[] {
+	if (detail.launch_message_id) {
+		const launchIndex = detail.transcript.findIndex(
+			(entry) => entry.id === detail.launch_message_id && entry.kind === "user",
+		);
+		if (launchIndex >= 0) {
+			return detail.transcript.map((entry, index) =>
+				index === launchIndex ? { ...entry, kind: "parent_message" } : entry,
+			);
+		}
+	}
 	if (!detail.prompt || detail.transcript.some((entry) => entry.kind === "parent_message")) {
 		return detail.transcript;
 	}
@@ -192,17 +203,26 @@ function InlineState({ children }: { children: ReactNode }) {
 	return <main className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-4">{children}</main>;
 }
 
-export function AgentUnavailable({ sessionId, onRetry }: { sessionId: string; onRetry?: () => void }) {
+export function AgentUnavailable({
+	sessionId,
+	parentPath,
+	onRetry,
+}: {
+	sessionId: string;
+	parentPath?: string;
+	onRetry?: () => void;
+}) {
 	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
+	const fallbackPath = parentPath || rootPath;
 	return (
 		<>
-			<AgentHeader detail={null} parentPath={rootPath} fallbackSubtitle="Unavailable" />
+			<AgentHeader detail={null} parentPath={fallbackPath} fallbackSubtitle="Unavailable" />
 			<InlineState>
 				<p role="alert" className="text-body-sm font-medium text-ink">This agent is no longer available.</p>
 				<p className="text-body-sm text-ink-dim">It may have expired or been removed.</p>
 				<div className="mt-2 flex flex-wrap gap-2">
 					{onRetry ? <button type="button" onClick={onRetry} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Retry</button> : null}
-					<button type="button" onClick={() => navigateUp(rootPath)} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Back to parent</button>
+					<button type="button" onClick={() => navigateUp(fallbackPath)} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Back to parent</button>
 					<button type="button" onClick={() => navigate(rootPath)} className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated">View root</button>
 				</div>
 			</InlineState>
@@ -331,9 +351,14 @@ export function AgentScreen({
 	}, [connected, projection.version]);
 
 	if (error && !detail) {
+		const summary = projection.subagents.find((row) => row.job_id === jobId);
+		const parentPath = summary?.parent_job_id
+			? agentPath(sessionId, summary.parent_job_id)
+			: `/s/${encodeURIComponent(sessionId)}`;
 		return (
 			<AgentUnavailable
 				sessionId={sessionId}
+				parentPath={parentPath}
 				onRetry={() => {
 					setError("");
 					loaderRef.current?.request(projection.version);
