@@ -981,6 +981,9 @@ async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager
 
     class RoutedSession(FakeSession):
         frontend_state: FrontendSessionState
+        # The read-only facade the production RemoteSession hands the app — the
+        # one whose get_server_config absence crashed the local /mcp handler.
+        mcp_manager: Any
 
         async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
             routed.append((command, args))
@@ -992,8 +995,6 @@ async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager
 
     routed: list[tuple[str, str]] = []
     session = RoutedSession()
-    # The read-only facade the production RemoteSession hands the app — the one
-    # whose get_server_config absence crashed the local /mcp login handler.
     session.mcp_manager = SnapshotMcpManager()
     session.frontend_state = FrontendSessionState(
         session_id=session.session_id,

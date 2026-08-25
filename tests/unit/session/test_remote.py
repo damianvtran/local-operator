@@ -314,7 +314,8 @@ async def test_remote_adopt_aside_and_cancel_route_to_owner(tmp_path: Path, monk
         ]
         await remote.adopt_aside(pair)
         assert handle.calls[-1][0] == "adopt_aside"
-        assert len(handle.calls[-1][1][0]) == 2
+        forwarded = handle.calls[-1][1][0]
+        assert isinstance(forwarded, list) and len(forwarded) == 2
 
         # Double-Esc: the synchronous method issues the authoritative op and
         # the owner's confirmed count resolves through the callback.
