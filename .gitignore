@@ -9,6 +9,7 @@ __pycache__/
 .venv
 .DS_Store
 dist/
+node_modules/
 *.egg-info/
 .pytest_cache/
 .vscode/
