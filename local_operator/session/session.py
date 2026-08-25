@@ -1360,9 +1360,20 @@ class Session:
         # The session, not an OperatorApp, owns state that must survive a second
         # frontend joining. Constructed after every durable source above has
         # restored so the first snapshot is already authoritative.
-        from local_operator.session.frontend_state import FrontendStateStore
+        from local_operator.session.frontend_state import (
+            FrontendSessionState,
+            FrontendStateStore,
+        )
 
-        self._frontend_state_store = FrontendStateStore.from_session(self)
+        self._frontend_state_store = (
+            FrontendStateStore.from_session(self)
+            if self._has_ui
+            else FrontendStateStore(
+                FrontendSessionState(
+                    session_id=str(self.session_id), epoch=f"headless-{id(self):x}"
+                )
+            )
+        )
 
     def _render_history(
         self, messages: list[AgentMessage], *, keep_images: bool = False
@@ -3218,7 +3229,7 @@ class Session:
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         store = getattr(self, "_frontend_state_store", None)
-        if store is not None:
+        if store is not None and (self._has_ui or store.has_subscribers):
             store.observe_event(self, event)
         for handler in list(self._handlers):
             try:
