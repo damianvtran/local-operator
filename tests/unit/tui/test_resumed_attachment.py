@@ -92,6 +92,47 @@ async def _adopted(app: OperatorApp, pilot: Any) -> None:
         await pilot.pause()
 
 
+async def _with_history(session: Session, turns: int) -> None:
+    """Give a session enough replayed turns to fill more than one screen.
+
+    A stale attachment is only reachable on a session that ALREADY RAN, so a
+    test asserting on that notice against an EMPTY transcript is testing the
+    one shape the feature never meets in the field (D1).
+    """
+    from local_operator.harness.types import Message, TextContent
+
+    for i in range(turns):
+        await session._transcript.append_message(
+            Message(role="user", content=[TextContent(text=f"question {i}")])
+        )
+        await session._transcript.append_message(
+            Message(role="assistant", content=[TextContent(text=f"answer {i}: disk full.")])
+        )
+
+
+def _restore_notice(app: OperatorApp) -> Any:
+    """The stale-attachment NoticeBlock, or ``None``."""
+    for block in app.query(NoticeBlock):
+        if "could not restore" in (block.text() or ""):
+            return block
+    return None
+
+
+def _is_on_screen(app: OperatorApp, block: Any) -> bool:
+    """Whether ``block`` actually falls inside the transcript's painted area.
+
+    ``Widget.region`` is SCREEN-relative and already carries the scroll, so
+    comparing it against the transcript's own ``region`` (also screen-relative)
+    answers "is this on screen" — where ``window_region`` is in virtual space
+    and would compare two different coordinate systems. Verified to
+    discriminate: it is ``False`` against the pre-fix ordering, where the notice
+    sat at ``y=-63`` under a viewport starting at ``y=65``, and ``True`` after.
+    """
+    from local_operator.tui.widgets.transcript import TranscriptView
+
+    return block.region.overlaps(app.query_one(TranscriptView).region)
+
+
 @pytest.mark.asyncio
 async def test_the_band_names_the_team_and_agent_a_resume_restored(tmp_path) -> None:
     """Before this, both segments were blank on every resume — honestly so, the
@@ -134,7 +175,104 @@ async def test_a_stale_team_leaves_the_segment_blank_and_says_why(tmp_path) -> N
         assert app._status is not None
         assert app._status._team == ""
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
-        assert any("lopdev" in text and "without it" in text for text in notices), notices
+        assert any("lopdev" in text and "re-attach" in text for text in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_the_stale_notice_is_on_screen_on_a_session_with_history(tmp_path) -> None:
+    """D1: the notice has to be VISIBLE, not merely mounted.
+
+    A stale attachment can only happen on a session that already ran, so this is
+    the only shape that matters. Raised before the history replay the notice
+    became block 0, the replay was appended after it, the transcript scrolled to
+    the bottom, and it landed at ``y=-63`` under a viewport starting at ``y=65``
+    — the silent downgrade the notice exists to prevent, reproduced by the
+    notice itself. Membership in ``app.query(NoticeBlock)`` cannot see that;
+    only viewport containment can.
+    """
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    await _with_history(first, 20)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+
+    resumed = _session(tmp_path, agents, TeamRegistry(tmp_path / "elsewhere"))
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(100, 26)) as pilot:
+        await _adopted(app, pilot)
+        notice = _restore_notice(app)
+        assert notice is not None, "the stale-attachment notice was never mounted"
+        assert _is_on_screen(
+            app, notice
+        ), f"notice mounted but off screen: region={tuple(notice.region)}"
+        # And it is the LAST block, i.e. directly above the composer where the
+        # user's eye already is, rather than merely somewhere on screen.
+        from local_operator.tui.widgets.transcript import TranscriptView
+
+        blocks = list(app.query_one(TranscriptView).children)
+        assert blocks[-1] is notice, "the notice is not the most recent block"
+
+
+@pytest.mark.asyncio
+async def test_a_restored_goal_is_reported(tmp_path) -> None:
+    """D4: a standing goal steers ``/loop``, so a silently restored one is
+    invisible state driving the conversation. The band is the wrong home for a
+    sentence; a one-line receipt is the right weight."""
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.set_goal("ship the resume fix and cut the release")
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot)
+        notices = [(n.text() or "") for n in app.query(NoticeBlock)]
+        assert any(
+            "goal restored" in text and "cut the release" in text for text in notices
+        ), notices
+
+
+@pytest.mark.asyncio
+async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> None:
+    """R4: owner death swaps a RemoteSession facade for a REAL Session, which
+    restores its attachment at construction. ``StatusLine.update`` treats
+    ``None`` as leave-alone, so omitting the two segments left whatever the
+    remote facade had painted — the one adopt sink that did not show them."""
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+    first.attach_agent_profile("auditor")
+
+    # Stands in for the remote facade: a different session, nothing attached.
+    bare = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[]]),
+        tools=[],
+        transcript=Transcript(tmp_path / "other"),
+        system_blocks_provider=lambda: [],
+    )
+
+    async def factory() -> Session:
+        return bare
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot)
+        assert app._status is not None
+        assert app._status._team == ""
+
+        await app._adopt_takeover_session(_session(tmp_path, agents, teams))
+        for _ in range(6):
+            await pilot.pause()
+        assert app._status._team == "lopdev"
+        assert app._status._agent_profile == "auditor"
 
 
 @pytest.mark.asyncio

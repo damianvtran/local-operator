@@ -2032,8 +2032,20 @@ class OperatorApp(App[None]):
         )
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
-        self._report_attachment_restore(session)
         self._render_resumed_history(session)
+        # AFTER the replay, and the order is load-bearing (D1). A stale
+        # attachment is by definition only reachable on a session that ALREADY
+        # RAN, so this notice always lands on a transcript with history. Raised
+        # before the replay it became block 0 of N, the replayed history was
+        # appended after it, the transcript auto-scrolled to the bottom, and the
+        # notice sat at y=-63 with the viewport at y=65 — off screen entirely,
+        # producing exactly the silent downgrade `_report_attachment_restore`
+        # exists to prevent. Last block puts it directly above the composer,
+        # where the eye already is, and it IS the most recent thing that
+        # happened to this session. Costs nothing on an empty transcript:
+        # `_render_resumed_history` no-ops there, so the boot splash is
+        # untouched and the notice still lands under it.
+        self._report_attachment_restore(session)
         # AFTER the history is on screen, because that is where the fallback
         # label comes from: a session resumed from a transcript written before
         # titles were journalled has no stored name to restore, and the band
@@ -2080,6 +2092,15 @@ class OperatorApp(App[None]):
             model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
+            # The takeover replaces a RemoteSession facade with a REAL Session,
+            # which runs `_restore_attachment` at construction and so may be
+            # carrying a team/agent the band is not showing (R4). `update`
+            # treats `None` as leave-alone, so omitting these left whatever the
+            # remote facade had painted — the one adopt sink that did not paint
+            # the restored attachment. Read defensively, as `_adopt_session`
+            # does, so a reduced facade without the accessors cannot raise here.
+            agent_profile=str(getattr(session, "active_agent", "") or ""),
+            team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
             streaming=False,
@@ -4370,10 +4391,27 @@ class OperatorApp(App[None]):
         that failed to resolve leaves its segment blank on its own; painting
         the stored name would contradict the notice and claim a persona the
         prompt does not carry.
+
+        A restored GOAL is reported here too, and for the same reason the team
+        and agent get band segments (D4): it is invisible standing state that
+        steers the conversation. The band is the wrong home for it — a goal is a
+        sentence, not a bounded name, and the drop ladder's ``_UNBOUNDED_RUNGS``
+        exists to keep exactly that out — but saying nothing means ``/loop``
+        iterates toward an objective set days ago that the user cannot see.
+        Informational rather than a warning: nothing went wrong, and this is the
+        feature working.
         """
-        detail = str(getattr(session, "attachment_restore_error", "") or "")
+        detail = str(getattr(session, "attachment_restore_notice", "") or "")
         if detail:
             self._system_notice(detail, "warning")
+        goal = str(getattr(session, "goal", "") or "").strip()
+        if goal:
+            from local_operator.tui.widgets.tool_card import truncate_cells
+
+            # Capped so a goal written up to MAX_GOAL_CHARS (2000) cannot turn
+            # a one-line receipt into a wall of replayed text above the
+            # composer. The full text is always available from `/goal`.
+            self._system_notice(f"goal restored: {truncate_cells(goal, 96)}", "info")
 
     # -- text selection (TUI-021) -------------------------------------------
     def on_text_selected(self, event: TextSelected) -> None:

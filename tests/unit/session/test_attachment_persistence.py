@@ -162,6 +162,41 @@ class TestTheRoundTrip:
 
 
 class TestNamesNotBriefs:
+    def test_a_name_with_repeated_spaces_round_trips(self, tmp_path, registries):
+        """R2: the stored value is a LOOKUP KEY, so it must not be normalised.
+
+        Agent-profile names are free-form and ``AgentRegistry.create_agent``
+        does not collapse whitespace, but every resolver matches with ``strip``
+        only. Collapsing on write meant a profile named ``"Deep  Auditor"``
+        attached live, was written as ``"Deep Auditor"``, then failed to resolve
+        on resume and told the user it had been renamed or deleted. Team names
+        cannot hit this (``_NAME_RE`` forbids spaces), so this is agent-only.
+        """
+        agents, teams = registries
+        agents.create_agent(
+            _role_fields(name="Deep  Auditor", description="Audits deeply", tags=["role"])
+        )
+        first = _session(tmp_path, registries)
+        assert first.attach_agent_profile("Deep  Auditor") == "Deep  Auditor"
+        assert _sidecar(tmp_path)["agent"] == "Deep  Auditor"
+
+        resumed = _session(tmp_path, registries)
+        assert resumed.active_agent == "Deep  Auditor"
+        assert resumed.attachment_restore_notice == ""
+
+    def test_surrounding_whitespace_is_still_stripped(self, tmp_path, registries):
+        """Strip yes, collapse no: a stored key with stray edge whitespace would
+        not match either, and stripping is what the resolvers themselves do."""
+        from local_operator.resume import (
+            read_session_attachment,
+            write_session_attachment,
+        )
+
+        write_session_attachment(tmp_path, team="  lopdev ", agent=" a  b ", goal="  g ")
+        stored = read_session_attachment(tmp_path)
+        assert stored is not None
+        assert (stored.team, stored.agent, stored.goal) == ("lopdev", "a  b", "g")
+
     def test_only_names_are_stored(self, tmp_path, registries):
         """Briefs are large and go stale; the sidecar holds names."""
         _, teams = registries
@@ -212,8 +247,10 @@ class TestTheStaleName:
         )
         assert resumed.active_team_name == ""
         assert resumed._goal_state.team_brief == ""
-        assert "lopdev" in resumed.attachment_restore_error
-        assert "without it" in resumed.attachment_restore_error
+        assert "lopdev" in resumed.attachment_restore_notice
+        # Names the recovery step, the way every sibling miss-notice does.
+        assert "/team" in resumed.attachment_restore_notice
+        assert "re-attach" in resumed.attachment_restore_notice
 
     def test_a_deleted_agent_degrades_the_same_way(self, tmp_path, registries):
         first = _session(tmp_path, registries)
@@ -230,7 +267,7 @@ class TestTheStaleName:
             team_registry=teams,
         )
         assert resumed.active_agent == ""
-        assert "auditor" in resumed.attachment_restore_error
+        assert "auditor" in resumed.attachment_restore_notice
 
     def test_a_successful_restore_reports_nothing(self, tmp_path, registries):
         """The notice is for a real miss; a clean resume must stay quiet."""
@@ -239,7 +276,68 @@ class TestTheStaleName:
         first.attach_team(teams.get_team_by_name("lopdev"))
 
         resumed = _session(tmp_path, registries)
-        assert resumed.attachment_restore_error == ""
+        assert resumed.attachment_restore_notice == ""
+
+    def test_the_cause_is_only_claimed_when_it_has_been_established(self, tmp_path, registries):
+        """Three failures, one of which is renamed-or-deleted.
+
+        A registry that is absent or that RAISED has established nothing about
+        whether the team still exists, and both are transient. Telling the user
+        it was renamed or deleted sends them off to re-create something that is
+        still there, which is worse than saying nothing about the cause.
+        """
+        _, teams = registries
+        agents, _ = registries
+        first = _session(tmp_path, registries)
+        first.attach_team(teams.get_team_by_name("lopdev"))
+
+        def resumed_with(team_registry: Any) -> Session:
+            return Session(
+                model=MODEL,
+                stream_fn=ScriptedStream([[]]),
+                tools=[],
+                transcript=Transcript(tmp_path / "sess"),
+                system_blocks_provider=lambda: [],
+                agent_registry=agents,
+                team_registry=team_registry,
+            )
+
+        class Raises:
+            def get_team_by_name(self, name: str) -> Any:
+                raise RuntimeError("registry down")
+
+        # Established: the lookup ran and answered "no such team".
+        deleted = resumed_with(TeamRegistry(tmp_path / "elsewhere"))
+        assert "renamed or deleted" in deleted.attachment_restore_notice
+        # Not established: no registry at all, and a registry that blew up.
+        assert "renamed or deleted" not in resumed_with(None).attachment_restore_notice
+        assert "renamed or deleted" not in resumed_with(Raises()).attachment_restore_notice
+        # All three still say what to do about it.
+        for session in (deleted, resumed_with(None), resumed_with(Raises())):
+            assert "Run /team to re-attach." in session.attachment_restore_notice
+
+    def test_the_notice_fits_one_line_on_a_standard_terminal(self, tmp_path, registries):
+        """It wrapped to two lines at 100 columns, which is where it is read."""
+        _, teams = registries
+        agents, _ = registries
+        first = _session(tmp_path, registries)
+        first.attach_team(teams.get_team_by_name("lopdev"))
+        first.attach_agent_profile("auditor")
+
+        resumed = Session(
+            model=MODEL,
+            stream_fn=ScriptedStream([[]]),
+            tools=[],
+            transcript=Transcript(tmp_path / "sess"),
+            system_blocks_provider=lambda: [],
+            agent_registry=AgentRegistry(tmp_path / "elsewhere"),
+            team_registry=TeamRegistry(tmp_path / "elsewhere"),
+        )
+        # Both slots missing is the longest form this can take.
+        assert "team 'lopdev' and agent 'auditor'" in resumed.attachment_restore_notice
+        # Deduped commands: never "/team or /team".
+        assert "Run /team or /agent to re-attach." in resumed.attachment_restore_notice
+        assert len(resumed.attachment_restore_notice) <= 96, resumed.attachment_restore_notice
 
     def test_a_partial_restore_does_not_erase_the_name_it_could_not_resolve(
         self, tmp_path, registries
@@ -268,6 +366,93 @@ class TestTheStaleName:
         assert _sidecar(tmp_path)["team"] == "lopdev"
         recovered = _session(tmp_path, registries)
         assert recovered.active_team_name == "lopdev"
+
+    def test_an_unresolved_name_survives_later_use_of_the_session(self, tmp_path, registries):
+        """R1: the recovery must outlive the restore, not just the restore call.
+
+        Suppressing the write DURING the restore only protected the stored name
+        until the resumed session was used at all: ``active_team`` is ``None``
+        for the half that missed, so the next ordinary mutation journalled that
+        emptiness over the surviving name. A plain ``/goal`` was enough, and the
+        team was then gone for good even once the registry came back — the exact
+        scenario the suppression was written for, one command later. The
+        previous version of this test stopped before any mutation, which is why
+        it passed.
+        """
+        _, teams = registries
+        agents, _ = registries
+        first = _session(tmp_path, registries)
+        first.attach_team(teams.get_team_by_name("lopdev"))
+        first.attach_agent_profile("auditor")
+
+        # Transient miss: the team registry is not wired on this host yet.
+        resumed = Session(
+            model=MODEL,
+            stream_fn=ScriptedStream([[]]),
+            tools=[],
+            transcript=Transcript(tmp_path / "sess"),
+            system_blocks_provider=lambda: [],
+            agent_registry=agents,
+            team_registry=TeamRegistry(tmp_path / "elsewhere"),
+        )
+        assert resumed.active_team_name == ""
+
+        # Ordinary use of the resumed session, of each kind that journals.
+        resumed.set_goal("carry on working")
+        resumed.attach_agent_profile("auditor")
+        assert _sidecar(tmp_path)["team"] == "lopdev"
+
+        # And the recovery still works once the registry is back.
+        recovered = _session(tmp_path, registries)
+        assert recovered.active_team_name == "lopdev"
+        assert recovered.goal == "carry on working"
+
+    def test_attaching_another_team_retires_the_carried_name(self, tmp_path, registries):
+        """The carried name is a recovery hint, not a permanent shadow.
+
+        A user who resumes into a miss and then attaches something else has
+        answered the question, so the old name must not survive to re-attach
+        itself at the next resume.
+        """
+        _, teams = registries
+        agents, _ = registries
+        teams.save_team(_team("other", instructions="Different work."))
+        first = _session(tmp_path, registries)
+        first.attach_team(teams.get_team_by_name("lopdev"))
+
+        resumed = Session(
+            model=MODEL,
+            stream_fn=ScriptedStream([[]]),
+            tools=[],
+            transcript=Transcript(tmp_path / "sess"),
+            system_blocks_provider=lambda: [],
+            agent_registry=agents,
+            team_registry=TeamRegistry(tmp_path / "elsewhere"),
+        )
+        assert resumed.active_team_name == ""
+        # The user picks a different team; the registry is reachable again.
+        resumed.team_registry = teams
+        resumed.attach_team(teams.get_team_by_name("other"))
+        assert _sidecar(tmp_path)["team"] == "other"
+
+    def test_an_explicit_detach_retires_the_carried_agent_name(self, tmp_path, registries):
+        """``/agent clear`` after a miss must actually clear."""
+        agents, _ = registries
+        first = _session(tmp_path, registries)
+        first.attach_agent_profile("auditor")
+
+        resumed = Session(
+            model=MODEL,
+            stream_fn=ScriptedStream([[]]),
+            tools=[],
+            transcript=Transcript(tmp_path / "sess"),
+            system_blocks_provider=lambda: [],
+            agent_registry=AgentRegistry(tmp_path / "elsewhere"),
+            team_registry=registries[1],
+        )
+        assert resumed.active_agent == ""
+        resumed.clear_agent_profile()
+        assert _sidecar(tmp_path)["agent"] == ""
 
 
 class TestTheSidecarIsRobust:

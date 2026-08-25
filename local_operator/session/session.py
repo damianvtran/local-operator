@@ -1163,13 +1163,23 @@ class Session:
         #: collaboration and project briefs without the manager restating them.
         #: ``None`` on an ordinary session.
         self.active_team: Any | None = None
-        #: Why a stored attachment did NOT come back ("" when it did, or when
-        #: there was none). Set by :meth:`_restore_attachment` for a team or
-        #: profile the operator has since renamed or deleted. Held instead of
-        #: raised because a missing team must never make a conversation
-        #: unopenable, and held instead of logged because the reader who needs
-        #: it is the user staring at a band segment that stayed blank.
-        self.attachment_restore_error: str = ""
+        #: User-facing copy explaining why a stored attachment did NOT come
+        #: back ("" when it did, or when there was none). Set by
+        #: :meth:`_restore_attachment` for a team or profile that failed to
+        #: resolve, whether because it is gone or because the registry was
+        #: unavailable.
+        #:
+        #: NOT named ``…_error``: it holds display copy, and its only consumer
+        #: renders it as a ``"warning"`` system notice, deliberately not an
+        #: ``"error"`` — a missing team is a recoverable state of this session,
+        #: not a failure of it. The name says so, so the next reader does not
+        #: route it to an error surface or log it as a fault (D5).
+        #:
+        #: Held instead of raised because a missing team must never make a
+        #: conversation unopenable, and held instead of logged because the
+        #: reader who needs it is the user staring at a band segment that
+        #: stayed blank.
+        self.attachment_restore_notice: str = ""
         #: True only while :meth:`_restore_attachment` is re-applying the stored
         #: attachment, which suppresses the journal write in
         #: :meth:`_persist_attachment`. Without it the restore would write back
@@ -1180,6 +1190,24 @@ class Session:
         #: a recoverable miss into permanent data loss. A restore is a READ of
         #: state that is already on disk; it has nothing new to record.
         self._restoring_attachment = False
+        #: Stored names the restore could NOT resolve, carried so the next
+        #: journal write preserves them instead of erasing them (R1).
+        #:
+        #: Suppressing the write during the restore is not enough on its own,
+        #: and the gap was a real data-loss path: once the restore returns,
+        #: ``active_team`` is ``None`` for the half that missed, so the very
+        #: next ordinary mutation — a plain ``/goal`` is enough — journals that
+        #: emptiness over the surviving name and the attachment is gone for
+        #: good, one command after a failure that was supposed to be
+        #: recoverable. Keeping the name here makes the recovery survive
+        #: arbitrary further use of the session, which is what "transient"
+        #: has to mean.
+        #:
+        #: Cleared per slot by an explicit user action (a successful attach
+        #: replaces it, a detach drops it), never by the miss itself — see
+        #: :meth:`_persist_attachment`.
+        self._unresolved_team: str = ""
+        self._unresolved_agent: str = ""
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -2280,6 +2308,10 @@ class Session:
         :attr:`active_team`.
         """
         self.active_team = team
+        # Either branch is the user acting on the team slot, so a carried
+        # unresolved name stops being a recovery hint here (R1): a detach means
+        # they no longer want it, and an attach replaces it outright.
+        self._clear_unresolved("team")
         if team is None:
             self._goal_state.team_brief = ""
             self._persist_attachment()
@@ -2321,13 +2353,15 @@ class Session:
     def _persist_attachment(self) -> None:
         """Journal the attached team/agent/goal beside the transcript.
 
-        Called from every mutation of the attached identity — ``attach_team``,
-        ``_stamp_agent_brief``, ``clear_agent_profile``, ``set_goal`` — because
-        those four are the only ways the volatile tail's persistent half moves.
-        Writing from the mutators rather than from the TUI commands is what
-        makes this hold for every front end: the mobile relay sets a goal
-        through ``Session.set_goal`` too, and a front-end-side write would have
-        left that path unpersisted.
+        Called from every mutation of the attached identity — ``attach_team``
+        (from BOTH of its branches: the ``team is None`` detach returns early,
+        so the tail write cannot cover it), ``_stamp_agent_brief``,
+        ``clear_agent_profile`` and ``set_goal`` — because those are the only
+        ways the volatile tail's persistent half moves. Writing from the
+        mutators rather than from the TUI commands is what makes this hold for
+        every front end: the mobile relay sets a goal through
+        ``Session.set_goal`` too, and a front-end-side write would have left
+        that path unpersisted.
 
         Synchronous and best-effort. The write is a sub-kilobyte atomic replace
         and these mutators are not on the hot turn path, so a thread hop would
@@ -2336,6 +2370,17 @@ class Session:
         helper never raises by contract (see ``write_session_attachment``), and
         the broad guard here covers a reduced test double whose transcript has
         no directory rather than any failure of the write itself.
+
+        A name the restore could not resolve is written back UNCHANGED rather
+        than as the empty live value (R1). Without that fallback a transient
+        miss survived only until the next mutation: ``active_team`` is ``None``
+        for the half that failed, so a plain ``/goal`` in the resumed session
+        journalled the emptiness over the stored name and the attachment was
+        lost for good — one command after a failure the design calls
+        recoverable. The carried name is dropped only when the user acts on
+        that slot themselves (see :meth:`_clear_unresolved`), so "recoverable"
+        holds for the whole life of the session rather than for the duration of
+        the restore.
         """
         from local_operator.resume import write_session_attachment
 
@@ -2347,10 +2392,28 @@ class Session:
             return
         write_session_attachment(
             directory,
-            team=self.active_team_name,
-            agent=self._goal_state.agent_name,
+            team=self.active_team_name or self._unresolved_team,
+            agent=self._goal_state.agent_name or self._unresolved_agent,
             goal=self._goal_state.text,
         )
+
+    def _clear_unresolved(self, slot: str) -> None:
+        """Forget a carried unresolved name because the user acted on that slot.
+
+        The counterpart to the fallback in :meth:`_persist_attachment`. A
+        carried name is a RECOVERY hint for a team or profile that was
+        momentarily unreachable, so it must survive incidental mutations — but
+        it must NOT survive the user deliberately attaching something else or
+        detaching, or a ``/team other`` would leave the old name to reappear at
+        the next resume and re-attach a roster the user had moved off.
+
+        Per slot, because the two are independent: re-attaching an agent says
+        nothing about whether the stored team is still wanted.
+        """
+        if slot == "team":
+            self._unresolved_team = ""
+        else:
+            self._unresolved_agent = ""
 
     def _restore_attachment(self) -> None:
         """Re-attach the team/agent/goal this session was carrying when it closed.
@@ -2382,7 +2445,7 @@ class Session:
         the volatile tail this state has always lived in.
 
         Failures degrade to unattached and are RECORDED for the host to report
-        (:attr:`attachment_restore_error`) rather than raised: a team the user
+        (:attr:`attachment_restore_notice`) rather than raised: a team the user
         renamed or deleted must not make a conversation unopenable.
         """
         from local_operator.resume import read_session_attachment
@@ -2411,17 +2474,32 @@ class Session:
             # that just came off disk, and the restore is not a user action.
             self._goal_state.set(stored.goal)
 
-        missing: list[str] = []
+        # ``(what was missed, which command re-attaches it)``, so the notice can
+        # name the recovery step per slot the way every sibling miss-notice in
+        # the TUI does ("Run /team to list teams, …").
+        missing: list[tuple[str, str]] = []
+        # True only when a lookup ran to completion and answered "no such
+        # thing". A registry that is absent or that RAISED has established
+        # nothing about whether the team still exists, and saying "renamed or
+        # deleted" for those sends the operator off to re-create something that
+        # is still there (D2/R3). Both of those are also the transient cases the
+        # carried-name recovery exists for.
+        looked_up_and_absent = True
         if stored.team:
             team = None
             registry = self.team_registry
-            if registry is not None:
+            if registry is None:
+                looked_up_and_absent = False
+            else:
                 try:
                     team = registry.get_team_by_name(stored.team)
                 except Exception:  # noqa: BLE001 — a bad registry row is not fatal
                     team = None
+                    looked_up_and_absent = False
             if team is None:
-                missing.append(f"team {stored.team!r}")
+                missing.append((f"team {stored.team!r}", "/team"))
+                # Carried so the next mutation cannot erase it (R1).
+                self._unresolved_team = stored.team
             else:
                 # Through ``attach_team`` rather than by setting the brief, so
                 # ``active_team`` (what subagents inherit) is restored too, not
@@ -2433,20 +2511,47 @@ class Session:
                 resolved = self.attach_agent_profile(stored.agent)
             except Exception:  # noqa: BLE001 — same contract as the team path
                 resolved = None
+                looked_up_and_absent = False
             if resolved is None:
-                missing.append(f"agent {stored.agent!r}")
+                missing.append((f"agent {stored.agent!r}", "/agent"))
+                self._unresolved_agent = stored.agent
         if missing:
             #: Held rather than logged, because the person who needs to know is
             #: the one looking at a band segment that did NOT come back. The TUI
             #: reads this once on adopt and says so in its ordinary
             #: system-notice style; headless hosts may ignore it.
+            #
             # Names what did NOT come back, never a blanket "unattached": a
             # partial miss is the common case (a deleted team beside a profile
             # that resolved fine), and claiming the whole session is bare would
             # contradict the band segment still showing the half that restored.
-            self.attachment_restore_error = (
-                f"could not restore {' and '.join(missing)} from the previous session "
-                "(renamed or deleted); continuing without it"
+            #
+            # Copy shape follows the established miss-notice idiom in the TUI:
+            # ONE em-dash clause separator (never a parenthetical plus a
+            # semicolon, which was a third idiom — D3), and it ends on the
+            # RECOVERY rather than on the damage, because "run /team to
+            # re-attach" is the only part the user can act on (D2).
+            what = " and ".join(name for name, _ in missing)
+            # Deduped: a both-missing restore would otherwise say "/team or
+            # /team". ``dict.fromkeys`` is the file's ordered-set idiom.
+            commands = " or ".join(dict.fromkeys(command for _, command in missing))
+            # "from the previous session" is dropped deliberately: this notice
+            # only ever fires on adopt after a resume, "restore" already says
+            # it, and the words cost 26 cells that pushed the common one-slot
+            # case to 101 characters — over a 100-column terminal, so it wrapped
+            # to two lines for no added meaning (D3).
+            #
+            # The cause clause is dropped as well once BOTH slots are missing:
+            # naming two things already costs ~35 cells, and keeping the clause
+            # there put the line back over 100 and wrapped it again. Of the two,
+            # the cause is the part the user cannot act on — WHAT is gone and
+            # HOW to get it back are both load-bearing — so it is the one that
+            # yields. A both-missing restore is also overwhelmingly a moved
+            # config directory rather than two independent deletions, which is
+            # the case the clause would describe least accurately anyway.
+            cause = " — renamed or deleted" if looked_up_and_absent and len(missing) == 1 else ""
+            self.attachment_restore_notice = (
+                f"could not restore {what}{cause}. Run {commands} to re-attach."
             )
 
     def _resolve_profile_or_specialist(self, name: str) -> tuple[str | None, Any, str, str]:
@@ -2544,6 +2649,10 @@ class Session:
         # contradicting each other. Both fields are stamped together in
         # ``_stamp_agent_brief``; they must be cleared together too.
         self._goal_state.agent_name = ""
+        # An explicit detach also retires a carried unresolved name (R1), or
+        # ``/agent clear`` would appear to work and the profile would come back
+        # at the next resume.
+        self._clear_unresolved("agent")
         # A detach is as much a fact to survive a resume as an attach: without
         # this the sidecar would still name the profile the user just dropped,
         # and the next resume would silently re-attach it.
@@ -2563,6 +2672,8 @@ class Session:
         # case): the profile IS attached and the band must name it, so the
         # segment tracks "which profile is in force", not "did it layer text".
         self._goal_state.agent_name = display_name
+        # A successful attach supersedes any carried unresolved name (R1).
+        self._clear_unresolved("agent")
         # The single funnel every successful ``/agent`` attach passes through
         # (role, seed and specialist all land here), so journalling once from
         # this point cannot miss a path the way three call-site writes could.

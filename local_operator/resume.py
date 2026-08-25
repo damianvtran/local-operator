@@ -507,9 +507,20 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
     journalling an attachment is bookkeeping ABOUT a session, never activity IN
     it. Attaching a team must not reorder the ``/resume`` picker.
     """
+    # ``strip()`` ONLY — never ``" ".join(x.split())``. These are LOOKUP KEYS,
+    # not display titles, and every resolver they are matched against strips
+    # without collapsing (``resolve_profile``, ``resolve_profile_or_specialist``,
+    # ``TeamRegistry.get_team_by_name``, which casefolds and strips). Collapsing
+    # internal whitespace here broke the round trip for any agent profile whose
+    # registered name contains repeated spaces — free-form and not normalised by
+    # ``AgentRegistry.create_agent`` — so a profile named ``"Deep  Auditor"``
+    # attached live, was written as ``"Deep Auditor"``, then failed to resolve on
+    # resume and told the user it had been renamed or deleted (R2). Normalising
+    # is right for a title (the sidecar this shape was copied from) and wrong
+    # for a key: what is stored has to be what the resolver will compare.
     payload = {
-        "team": " ".join((team or "").split()),
-        "agent": " ".join((agent or "").split()),
+        "team": (team or "").strip(),
+        "agent": (agent or "").strip(),
         "goal": (goal or "").strip(),
     }
     try:
