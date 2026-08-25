@@ -34,6 +34,7 @@ import logging
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,20 @@ DEFAULT_PORT = 4098
 #: may see many historical sessions over its lifetime, so bound both together;
 #: evicting detail alone leaves a retained projection advertising dead routes.
 MAX_RETAINED_SESSION_PROJECTIONS = 64
+
+
+@dataclass
+class _ProjectionGeneration:
+    """Daemon-local ordering for one registrant generation's projection epochs."""
+
+    identity: tuple[int, float, str] | None
+    started_at: float | None
+    retired: tuple[tuple[int, float, str], ...]
+    local_version: int
+    offset: int
+    epoch: int
+    terminal: bool = False
+
 
 _WEB_DIR = Path(__file__).parent / "web"
 _DIST_DIR = _WEB_DIR / "dist"
@@ -377,7 +392,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     continue
                 entry.projection.degraded = False
                 entry.projection.ended = False
-                entry.projection = daemon.capture_subagent_details(entry.projection)
+                entry.projection = daemon.capture_subagent_details(entry.projection, record=record)
                 daemon.table.provisional_active.discard(entry.record.session_id)
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
@@ -635,40 +650,118 @@ class MobileDaemon:
         # A session route outlives every process generation. Retain its latest
         # repaint so an open phone remains a normal conversation while idle.
         self.session_projections: dict[str, SessionProjection] = {}
+        # ProjectionFold versions restart at zero with every owner. Keep the
+        # registration identity beside the cache unit so a replacement owner can
+        # advance the phone epoch while late frames from its predecessor cannot.
+        self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
 
-    def capture_subagent_details(self, projection: SessionProjection) -> SessionProjection:
+    def capture_subagent_details(
+        self,
+        projection: SessionProjection,
+        *,
+        record: SessionRecord | None = None,
+        terminal: bool = False,
+    ) -> SessionProjection:
         """Cache full descendant state and return a lightweight aggregate copy.
 
-        The retained aggregate is deliberately safe to recapture during wake and
-        reconnect. It contains empty detail-only fields, so replacing the detail
-        cache from it would erase the last rich host repaint exactly when no host
-        is available to repair the loss.
+        ``SessionRecord.started_at`` plus its per-registration control key forms
+        the process birth identity: PID alone can be reused, while the key is
+        regenerated for every registrant. The birth timestamp orders replacements;
+        a bounded retired set fences a late predecessor even on a clock collision.
         """
         session_id = projection.session_id
         previous_projection = self.session_projections.get(session_id)
-        if previous_projection is not None and projection.version < previous_projection.version:
-            # A delayed durable fold must not move either cache behind a live
-            # host repaint. Touching the unit still reflects active route use.
+        state = self._projection_generations.get(session_id)
+        retained_recapture = projection is previous_projection
+        identity = (
+            (record.pid, record.started_at, record.control_key) if record is not None else None
+        )
+        started_at = record.started_at if record is not None else None
+        generation_changed = False
+
+        if previous_projection is not None and retained_recapture:
+            # Wake and reconnect deliberately republish this stripped object. It
+            # is already stamped with the daemon epoch and cannot be a new frame.
             self.session_projections.pop(session_id)
             self.session_projections[session_id] = previous_projection
             return previous_projection
 
-        retained_recapture = projection is previous_projection
+        if state is not None and identity is not None and identity != state.identity:
+            if identity in state.retired or (
+                state.started_at is not None
+                and started_at is not None
+                and started_at < state.started_at
+            ):
+                # A predecessor socket may still have a decoded frame queued when
+                # its replacement registers. Its high local counter has no claim
+                # over the newer process birth.
+                assert previous_projection is not None
+                self.session_projections.pop(session_id)
+                self.session_projections[session_id] = previous_projection
+                return previous_projection
+            generation_changed = True
+        elif state is not None and identity is not None and state.identity is None:
+            # A disk-only repaint has no process identity. The first registrant is
+            # authoritative even when its ProjectionFold counter starts lower.
+            generation_changed = True
+
+        if state is not None and not generation_changed:
+            if state.terminal and not terminal:
+                assert previous_projection is not None
+                self.session_projections.pop(session_id)
+                self.session_projections[session_id] = previous_projection
+                return previous_projection
+            if terminal and state.terminal and projection.version <= state.local_version:
+                assert previous_projection is not None
+                self.session_projections.pop(session_id)
+                self.session_projections[session_id] = previous_projection
+                return previous_projection
+            if not terminal and projection.version < state.local_version:
+                assert previous_projection is not None
+                self.session_projections.pop(session_id)
+                self.session_projections[session_id] = previous_projection
+                return previous_projection
+
+        if state is None:
+            epoch = projection.version
+            offset = 0
+        elif generation_changed or terminal:
+            epoch = max(state.epoch + 1, projection.version)
+            offset = epoch - projection.version
+        else:
+            offset = state.offset
+            epoch = offset + projection.version
+
+        retired = state.retired if state is not None else ()
+        if generation_changed and state is not None and state.identity is not None:
+            # A socket can only race a small number of replacements. Bounding the
+            # fence avoids turning a frequently resumed route into an append-only
+            # process history while still covering every plausible late frame.
+            retired = (*retired, state.identity)[-8:]
+        self._projection_generations[session_id] = _ProjectionGeneration(
+            identity=identity if identity is not None else (state.identity if state else None),
+            started_at=(
+                started_at if started_at is not None else (state.started_at if state else None)
+            ),
+            retired=retired,
+            local_version=projection.version,
+            offset=offset,
+            epoch=epoch,
+            terminal=terminal,
+        )
         # Root transcript and todo state are immutable during this call; copying
         # only descendant rows avoids duplicating the whole repaint per token.
         summary = copy.copy(projection)
         summary.subagents = copy.deepcopy(projection.subagents)
-        summary.version = max(
-            projection.version,
-            previous_projection.version if previous_projection is not None else 0,
-        )
+        summary.version = epoch
         # Reinsert on every repaint so active/reconnected routes are most recent.
         self.session_projections.pop(session_id, None)
         self.session_projections[session_id] = summary
         while len(self.session_projections) > MAX_RETAINED_SESSION_PROJECTIONS:
             expired = next(iter(self.session_projections))
             self.session_projections.pop(expired, None)
+            self._projection_generations.pop(expired, None)
             for key in [key for key in self.subagent_details if key[0] == expired]:
                 self.subagent_details.pop(key, None)
         # Every summary published in the roster must resolve through the detail
@@ -685,7 +778,7 @@ class MobileDaemon:
         for row, summary_row in zip(projection.subagents, summary.subagents, strict=True):
             key = (session_id, row.job_id)
             incoming = row.to_json()
-            existing = self.subagent_details.get(key)
+            existing = None if generation_changed else self.subagent_details.get(key)
             if existing is not None:
                 # Summary fields are real lifecycle updates even when empty.
                 # Detail-only empties are ambiguous after projection stripping,
@@ -708,10 +801,7 @@ class MobileDaemon:
                 elif not retained_recapture:
                     incoming["result_text"] = ""
                     incoming["error_text"] = ""
-            incoming["version"] = max(
-                projection.version,
-                int(existing.get("version", 0)) if existing is not None else 0,
-            )
+            incoming["version"] = epoch
             self.subagent_details[key] = incoming
             # The aggregate needs enough to paint and route rows, not the launch
             # prompt or terminal payload. Those can each be many kilobytes and
@@ -740,7 +830,20 @@ class MobileDaemon:
         for record, state in await asyncio.to_thread(registry.scan):
             seen.add(record.pid)
             entry = self.table.entries.get(record.pid)
-            if entry is None:
+            registration_changed = entry is not None and (
+                entry.record.started_at,
+                entry.record.control_key,
+            ) != (record.started_at, record.control_key)
+            if entry is None or registration_changed:
+                if entry is not None:
+                    # PID reuse must replace every process-scoped flag and request
+                    # sequence. Reusing the ended/degraded entry would make the
+                    # new registrant permanently ineligible for adoption.
+                    if entry.writer is not None:
+                        entry.writer.close()
+                    old_dial = self._dial_tasks.pop(record.pid, None)
+                    if old_dial is not None and not old_dial.done():
+                        old_dial.cancel()
                 entry = SessionEntry(record)
                 self.table.entries[record.pid] = entry
                 changed = True
@@ -771,7 +874,9 @@ class MobileDaemon:
                 self.table.provisional_active.discard(record.session_id)
                 projection = await asyncio.to_thread(_durable_projection, record.session_id)
                 if projection is not None:
-                    projection = self.capture_subagent_details(projection)
+                    projection = self.capture_subagent_details(
+                        projection, record=record, terminal=True
+                    )
                     for queue in self.table.session_subscribers.get(record.session_id, set()):
                         try:
                             queue.put_nowait(projection.to_json())
@@ -803,7 +908,9 @@ class MobileDaemon:
                     self.table.provisional_active.discard(session_id)
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        projection = self.capture_subagent_details(projection)
+                        projection = self.capture_subagent_details(
+                            projection, record=entry.record, terminal=True
+                        )
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
                                 queue.put_nowait(projection.to_json())
@@ -830,7 +937,7 @@ class MobileDaemon:
                     self.table.provisional_active.discard(session_id)
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        projection = self.capture_subagent_details(projection)
+                        projection = self.capture_subagent_details(projection, terminal=True)
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
                                 queue.put_nowait(projection.to_json())

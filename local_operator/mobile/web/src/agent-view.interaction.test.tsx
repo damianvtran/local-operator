@@ -55,6 +55,7 @@ function fixture(): { detail: SubagentDetail; projection: SessionProjection } {
 
 afterEach(() => {
 	cleanup();
+	localStorage.clear();
 	vi.restoreAllMocks();
 });
 
@@ -190,6 +191,56 @@ describe("AgentConversation", () => {
 		window.dispatchEvent(new PopStateEvent("popstate"));
 		await waitFor(() => expect(location.hash).toBe("#/s/root/a/current"));
 		expect(screen.getByText("Preserve this later steering message")).toBeTruthy();
+	});
+
+	it("acknowledges the lost-response envelope without discarding a later draft", async () => {
+		const { detail, projection } = fixture();
+		const topLevel = { ...detail, parent_job_id: null };
+		let rejectFirst!: (reason: Error) => void;
+		const firstResponse = new Promise<never>((_resolve, reject) => { rejectFirst = reject; });
+		vi.mocked(api.getSubagentDetail).mockResolvedValue(topLevel);
+		vi.mocked(api.sendCommand)
+			.mockReturnValueOnce(firstResponse)
+			.mockResolvedValueOnce({ ok: true, detail: "already admitted" })
+			.mockResolvedValueOnce({ ok: true, detail: "steering queued" });
+		const randomUUID = vi.fn()
+			.mockReturnValueOnce("12345678-1234-4678-9234-567812345678")
+			.mockReturnValueOnce("87654321-4321-4678-9234-567812345678");
+		vi.stubGlobal("crypto", { randomUUID });
+		vi.spyOn(store, "useProjection").mockReturnValue({ projection, connected: true });
+		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		history.replaceState({}, "", "#/s/root/a/current");
+		render(<App />);
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "Open parent to steer" })).toBeTruthy(),
+		);
+		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
+		const composer = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+		fireEvent.change(composer, { target: { value: "Original instruction" } });
+		fireEvent.click(screen.getByRole("button", { name: "steer" }));
+		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(1));
+		fireEvent.change(composer, { target: { value: "Edited draft" } });
+		rejectFirst(new Error("response lost"));
+		await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+		expect((screen.getByRole("button", { name: "steer" }) as HTMLButtonElement).disabled).toBe(true);
+
+		fireEvent.click(screen.getByRole("button", { name: "Retry earlier instruction" }));
+		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(2));
+		expect(vi.mocked(api.sendCommand).mock.calls[1]?.[1]).toEqual(
+			vi.mocked(api.sendCommand).mock.calls[0]?.[1],
+		);
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Earlier instruction delivered. Your edited draft is ready to send.",
+		);
+		expect(composer.value).toBe("Edited draft");
+
+		fireEvent.click(screen.getByRole("button", { name: "steer" }));
+		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(3));
+		expect(vi.mocked(api.sendCommand).mock.calls[2]?.[1]).toMatchObject({
+			command_id: "87654321-4321-4678-9234-567812345678",
+			text: "Edited draft",
+		});
+		await waitFor(() => expect(composer.value).toBe(""));
 	});
 
 	it("keeps a failed parent instruction with an actionable non-protocol error", async () => {

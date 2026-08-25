@@ -276,6 +276,163 @@ def test_retained_summary_recapture_preserves_rich_detail_and_monotonic_version(
     assert detail["todos"][0]["items"][0]["text"] == "ship"
 
 
+def test_new_process_generation_supersedes_high_version_and_rejects_late_old_frame() -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="old",
+        cwd="/tmp",
+        model_label="old-model",
+        control_port=4101,
+        control_key="old-registration",
+        started_at=100.0,
+        heartbeat_at=101.0,
+    )
+    old = SessionProjection(
+        session_id="root-session",
+        pid=101,
+        version=40,
+        transcript=[TranscriptEntry(id="old-root", kind="assistant", text="old root")],
+        todos=[TodoPhase(name="Old", items=[TodoItem(text="old todo")])],
+    )
+    old.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="old child",
+            status="running",
+            prompt="old prompt",
+            transcript=[TranscriptEntry(id="old-child", kind="assistant", text="old child")],
+            todos=[TodoPhase(name="Old child", items=[TodoItem(text="old child todo")])],
+        )
+    ]
+    assert daemon.capture_subagent_details(old, record=old_record).version == 40
+
+    # started_at + registration key distinguishes process birth even if the OS
+    # reuses the PID; its low ProjectionFold counter must still advance the
+    # daemon epoch and rematerialize every detail-only field from this owner.
+    new_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="new",
+        cwd="/tmp",
+        model_label="new-model",
+        control_port=4202,
+        control_key="new-registration",
+        started_at=200.0,
+        heartbeat_at=201.0,
+    )
+    new = SessionProjection(
+        session_id="root-session",
+        pid=101,
+        version=1,
+        transcript=[TranscriptEntry(id="new-root", kind="assistant", text="new root")],
+        todos=[TodoPhase(name="New", items=[TodoItem(text="new todo", status="done")])],
+    )
+    new.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="new child",
+            status="completed",
+            prompt="new prompt",
+            result_text="new result",
+            transcript=[TranscriptEntry(id="new-child", kind="assistant", text="new child")],
+            todos=[TodoPhase(name="New child", items=[TodoItem(text="new child todo")])],
+        )
+    ]
+    current = daemon.capture_subagent_details(new, record=new_record)
+    assert current.version == 41
+    assert [row.id for row in current.transcript] == ["new-root"]
+    assert current.todos[0].items[0].text == "new todo"
+    detail = daemon.subagent_details[("root-session", "child-job")]
+    assert detail["version"] == 41
+    assert detail["label"] == "new child"
+    assert detail["status"] == "completed"
+    assert detail["prompt"] == "new prompt"
+    assert detail["result_text"] == "new result"
+    assert detail["transcript"][0]["id"] == "new-child"
+    assert detail["todos"][0]["items"][0]["text"] == "new child todo"
+
+    late = daemon.capture_subagent_details(old, record=old_record)
+    assert late is current
+    assert daemon.subagent_details[("root-session", "child-job")]["label"] == "new child"
+
+
+def test_scan_replaces_process_state_when_registration_reuses_pid(monkeypatch) -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="old",
+        cwd="/tmp",
+        model_label="old-model",
+        control_port=4101,
+        control_key="old-registration",
+        started_at=100.0,
+    )
+    old_entry = SessionEntry(old_record)
+    old_entry.ended = True
+    old_entry.degraded = True
+    daemon.table.entries[101] = old_entry
+    new_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="new",
+        cwd="/tmp",
+        model_label="new-model",
+        control_port=4202,
+        control_key="new-registration",
+        started_at=200.0,
+    )
+    monkeypatch.setattr(registry, "scan", lambda: [(new_record, "live")])
+    dialed: list[SessionEntry] = []
+
+    async def fake_dial(_daemon, entry):  # noqa: ANN001, ANN202
+        dialed.append(entry)
+
+    monkeypatch.setattr("local_operator.mobile.daemon._dial", fake_dial)
+    asyncio.run(daemon._scan_once())
+
+    replacement = daemon.table.entries[101]
+    assert replacement is not old_entry
+    assert replacement.record.control_key == "new-registration"
+    assert replacement.ended is False
+    assert replacement.degraded is False
+    assert dialed == [replacement]
+
+
+def test_terminal_fold_advances_epoch_and_blocks_late_live_frame() -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="live",
+        cwd="/tmp",
+        model_label="model",
+        control_port=4101,
+        control_key="registration",
+        started_at=100.0,
+    )
+    live = SessionProjection(session_id="root-session", pid=101, version=40, streaming=True)
+    daemon.capture_subagent_details(live, record=record)
+    durable = SessionProjection(
+        session_id="root-session",
+        pid=0,
+        version=1,
+        ended=True,
+        transcript=[TranscriptEntry(id="durable", kind="assistant", text="settled")],
+    )
+    terminal = daemon.capture_subagent_details(durable, record=record, terminal=True)
+    assert terminal.version == 41
+    assert terminal.ended is True
+    assert daemon.capture_subagent_details(live, record=record) is terminal
+
+
 def test_subagent_detail_merge_accepts_lifecycle_updates_and_terminal_clearing() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     first = SessionProjection(session_id="root-session", pid=9, version=2)
@@ -370,7 +527,9 @@ def test_projection_and_detail_evict_as_one_bounded_unit() -> None:
         daemon.capture_subagent_details(projection)
 
     assert len(daemon.session_projections) == MAX_RETAINED_SESSION_PROJECTIONS
+    assert len(daemon._projection_generations) == MAX_RETAINED_SESSION_PROJECTIONS
     assert "root-000" not in daemon.session_projections
+    assert "root-000" not in daemon._projection_generations
     assert ("root-000", "child") not in daemon.subagent_details
     for session_id, projection in daemon.session_projections.items():
         assert all(

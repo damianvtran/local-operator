@@ -24,6 +24,12 @@ describe("submitContinuation", () => {
 		await expect(submitContinuation("root", "steer", "Reach the parent once")).resolves.toEqual({
 			ok: true,
 			detail: "steering queued",
+			envelope: {
+				op: "steer",
+				command_id: "12345678-1234-4678-9234-567812345678",
+				text: "Reach the parent once",
+				images: undefined,
+			},
 		});
 		expect(mockedSendCommand).toHaveBeenCalledOnce();
 		expect(mockedSendCommand).toHaveBeenCalledWith("root", {
@@ -35,20 +41,32 @@ describe("submitContinuation", () => {
 		expect(localStorage.getItem("lo-mobile-command:root")).toBeNull();
 	});
 
-	it("retains one receipt across errors so retry cannot duplicate delivery", async () => {
+	it("retries the admitted envelope even after the caller edits its draft", async () => {
 		mockedSendCommand
-			.mockRejectedValueOnce(new Error("connection lost"))
-			.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+			.mockRejectedValueOnce(new Error("response lost"))
+			.mockResolvedValueOnce({ ok: true, detail: "already admitted" })
+			.mockResolvedValueOnce({ ok: true, detail: "steering queued" });
 
-		await expect(submitContinuation("root", "steer", "Retry safely")).rejects.toThrow(
-			"connection lost",
+		await expect(submitContinuation("root", "steer", "Original instruction")).rejects.toThrow(
+			"response lost",
 		);
-		await expect(submitContinuation("root", "steer", "Retry safely")).resolves.toEqual({
-			ok: true,
-			detail: "already admitted",
+		const retry = await submitContinuation("root", "prompt", "Edited draft", [
+			{ data_b64: "edited-image", mime_type: "image/png" },
+		]);
+		expect(retry.detail).toBe("already admitted");
+		expect(retry.envelope).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+		expect(mockedSendCommand.mock.calls[1]?.[1]).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+
+		await submitContinuation("root", "prompt", "Edited draft", [
+			{ data_b64: "edited-image", mime_type: "image/png" },
+		]);
+		expect(mockedSendCommand.mock.calls[2]?.[1]).toEqual({
+			op: "prompt",
+			command_id: "12345678-1234-4678-9234-567812345678",
+			text: "Edited draft",
+			images: [{ data_b64: "edited-image", mime_type: "image/png" }],
 		});
-		expect(mockedSendCommand).toHaveBeenCalledTimes(2);
-		expect(mockedSendCommand.mock.calls[0]?.[1]).toEqual(mockedSendCommand.mock.calls[1]?.[1]);
+		expect(mockedSendCommand.mock.calls[2]?.[1]).not.toBe(mockedSendCommand.mock.calls[1]?.[1]);
 		expect(localStorage.getItem("lo-mobile-command:root")).toBeNull();
 	});
 });

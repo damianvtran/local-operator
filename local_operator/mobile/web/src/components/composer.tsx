@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCommands, sendCommand } from "../api";
-import { submitContinuation } from "../continuation-command";
+import { hasPendingContinuation, submitContinuation } from "../continuation-command";
 import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
 import { useDraft } from "../store";
@@ -237,8 +237,13 @@ export function Composer({
 	const [text, setText] = useDraft(pid);
 	const [slashOpen, setSlashOpen] = useState(false);
 	const [sending, setSending] = useState(false);
+	const [retryPending, setRetryPending] = useState(() => hasPendingContinuation(pid));
 	const [error, setError] = useState("");
 	const [images, setImages] = useState<AttachedImage[]>([]);
+	const textRef = useRef(text);
+	const imagesRef = useRef(images);
+	textRef.current = text;
+	imagesRef.current = images;
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -285,7 +290,7 @@ export function Composer({
 
 	const send = async (raw: string, op?: "prompt" | "steer") => {
 		const trimmed = raw.trim();
-		if ((!trimmed && images.length === 0) || sending || disabled) return;
+		if ((!trimmed && images.length === 0 && !retryPending) || sending || disabled) return;
 		setSending(true);
 		setError("");
 		try {
@@ -304,12 +309,30 @@ export function Composer({
 				const payloadImages = images.length
 					? images.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
 					: undefined;
-				await submitContinuation(pid, chosen, trimmed, payloadImages);
-				images.forEach((i) => URL.revokeObjectURL(i.preview));
-				setImages([]);
+				const receipt = await submitContinuation(pid, chosen, trimmed, payloadImages);
+				setRetryPending(false);
+				const currentPayloadImages = imagesRef.current.length
+					? imagesRef.current.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
+					: undefined;
+				const acknowledgedCurrentDraft =
+					receipt.envelope.op === chosen &&
+					receipt.envelope.text === textRef.current.trim() &&
+					JSON.stringify(receipt.envelope.images) === JSON.stringify(currentPayloadImages);
+				if (acknowledgedCurrentDraft) {
+					imagesRef.current.forEach((i) => URL.revokeObjectURL(i.preview));
+					setImages([]);
+					setText("");
+				} else {
+					/* The acknowledged envelope predates the visible edit. Keep the edit
+					   as the next command rather than presenting an old idempotent ACK as
+					   delivery of content the owner never received. */
+					setError("Earlier instruction delivered. Your edited draft is ready to send.");
+				}
+				return;
 			}
 			setText("");
 		} catch (e) {
+			setRetryPending(hasPendingContinuation(pid));
 			/* Previous conversations can fail at every layer between fetch and
 			   provider construction. Those mechanics are intentionally invisible:
 			   retain the exact draft, images, and command id for a safe retry while
@@ -376,13 +399,18 @@ export function Composer({
 			) : null}
 
 			{error ? (
-				<p
-					role="alert"
-					aria-live="assertive"
-					className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2 text-body-sm text-danger"
-				>
-					{error}
-				</p>
+				<div className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2 text-body-sm text-danger">
+					<p role="alert" aria-live="assertive">{error}</p>
+					{retryPending ? (
+						<button
+							type="button"
+							onClick={() => void send(text)}
+							className="mt-2 min-h-8 rounded-sm border border-danger-border px-3"
+						>
+							Retry earlier instruction
+						</button>
+					) : null}
+				</div>
 			) : null}
 
 			{images.length > 0 ? (
@@ -488,7 +516,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={() => void send(text)}
-					disabled={(!text.trim() && images.length === 0) || sending || disabled}
+					disabled={retryPending || (!text.trim() && images.length === 0) || sending || disabled}
 					aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
 					className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
 				>
