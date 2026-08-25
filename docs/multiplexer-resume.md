@@ -59,6 +59,14 @@ tmux show-options -pv @lop_resume_command
 zellij and screen have no per-pane key/value store, so the same two facts go in
 `~/.local-operator/multiplexer/<backend>-<pane-id>.json`:
 
+`<pane-id>` is the multiplexer's own pane identity, which may be more than one
+value. zellij uses `<session-name>-<pane-id>` (`ZELLIJ_SESSION_NAME` and
+`ZELLIJ_PANE_ID`), because a zellij pane id is only unique within its session.
+screen uses `<sty>-<window>` (`STY` and `WINDOW`), falling back to `<sty>` alone
+where `WINDOW` is not exported — in that fallback the marker is per session
+rather than per window, so a second `lop` in the same screen session overwrites
+it.
+
 ```json
 {"session_id": "…", "command": ["…/lop", "--resume", "…"], "cwd": "…"}
 ```

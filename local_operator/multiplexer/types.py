@@ -52,8 +52,9 @@ class SessionBinding:
     cwd: str
 
     #: Human-facing label for multiplexer UI that shows one (cmux's restore
-    #: prompt). Never model-generated text — see the sanitising note in
-    #: ``broadcast``: this string can reach a shell-adjacent surface.
+    #: prompt). Never model-generated text — see the pane-id sanitising note on
+    #: ``_SAFE_PANE_ID`` in ``markers``: this string can reach a
+    #: shell-adjacent surface.
     name: str = "local-operator"
 
 

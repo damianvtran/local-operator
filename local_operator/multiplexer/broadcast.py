@@ -28,16 +28,23 @@ from local_operator.multiplexer.types import (
 
 logger = logging.getLogger(__name__)
 
-#: How often the loop re-checks whether a not-yet-publishable session has
-#: become publishable. A single ``stat`` per pass, so it is cheap enough to
-#: run at this cadence, and it only runs until the first successful publish.
+#: How often the loop re-checks whether a not-yet-resumable session has become
+#: resumable. This cadence runs ONLY while :func:`is_resumable_session` is
+#: False, and in that state a pass really is a single ``stat``: ``_publish_once``
+#: returns before it reaches the backend, so no subprocess is spawned. That is
+#: what makes a five-second poll affordable. Keying it on resumability rather
+#: than on publish success is deliberate — a session whose publish keeps failing
+#: (socket refusing, surface closed) would otherwise stay on this cadence
+#: forever and spawn one ``cmux rpc`` process every five seconds, per pane, for
+#: the life of the session.
 #: This is the delay between a cold session's first turn landing on disk and
 #: its pane advertising a resume command, so it is deliberately short.
 _PENDING_POLL_S = 5.0
 
-#: How long ``stop`` waits for the timer thread. Long enough for a publish
-#: already inside a subprocess call to finish and see the retire flag, short
-#: enough that quitting never feels stuck.
+#: Default grace for :meth:`SessionBroadcast.join`, which is a TEST and
+#: teardown-diagnostic helper rather than part of the stop path. Long enough
+#: for a backend call already inside a subprocess to finish and see the retire
+#: latch. ``stop`` itself never waits this out — see :meth:`SessionBroadcast.stop`.
 CALL_JOIN_TIMEOUT_S = 6.0
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE`` in
@@ -187,6 +194,11 @@ class SessionBroadcast:
     thing waiting on a multiplexer socket. A daemon thread also cannot hold
     the process open if some exit path forgets to stop it.
 
+    That rule covers the WITHDRAWAL as well as the publish: :meth:`stop` runs
+    on the event loop (a ``/new`` swap, and quit) and hands the retire to a
+    worker rather than making the call itself, so a wedged socket cannot
+    freeze the TUI at exactly the moment this feature exists to survive.
+
     The re-assert exists because cmux caches its live-agent index for 60s and
     retires bindings judged against a stale snapshot — see
     :data:`local_operator.multiplexer.cmux.REASSERT_INTERVAL_S` for why that
@@ -209,17 +221,34 @@ class SessionBroadcast:
         # `stop()` prompt rather than waiting out a 90s sleep.
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
-        # Guards the publish/retire pair. Without it a re-assert already in
+        # Survives `stop()` clearing `_thread`, purely so `join()` has
+        # something to wait on. Never read by a production path.
+        self._timer_thread: threading.Thread | None = None
+        # Serialises the publish/retire pair. Without it a re-assert already in
         # flight on the timer thread could land AFTER the clean-exit clear and
         # resurrect the binding the user just quit out of — the retirement bug
         # inverted, and invisible until their next new shell replayed a dead
         # session.
-        self._lock = threading.Lock()
-        self._retired = False
-        #: Whether a binding has ever been published. Until it has, the loop is
-        #: waiting for the first turn to persist and polls on the cheap
-        #: cadence; afterwards it only defends what it published.
-        self._published = False
+        #
+        # HELD ACROSS A SUBPROCESS CALL, so nothing on the event loop may ever
+        # wait on it. `stop()` deliberately touches only the lock-free latches
+        # below; that is what keeps a wedged socket off the calling thread.
+        self._call_lock = threading.Lock()
+        # An Event, not a bool under `_call_lock`: `stop()` has to set the
+        # latch without ever contending with a retire that is currently sitting
+        # in a five-second subprocess timeout. Event set/is_set is atomic, so
+        # the latch is readable and writable from any thread for free.
+        self._retired = threading.Event()
+        # Guards only the retire-dispatch bookkeeping. Held for microseconds
+        # and NEVER across a backend call, so stop() cannot block on it.
+        self._dispatch_lock = threading.Lock()
+        self._retire_thread: threading.Thread | None = None
+        #: Whether the session's transcript has appeared yet. This and NOT
+        #: publish success is what selects the cadence: once a session can be
+        #: resumed the loop drops to the re-assert interval whether or not the
+        #: backend is answering, because retrying a failing publish every five
+        #: seconds forever is subprocess churn rather than resilience.
+        self._resumable = False
 
     def start(self) -> None:
         """Publish now, then keep re-asserting until :meth:`stop`."""
@@ -231,13 +260,22 @@ class SessionBroadcast:
             daemon=True,
         )
         self._thread = thread
+        self._timer_thread = thread
         thread.start()
 
     def _publish_once(self) -> None:
-        with self._lock:
-            # The clean-exit clear is FINAL: once retired, a re-assert that was
-            # already queued must do nothing.
-            if self._retired:
+        # Checked BEFORE the lock, not only under it. The retire worker holds
+        # `_call_lock` for the whole of a backend call, so a re-assert that
+        # arrives during a withdrawal would otherwise sit in the queue for a
+        # subprocess timeout only to discover it must do nothing. The latch is
+        # set synchronously by `stop`, so this early exit is not a race: it
+        # sees every retirement that has been decided.
+        if self._retired.is_set():
+            return
+        with self._call_lock:
+            # Re-read under the lock: `stop` may have latched between the
+            # check above and acquiring it. The clean-exit clear is FINAL.
+            if self._retired.is_set():
                 return
             # Re-checked on EVERY pass, not once at startup: a cold session has
             # no transcript until its first turn persists, so publishing a
@@ -246,9 +284,13 @@ class SessionBroadcast:
             # never (see `is_resumable_session`).
             if not is_resumable_session(self._binding.session_id):
                 return
+            # Recorded BEFORE the publish attempt and independently of its
+            # result: the cadence question is "is there still something to wait
+            # for?", and once the transcript exists the answer is no even if
+            # the backend refuses every call.
+            self._resumable = True
             try:
-                if self._backend.publish(self._binding, self._env):
-                    self._published = True
+                self._backend.publish(self._binding, self._env)
             except Exception:  # noqa: BLE001 — best-effort by contract
                 logger.debug("multiplexer publish failed", exc_info=True)
 
@@ -259,15 +301,16 @@ class SessionBroadcast:
         elapsed = 0.0
         while not self._stopped.wait(_PENDING_POLL_S):
             elapsed += _PENDING_POLL_S
-            # Two cadences, one timer. Before the first successful publish the
-            # loop is waiting for the first turn to persist, and the check is a
-            # single stat — cheap enough to run often so a cold session's
-            # binding appears seconds after its first turn instead of up to a
-            # re-assert interval later. After that only the re-assert matters,
-            # and that must stay slower than cmux's 60s index TTL.
-            with self._lock:
-                published = self._published
-            if published and elapsed < self._interval_s:
+            # Two cadences, one timer, switched on RESUMABILITY and not on
+            # publish success. While the session has no transcript the pass is
+            # a single stat that never reaches the backend, so five seconds is
+            # cheap and makes a cold session's binding appear seconds after its
+            # first turn. Once it is resumable only the re-assert matters, and
+            # that must stay slower than cmux's 60s index TTL. Gating on
+            # success instead would pin a session whose backend is refusing to
+            # the fast cadence permanently, turning one unreachable socket into
+            # a subprocess every five seconds in every pane.
+            if self._resumable and elapsed < self._interval_s:
                 continue
             elapsed = 0.0
             # Deliberately silent: this runs for the life of a session, and a
@@ -284,26 +327,88 @@ class SessionBroadcast:
         default is to withdraw, because a session the user deliberately quit
         must not be replayed into their next shell.
 
+        NON-BLOCKING, and that is a hard requirement rather than an
+        optimisation. Both callers run on the Textual event loop — a ``/new``
+        or ``/resume`` swap (``_adopt_session``) and quit (``on_unmount``) —
+        so doing the retire here would park the whole TUI inside
+        ``subprocess.run(timeout=5.0)`` whenever the multiplexer socket is
+        unresponsive. That is precisely the post-crash window this feature
+        exists for, so the freeze would land exactly when it hurts most
+        (measured at 9.8s against a wedged backend). The retire therefore goes
+        to a short-lived worker and this method returns immediately.
+
+        Correctness does not depend on that worker running, let alone
+        finishing: ``_retired`` is latched HERE, synchronously, before this
+        returns, and ``_publish_once`` re-reads it as its first action. A
+        re-assert can never resurrect a binding the user quit out of, whether
+        or not the withdrawal itself succeeds. The withdrawal is best-effort
+        like every other call in this package; the latch is the guarantee.
+
         Idempotent, and safe to call from any thread — including from an exit
         path that runs while a re-assert is mid-flight.
         """
         self._stopped.set()
-        if retire:
-            with self._lock:
-                # Set BEFORE the call, so a re-assert that is already waiting
-                # on this lock sees the retirement and does not republish.
-                self._retired = True
-                try:
-                    self._backend.retire(self._binding, self._env)
-                except Exception:  # noqa: BLE001 — best-effort by contract
-                    logger.debug("multiplexer retire failed", exc_info=True)
-        thread = self._thread
+        # Cleared so `start()` could run again, but kept on `_timer_thread` so
+        # `join()` can still settle it in tests.
         self._thread = None
-        if thread is not None and thread is not threading.current_thread():
-            # Bounded: the timer wakes on the event immediately, and a publish
-            # in flight is capped by the backend's own subprocess timeout. The
-            # join is what stops a subprocess outliving the app's teardown.
-            thread.join(timeout=CALL_JOIN_TIMEOUT_S)
+        if retire:
+            # Latched before the worker is dispatched, so a re-assert already
+            # waiting on `_call_lock` sees the retirement and does not
+            # republish even if the retire call itself never lands.
+            self._retired.set()
+            self._dispatch_retire()
+        # Deliberately NOT joined. The timer is a daemon thread that cannot
+        # hold the process open, it wakes on `_stopped` immediately, and the
+        # `_retired` latch already prevents it from doing anything meaningful
+        # after this point. Joining here would reintroduce the event-loop
+        # stall the dispatch above exists to avoid — a publish in flight can
+        # sit in a subprocess timeout for seconds. Tests that need the thread
+        # settled call `join()` explicitly.
+
+    def _dispatch_retire(self) -> None:
+        """Run the backend retire off the caller's thread, at most once.
+
+        A dedicated short-lived thread rather than the timer thread: the timer
+        may be parked inside a publish subprocess for seconds, and the
+        withdrawal should not queue behind it. Daemon, for the same reason the
+        timer is — a wedged socket must not delay interpreter shutdown, and a
+        withdrawal that loses a race with process exit costs a stale marker,
+        which is the failure mode this package is explicitly allowed to have.
+        """
+        with self._dispatch_lock:
+            if self._retire_thread is not None:
+                return
+
+            def _retire() -> None:
+                # Takes `_call_lock` so the retire cannot interleave with a
+                # publish mid-flight; because this is a worker, waiting on
+                # that lock costs nothing the user can feel.
+                with self._call_lock:
+                    try:
+                        self._backend.retire(self._binding, self._env)
+                    except Exception:  # noqa: BLE001 — best-effort by contract
+                        logger.debug("multiplexer retire failed", exc_info=True)
+
+            worker = threading.Thread(
+                target=_retire,
+                name="lop-multiplexer-retire",
+                daemon=True,
+            )
+            self._retire_thread = worker
+            worker.start()
+
+    def join(self, timeout: float = CALL_JOIN_TIMEOUT_S) -> None:
+        """Wait for the timer and any retire worker to finish.
+
+        For TESTS and teardown diagnostics only. No production path calls this:
+        both real callers are on the event loop, where waiting on a multiplexer
+        socket is the exact bug :meth:`stop` is written to avoid.
+        """
+        with self._dispatch_lock:
+            retire_worker = self._retire_thread
+        for worker in (retire_worker, self._timer_thread):
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(timeout=timeout)
 
 
 def broadcast_session(

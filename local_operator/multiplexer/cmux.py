@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 import subprocess
 
 from local_operator.multiplexer.types import EnvMap, SessionBinding
@@ -156,7 +157,12 @@ class CmuxBackend:
             # The shell form cmux falls back to. Restore-and-idle by
             # construction: `binding.argv` is built by `broadcast` and can
             # never carry a prompt or a continue flag.
-            "command": " ".join(binding.argv),
+            #
+            # shlex.join and not " ".join, matching the marker backends: cmux
+            # re-tokenises this string, so a launcher path containing a space
+            # (`/Applications/My Tools/lop`) would otherwise come back as two
+            # arguments and restore nothing.
+            "command": shlex.join(binding.argv),
             "cwd": binding.cwd,
             "launch_command": {
                 "launcher": AGENT_KIND,

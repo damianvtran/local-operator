@@ -27,6 +27,13 @@ in a JSON state file, one per pane, under::
     ~/.local-operator/multiplexer/<backend>-<pane-id>.json
     {"session_id": "...", "command": [...], "cwd": "...", "updated_at": 1.0}
 
+``<pane-id>`` is whatever identifies a pane on that multiplexer, which is not
+always one variable: zellij's is ``<session-name>-<pane-id>`` because its pane
+ids are only unique within a session. screen's is ``<sty>-<window>`` when
+``WINDOW`` is exported and falls back to ``<sty>`` when it is not — the one
+case where a marker is per SESSION rather than per window, and a second ``lop``
+in that session overwrites it.
+
 A restore script's job is the same in both cases: for each pane, read
 ``@lop_session`` (or the file), and if it names a session directory that still
 exists, launch ``@lop_resume_command`` in that pane. Nothing here runs that
@@ -219,13 +226,23 @@ class _FileBackend:
 
     name = ""
     #: Environment variables that identify this pane, in preference order.
-    pane_envs: tuple[str, ...] = ()
+    #: Each entry is a tuple of variables that are joined with ``-`` to form
+    #: one identity, so a multiplexer whose pane is only identified by
+    #: (session, pane) can name both. ALL variables in a tuple must be present
+    #: and safe for that candidate to be used; the next candidate is then
+    #: tried, which is what lets a backend degrade to a coarser identity on a
+    #: host that does not export the finer one.
+    pane_envs: tuple[tuple[str, ...], ...] = ()
 
     def _pane_id(self, env: EnvMap) -> str | None:
-        for variable in self.pane_envs:
-            value = (env.get(variable) or "").strip()
-            if value and _SAFE_PANE_ID.match(value):
-                return value
+        for variables in self.pane_envs:
+            parts = [(env.get(variable) or "").strip() for variable in variables]
+            # Every component is validated separately rather than validating
+            # the joined string: the join character is legal inside a
+            # component, so checking only the result would let a component
+            # containing a separator forge a different pane's filename.
+            if all(part and _SAFE_PANE_ID.match(part) for part in parts):
+                return "-".join(parts)
         return None
 
     def detect(self, env: EnvMap) -> bool:
@@ -274,19 +291,43 @@ class _FileBackend:
 
 
 class ZellijBackend(_FileBackend):
-    """zellij. ``ZELLIJ_SESSION_NAME`` identifies the session it belongs to."""
+    """zellij, keyed by session name AND pane id.
+
+    Both halves are required for correctness, not for readability.
+    ``ZELLIJ_SESSION_NAME`` names a SESSION, and a session holds many panes, so
+    keying on it alone gave every ``lop`` pane in one zellij session the same
+    marker file: the last publisher won, and one pane's clean exit deleted its
+    siblings' markers, so a restore reopened the wrong conversation or none at
+    all. Verified on zellij 0.42.2: two panes of one session export
+    ``ZELLIJ_SESSION_NAME=<same>`` with ``ZELLIJ_PANE_ID=0`` and ``=1``.
+
+    The session name stays in the key because a pane id is only unique WITHIN
+    a session — pane 0 exists in every one of them.
+    """
 
     name = "zellij"
-    #: Session name first: it is stable and human-meaningful, where ``ZELLIJ``
-    #: is only a "you are inside zellij" flag.
-    pane_envs = ("ZELLIJ_SESSION_NAME", "ZELLIJ")
+    #: (session, pane) is the only identity that satisfies the one-file-per-pane
+    #: contract at the top of this module. No coarser fallback is offered: a
+    #: zellij that exports the session name but not the pane id would collide
+    #: silently, and publishing nothing is the better failure.
+    pane_envs = (("ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"),)
 
 
 class ScreenBackend(_FileBackend):
-    """GNU screen. ``STY`` names the session (``<pid>.<tty>.<host>``)."""
+    """GNU screen, keyed by session (``STY``) and window index (``WINDOW``).
+
+    Same collision as zellij's and fixed the same way: ``STY`` names the
+    session, so several ``lop`` windows in one screen session shared a marker
+    file. Verified on screen 4.00.03: a process inside a session exports both
+    ``STY=<pid>.<tty>`` and ``WINDOW=0``.
+
+    ``STY`` alone is kept as a fallback — unlike zellij's pane id, ``WINDOW``
+    is set by the shell's startup rather than by screen in every configuration,
+    and a per-session marker still restores correctly for the one-window-per-
+    session case that is how screen is usually run. When it is used, the marker
+    is per session and a second ``lop`` in that session overwrites it; the
+    module contract above and the docs table say so.
+    """
 
     name = "screen"
-    #: ``WINDOW`` is screen's per-window index; combined with STY it would be
-    #: a finer identity, but STY alone is what every screen session exports
-    #: and the pane granularity users actually run one agent per.
-    pane_envs = ("STY",)
+    pane_envs = (("STY", "WINDOW"), ("STY",))

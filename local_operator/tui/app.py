@@ -6991,7 +6991,9 @@ class OperatorApp(App[None]):
         :mod:`local_operator.multiplexer`. Nothing here can raise into the
         boot path, and no subprocess runs on this thread: the broadcast owns a
         daemon timer thread of its own precisely so the event loop never waits
-        on a multiplexer socket.
+        on a multiplexer socket. That holds for the retire of the OUTGOING
+        binding below too — ``stop`` dispatches it to a worker and returns
+        immediately, so a swap cannot stall this coroutine on a wedged socket.
         """
         # Retire the outgoing binding BEFORE publishing the new one: both name
         # the same pane, so the reverse order would clear the fresh binding.
