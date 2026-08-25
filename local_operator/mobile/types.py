@@ -404,6 +404,7 @@ class SubagentRow:
     prompt: str = ""
     effort: str = ""
     ancestors: list[str] = field(default_factory=list)
+    ancestor_ids: list[str] = field(default_factory=list)
     child_ids: list[str] = field(default_factory=list)
     peer_ids: list[str] = field(default_factory=list)
     transcript: list[TranscriptEntry] = field(default_factory=list)

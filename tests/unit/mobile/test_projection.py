@@ -186,6 +186,7 @@ def test_legacy_subagent_projection_rebuilds_new_detail_collections() -> None:
     row = projection.subagents[0]
     assert projection.pid == 42
     assert row.ancestors == []
+    assert row.ancestor_ids == []
     assert row.child_ids == []
     assert row.peer_ids == []
     assert row.transcript == []
@@ -232,6 +233,7 @@ def test_subagent_details_seed_nested_descendants_for_recursive_navigation() -> 
     assert by_id["child"].child_ids == ["grandchild"]
     assert by_id["grandchild"].parent_job_id == "child"
     assert by_id["grandchild"].ancestors == ["parent", "child"]
+    assert by_id["grandchild"].ancestor_ids == ["parent", "child"]
     assert by_id["grandchild"].activity == "reading"
 
     session.jobs.rows["grandchild"].latest_details = {"progress": "summarizing"}

@@ -301,6 +301,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     continue
                 entry.projection.degraded = False
                 entry.projection.ended = False
+                daemon.capture_subagent_details(entry.projection)
                 daemon.session_projections[entry.record.session_id] = entry.projection
                 daemon.table.provisional_active.discard(entry.record.session_id)
                 daemon.table.notify_list_changed()
@@ -543,6 +544,13 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # The session repaint carries only roster summaries. Full child state is
+        # retained separately and fetched for the active route, otherwise one
+        # busy descendant makes every root token repaint resend every transcript.
+        # Ordered dict insertion order supplies a simple bounded oldest-session
+        # eviction without putting another cache dependency on the daemon path.
+        self.subagent_details: dict[tuple[str, str], dict[str, Any]] = {}
+        self._subagent_detail_sessions: list[str] = []
         self._pending_reqs: dict[tuple[int, Any], asyncio.Future[dict[str, Any]]] = {}
         self._dial_tasks: dict[int, asyncio.Task[None]] = {}
         self._slash_commands: list[dict[str, Any]] | None = None
@@ -553,6 +561,35 @@ class MobileDaemon:
         # repaint so an open phone remains a normal conversation while idle.
         self.session_projections: dict[str, SessionProjection] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def capture_subagent_details(self, projection: SessionProjection) -> None:
+        """Move descendant-only state out of the aggregate repaint.
+
+        Keeping the legacy fields on ``SubagentRow`` makes mixed-version
+        registrants additive: an old host can still send the aggregate shape,
+        while every browser receives lightweight summaries and asks for only
+        the selected child. The cache is bounded by root sessions because a
+        phone can navigate only within one root lineage at a time.
+        """
+        session_id = projection.session_id
+        if session_id not in self._subagent_detail_sessions:
+            self._subagent_detail_sessions.append(session_id)
+        while len(self._subagent_detail_sessions) > 16:
+            expired = self._subagent_detail_sessions.pop(0)
+            for key in [key for key in self.subagent_details if key[0] == expired]:
+                self.subagent_details.pop(key, None)
+        for row in projection.subagents[:256]:
+            detail = row.to_json()
+            detail["version"] = projection.version
+            self.subagent_details[(session_id, row.job_id)] = detail
+            # The aggregate needs enough to paint and route rows, not the launch
+            # prompt or terminal payload. Those can each be many kilobytes and
+            # belong to selected detail exactly like transcript and todos.
+            row.prompt = ""
+            row.result_text = ""
+            row.error_text = ""
+            row.transcript = []
+            row.todos = []
 
     # -- scanning --------------------------------------------------------------
 
@@ -998,6 +1035,46 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    async def api_subagent_detail(request: Request) -> Response:
+        """Full state for the one descendant named by the active phone route."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        job_id = str(request.path_params["job_id"])
+        detail = daemon.subagent_details.get((session_id, job_id))
+        if detail is None:
+            return JSONResponse({"error": "unknown subagent"}, status_code=404)
+        return JSONResponse(detail)
+
+    async def api_subagent_history(request: Request) -> Response:
+        """Page one child's transcript, never the root conversation.
+
+        The selected detail proves the child session id belongs to this root
+        lineage before the route reaches disk. That isolation matters because
+        child transcripts intentionally do not qualify as public root routes.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        job_id = str(request.path_params["job_id"])
+        detail = daemon.subagent_details.get((session_id, job_id))
+        child_session_id = detail.get("session_id") if detail else None
+        if not isinstance(child_session_id, str) or not child_session_id:
+            return JSONResponse({"error": "subagent history unavailable"}, status_code=404)
+        before = request.query_params.get("before")
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
+        except ValueError:
+            limit = 80
+        page, has_more = await asyncio.to_thread(
+            _history_page, child_session_id, before, limit, durable_only=False
+        )
+        return JSONResponse(
+            {"entries": [_transcript_entry_json(entry) for entry in page], "has_more": has_more}
+        )
+
     async def api_session_history(request: Request) -> Response:
         """Older transcript entries for lazy loading.
 
@@ -1320,6 +1397,11 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/resume", api_resume_session, methods=["POST"]),
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{session_id:str}/events", api_session_events),
+        Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
+        Route(
+            "/api/sessions/{session_id:str}/agents/{job_id:str}/history",
+            api_subagent_history,
+        ),
         Route("/api/sessions/{session_id:str}/history", api_session_history),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),

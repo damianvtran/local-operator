@@ -33,6 +33,7 @@ function normalizeSubagent(row: SubagentRow): SubagentRow {
 	return {
 		...row,
 		ancestors: list(row.ancestors),
+		ancestor_ids: list(row.ancestor_ids),
 		child_ids: list(row.child_ids),
 		peer_ids: list(row.peer_ids),
 		transcript: list<TranscriptEntry>(row.transcript),

@@ -19,6 +19,7 @@ import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
 import { navigate } from "../router";
+import { AgentScreen } from "./agent-view";
 import { retainProjectionStream, useProjection } from "../store";
 import type { SessionProjection } from "../types";
 
@@ -44,7 +45,13 @@ function Header({
 	);
 }
 
-export function SessionScreen({ sessionId }: { sessionId: string }) {
+export function SessionScreen({
+	sessionId,
+	jobId,
+}: {
+	sessionId: string;
+	jobId?: string;
+}) {
 	const { projection, connected } = useProjection(sessionId);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
@@ -108,6 +115,14 @@ export function SessionScreen({ sessionId }: { sessionId: string }) {
 			ref={rootRef}
 			className="relative mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
 		>
+			{jobId ? (
+				<AgentScreen
+					sessionId={sessionId}
+					jobId={jobId}
+					projection={projection}
+					connected={connected}
+				/>
+			) : <>
 			<Header projection={projection} />
 
 			{projection.transcript.length === 0 && !projection.streaming ? (
@@ -165,6 +180,7 @@ export function SessionScreen({ sessionId }: { sessionId: string }) {
 				pid={sessionId}
 				projection={projection}
 			/>
+			</>}
 		</div>
 	);
 }

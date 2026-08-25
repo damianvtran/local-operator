@@ -13,6 +13,7 @@ import type {
 	PastSession,
 	SessionSummary,
 	SlashCommand,
+	SubagentDetail,
 	TranscriptEntry,
 } from "./types";
 
@@ -125,4 +126,33 @@ export function getHistory(
 	const q = new URLSearchParams({ limit: String(limit) });
 	if (before) q.set("before", before);
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`);
+}
+
+export function getSubagentDetail(
+	sessionId: string,
+	jobId: string,
+	signal?: AbortSignal,
+): Promise<SubagentDetail> {
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(jobId)}`,
+		{ signal },
+	);
+}
+
+/** Child history has its own lineage-checked endpoint. Reusing the root route
+    here was the paging bug: once a child scrolled above its live tail, root
+    user/tool rows appeared inside the child's conversation. */
+export function getSubagentHistory(
+	sessionId: string,
+	jobId: string,
+	before: string | null,
+	limit = 80,
+	signal?: AbortSignal,
+): Promise<{ entries: TranscriptEntry[]; has_more: boolean }> {
+	const q = new URLSearchParams({ limit: String(limit) });
+	if (before) q.set("before", before);
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(jobId)}/history?${q}`,
+		{ signal },
+	);
 }

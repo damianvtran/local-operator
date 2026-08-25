@@ -109,11 +109,19 @@ export interface SubagentRow {
 	prompt: string;
 	effort: string;
 	ancestors: string[];
+	ancestor_ids: string[];
 	child_ids: string[];
 	peer_ids: string[];
 	transcript: TranscriptEntry[];
 	todos: TodoPhase[];
 	activity: string;
+}
+
+/** Selected-child payload. Root snapshots remain compatible with the legacy
+    aggregate shape, but current daemons leave transcript/todos empty there and
+    serve these fields only for the active route. */
+export interface SubagentDetail extends SubagentRow {
+	version: number;
 }
 
 /** One selectable answer on an ask question. Carries the consequence line the

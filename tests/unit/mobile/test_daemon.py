@@ -14,7 +14,14 @@ from starlette.testclient import TestClient
 from local_operator.mobile import registry
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
 from local_operator.mobile.registrant import Registrant
-from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT, SessionProjection
+from local_operator.mobile.types import (
+    PROJECTION_TRANSCRIPT_LIMIT,
+    SessionProjection,
+    SubagentRow,
+    TodoItem,
+    TodoPhase,
+    TranscriptEntry,
+)
 
 
 class FakeHandle:
@@ -167,6 +174,51 @@ def test_http_gate_and_login_flow() -> None:
     authed = client.get("/api/sessions")
     assert authed.status_code == 200
     assert authed.json() == {"sessions": []}
+
+
+def test_subagent_summary_detail_and_child_history_are_isolated(tmp_path, monkeypatch) -> None:
+    """Root repaints stay light while the selected child pages its own file."""
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root-only", id="root-row")))
+    asyncio.run(Transcript(child_dir).append_message(Message.user("child-only", id="child-row")))
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    projection = SessionProjection(session_id="root-session", pid=9, version=7)
+    projection.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="child",
+            session_id="child-session",
+            transcript=[TranscriptEntry(id="child-row", kind="user", text="child-only")],
+            todos=[TodoPhase(name="Todos", items=[TodoItem(text="verify")])],
+        )
+    ]
+    daemon.capture_subagent_details(projection)
+    assert projection.subagents[0].transcript == []
+    assert projection.subagents[0].todos == []
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    detail = client.get("/api/sessions/root-session/agents/child-job")
+    assert detail.status_code == 200
+    assert detail.json()["version"] == 7
+    assert [entry["text"] for entry in detail.json()["transcript"]] == ["child-only"]
+    history = client.get(
+        "/api/sessions/root-session/agents/child-job/history", params={"limit": 10}
+    )
+    assert history.status_code == 200
+    assert [entry["id"] for entry in history.json()["entries"]] == ["child-row"]
+    assert "root-row" not in str(history.json())
+    assert client.get("/api/sessions/root-session/agents/not-related").status_code == 404
 
 
 def test_unknown_session_command_is_a_409() -> None:

@@ -1,6 +1,7 @@
 /**
  * Hash-based routing, hand-rolled. Routes: `#/`, `#/new`, `#/past`,
- * `#/s/:pid`. A hash router is the right shape here because the daemon
+ * `#/s/:sessionId`, `#/s/:sessionId/a/:jobId`. A hash router is the right
+ * shape here because the daemon
  * serves a single static bundle and no server-side route table exists.
  */
 import { useEffect, useState } from "react";
@@ -9,13 +10,21 @@ export type Route =
 	| { name: "list" }
 	| { name: "new" }
 	| { name: "past" }
-	| { name: "session"; sessionId: string };
+	| { name: "session"; sessionId: string; jobId?: string };
 
 export function parseHash(hash: string): Route {
 	const path = hash.replace(/^#/, "") || "/";
 	if (path === "/new") return { name: "new" };
 	if (path === "/past") return { name: "past" };
-	const session = path.match(/^\/s\/([^/]+)/);
+	const agent = path.match(/^\/s\/([^/]+)\/a\/([^/]+)$/);
+	if (agent) {
+		return {
+			name: "session",
+			sessionId: decodeURIComponent(agent[1]),
+			jobId: decodeURIComponent(agent[2]),
+		};
+	}
+	const session = path.match(/^\/s\/([^/]+)$/);
 	if (session) return { name: "session", sessionId: decodeURIComponent(session[1]) };
 	return { name: "list" };
 }
