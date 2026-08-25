@@ -62,6 +62,10 @@ COMMAND_TIMEOUTS = {
     "screenshot": 20.0,
     "close": 20.0,
     "status": 20.0,
+    # scroll waits briefly for the wheel/scrollIntoView to settle and re-reads
+    # position; logs just drains a per-tab ring buffer already in memory.
+    "scroll": 20.0,
+    "logs": 20.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin

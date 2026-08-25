@@ -15,6 +15,27 @@ from pydantic import BaseModel, ConfigDict, Field
 
 PROTO_VERSION = 1
 
+#: Every RPC method the extension answers, in a stable order. This is the ONE
+#: source of truth: the daemon's timeout table, the tool's action list, and the
+#: generated TypeScript ``Method`` union all derive from it, so a method added
+#: here without a handler fails a test rather than timing out on the wire, and a
+#: method the extension can serve but nobody advertises simply does not exist.
+#: ``scroll`` and ``logs`` are bridge-only capabilities (cmux degrades with a
+#: typed error); they still live here because the wire protocol is shared.
+METHODS = (
+    "open",
+    "goto",
+    "read",
+    "snapshot",
+    "screenshot",
+    "click",
+    "type",
+    "close",
+    "status",
+    "scroll",
+    "logs",
+)
+
 
 class ErrorCode(StrEnum):
     EXTENSION_DISCONNECTED = "extension_disconnected"

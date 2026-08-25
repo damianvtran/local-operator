@@ -4606,7 +4606,28 @@ BROWSER_ACTIONS = (
     "click",
     "type",
     "close",
+    # scroll and logs are served ONLY by the extension bridge; the cmux backend
+    # degrades with a typed "use the extension" error rather than faking them
+    # (see execute_browser). They are actions so they ride the same schema,
+    # approval tier and dispatch as everything else.
+    "scroll",
+    "logs",
 )
+
+#: Actions that only the Local Operator browser extension can serve. cmux has no
+#: console-log tap and no background-tab scroll primitive, so rather than fake a
+#: partial result these degrade with a clear, actionable error naming the
+#: extension. Kept as a set beside BROWSER_ACTIONS so the degrade check and the
+#: advertised action list can never drift apart.
+BRIDGE_ONLY_BROWSER_ACTIONS = frozenset({"scroll", "logs"})
+
+#: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
+#: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
+#: wire rather than returning an empty scroll.
+_SCROLL_DIRECTIONS = frozenset({"top", "bottom", "up", "down", "left", "right"})
+
+#: Console levels ``logs`` filters on. Mirrors the extension's LEVELS.
+_LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
 
 #: Page text is model input, so it rides the same ceiling as command output
 #: rather than a bespoke one — a single-page app whose body is megabytes would
@@ -4686,16 +4707,44 @@ class BrowserParams(BaseModel):
     action: str = Field(
         description="open (start a surface at a URL) | goto | read (page text) | "
         "snapshot (accessibility tree with click refs) | screenshot | click | "
-        "type | close."
+        "type | scroll (move the viewport) | logs (console + errors) | close."
     )
     url: str = Field(default="", description="http(s) URL for 'open'/'goto'.")
     path: str = Field(default="", description="Destination file for 'screenshot'.")
     selector: str = Field(
         default="",
         description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
-        "scopes the text for 'read' (default: body).",
+        "scopes the text for 'read' (default: body); for 'scroll', the element "
+        "to bring into view.",
     )
     text: str = Field(default="", description="Text to enter for 'type'.")
+    # scroll params. All optional: with none set, 'scroll' pages one viewport
+    # down. Precedence is selector > x/y > direction > default (mirrors
+    # extension/src/commands/scroll.ts).
+    x: float | None = Field(
+        default=None,
+        description="'scroll' horizontal pixel delta (positive = right). "
+        "Use with 'y' for a precise wheel scroll.",
+    )
+    y: float | None = Field(
+        default=None,
+        description="'scroll' vertical pixel delta (positive = down).",
+    )
+    direction: str = Field(
+        default="",
+        description="'scroll' keyword: top | bottom | up | down | left | right "
+        "(top/bottom jump to the extremes; the rest move one page).",
+    )
+    # logs params.
+    level: str = Field(
+        default="",
+        description="'logs' level filter: error | warning | info | log | all " "(default all).",
+    )
+    limit: int | None = Field(
+        default=None,
+        description="'logs' max entries to return (most recent kept); 'scroll' "
+        "ignores it. Omit for no cap.",
+    )
 
 
 def _cmux_binary() -> str | None:
@@ -4964,6 +5013,27 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
         # Optional here — an absent selector snapshots the whole document —
         # which is why this is not the same shape as click/type.
         return _validate_selector(params.selector, "snapshot")
+    if action == "scroll":
+        # Every scroll param is optional (no params = one viewport down), so the
+        # only refusals are a malformed value: a flag-shaped selector (same argv
+        # hazard as click) or an unknown direction keyword.
+        if params.selector.strip():
+            return _validate_selector(params.selector, "scroll")
+        direction = params.direction.strip().lower()
+        if direction and direction not in _SCROLL_DIRECTIONS:
+            return (
+                f"unknown scroll direction: {params.direction!r} "
+                f"(expected one of {', '.join(sorted(_SCROLL_DIRECTIONS))})"
+            )
+        return ""
+    if action == "logs":
+        level = params.level.strip().lower()
+        if level and level not in _LOG_LEVELS:
+            return (
+                f"unknown logs level: {params.level!r} "
+                f"(expected one of {', '.join(sorted(_LOG_LEVELS))})"
+            )
+        return ""
     return ""
 
 
@@ -5498,6 +5568,60 @@ async def _bridge_open(
     )
 
 
+def _format_log_entry(entry: dict[str, Any]) -> str:
+    """One buffered log line rendered for the model: ``[level] text (url:line)``.
+
+    The source (console vs exception) is folded into the level tag so an
+    uncaught exception is visually distinct from a plain ``console.error`` — the
+    difference that matters when the agent is debugging a broken page.
+    """
+    level = str(entry.get("level", "log")).upper()
+    source = str(entry.get("source", ""))
+    tag = f"{level}!" if source == "exception" else level
+    text = str(entry.get("text", "")).strip()
+    url = str(entry.get("url", "")).strip()
+    line = entry.get("line")
+    where = ""
+    if url:
+        where = f" ({url}:{line})" if line else f" ({url})"
+    return f"[{tag}] {text}{where}"
+
+
+def _bridge_logs_result(
+    tool_call_id: str,
+    params: BrowserParams,
+    result: dict[str, Any],
+    details: dict[str, Any],
+    title: str,
+    href: str,
+) -> ToolResult:
+    """Render the extension's buffered log entries, newest-last.
+
+    The joined text rides the same BROWSER_TEXT_LIMIT_CHARS ceiling as read and
+    snapshot: a page in a console-spam loop must not spend the whole context
+    window in one call, and the extension already caps its ring buffer, so this
+    is the second, model-facing cap.
+    """
+    entries = result.get("entries")
+    if not isinstance(entries, list) or not entries:
+        level = params.level.strip().lower() or "all"
+        scope = "" if level == "all" else f" at level '{level}'"
+        return _text(
+            tool_call_id,
+            "browser",
+            f"No console logs{scope} since the page opened. Page: {_page_line(title, href)}",
+            details={**details, "log_count": 0},
+        )
+    lines = [_format_log_entry(entry) for entry in entries if isinstance(entry, dict)]
+    body = truncate_output("\n".join(lines), BROWSER_TEXT_LIMIT_CHARS)
+    return _text(
+        tool_call_id,
+        "browser",
+        f"{len(lines)} log entr{'y' if len(lines) == 1 else 'ies'} " f"(newest last):\n\n{body}",
+        details={**details, "log_count": len(lines)},
+    )
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -5516,6 +5640,22 @@ async def _bridge_action(
         wire["selector"] = params.selector.strip()
         if action == "type":
             wire["text"] = params.text
+    elif action == "scroll":
+        # Only send the params the caller actually set, so the extension's
+        # precedence (selector > x/y > direction > default) sees an unset param
+        # as absent rather than an empty-string selector or a zero delta.
+        if params.selector.strip():
+            wire["selector"] = params.selector.strip()
+        if params.x is not None:
+            wire["x"] = params.x
+        if params.y is not None:
+            wire["y"] = params.y
+        if params.direction.strip():
+            wire["direction"] = params.direction.strip().lower()
+    elif action == "logs":
+        wire["level"] = params.level.strip().lower() or "all"
+        if params.limit is not None:
+            wire["limit"] = params.limit
     result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface)
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
@@ -5554,6 +5694,28 @@ async def _bridge_action(
             or "(empty snapshot)",
             details=details,
         )
+    if action == "scroll":
+        x = int(result.get("scrollX", 0) or 0)
+        y = int(result.get("scrollY", 0) or 0)
+        more_below = bool(result.get("moreBelow"))
+        more_right = bool(result.get("moreRight"))
+        # Tell the agent where it landed AND whether paging further will reveal
+        # more, so it can stop at the end instead of scrolling into a wall.
+        remaining = []
+        if more_below:
+            remaining.append("more below")
+        if more_right:
+            remaining.append("more right")
+        edge = ", ".join(remaining) if remaining else "at the end (no more content)"
+        details.update(scroll_x=x, scroll_y=y, more_below=more_below, more_right=more_right)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Scrolled to ({x}, {y}) — {edge}. Page: {_page_line(title, href)}",
+            details=details,
+        )
+    if action == "logs":
+        return _bridge_logs_result(tool_call_id, params, result, details, title, href)
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
@@ -5699,17 +5861,45 @@ async def execute_browser(
     # transport, so a browser opening or closing mid-session cannot silently
     # move the agent to a different surface.
     if action == "open":
+        # Backend precedence on a FRESH open: prefer the paired Local Operator
+        # browser extension over cmux when both are reachable. The extension
+        # drives a real Chromium profile with the user's own logins and — by
+        # construction (nav.ts creates its tab with ``active: false`` and never
+        # activates it, raises a window, or calls captureVisibleTab) — never
+        # steals focus, so a background agent can browse while the user works in
+        # another window. cmux remains a first-class FALLBACK: it is used when no
+        # extension is connected, and an already-open cmux surface stays on cmux.
+        #
+        # A prefixed handle still pins the transport for the life of the surface,
+        # so this only decides where a brand-new surface lands; a browser opening
+        # or closing mid-session can never silently move the agent between
+        # backends.
         if state.surface_id.startswith("bridge:"):
             return await _bridge_open(tool_call_id, state, params.url)
-        if state.surface_id.startswith("surface:") or cmux_available:
+        if state.surface_id.startswith("surface:"):
             return await _browser_open(tool_call_id, state, params.url)
-        return await _bridge_open(tool_call_id, state, params.url)
+        if bridge_available:
+            return await _bridge_open(tool_call_id, state, params.url)
+        return await _browser_open(tool_call_id, state, params.url)
     if action == "close":
         return await _browser_close(tool_call_id, state)
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
     if state.surface_id.startswith("bridge:"):
         return await _bridge_action(tool_call_id, state, action, params, context)
+    # A cmux-backed surface cannot serve the extension-only actions. Degrade with
+    # a clear, actionable error naming the extension rather than faking a partial
+    # scroll or an empty log list — the operator asked for these to work on the
+    # bridge and to fail honestly on cmux.
+    if action in BRIDGE_ONLY_BROWSER_ACTIONS:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"'{action}' is not supported on the cmux backend — use the Local Operator "
+            "browser extension (run 'lop browser status' / 'lop browser install' to set it "
+            "up). cmux has no console-log tap or background-tab scroll primitive, so this "
+            "action only works through the extension bridge.",
+        )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
     # ACTIVE surface with exit 0, so without this check 'read', 'snapshot',
@@ -5900,6 +6090,14 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     user is looking at, so its cookies and logins survive between calls and
     between sessions and the user can sign in by hand when asked, which is
     exactly what a freshly downloaded headless Chromium can never do.
+
+    Backend precedence (see ``execute_browser``): when both a cmux panel and a
+    paired Local Operator browser extension are reachable, a fresh open prefers
+    the EXTENSION. It drives a real Chromium profile with the user's own logins
+    and never steals focus — its tab is created inactive and no action raises a
+    window — so a background agent can browse while the user works elsewhere.
+    cmux and (outside this tool) playwright are fallbacks for hosts without the
+    extension. The full setup/permissions playbook lives in ``guide://browser``.
     """
     if not cmux_browser_available() and not bridge_browser_available():
         return None
@@ -5910,12 +6108,17 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         description=(
             "Drive the user's REAL browser (a cmux browser panel or their paired "
             "Local Operator browser extension): open/goto a URL, read page text, snapshot the "
-            "accessibility tree for click refs, click, type, screenshot, close. "
-            "Cookies and logins persist across calls and across sessions, and "
-            "the user can sign in by hand when you ask them to, so this reaches "
-            "authenticated pages a throwaway headless browser cannot. Use it for "
-            "every screenshot and page interaction; never install or script a "
-            "browser engine instead."
+            "accessibility tree for click refs, click, type, scroll, read console "
+            "logs, screenshot, close. Cookies and logins persist across calls and "
+            "across sessions, and the user can sign in by hand when you ask them "
+            "to, so this reaches authenticated pages a throwaway headless browser "
+            "cannot. 'scroll' pages the view (default one screen down, or by "
+            "x/y pixels, a direction keyword, or a selector to reveal) and reports "
+            "whether more content remains; 'logs' returns the page's console "
+            "output and uncaught exceptions for debugging web apps. 'scroll' and "
+            "'logs' need the extension backend (cmux says so). Use it for every "
+            "screenshot and page interaction; never install or script a browser "
+            "engine instead."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write

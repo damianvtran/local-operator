@@ -1,4 +1,5 @@
-import { attach, BridgeCommandError, detach, requireSurface } from "../cdp";
+import { attach, BridgeCommandError, cdp, detach, requireSurface } from "../cdp";
+import { dropLogCapture, startLogCapture } from "../log-capture";
 import { askOrigin, safeHttpUrl, withOriginGate } from "../origins";
 import { settle } from "../settle";
 import { getSession, setSurface, surfaceToken, type StoredSurface } from "../state";
@@ -31,6 +32,10 @@ export async function open(params: Record<string, unknown>, requestId: string): 
   if (previous) {
     try {
       await chrome.tabs.get(previous.tabId);
+      // Re-arm log capture on the reused surface: after a worker restart the
+      // ring buffer was lost and the domains may need re-enabling, and
+      // startLogCapture is idempotent when they are already on.
+      await startLogCapture(previous.tabId, cdp);
       const result = await navigate(previous.tabId, url, requestId);
       return { tab: surfaceToken(previous), ...result };
     } catch (error) {
@@ -52,6 +57,10 @@ export async function open(params: Record<string, unknown>, requestId: string): 
   };
   await setSurface(surface);
   await attach(tab.id);
+  // Start buffering console/runtime logs immediately after attach and BEFORE
+  // navigating, so the `logs` command captures output from the destination
+  // page's very first script (finding: logs must be "since the surface opened").
+  await startLogCapture(tab.id, cdp);
   const live = await navigate(tab.id, url, requestId);
   return { tab: surfaceToken(surface), ...live };
 }
@@ -72,6 +81,7 @@ export async function status(params: Record<string, unknown>): Promise<Record<st
 
 export async function close(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
+  dropLogCapture(surface.tabId);
   await detach(surface.tabId);
   try { await chrome.tabs.remove(surface.tabId); } catch { /* already gone is success */ }
   await setSurface();

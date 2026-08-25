@@ -3,6 +3,8 @@ import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
 import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
+import { scroll } from "./commands/scroll";
+import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
 import { resolveOrigin, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
@@ -24,6 +26,8 @@ const HANDLERS: Record<
   type: typeText,
   close,
   status,
+  scroll,
+  logs,
 };
 
 // How long a dial may sit unresolved before we force it closed and retry. A

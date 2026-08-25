@@ -16,7 +16,20 @@ export enum ErrorCode {
   INTERNAL = 'internal',
 }
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'scroll' | 'logs';
+// One buffered console/runtime log line, as `logs` returns it (newest last).
+// `level` is normalized to the read/warning/info/log/error vocabulary the tool
+// filters on; `source` distinguishes a page console call from an uncaught
+// exception ('console' | 'exception' | 'log-entry').
+export interface LogEntry {
+  level: string; text: string; source: string; url: string; line: number; timestamp: number;
+}
+// What `scroll` reports back so the agent knows where the viewport landed and
+// whether more content remains past it (so it can stop paging at the end).
+export interface ScrollResult {
+  scrollX: number; scrollY: number; moreBelow: boolean; moreRight: boolean;
+  url: string; title: string;
+}
 export interface Request { id: string; method: Method; params: Record<string, unknown>; }
 export interface ErrorDetail { code: ErrorCode; message: string; data: Record<string, unknown>; }
 export type Response =

@@ -35,3 +35,22 @@ test("AX compaction assigns epoch-scoped click refs", async () => {
     assert.deepEqual(rendered.refs.e1, { backendNodeId: 42, epoch: 7 });
   } finally { await module.close(); }
 });
+
+test("log filter keeps level matches and limits to the most recent", async () => {
+  const module = await load("src/log-capture.ts");
+  try {
+    const { filterEntries } = module.loaded;
+    const entries = [
+      { level: "log", text: "a" },
+      { level: "error", text: "b" },
+      { level: "log", text: "c" },
+      { level: "error", text: "d" },
+    ];
+    // "all" keeps everything, order preserved.
+    assert.deepEqual(filterEntries(entries, "all", 0).map((e) => e.text), ["a", "b", "c", "d"]);
+    // level filter keeps only matches.
+    assert.deepEqual(filterEntries(entries, "error", 0).map((e) => e.text), ["b", "d"]);
+    // limit keeps the most recent n, still oldest->newest.
+    assert.deepEqual(filterEntries(entries, "all", 2).map((e) => e.text), ["c", "d"]);
+  } finally { await module.close(); }
+});
