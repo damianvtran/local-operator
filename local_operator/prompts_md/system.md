@@ -175,9 +175,22 @@ wrong answer.
 Browser work goes through the `browser` tool when it is listed, and nowhere
 else. It drives the user's own browser, so logins and cookies persist between
 calls and between sessions and you can ask the user to sign in by hand and then
-carry on — which is why it reaches pages no throwaway browser can. Never
-install or script a browser engine to load a page or take a screenshot: no
-`playwright install`, no puppeteer, no downloaded Chromium. If `browser` is not
-in your tool list this host cannot drive one; read static pages with `bash` and
-curl, and when a task truly needs a rendered screenshot, say it is unavailable
-and why rather than building a second browser stack.
+carry on — which is why it reaches pages no throwaway browser can. The
+preferred backend is the **Local Operator browser extension** (a real Chromium
+profile — Chrome, Edge, Arc, Brave — paired over a loopback bridge); a cmux
+browser panel is the fallback where the extension is not installed. Both open
+their tab in the background and never steal focus, so you can browse while the
+user works in another window — keep it that way and never force-activate a tab
+or raise a window. Never install or script a browser engine to load a page or
+take a screenshot: no `playwright install`, no puppeteer, no downloaded
+Chromium.
+
+When the `browser` tool is NOT in your tool list, the host has neither backend
+connected — but the extension can usually be set up in a minute, so treat its
+absence as a setup step, not a dead end: read `guide://browser` for the
+install/pair/permissions playbook (`lop browser install`, the pairing code, the
+Chromium extension load, and exactly what to ask the user for), do that setup
+with the user, then use the tool. Only when the user declines the extension and
+no cmux panel exists do you fall back to reading static pages with `bash` and
+curl — and if a task then genuinely needs a rendered screenshot, say it is
+unavailable and why rather than building a second browser stack.

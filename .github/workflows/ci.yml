@@ -56,6 +56,11 @@ jobs:
 
       - name: Run pyright
         run: pyright
+
+      - name: Verify browser extension protocol sync
+        # Main CI owns this too: a Python-only protocol edit must fail even if
+        # the paths-gated extension workflow does not run.
+        run: python -m local_operator.browser_bridge.gen_ts --check
         
   test:
     runs-on: ubuntu-latest
