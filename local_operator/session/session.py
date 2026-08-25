@@ -1360,19 +1360,16 @@ class Session:
         # The session, not an OperatorApp, owns state that must survive a second
         # frontend joining. Constructed after every durable source above has
         # restored so the first snapshot is already authoritative.
-        from local_operator.session.frontend_state import (
-            FrontendSessionState,
-            FrontendStateStore,
-        )
+        from local_operator.session.frontend_state import FrontendStateStore
 
+        # Headless hosts restore the durable checkpoint WITHOUT the live source
+        # scan (jobs/todos/MCP walk plus the TUI registry import) so schedulers
+        # stay cheap — but never start bare: their turn-end checkpoint would
+        # otherwise overwrite a TUI's persisted spend/duration/title.
         self._frontend_state_store = (
             FrontendStateStore.from_session(self)
             if self._has_ui
-            else FrontendStateStore(
-                FrontendSessionState(
-                    session_id=str(self.session_id), epoch=f"headless-{id(self):x}"
-                )
-            )
+            else FrontendStateStore.from_checkpoint(self)
         )
 
     def _render_history(
@@ -3107,8 +3104,15 @@ class Session:
         return self._frontend_state_store.state
 
     def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
-        """Atomically refresh, snapshot and subscribe on the session loop."""
-        self._frontend_state_store.refresh_from_session(self, initial=True)
+        """Atomically refresh, snapshot and subscribe on the session loop.
+
+        The refresh must go through the PUBLISHING path: silently replacing
+        state would hand this joiner a different state at the same sequence
+        number an earlier subscriber already holds, breaking the exact-`+1`
+        gap check every client uses to detect transport loss. ``initial=True``
+        is reserved for store construction, before any subscriber exists.
+        """
+        self._frontend_state_store.refresh_from_session(self)
         return self._frontend_state_store.subscribe(handler)
 
     def refresh_frontend_state(self) -> None:
@@ -3490,8 +3494,13 @@ class Session:
             await self._maybe_persist_todos()
             # Spend must survive owner death at the same durability boundary as
             # the messages it describes. The checkpoint is replacement state,
-            # never an additive delta, so takeover cannot double it.
-            await self._frontend_state_store.checkpoint(self._transcript)
+            # never an additive delta, so takeover cannot double it. A headless
+            # store that observed nothing (no UI, no attach subscriber) skips
+            # the write: it holds only the restored durable state, and
+            # re-appending that would at best duplicate and at worst — before
+            # ``from_checkpoint`` — clobber the richer checkpoint a TUI wrote.
+            if self._has_ui or self._frontend_state_store.has_subscribers:
+                await self._frontend_state_store.checkpoint(self._transcript)
 
             pending_incident = self._pending_incident
             self._pending_incident = None

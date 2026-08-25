@@ -1,4 +1,4 @@
-"""Full-fidelity remote session facade for a follower TUI (protocol v4).
+"""Full-fidelity remote session facade for a follower TUI (protocol v5).
 
 ``RemoteSession`` implements the same :class:`SessionProtocol` the standard
 ``OperatorApp`` already consumes. Durable history comes from the transcript;
@@ -124,7 +124,7 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
 
 
 class RemoteSession:
-    """A SessionProtocol facade backed by one owner's v4 attach socket."""
+    """A SessionProtocol facade backed by one owner's v5 attach socket."""
 
     is_remote = True
 
@@ -613,10 +613,10 @@ class RemoteSession:
     ) -> str:
         """Run a conversation-mutating slash command on the authoritative host.
 
-        OperatorApp handles process-local navigation/config itself. This seam is
-        only for commands whose normal local implementation depends on owner
-        registries or turn workers (/agent, /team, /loop), so the follower does
-        not maintain a second copy of shared orchestration state.
+        OperatorApp handles process-local navigation/config itself. This seam
+        carries every command the owner's capability list marks
+        ``authoritative_session``, so the follower never maintains a second
+        copy of shared orchestration state.
         """
         client = self._client
         if client is None:

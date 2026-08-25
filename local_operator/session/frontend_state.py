@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -170,6 +171,10 @@ class JobState(BaseModel):
     started_at: float | None = None
     settled_at: float | None = None
     trajectory: list[dict[str, Any]] = Field(default_factory=list)
+    # Nested spend (#297): a finished grandchild's usage folds into its root's
+    # row here. Without carrying it, follower-side child-cost pricing counted
+    # only the direct child while the owner priced the whole subtree.
+    descendant_usage: list[FrontendUsage] = Field(default_factory=list)
     prompt: str | None = None
     agent_role: str | None = None
     effort: str | None = None
@@ -193,6 +198,12 @@ class JobState(BaseModel):
         usage = getattr(job, "usage", None)
         if isinstance(usage, dict):
             usage = Usage.model_validate(usage)
+        descendants = []
+        for component in list(getattr(job, "descendant_usage", None) or []):
+            if isinstance(component, dict):
+                descendants.append(FrontendUsage.model_validate(component))
+            elif isinstance(component, Usage):
+                descendants.append(FrontendUsage.model_validate(component.model_dump(mode="json")))
         return cls(
             id=str(getattr(job, "id", "") or ""),
             type=str(getattr(job, "type", "") or ""),
@@ -216,6 +227,7 @@ class JobState(BaseModel):
             started_at=getattr(job, "started_at", None),
             settled_at=getattr(job, "settled_at", None) or getattr(job, "finished_at", None),
             trajectory=trajectory,
+            descendant_usage=descendants,
             prompt=getattr(job, "prompt", None),
             agent_role=getattr(job, "agent_role", None),
             effort=getattr(job, "effort", None),
@@ -343,6 +355,12 @@ class FrontendUpdate(BaseModel):
     sequence: int
     changes: dict[str, Any]
     job_trajectory_appends: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    # Jobs whose appended events are a REPLACEMENT, not a suffix. The owner's
+    # ``AsyncJob.trajectory`` evicts oldest past ``subagent.TRAJECTORY_CAP``, so
+    # once a child crosses the cap the prefix check can never hold again;
+    # without this marker a follower would extend forever (500 → 1000 → 1500…)
+    # while duplicating rows in its click-through view.
+    job_trajectory_replacements: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,12 +464,20 @@ class FrontendStateStore:
         changes = copy.deepcopy(update.changes)
         if "jobs" in changes:
             previous = {job.id: job for job in self._state.jobs}
+            replacements = set(update.job_trajectory_replacements)
             rebuilt = []
             for raw in changes["jobs"]:
                 job_id = str(raw.get("id", ""))
                 prior = previous.get(job_id)
-                trajectory = list(prior.trajectory if prior is not None else [])
+                if job_id in replacements:
+                    trajectory = []
+                else:
+                    trajectory = list(prior.trajectory if prior is not None else [])
                 trajectory.extend(update.job_trajectory_appends.get(job_id, []))
+                # Defensive mirror of the owner-side eviction: even a
+                # misbehaving owner cannot grow a follower without bound.
+                if len(trajectory) > _TRAJECTORY_CAP:
+                    del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
                 raw["trajectory"] = trajectory
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
@@ -468,6 +494,7 @@ class FrontendStateStore:
         normalized: dict[str, Any] = {}
         wire_changes: dict[str, Any] = {}
         trajectory_appends: dict[str, list[dict[str, Any]]] = {}
+        trajectory_replacements: list[str] = []
         current = self._state.model_dump(mode="json")
         for key, value in changes.items():
             candidate = _json_value(value)
@@ -478,17 +505,18 @@ class FrontendStateStore:
             previous = {str(job.get("id", "")): job for job in current.get("jobs", [])}
             summaries = []
             for job in wire_changes["jobs"]:
-                if hasattr(job, "model_dump"):
-                    job = job.model_dump(mode="json")
-                else:
-                    job = copy.deepcopy(job)
+                job = copy.deepcopy(job)
                 job_id = str(job.get("id", ""))
                 trajectory = list(job.pop("trajectory", []) or [])
                 old = list(previous.get(job_id, {}).get("trajectory", []) or [])
                 if trajectory[: len(old)] == old:
                     appended = trajectory[len(old) :]
                 else:
+                    # The owner list rotated past its cap (or was rebuilt):
+                    # a suffix no longer exists, so ship a replacement once
+                    # rather than the whole list disguised as appends forever.
                     appended = trajectory
+                    trajectory_replacements.append(job_id)
                 if appended:
                     trajectory_appends[job_id] = appended
                 summaries.append(job)
@@ -504,6 +532,7 @@ class FrontendStateStore:
             sequence=self._state.sequence,
             changes=wire_changes,
             job_trajectory_appends=trajectory_appends,
+            job_trajectory_replacements=trajectory_replacements,
         )
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
@@ -532,6 +561,24 @@ class FrontendStateStore:
 
     @classmethod
     def from_session(cls, session: Any) -> "FrontendStateStore":
+        store = cls(cls._restored_state(session))
+        store.refresh_from_session(session, initial=True)
+        return store
+
+    @classmethod
+    def from_checkpoint(cls, session: Any) -> "FrontendStateStore":
+        """Headless construction: durable restore only, no live source scan.
+
+        A headless host (scheduler, owned session, exec CLI) must stay cheap —
+        ``refresh_from_session`` walks jobs/todos/MCP and imports the TUI
+        registry — but its turn-end checkpoint is unconditional, so the store
+        MUST begin from the richest durable state or a single headless turn
+        would persist a bare checkpoint over the TUI's spend/duration/title.
+        """
+        return cls(cls._restored_state(session))
+
+    @staticmethod
+    def _restored_state(session: Any) -> FrontendSessionState:
         transcript = getattr(session, "_transcript", None)
         checkpoint = (
             transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE) if transcript else None
@@ -549,10 +596,7 @@ class FrontendStateStore:
         state = restored or FrontendSessionState(session_id=str(session.session_id), epoch=epoch)
         # A new owner epoch invalidates stale wire updates while preserving the
         # durable checkpoint identity used to reconcile takeover without addition.
-        state = state.model_copy(update={"epoch": epoch, "sequence": 0})
-        store = cls(state)
-        store.refresh_from_session(session, initial=True)
-        return store
+        return state.model_copy(update={"epoch": epoch, "sequence": 0})
 
     def refresh_from_session(self, session: Any, *, initial: bool = False) -> FrontendSessionState:
         current = self._state
@@ -568,7 +612,7 @@ class FrontendStateStore:
         jobs = self._jobs(session)
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
-            cost = job_cost(job, default_model_label=_label(selected))
+            cost = _job_subtree_cost(job, default_model_label=_label(selected))
             if cost is not None:
                 child_costs[job.id] = cost
         parent_cost = current.cumulative_parent_cost
@@ -723,7 +767,7 @@ class FrontendStateStore:
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
-            cost = job_cost(job, default_model_label=_label(selected))
+            cost = _job_subtree_cost(job, default_model_label=_label(selected))
             if cost is not None:
                 child_costs[job.id] = cost
         return self.mutate(jobs=jobs, child_costs=child_costs)
@@ -867,16 +911,29 @@ class FrontendStateStore:
         elif kind == "tool_execution_end":
             call_id = str(data.get("tool_call_id") or "")
             live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
-        self._state = self._state.model_copy(update={"live_events": live}, deep=True)
+        # Shallow copy on purpose: this runs per streaming delta on the session
+        # loop, and a deep copy re-clones a 500-event trajectory each token.
+        # ``live`` is freshly built above, and every other field is replaced
+        # (never mutated in place) by ``mutate``/``apply_update``.
+        self._state = self._state.model_copy(update={"live_events": live})
 
     async def checkpoint(self, transcript: Any) -> None:
         state = self.state
         checkpoint_id = uuid.uuid4().hex
         state.checkpoint_id = checkpoint_id
         self.replace(state)
+        # Trajectories are reconstructable from durable child transcripts and
+        # live_events are transient by definition; persisting them appended
+        # ~71 KiB per busy child to the transcript at EVERY turn end.
+        durable = state.model_copy(
+            update={
+                "live_events": [],
+                "jobs": [job.model_copy(update={"trajectory": []}) for job in state.jobs],
+            }
+        )
         await transcript.append_custom(
             FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-            {"checkpoint_id": checkpoint_id, "state": state.model_dump(mode="json")},
+            {"checkpoint_id": checkpoint_id, "state": durable.model_dump(mode="json")},
         )
 
     @staticmethod
@@ -919,6 +976,30 @@ def _slash_capabilities() -> list[SlashCapability]:
     return values
 
 
+def _job_subtree_cost(job: Any, *, default_model_label: str) -> float | None:
+    """Direct plus nested descendant spend for one root job row.
+
+    Mirrors the harness accounting (`jobs.py`): each descendant component is
+    priced at ITS OWN serving identity, never the parent's rate. Any
+    unpriceable component returns ``None`` so the prior figure is retained
+    rather than silently undercounted — the same honesty rule the legacy
+    harvest applied.
+    """
+    direct = job_cost(job, default_model_label=default_model_label)
+    components = list(getattr(job, "descendant_usage", None) or [])
+    if direct is None and not components:
+        return None
+    descendant = 0.0
+    for component in components:
+        provider = getattr(component, "provider", None) or ""
+        model_id = getattr(component, "model_id", None) or ""
+        cost = turn_cost(f"{provider}/{model_id}" if provider else model_id, component)
+        if cost is None:
+            return None
+        descendant += cost
+    return (direct or 0.0) + descendant
+
+
 def _label(spec: Any) -> str:
     if spec is None:
         return ""
@@ -926,10 +1007,22 @@ def _label(spec: Any) -> str:
 
 
 def _json_value(value: Any) -> Any:
+    """Fully JSON-shape a candidate so equality against dumped state is real.
+
+    ``mutate`` decides "changed" by comparing this against the state's
+    ``model_dump(mode="json")``. A list of pydantic models (jobs, capabilities)
+    left as model instances can NEVER equal its dict form, which made change
+    detection constant-true and published a sequence-consuming frame on every
+    no-op refresh — so recurse into containers, not just the top level.
+    """
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
     if hasattr(value, "__dict__"):
         return copy.deepcopy(value.__dict__)
     return copy.deepcopy(value)

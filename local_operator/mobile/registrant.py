@@ -767,8 +767,23 @@ class Registrant:
         try:
             conn.event_queue.put_nowait(frame)
         except asyncio.QueueFull:
-            self._drop_client(conn)
-            return
+            # A full FIFO is not always a slow CLIENT: a provider can hand the
+            # session a whole turn of token deltas in one loop tick, which
+            # overflows any bound before the drain writes a byte. Those frames
+            # are losslessly coalescible (each ``message_update`` carries the
+            # full accumulated message and its append-only ``delta``), so
+            # compact first and drop only a client that stays full — the
+            # genuinely slow reader the bound exists for.
+            compacted = self._compact_event_queue(conn)
+            if compacted:
+                try:
+                    conn.event_queue.put_nowait(frame)
+                    compacted = True
+                except asyncio.QueueFull:
+                    compacted = False
+            if not compacted:
+                self._drop_client(conn)
+                return
         if conn.event_writer_task is None:
             task = asyncio.create_task(self._drain_event_queue(conn))
             conn.event_writer_task = task
@@ -818,6 +833,47 @@ class Registrant:
             # callbacks are scheduled in session order, so a follower cannot
             # observe transcript animation ahead of the state edge that caused it.
             self._enqueue_client_frame(conn, frame)
+
+    def _compact_event_queue(self, conn: _ClientConn) -> bool:
+        """Merge runs of same-message ``message_update`` frames in place.
+
+        Lossless by construction: the later event's ``message`` already
+        contains the earlier one's text, and concatenating ``delta`` preserves
+        the append contract UIs rely on. Returns whether any room was freed.
+        Runs synchronously on the registrant loop, so the drain task cannot
+        observe a half-compacted queue.
+        """
+        frames: list[dict[str, Any]] = []
+        while True:
+            try:
+                frames.append(conn.event_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+            conn.event_queue.task_done()
+        compacted: list[dict[str, Any]] = []
+        for frame in frames:
+            previous = compacted[-1] if compacted else None
+            if (
+                previous is not None
+                and frame.get("op") == "event"
+                and previous.get("op") == "event"
+            ):
+                data = frame.get("data") or {}
+                prior = previous.get("data") or {}
+                if (
+                    data.get("type") == "message_update"
+                    and prior.get("type") == "message_update"
+                    and (data.get("message") or {}).get("id")
+                    == (prior.get("message") or {}).get("id")
+                ):
+                    merged = dict(data)
+                    merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
+                    compacted[-1] = {"op": "event", "data": merged}
+                    continue
+            compacted.append(frame)
+        for frame in compacted:
+            conn.event_queue.put_nowait(frame)
+        return len(compacted) < len(frames)
 
     async def _drain_event_queue(self, conn: _ClientConn) -> None:
         """Drain one follower's raw event FIFO until it is dropped."""

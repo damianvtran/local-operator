@@ -121,3 +121,221 @@ async def test_wrong_key_wrong_session_and_old_protocol_are_rejected(
             await RemoteSession.connect(old, "s1", config_dir=tmp_path, takeover_factory=_never)
     finally:
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_headless_turn_preserves_a_rich_frontend_checkpoint(tmp_path: Path) -> None:
+    """N1: a scheduler/owned turn must never lower the TUI's durable state.
+
+    The headless store starts from the durable checkpoint (never bare), and a
+    headless session with no attach subscriber skips the turn-end checkpoint
+    entirely — so the richest persisted spend/duration/title survives for the
+    next TUI resume/takeover instead of being clobbered by a bare snapshot.
+    """
+    from local_operator.harness.types import (
+        Message,
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        TextContent,
+    )
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    await transcript.append_message(
+        Message(role="assistant", content=[TextContent(text="prior")], stop_reason="stop")
+    )
+    rich = FrontendSessionState(
+        session_id="conv",
+        epoch="tui-epoch",
+        conversation_title="Real title",
+        conversation_title_user_set=True,
+        cumulative_parent_cost=12.34,
+        active_duration_s=300.0,
+    )
+    await FrontendStateStore(rich).checkpoint(transcript)
+
+    class _Stream:
+        def __call__(self, request, signal=None):  # noqa: ANN001
+            async def gen():
+                yield StreamTextDelta(delta="ok")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=100_000),
+        stream_fn=_Stream(),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["system"],
+        has_ui=False,
+    )
+    try:
+        # The headless store itself restored the rich durable state.
+        assert session.frontend_state.cumulative_parent_cost == 12.34
+        assert session.frontend_state.conversation_title == "Real title"
+        await session.prompt("do the scheduled thing")
+    finally:
+        await session.dispose()
+
+    restored = Transcript(directory).latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    assert isinstance(restored, dict)
+    state = FrontendSessionState.model_validate(restored["state"])
+    assert state.cumulative_parent_cost == 12.34
+    assert state.active_duration_s == 300.0
+    assert state.conversation_title == "Real title"
+
+
+@pytest.mark.asyncio
+async def test_real_session_streams_through_registrant_to_two_followers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Flagship realism: real Session → real Registrant → two socket followers.
+
+    The canonical seed/updates come from the SESSION's own store (not a test
+    double), the turn is a real streamed prompt, and both followers must end
+    at identical state with a bounded sequence count — sustained streaming may
+    not consume a sequence per token (N4) nor grow follower job state without
+    bound (N2).
+    """
+    from local_operator.harness.types import (
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        Usage,
+    )
+    from local_operator.mobile.registrant import SessionHandle
+    from local_operator.mobile.types import SessionProjection
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    class _Stream:
+        def __call__(self, request, signal=None):  # noqa: ANN001
+            async def gen():
+                for index in range(120):
+                    yield StreamTextDelta(delta=f"tok{index} ")
+                yield StreamEndEvent(
+                    stop_reason="stop",
+                    usage=Usage(input_tokens=1_000, output_tokens=120, context_tokens=2_000),
+                )
+
+            return gen()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=1_000_000),
+        stream_fn=_Stream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sessions" / "conv"),
+        system_blocks_provider=lambda: ["system"],
+        has_ui=True,
+        session_id="conv",
+    )
+
+    class _RealSessionHandle(SessionHandle):
+        """Production contract implemented directly over the real Session."""
+
+        @property
+        def session_projection_seed(self) -> SessionProjection:
+            return SessionProjection(
+                session_id=session.session_id,
+                pid=0,
+                kind="tui",
+                conversation_name="real",
+                cwd=str(tmp_path),
+                model_label="test/m",
+            )
+
+        def subscribe(self, on_projection):  # noqa: ANN001, ANN202
+            return lambda: None
+
+        @property
+        def frontend_state_seed(self):  # noqa: ANN202
+            return session.frontend_state
+
+        def subscribe_frontend(self, on_update):  # noqa: ANN001, ANN202
+            return session.subscribe_frontend(on_update)
+
+        def subscribe_events(self, on_event):  # noqa: ANN001, ANN202
+            return session.subscribe(lambda event: on_event(event.model_dump(mode="json")))
+
+        async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
+            await session.prompt(text)
+            return "ok"
+
+        async def steer(self, text, images=None):  # noqa: ANN001, ANN202
+            return "ok"
+
+        async def abort(self):  # noqa: ANN202
+            return "ok"
+
+        async def set_model(self, provider, model_id):  # noqa: ANN001, ANN202
+            return "ok"
+
+        async def set_effort(self, effort):  # noqa: ANN001, ANN202
+            return "ok"
+
+        async def slash(self, command, args):  # noqa: ANN001, ANN202
+            return "ok"
+
+        async def new_conversation(self):  # noqa: ANN202
+            return "ok"
+
+        async def resume_session(self, session_id):  # noqa: ANN001, ANN202
+            return "ok"
+
+        async def approval_answer(self, request_id, approved, remember):  # noqa: ANN001, ANN202
+            return "ok"
+
+        async def ask_answer(self, request_id, value, question_index=None):  # noqa: ANN001, ANN202
+            return "ok"
+
+        async def refresh(self) -> None:
+            return None
+
+    registrant = Registrant(_RealSessionHandle(), kind="tui")
+    registrant.start()
+    first = second = None
+    try:
+        record = await _record(tmp_path)
+        first, second = await asyncio.gather(
+            RemoteSession.connect(record, "conv", config_dir=tmp_path, takeover_factory=_never),
+            RemoteSession.connect(record, "conv", config_dir=tmp_path, takeover_factory=_never),
+        )
+        events: list[str] = []
+        first.subscribe(lambda event: events.append(event.type))
+
+        await session.prompt("stream a real turn")
+
+        for _ in range(200):
+            if (
+                not first.frontend_state.streaming
+                and not second.frontend_state.streaming
+                and first.frontend_state.sequence == second.frontend_state.sequence
+                and first.frontend_state.sequence > 0
+                and "agent_end" in events
+            ):
+                break
+            await asyncio.sleep(0.02)
+        assert "agent_end" in events, "raw event stream did not deliver the turn"
+        assert first.frontend_state == second.frontend_state
+        assert first.frontend_state.context_tokens == 2_000
+        # 120 token deltas must not consume 120 sequences: canonical state moves
+        # on turn edges/summaries, never per token.
+        assert first.frontend_state.sequence < 20
+    finally:
+        if first is not None:
+            await first.dispose()
+        if second is not None:
+            await second.dispose()
+        registrant.close()
+        await session.dispose()

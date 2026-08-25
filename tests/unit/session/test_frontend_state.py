@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -211,3 +212,148 @@ def test_real_async_job_roundtrips_progress_trajectory_and_accounting() -> None:
     assert restored.usage is not None and restored.usage.usd_cost == 0.25
     snapshot = SnapshotJobs([restored]).get("child-1")
     assert snapshot is not None and snapshot.trajectory == job.trajectory
+
+
+def test_two_subscribers_never_hold_different_state_at_one_sequence() -> None:
+    """N3: a second join must not silently rewrite state under the same number.
+
+    The old join path replaced state via ``initial=True`` without a sequence
+    bump, so subscriber 1 held ``seq N / team-x`` while subscriber 2 received
+    ``seq N / team-y`` — the exact divergence the client's exact-`+1` gap
+    check exists to rule out.
+    """
+    store = FrontendStateStore(_state(active_team="team-x"))
+    first_updates: list[FrontendUpdate] = []
+    first = store.subscribe(first_updates.append)
+
+    # The publishing path (what subscribe_frontend now uses) consumes a
+    # sequence and notifies the existing subscriber before the second join.
+    update = store.mutate(active_team="team-y")
+    assert update is not None and update.sequence == first.sync.sequence + 1
+    assert [u.sequence for u in first_updates] == [update.sequence]
+
+    second = store.subscribe(lambda _u: None)
+    assert second.sync.sequence == update.sequence
+    assert second.sync.snapshot.active_team == "team-y"
+
+
+def test_noop_refresh_consumes_no_sequence_for_model_list_fields() -> None:
+    """N4: identical jobs/capabilities must not publish a frame each refresh."""
+    jobs = [
+        JobState(id="j1", type="task", trajectory=[{"type": "e", "n": index} for index in range(4)])
+    ]
+    store = FrontendStateStore(_state())
+    first = store.mutate(jobs=jobs)
+    assert first is not None
+    again = store.mutate(jobs=[job.model_copy(deep=True) for job in jobs])
+    assert again is None, "unchanged list-of-model fields consumed a sequence"
+
+
+def test_rotated_trajectory_ships_replacement_and_follower_stays_bounded() -> None:
+    """N2: past TRAJECTORY_CAP the delta is a replacement, never endless appends."""
+    from local_operator.harness.subagent import TRAJECTORY_CAP
+
+    owner = FrontendStateStore(_state(jobs=[]))
+    follower = FrontendStateStore(_state(jobs=[]))
+    seed = owner.mutate(
+        jobs=[
+            JobState(
+                id="child",
+                type="task",
+                trajectory=[{"type": "e", "n": index} for index in range(TRAJECTORY_CAP)],
+            )
+        ]
+    )
+    assert seed is not None
+    follower.apply_update(seed)
+    for round_no in range(1, 4):
+        rotated = [{"type": "e", "n": index + round_no} for index in range(TRAJECTORY_CAP)]
+        update = owner.mutate(jobs=[JobState(id="child", type="task", trajectory=rotated)])
+        assert update is not None
+        assert update.job_trajectory_replacements == ["child"]
+        follower.apply_update(update)
+        assert len(follower.state.jobs[0].trajectory) == TRAJECTORY_CAP
+        assert follower.state.jobs[0].trajectory == rotated
+
+
+def test_child_costs_price_descendant_usage_like_the_owner() -> None:
+    """N5: nested (#297) spend reaches canonical child_costs at descendant rates."""
+    job = AsyncJob(
+        id="root",
+        type="task",
+        label="manager",
+        start_time=1.0,
+        model_label="anthropic/sonnet",
+        usage=Usage(input_tokens=1_000_000),
+        descendant_usage=[Usage(input_tokens=1_000_000, provider="anthropic", model_id="sonnet")],
+    )
+    manager = SimpleNamespace(list=lambda: [job])
+    session = SimpleNamespace(
+        jobs=manager,
+        model=_spec(),
+        session_id="s1",
+        queued_steering=lambda: [],
+    )
+    dto = JobState.from_job(job)
+    assert [component.model_id for component in dto.descendant_usage] == ["sonnet"]
+
+    from unittest.mock import patch
+
+    from local_operator.model.registry import ModelInfo
+
+    priced = ModelInfo(id="sonnet", name="sonnet", description="", input_price=10.0)
+    with patch(
+        "local_operator.model.configure.resolve_model_info",
+        side_effect=lambda provider, model_id: priced,
+    ):
+        store = FrontendStateStore(_state(jobs=[], child_costs={}))
+        update = store.refresh_jobs(session)
+    assert update is not None
+    # $10/MTok on 1M direct + 1M descendant tokens: the whole subtree, not half.
+    assert store.state.child_costs["root"] == pytest.approx(20.0)
+
+    # Follower re-pricing from the wire DTO reaches the same figure.
+    remote_manager = SimpleNamespace(list=lambda: [JobState.model_validate(dto.model_dump())])
+    with patch(
+        "local_operator.model.configure.resolve_model_info",
+        side_effect=lambda provider, model_id: priced,
+    ):
+        remote_store = FrontendStateStore(_state(jobs=[], child_costs={}))
+        remote_store.refresh_jobs(
+            SimpleNamespace(
+                jobs=remote_manager, model=_spec(), session_id="s1", queued_steering=lambda: []
+            )
+        )
+    assert remote_store.state.child_costs["root"] == pytest.approx(20.0)
+
+
+def test_checkpoint_strips_trajectories_and_live_events() -> None:
+    """n2: durable checkpoints must not carry ~71 KiB of reconstructable events."""
+    import asyncio
+
+    state = _state(
+        jobs=[
+            JobState(
+                id="busy",
+                type="task",
+                trajectory=[{"type": "e", "n": index} for index in range(50)],
+            )
+        ],
+        live_events=[{"type": "message_update"}],
+    )
+    store = FrontendStateStore(state)
+
+    class _Transcript:
+        def __init__(self) -> None:
+            self.appended: list[tuple[str, dict[str, Any]]] = []
+
+        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+            self.appended.append((custom_type, payload))
+
+    transcript = _Transcript()
+    asyncio.run(store.checkpoint(transcript))
+    ((_, payload),) = transcript.appended
+    assert payload["state"]["live_events"] == []
+    assert payload["state"]["jobs"][0]["trajectory"] == []
+    # The in-memory state a live follower reads keeps its trajectory.
+    assert len(store.state.jobs[0].trajectory) == 50

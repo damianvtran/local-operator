@@ -8023,9 +8023,13 @@ class OperatorApp(App[None]):
         # where the counts do not: a single child working for two minutes holds
         # `agents` at 1 the whole time while its bill climbs, so gating the
         # harvest on a count change would freeze the parent's total for exactly
-        # as long as the child was busy.
+        # as long as the child was busy. On a canonical-state session the store
+        # is the one writer (its 50 ms jobs coalesce covers the same window);
+        # harvesting here too made the band alternate between two ledgers
+        # whenever they disagreed (e.g. before descendant_usage reached DTOs).
         before = self._spend_total()
-        self._harvest_subagent_costs()
+        if not _canonical_frontend(self._session):
+            self._harvest_subagent_costs()
         total = self._spend_total()
         if (agents, jobs) != self._subagents_shown or total != before:
             self._subagents_shown = (agents, jobs)
@@ -9034,12 +9038,10 @@ class OperatorApp(App[None]):
         arg = parts[1].strip() if len(parts) > 1 else ""
         notice = self._notice
 
-        # A RemoteSession keeps process/terminal commands local, but commands
-        # that mutate the SHARED conversation run on the owner. These three
-        # normally inspect local-only registries/loop state before touching the
-        # session, so they need the explicit routing seam here. /model, /effort,
-        # /goal, /rename and /compact already route through SessionProtocol's
-        # ordinary mutation methods and stay on their existing full UI paths.
+        # A RemoteSession keeps process/terminal commands local, but every
+        # command the owner advertises as ``authoritative_session`` in its
+        # capability list runs on the owner through the routing seam below —
+        # the owner's capability scope, not a hardcoded command list, decides.
         remote_route = getattr(self._session, "route_shared_slash", None)
         remote_capabilities = {
             f"/{cap.command}": cap
