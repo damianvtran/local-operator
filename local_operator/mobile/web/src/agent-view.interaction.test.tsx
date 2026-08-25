@@ -229,9 +229,12 @@ describe("AgentConversation", () => {
 		expect(vi.mocked(api.sendCommand).mock.calls[1]?.[1]).toEqual(
 			vi.mocked(api.sendCommand).mock.calls[0]?.[1],
 		);
-		expect(screen.getByRole("alert").textContent).toBe(
-			"Earlier instruction delivered. Your edited draft is ready to send.",
-		);
+		/* D11: the delivered acknowledgement is a success notice, not the danger
+		   alert — there is no alert once recovery succeeds. */
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(
+			screen.getByText("Earlier instruction delivered. Your edited draft is ready to send."),
+		).toBeTruthy();
 		expect(composer.value).toBe("Edited draft");
 
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));
@@ -283,9 +286,10 @@ describe("AgentConversation", () => {
 		expect(vi.mocked(api.sendCommand).mock.calls[1]?.[1]).toEqual(
 			vi.mocked(api.sendCommand).mock.calls[0]?.[1],
 		);
-		expect(screen.getByRole("alert").textContent).toBe(
-			"Earlier instruction delivered. Your edited draft is ready to send.",
-		);
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(
+			screen.getByText("Earlier instruction delivered. Your edited draft is ready to send."),
+		).toBeTruthy();
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));
 		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(3));
 		expect(vi.mocked(api.sendCommand).mock.calls[2]?.[1]).toMatchObject({

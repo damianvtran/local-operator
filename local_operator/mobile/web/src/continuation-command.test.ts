@@ -1,11 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCommand } from "./api";
-import {
-	clearPendingContinuationsExcept,
-	getPendingContinuation,
-	submitContinuation,
-} from "./continuation-command";
+import { getPendingContinuation, submitContinuation } from "./continuation-command";
 
 vi.mock("./api", () => ({ sendCommand: vi.fn() }));
 
@@ -88,11 +84,8 @@ describe("submitContinuation", () => {
 		const stored = JSON.parse(raw) as { saved_at: number };
 		stored.saved_at = Date.now() - 25 * 60 * 60 * 1000;
 		localStorage.setItem("lo-mobile-command:root", JSON.stringify(stored));
+		/* TTL expiry (24h) is a definitive clear — read-time revalidation drops it. */
 		expect(getPendingContinuation("root")).toBeNull();
-
-		localStorage.setItem("lo-mobile-command:other", raw);
-		clearPendingContinuationsExcept("root");
-		expect(localStorage.getItem("lo-mobile-command:other")).toBeNull();
 	});
 
 	it("retires a definitively rejected UUID instead of replaying it", async () => {
@@ -103,5 +96,62 @@ describe("submitContinuation", () => {
 			"invalid command",
 		);
 		expect(getPendingContinuation("root")).toBeNull();
+	});
+
+	it.each([408, 502, 504])(
+		"keeps the envelope on ambiguous acknowledgement-loss status %i",
+		async (status) => {
+			/* 408/502/504 can arrive AFTER the daemon admitted the UUID, so the
+			   envelope must survive for a same-UUID retry rather than being retired
+			   like a definitive rejection (R9-F2). */
+			mockedSendCommand.mockRejectedValueOnce(
+				Object.assign(new Error("acknowledgement lost"), { status }),
+			);
+			await expect(
+				submitContinuation("root", "steer", "Ambiguous instruction"),
+			).rejects.toThrow("acknowledgement lost");
+			expect(getPendingContinuation("root")).toMatchObject({
+				op: "steer",
+				text: "Ambiguous instruction",
+			});
+
+			/* The retry replays the ORIGINAL UUID/body, so an already-admitted
+			   instruction is de-duplicated instead of sent twice. */
+			mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+			const retry = await submitContinuation("root", "steer", "Ambiguous instruction");
+			expect(retry.envelope).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+			expect(getPendingContinuation("root")).toBeNull();
+		},
+	);
+
+	it("scopes envelopes per session and evicts the oldest past the bound", async () => {
+		/* Navigating between my own conversations must never drop another route's
+		   uncertain envelope (U1): each session key is independent. Storage is
+		   bounded by count, evicting the OLDEST, not the route just written. */
+		let clock = 1_000;
+		const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+		try {
+			mockedSendCommand.mockRejectedValue(new Error("response lost"));
+			for (let index = 0; index < 8; index++) {
+				clock += 1_000;
+				await expect(
+					submitContinuation(`session-${index}`, "prompt", `Instruction ${index}`),
+				).rejects.toThrow("response lost");
+			}
+			/* All eight distinct sessions retain their own envelope. */
+			for (let index = 0; index < 8; index++) {
+				expect(getPendingContinuation(`session-${index}`)).not.toBeNull();
+			}
+			/* A ninth distinct session evicts the OLDEST (session-0), never itself. */
+			clock += 1_000;
+			await expect(
+				submitContinuation("session-8", "prompt", "Instruction 8"),
+			).rejects.toThrow("response lost");
+			expect(getPendingContinuation("session-0")).toBeNull();
+			expect(getPendingContinuation("session-8")).not.toBeNull();
+			expect(getPendingContinuation("session-1")).not.toBeNull();
+		} finally {
+			now.mockRestore();
+		}
 	});
 });

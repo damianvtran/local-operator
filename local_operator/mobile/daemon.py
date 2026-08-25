@@ -732,6 +732,14 @@ class MobileDaemon:
             # authoritative even when its ProjectionFold counter starts lower.
             generation_changed = True
 
+        # A durable fold carries no process identity (``record is None``). It is a
+        # reconstruction of the session from disk, never a live registrant frame,
+        # so it can never reopen or advance a generation — it only republishes the
+        # retained epoch the browser already observed. This is the seam the whole
+        # lifecycle contract turns on: an evicted payload on a still-owned route
+        # must rematerialize here, while a genuine late predecessor frame (which
+        # DOES carry its identity) stays fenced below.
+        durable_rematerialize = False
         if state is not None and not generation_changed:
             stale = (
                 (state.terminal and not terminal)
@@ -739,15 +747,31 @@ class MobileDaemon:
                 or (not terminal and projection.version < state.local_version)
             )
             if stale:
-                if previous_projection is None:
+                if previous_projection is not None:
+                    self.session_projections.pop(session_id)
+                    self.session_projections[session_id] = previous_projection
+                    return previous_projection
+                if identity is None:
+                    # Payload cache pressure evicted this route's only payload
+                    # while its generation ledger survived (a live/subscribed or
+                    # durably reconstructable route keeps it). Rebuild the payload
+                    # at the retained epoch instead of fencing detail/history/SSE
+                    # reconstruction to an HTTP 500. Only a truly-gone session —
+                    # whose ledger was already pruned — reaches ``state is None``.
+                    durable_rematerialize = True
+                else:
+                    # A predecessor socket frame whose payload is gone: it must
+                    # not become publishable, so its caller drops the fenced frame.
                     raise _StaleProjection
-                self.session_projections.pop(session_id)
-                self.session_projections[session_id] = previous_projection
-                return previous_projection
 
         if state is None:
             epoch = projection.version
             offset = 0
+        elif durable_rematerialize:
+            # Republish at exactly the observed epoch; the generation ledger is
+            # left intact so a subsequent live owner frame still advances it.
+            epoch = state.epoch
+            offset = state.offset
         elif generation_changed or terminal:
             epoch = max(state.epoch + 1, projection.version)
             offset = epoch - projection.version
@@ -761,16 +785,22 @@ class MobileDaemon:
             # fence avoids turning a frequently resumed route into an append-only
             # process history while still covering every plausible late frame.
             retired = (*retired, state.identity)[-8:]
+        # A durable rematerialization only rebuilds the evicted payload; it must
+        # leave the ledger's fencing fields exactly as the last live owner set
+        # them. Writing the low durable version into ``local_version`` (or
+        # clearing ``terminal``) would open a window for a genuine late old frame.
         self._projection_generations[session_id] = _ProjectionGeneration(
             identity=identity if identity is not None else (state.identity if state else None),
             started_at=(
                 started_at if started_at is not None else (state.started_at if state else None)
             ),
             retired=retired,
-            local_version=projection.version,
+            local_version=(
+                state.local_version if durable_rematerialize and state else projection.version
+            ),
             offset=offset,
             epoch=epoch,
-            terminal=terminal,
+            terminal=(state.terminal if durable_rematerialize and state else terminal),
         )
         # Root transcript and todo state are immutable during this call; copying
         # only descendant rows avoids duplicating the whole repaint per token.
@@ -1247,7 +1277,14 @@ def build_app(daemon: MobileDaemon):
                 if projection is None:
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        projection = daemon.capture_subagent_details(projection)
+                        try:
+                            projection = daemon.capture_subagent_details(projection)
+                        except _StaleProjection:
+                            # A subscribed but payload-less route whose owner is
+                            # mid-replacement: skip the seed frame rather than
+                            # tearing down the handshake. The next live repaint or
+                            # keepalive carries the view.
+                            projection = None
                 if projection is not None:
                     yield _sse("projection", projection.to_json())
                 while True:
@@ -1315,7 +1352,13 @@ def build_app(daemon: MobileDaemon):
         if detail is None:
             projection = await asyncio.to_thread(_durable_projection, session_id)
             if projection is not None:
-                daemon.capture_subagent_details(projection)
+                try:
+                    daemon.capture_subagent_details(projection)
+                except _StaleProjection:
+                    # Reconstruction races a live owner replacement: the fence is
+                    # correct, but a still-durable route must not 500. The next
+                    # request rebuilds once the ledger settles.
+                    pass
                 detail = daemon.subagent_details.get((session_id, job_id))
         if detail is None:
             return JSONResponse({"error": "unknown subagent"}, status_code=404)
@@ -1337,7 +1380,12 @@ def build_app(daemon: MobileDaemon):
         if detail is None:
             projection = await asyncio.to_thread(_durable_projection, session_id)
             if projection is not None:
-                daemon.capture_subagent_details(projection)
+                try:
+                    daemon.capture_subagent_details(projection)
+                except _StaleProjection:
+                    # See api_subagent_detail: a fenced reconstruction is not an
+                    # error; fall through to the durable 404 rather than a 500.
+                    pass
                 detail = daemon.subagent_details.get((session_id, job_id))
         child_session_id = detail.get("session_id") if detail else None
         if not isinstance(child_session_id, str) or not child_session_id:
@@ -1490,9 +1538,16 @@ def build_app(daemon: MobileDaemon):
                 if projection is not None:
                     projection.ended = False
                     projection.degraded = False
-                    projection = daemon.capture_subagent_details(projection)
-                    for target in daemon.table.session_subscribers.get(session_id, set()):
-                        target.put_nowait(projection.to_json())
+                    try:
+                        projection = daemon.capture_subagent_details(projection)
+                    except _StaleProjection:
+                        # The optimistic wake repaint is a courtesy; a fenced
+                        # reconstruction just means the live owner's frame wins.
+                        # The wake itself proceeds regardless.
+                        projection = None
+                    if projection is not None:
+                        for target in daemon.table.session_subscribers.get(session_id, set()):
+                            target.put_nowait(projection.to_json())
                 try:
                     client, detail = await continue_command(config_dir(), command)
                 except BaseException:
@@ -1991,6 +2046,33 @@ _LOGIN_HTML = """<!doctype html>
   </div>
   <button type="submit">sign in</button>
 </form>
+<script>
+  /* U2: clear private authenticated state (uncertain command envelopes and
+     drafts) whenever the unauthenticated login screen is shown. This is the
+     one reachable, WebKit-safe cleanup path: logout, an expired cookie, and a
+     401-driven reload ALL land here, and this runs in the page's own engine
+     rather than depending on the `Clear-Site-Data` response header, which
+     WebKit (the iOS phone target) may ignore. It deliberately does NOT touch
+     theme or other non-private preferences — only the two private prefixes,
+     kept in sync with web/src/private-storage.ts. */
+  (function () {
+    try {
+      var prefixes = ["lo-mobile-command:", "lo-mobile-draft:"];
+      for (var i = localStorage.length - 1; i >= 0; i--) {
+        var key = localStorage.key(i);
+        if (!key) continue;
+        for (var p = 0; p < prefixes.length; p++) {
+          if (key.indexOf(prefixes[p]) === 0) {
+            localStorage.removeItem(key);
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      /* Private mode or a storage-disabled engine has nothing to clear. */
+    }
+  })();
+</script>
 </body>
 </html>
 """

@@ -170,6 +170,44 @@ Screens, following branding.md §7's agent-output hierarchy:
   an oversight: racing two front ends over one modal is worse than a clear
   owner.
 
+## Retry-envelope & generation-ledger lifecycle (one contract)
+
+The full-screen subagent feature adds two pieces of durable lifecycle state that
+share a single authoritative contract; every keep/clear/reconstruct decision
+resolves to it, and a second ad-hoc rule beside it is a defect.
+
+**The persisted retry envelope** (`lo-mobile-command:<sessionId>` in the phone's
+`localStorage`) is the exact bytes of an instruction whose delivery outcome is
+*unknown*. Its UUID is the identity of that body, so a retry replays the same
+UUID and the daemon de-duplicates an already-admitted instruction instead of
+running it twice. The rule (source of truth: `web/src/continuation-command.ts`):
+
+- **Keep** across anything that leaves the outcome ambiguous — transport failure,
+  HTTP **502/504/408** (acknowledgement loss *after* the daemon drained the owner
+  frame, not rejection), page reload, SSE reconnect, and navigating between the
+  owner's own conversations. Envelopes are scoped **per session** and bounded by
+  **count** (oldest evicted, never the active route), so an ordinary conversation
+  switch never silently drops the recovery affordance.
+- **Clear** only on a definitive end of *this UUID's* ambiguity or of its privacy
+  scope: definitive acknowledgement, a pre-admission rejection status (any 4xx/5xx
+  except 408/502/504), TTL expiry (24h), explicit discard, and logout / identity
+  change / 401. Logout clears **all** scoped storage; the WebKit-safe path is the
+  server-rendered login page's own inline clear script plus the api.ts 401 handler
+  — it does not depend on the `Clear-Site-Data` header WebKit may ignore.
+
+**The generation/epoch ledger** (`MobileDaemon._projection_generations`) orders a
+session's projection epochs monotonically across process replacements, and is
+deliberately *not* part of the bounded payload cache: a live/subscribed or durably
+reconstructable route can outlive cache pressure that evicts its payload. When a
+terminal or superseded route's payload is evicted while its ledger survives, a
+**durable disk fold carries no process identity** and therefore re-materializes
+the evicted payload at the retained epoch (never reopening the generation), so
+detail/history/SSE reconstruction succeeds instead of fencing to HTTP 500. A
+genuine late frame from an *old* process still carries its identity and stays
+fenced. Only a truly-gone session — whose ledger was already pruned with its
+payload unit — fences. See `capture_subagent_details` and the reconstruction
+endpoints in `daemon.py`.
+
 ## Non-goals (v1)
 
 - Push notifications (the `needs attention` badge and deep links anticipate

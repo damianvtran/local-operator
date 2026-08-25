@@ -197,6 +197,23 @@ def test_http_gate_and_login_flow() -> None:
     assert "lop_mobile=" in logout.headers["set-cookie"]
 
 
+def test_login_page_clears_private_storage_without_relying_on_header() -> None:
+    """U2: the WebKit-safe cleanup path. Every logout/401/expiry lands on the
+    server-rendered login page, whose inline script clears the private storage
+    prefixes in the page's own engine — so cleanup does not depend on the
+    ``Clear-Site-Data`` header that WebKit may ignore."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    body = client.get("/login").text
+    # The script must remove exactly the two private prefixes and nothing else
+    # (theme and other preferences survive), matching web/src/private-storage.ts.
+    assert "localStorage.removeItem(key)" in body
+    assert '"lo-mobile-command:"' in body
+    assert '"lo-mobile-draft:"' in body
+    # It must not blanket-clear storage, which would wipe non-private prefs.
+    assert "localStorage.clear()" not in body
+
+
 def test_subagent_summary_detail_and_child_history_are_isolated(tmp_path, monkeypatch) -> None:
     """Root repaints stay light while the selected child pages its own file."""
     from local_operator.harness.types import Message
@@ -502,6 +519,117 @@ def test_live_generation_epoch_survives_payload_eviction_pressure() -> None:
     daemon.table.entries[new_record.pid].ended = True
     daemon._prune_projection_generation("root-session")
     assert "root-session" not in daemon._projection_generations
+
+
+def test_evicted_payload_reconstructs_under_epoch_while_late_old_frame_stays_fenced(
+    tmp_path, monkeypatch
+) -> None:
+    """The lifecycle contract's hardest case, end to end.
+
+    A high daemon epoch is superseded by a low-version replacement owner; the
+    only route payload is then evicted under cache pressure while a live SSE
+    subscriber keeps the generation ledger alive. Detail and history must still
+    reconstruct from durable disk (re-admitted at the retained monotonic epoch,
+    NOT fenced to HTTP 500), and a genuine late frame from the OLD process must
+    still be fenced. This is the single documented reconciliation the R9 pass
+    replaced case-by-case eviction patches with.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.mobile.daemon import MAX_RETAINED_SESSION_PROJECTIONS
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    (child_dir / "origin.json").write_text('{"origin":"subagent"}')
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(Transcript(child_dir).append_message(Message.assistant("reply", id="child-row")))
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "completed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "prompt": "durable prompt",
+                        "session_dir": str(child_dir),
+                        "outcome": "completed",
+                        "result_text": "done",
+                    }
+                ],
+            },
+        )
+    )
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="root",
+        cwd="/tmp",
+        model_label="old",
+        control_port=4101,
+        control_key="old-key",
+        started_at=10.0,
+    )
+    new_record = SessionRecord(
+        pid=102,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="root",
+        cwd="/tmp",
+        model_label="new",
+        control_port=4102,
+        control_key="new-key",
+        started_at=20.0,
+    )
+    # A live SSE subscriber is the route owner that intentionally keeps the
+    # generation ledger alive past payload eviction (the F1 scenario).
+    daemon.table.session_subscribers["root-session"] = {asyncio.Queue()}
+
+    # High epoch, then a low-version replacement owner supersedes it.
+    high = SessionProjection(session_id="root-session", pid=101, version=50)
+    assert daemon.capture_subagent_details(high, record=old_record).version == 50
+    replacement = SessionProjection(session_id="root-session", pid=102, version=1)
+    assert daemon.capture_subagent_details(replacement, record=new_record).version == 51
+
+    # Evict the route payload under pressure; the subscriber keeps the ledger.
+    for index in range(MAX_RETAINED_SESSION_PROJECTIONS):
+        daemon.capture_subagent_details(
+            SessionProjection(session_id=f"pressure-{index:03d}", pid=200 + index, version=1)
+        )
+    assert "root-session" not in daemon.session_projections
+    assert daemon._projection_generations["root-session"].epoch == 51
+
+    # Durable detail/history now rebuild instead of fencing to a 500, and the
+    # rematerialized payload carries the retained monotonic epoch.
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    detail = client.get("/api/sessions/root-session/agents/child-job")
+    assert detail.status_code == 200
+    assert detail.json()["prompt"] == "durable prompt"
+    assert detail.json()["version"] == 51
+    history = client.get(
+        "/api/sessions/root-session/agents/child-job/history", params={"limit": 10}
+    )
+    assert history.status_code == 200
+    assert [row["id"] for row in history.json()["entries"]] == ["child-row"]
+
+    # A genuine late frame from the OLD process is still fenced: reconstruction
+    # rebuilt the payload but never reopened the superseded generation.
+    late_old = SessionProjection(session_id="root-session", pid=101, version=999)
+    assert (
+        daemon.capture_subagent_details(late_old, record=old_record)
+        is daemon.session_projections["root-session"]
+    )
+    assert daemon.session_projections["root-session"].version == 51
 
 
 def test_subagent_detail_merge_accepts_lifecycle_updates_and_terminal_clearing() -> None:
