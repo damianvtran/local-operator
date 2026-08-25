@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -23,9 +24,12 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
+    Usage,
 )
+from local_operator.model.registry import ModelInfo
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome, SessionProtocol
+from local_operator.tui.costs import turn_cost
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
@@ -302,6 +306,31 @@ def test_unstamped_agent_end_tears_down() -> None:
     assert isinstance(app.posted[-1], TurnEnded)
 
 
+def test_agent_end_preserves_mixed_receipt_and_estimate_calls() -> None:
+    """One provider receipt must not suppress another call's table estimate."""
+    _controller_instance, session, app = _controller()
+    messages: list[Any] = [
+        Message.assistant(
+            usage=Usage(
+                input_tokens=1_000_000,
+                usd_cost=0.001,
+                provider="openrouter",
+                model_id="routed",
+            )
+        ),
+        Message.assistant(usage=Usage(input_tokens=1_000_000, provider="test", model_id="model")),
+    ]
+    session.emit(AgentEndEvent(messages=messages))
+
+    ended = app.posted[-1]
+    assert isinstance(ended, TurnEnded)
+    assert ended.usage.usd_cost is None
+    assert len(ended.usage.cost_components) == 2
+    priced = ModelInfo(id="model", name="model", description="", input_price=20.0)
+    with patch("local_operator.model.configure.resolve_model_info", return_value=priced):
+        assert turn_cost(session.model_label, ended.usage) == pytest.approx(20.001)
+
+
 def test_orphaned_tool_end_buffered_until_start() -> None:
     controller, session, app = _controller()
     session.emit(AgentStartEvent())
@@ -414,10 +443,8 @@ def test_dispose_stops_flush_timer() -> None:
     assert app.timers[0].stopped
 
 
-def test_agent_end_sums_provider_reported_dollars_across_messages() -> None:
-    """A tool-using turn is many billed calls; the provider-reported dollar on
-    EACH message must be summed into the turn's aggregate, not overwritten by the
-    last one (the same rule the token buckets already follow)."""
+def test_agent_end_preserves_provider_reported_dollars_across_messages() -> None:
+    """A tool-using turn retains each receipt without creating a partial total."""
     from local_operator.harness.types import Usage
 
     controller, session, app = _controller()
@@ -428,15 +455,15 @@ def test_agent_end_sums_provider_reported_dollars_across_messages() -> None:
     second.usage = Usage(input_tokens=20, output_tokens=0, usd_cost=0.002)
     session.emit(AgentEndEvent(messages=[first, second]))
     ended = [m for m in app.posted if isinstance(m, TurnEnded)]
-    assert ended and ended[-1].usage.usd_cost == pytest.approx(0.003)
+    assert ended and ended[-1].usage.usd_cost is None
+    assert [component.usd_cost for component in ended[-1].usage.cost_components] == [
+        0.001,
+        0.002,
+    ]
 
 
-def test_agent_end_non_finite_reported_dollar_does_not_poison_the_total() -> None:
-    """A non-finite reported amount on one message (wire-reachable via
-    ``json.loads``'s ``Infinity``/``NaN``) must not be summed into the turn's
-    aggregate. ``inf + x == inf`` would pin the total at infinity forever, so the
-    bad message is dropped and only the valid neighbours contribute a finite sum."""
-    import math
+def test_agent_end_non_finite_reported_dollar_stays_component_scoped() -> None:
+    """Malformed receipt data cannot poison a synthesized aggregate receipt."""
 
     from local_operator.harness.types import Usage
 
@@ -449,9 +476,11 @@ def test_agent_end_non_finite_reported_dollar_does_not_poison_the_total() -> Non
     session.emit(AgentEndEvent(messages=[good, poison]))
     ended = [m for m in app.posted if isinstance(m, TurnEnded)]
     assert ended
-    total = ended[-1].usage.usd_cost
-    assert total == pytest.approx(0.002)
-    assert total is not None and math.isfinite(total)
+    assert ended[-1].usage.usd_cost is None
+    assert [component.usd_cost for component in ended[-1].usage.cost_components] == [
+        0.002,
+        float("inf"),
+    ]
 
 
 def test_agent_end_reported_dollar_is_none_when_no_message_carried_one() -> None:

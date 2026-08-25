@@ -163,6 +163,80 @@ async def test_openai_compat_text_tool_usage() -> None:
     assert end.usage is not None and end.usage.output_tokens == 7
 
 
+@pytest.mark.parametrize(
+    ("provider_field", "cached"),
+    [("cached_tokens", 12), ("prompt_cache_hit_tokens", 12)],
+)
+async def test_openai_compat_normalizes_provider_specific_cache_hits(
+    provider_field: str, cached: int
+) -> None:
+    """Kimi and DeepSeek expose cache hits beside ``prompt_tokens``.
+
+    Missing these aliases prices the cached prefix at the full input rate, which
+    is the reported per-session cost inflation this regression reproduces.
+    """
+    body = _sse(
+        [
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 40,
+                    "completion_tokens": 7,
+                    provider_field: cached,
+                },
+            }
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    events = await _collect(
+        client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+    )
+
+    usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][-1]
+    assert usage.input_tokens == 40
+    assert usage.cache_read_tokens == 12
+    assert usage.context_tokens == 40
+
+
+async def test_openai_compat_prefers_standard_cache_detail_over_alias() -> None:
+    """A compatibility alias must not double-count a standard cache detail."""
+    body = _sse(
+        [
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 40,
+                    "completion_tokens": 7,
+                    "cached_tokens": 20,
+                    "prompt_cache_hit_tokens": 30,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
+            }
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    events = await _collect(
+        client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+    )
+
+    usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][-1]
+    assert usage.cache_read_tokens == 0
+
+
 async def test_openai_compat_mid_stream_error_chunk_raises_named_error() -> None:
     """OpenRouter mid-stream failures arrive in-band on HTTP 200.
 
@@ -1415,6 +1489,45 @@ async def test_openai_compat_context_tokens_is_prompt_total() -> None:
     assert usage.input_tokens == 40
     assert usage.cache_read_tokens == 12
     assert usage.context_tokens == 40
+
+
+async def test_google_usage_includes_thinking_and_tool_use_tokens() -> None:
+    """Gemini bills counters that sit outside candidates/prompt token counts."""
+    body = _sse(
+        [
+            {
+                "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {
+                    "promptTokenCount": 100,
+                    "cachedContentTokenCount": 80,
+                    "candidatesTokenCount": 20,
+                    "thoughtsTokenCount": 30,
+                    "toolUsePromptTokenCount": 10,
+                    "totalTokenCount": 160,
+                },
+            }
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = GoogleClient(http_client=httpx.AsyncClient(transport=transport))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+            "g-key",
+        )
+    )
+
+    usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][-1]
+    assert usage.input_tokens == 110
+    assert usage.context_tokens == 110
+    assert usage.cache_read_tokens == 80
+    assert usage.output_tokens == 50
+    assert usage.reasoning_tokens == 30
+    assert usage.total_tokens == 160
 
 
 async def test_anthropic_context_tokens_sums_uncached_and_cached() -> None:

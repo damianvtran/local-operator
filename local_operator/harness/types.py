@@ -240,6 +240,13 @@ class Usage(BaseModel):
     # the provider billed as free) — the same three-way split the TUI's
     # ``None``-vs-``$0.0000`` contract already draws.
     usd_cost: float | None = None
+    # Aggregate-only copies of the calls behind this usage. Token buckets alone
+    # cannot preserve which calls carried authoritative provider receipts and
+    # which still need a table estimate; keeping the components lets money be
+    # priced call-by-call without billing the aggregate tokens a second time.
+    # Wire/provider usages leave this empty. Parent turns and child ledgers fill
+    # it while folding message usages together.
+    cost_components: list["Usage"] = Field(default_factory=list)
     # Serving identity, stamped by the failover layer from the on-the-wire
     # ``ChatRequest`` (the spec that actually went out). The analytics recorder
     # used to read ``request.model`` off the ORIGINAL ChatRequest, which still
