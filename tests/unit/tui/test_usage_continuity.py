@@ -557,6 +557,56 @@ async def test_a_turn_is_not_billed_twice_for_the_calls_it_already_paid_for() ->
 
 
 @pytest.mark.asyncio
+async def test_provider_receipts_win_and_sum_without_double_counting() -> None:
+    """A routed provider's receipts, not registry estimates, define session spend.
+
+    The live path sees each call and the turn-end path sees their aggregate. The
+    reconciliation must total the two receipts exactly once even though the token
+    table deliberately prices the same calls orders of magnitude higher.
+    """
+    from tests.unit.tui.test_band_panels import FakeSession, _async_factory
+
+    app = OperatorApp(_async_factory(FakeSession()))
+    with _resolving():
+        async with app.run_test(size=(100, 18)) as pilot:
+            await pilot.pause()
+
+            receipts = (0.125, 0.275)
+            for receipt in receipts:
+                app.post_message(
+                    ContextUsageReported(
+                        10_000,
+                        Usage(
+                            input_tokens=1_000_000,
+                            output_tokens=100_000,
+                            context_tokens=10_000,
+                            usd_cost=receipt,
+                        ),
+                    )
+                )
+                await pilot.pause()
+
+            assert app._total_cost == pytest.approx(sum(receipts))
+            app.post_message(
+                TurnEnded(
+                    False,
+                    None,
+                    context_tokens=10_000,
+                    usage=Usage(
+                        input_tokens=2_000_000,
+                        output_tokens=200_000,
+                        context_tokens=10_000,
+                        usd_cost=sum(receipts),
+                    ),
+                )
+            )
+            await pilot.pause()
+
+            assert app._total_cost == pytest.approx(sum(receipts))
+            assert app._turn_accrued_cost == 0.0
+
+
+@pytest.mark.asyncio
 async def test_a_turn_end_that_prices_more_than_was_accrued_adds_the_remainder() -> None:
     """A call the per-call path never saw is still paid for at the end.
 
