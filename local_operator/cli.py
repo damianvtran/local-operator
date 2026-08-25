@@ -1197,7 +1197,19 @@ def send_command(args: argparse.Namespace) -> int:
         _peer_red(error or "no target resolved")
         return 1
 
+    # Self-send guard (U2): `lop send` is a child of the launching TUI, so
+    # os.getppid() IS the sending session's pid. A target resolving to that pid
+    # means the session is messaging itself, which would paint a
+    # "peer message from <own name>" card as though a DIFFERENT session sent it
+    # (and, in --wake/--now mode, self-trigger a turn). Refuse rather than
+    # deliver a mislabeled self-note; the composer is the way to talk to
+    # yourself.
+    if record.pid == os.getppid():
+        _peer_red("that target is this session; use the composer to message yourself")
+        return 1
+
     # Body: positional wins; otherwise read stdin (piped note).
+
     if args.message is not None:
         text = args.message
     elif not sys.stdin.isatty():
@@ -1227,7 +1239,10 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
-    except (RuntimeError, ConnectionError, OSError) as exc:
+    except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
+        # ValueError covers a read fault the frame reader could still surface
+        # (e.g. an oversized non-welcome line): it must become the same soft,
+        # non-zero "could not deliver" line, never an uncaught traceback (U1).
         _peer_red(f"could not deliver: {exc}")
         return 1
     name = record.conversation_name or record.session_id
