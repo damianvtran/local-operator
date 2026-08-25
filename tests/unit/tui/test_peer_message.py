@@ -32,9 +32,13 @@ async def _settle_for_peer_block(pilot, app, *, want: int = 1) -> None:
     hops to complete before the assert (measured >40% flake in isolation,
     C2). Poll for the block to appear instead, bounded so a genuine failure
     still terminates — the same settle-loop discipline the app-pilot tests
-    use for their own two-hop posts.
+    use for their own two-hop posts. The bound is generous (200, matching
+    ``test_app_pilot``) because a ``pause()`` only advances one frame and
+    under whole-suite CPU contention the two hops can need far more than a
+    small fixed count; the loop exits the moment the block mounts, so the
+    extra headroom costs nothing on a fast machine.
     """
-    for _ in range(50):
+    for _ in range(200):
         await pilot.pause()
         if len(_peer_blocks(app)) >= want:
             return
