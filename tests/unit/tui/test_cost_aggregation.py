@@ -63,6 +63,7 @@ class _TaskJob:
         self.trajectory: list[dict[str, Any]] | None = None
         self.usage = usage
         self.model_label = model_label
+        self.descendant_usage: list[Usage] = []
         self.child_jobs: Any | None = None
 
 
@@ -162,11 +163,8 @@ def test_harvest_walks_every_nesting_depth_without_counting_ancestors_twice() ->
         app = _harvest(session)
         for _ in range(10):
             app._harvest_subagent_costs()
-    assert app._subagent_costs == {
-        "child": pytest.approx(2.0),
-        "grandchild": pytest.approx(3.0),
-        "great-grandchild": pytest.approx(4.0),
-    }
+    # One collision-proof accumulator key at the root; the value is its subtree.
+    assert app._subagent_costs == {"child": pytest.approx(9.0)}
     assert app._spend_total() == pytest.approx(9.0)
 
 
@@ -187,11 +185,7 @@ def test_nested_harvest_preserves_provider_receipts_and_table_estimates() -> Non
     session.jobs = _fake_jobs(parent)
     with _resolving():
         app = _harvest(session)
-    assert app._subagent_costs == {
-        "parent": pytest.approx(1.0),
-        "receipt": pytest.approx(0.25),
-        "estimate": pytest.approx(2.0),
-    }
+    assert app._subagent_costs == {"parent": pytest.approx(3.25)}
     assert app._spend_total() == pytest.approx(3.25)
 
 
@@ -208,6 +202,10 @@ def test_nested_cost_survives_branch_eviction_after_it_was_harvested() -> None:
     session.jobs = _fake_jobs(child)
     with _resolving():
         app = _harvest(session)
+        # A real settlement copies this before clearing its live edge.
+        child.descendant_usage = [
+            Usage(input_tokens=2_000_000, provider="anthropic", model_id="haiku")
+        ]
         child.child_jobs = _fake_jobs()
         app._harvest_subagent_costs()
     assert app._spend_total() == pytest.approx(3.0)

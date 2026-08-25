@@ -13,6 +13,7 @@ from local_operator.harness.jobs import (
     OUTPUT_TAIL_CHARS,
     AsyncJob,
     AsyncJobManager,
+    JobStatus,
 )
 from local_operator.harness.types import Usage
 
@@ -80,6 +81,99 @@ def test_accumulate_usage_leaves_reported_dollar_none_when_unreported() -> None:
     assert job.usage.usd_cost is None
     assert job.usage.input_tokens == 30
     assert len(job.usage.cost_components) == 2
+
+
+def _task_row(
+    job_id: str,
+    *,
+    usage: Usage | None = None,
+    model_label: str = "test/model",
+    descendant_usage: list[Usage] | None = None,
+    status: JobStatus = "completed",
+) -> AsyncJob:
+    return AsyncJob(
+        id=job_id,
+        type="task",
+        status=status,
+        start_time=1.0,
+        label=job_id,
+        model_label=model_label,
+        usage=usage,
+        descendant_usage=descendant_usage or [],
+    )
+
+
+def test_accounting_summary_is_bounded_for_hundred_child_fanout() -> None:
+    manager = AsyncJobManager()
+    manager.restore(
+        [
+            _task_row(
+                f"child-{index}",
+                usage=Usage(input_tokens=1, provider="test", model_id="model"),
+            )
+            for index in range(100)
+        ]
+    )
+    summary = manager.accounting_components()
+    assert len(summary) == 1
+    assert summary[0].input_tokens == 100
+
+
+def test_accounting_summary_covers_every_production_nesting_level() -> None:
+    leaf_manager = AsyncJobManager()
+    leaf_manager.restore([_task_row("grandchild", usage=Usage(input_tokens=3))])
+    child_manager = AsyncJobManager()
+    child = _task_row("child", usage=Usage(input_tokens=2), status="running")
+    child.child_jobs = leaf_manager
+    child_manager._jobs[child.id] = child
+    root = _task_row("root", usage=Usage(input_tokens=1), status="running")
+    root.child_jobs = child_manager
+    manager = AsyncJobManager()
+    manager._jobs[root.id] = root
+
+    summary = manager.accounting_components()
+    assert sum(item.input_tokens for item in summary) == 6
+
+
+def test_accounting_summary_keeps_duplicate_ids_from_independent_managers() -> None:
+    left = AsyncJobManager()
+    right = AsyncJobManager()
+    left.restore([_task_row("same-id", usage=Usage(input_tokens=2))])
+    right.restore([_task_row("same-id", usage=Usage(input_tokens=3))])
+    root = AsyncJobManager()
+    root.restore(
+        [
+            _task_row(
+                "root",
+                descendant_usage=[*left.accounting_components(), *right.accounting_components()],
+            )
+        ]
+    )
+    assert sum(item.input_tokens for item in root.accounting_components()) == 5
+
+
+def test_accounting_summary_preserves_mixed_receipts_and_estimates() -> None:
+    manager = AsyncJobManager()
+    manager.restore(
+        [
+            _task_row(
+                "mixed",
+                descendant_usage=[
+                    Usage(
+                        input_tokens=9,
+                        usd_cost=0.25,
+                        provider="openrouter",
+                        model_id="routed",
+                    ),
+                    Usage(input_tokens=2, provider="test", model_id="model"),
+                ],
+            )
+        ]
+    )
+    summary = manager.accounting_components()
+    assert len(summary) == 2
+    assert sorted(item.usd_cost for item in summary if item.usd_cost is not None) == [0.25]
+    assert sum(item.input_tokens for item in summary) == 11
 
 
 def test_accumulate_usage_mixes_receipt_and_estimated_calls_without_double_counting() -> None:
@@ -403,6 +497,63 @@ async def test_unregister_sink():
     await wait_for(lambda: require_job(manager, job_id).status == "completed")
     assert inbox == []  # dead-lettered again
     await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retention_zero_preserves_accounting_before_any_harvest():
+    manager = AsyncJobManager(retention_ms=0)
+
+    async def priced(job_id, signal, report_progress):
+        job = require_job(manager, job_id)
+        job.model_label = "test/model"
+        job.usage = Usage(input_tokens=7, provider="test", model_id="model")
+        return "done"
+
+    job_id = manager.register("task", "priced", priced)
+    await manager.settled_event(job_id).wait()
+    assert manager.list() == []
+    summary = manager.accounting_components()
+    assert len(summary) == 1
+    assert summary[0].input_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_adds_to_restored_accounting_once():
+    manager = AsyncJobManager()
+    manager.restore([_task_row("prior", usage=Usage(input_tokens=4))])
+
+    async def resumed(job_id, signal, report_progress):
+        job = require_job(manager, job_id)
+        job.model_label = "test/model"
+        job.usage = Usage(input_tokens=6, provider="test", model_id="model")
+        return "continued"
+
+    job_id = manager.register("task", "resumed", resumed)
+    await manager.settled_event(job_id).wait()
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 10
+    # Retention and repeated snapshots read the manager accumulator; neither
+    # re-folds the still-retained terminal row.
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 10
+
+
+@pytest.mark.asyncio
+async def test_cancel_hands_prior_usage_to_accounting_once():
+    manager = AsyncJobManager(retention_ms=0)
+    started = asyncio.Event()
+
+    async def spending(job_id, signal, report_progress):
+        job = require_job(manager, job_id)
+        job.model_label = "test/model"
+        job.usage = Usage(input_tokens=4, provider="test", model_id="model")
+        started.set()
+        await signal.wait()
+
+    job_id = manager.register("task", "spending", spending)
+    await started.wait()
+    assert await manager.cancel(job_id)
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 4
+    assert not await manager.cancel(job_id)
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 4
 
 
 @pytest.mark.asyncio

@@ -12836,19 +12836,14 @@ class OperatorApp(App[None]):
         return turn_cost(_effective_label(self._session), usage)
 
     def _harvest_subagent_costs(self) -> None:
-        """Record what each child has spent, keyed by job id.
+        """Record each root task's whole subtree, keyed in the root namespace.
 
-        REPLACES each entry rather than adding to a running total, because a
-        child's figure grows while it works: the same job is observed many times
-        and only its latest value is its spend.
-
-        Called from the 1 Hz poll rather than only at turn end. A delegated child
-        outlives the turn that launched it — the parent finishes, the band goes
-        idle, and the child keeps spending for minutes — so a turn-end-only
-        harvest would leave the total frozen through exactly the period when it
-        is moving. This is also why the entries are never dropped: settled jobs
-        leave the ledger after ``AsyncJobManager``'s retention window, and a
-        total that falls when a finished child is evicted is worse than none.
+        REPLACES each entry because a running subtree grows. Descendants are
+        read live only for display freshness; their owning root row receives a
+        detached summary before settlement, so polling is never the durability
+        mechanism. Keeping one accumulator entry per root also respects the
+        actual uniqueness boundary: independent child managers may reuse the
+        same local job id without overwriting one another.
         """
         session = self._session
         manager = getattr(session, "jobs", None)
@@ -12859,23 +12854,56 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a status number never takes the app down
             return
         label = getattr(session, "model_label", "")
-        pending = list(jobs)
-        seen: set[int] = set()
-        while pending:
-            job = pending.pop()
-            identity = id(job)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            cost = job_cost(job, default_model_label=label)
-            if cost is not None:
-                self._subagent_costs[job.id] = cost
+        for job in jobs:
+            direct = job_cost(job, default_model_label=label)
+            descendant = 0.0
+            components = list(getattr(job, "descendant_usage", ()) or ())
             child_manager = getattr(job, "child_jobs", None)
             if child_manager is not None:
                 try:
-                    pending.extend(child_manager.list())
+                    # The live lease is replaced by the same bounded snapshot at
+                    # settlement, so this branch changes freshness, not totals.
+                    accounting = getattr(child_manager, "accounting_components", None)
+                    if callable(accounting):
+                        snapshot = accounting()
+                        if isinstance(snapshot, (list, tuple)):
+                            components = list(snapshot)
+                    else:
+                        # Reduced/embedder hosts expose only ``list()``. Sum
+                        # within this root instead of assigning manager-local ids
+                        # into the app-wide accumulator, preserving collision
+                        # safety even on that compatibility path.
+                        descendant += self._live_manager_cost(child_manager, label, set())
                 except Exception:  # noqa: BLE001 — one unreadable branch must not hide its siblings
-                    continue
+                    pass
+            unpriceable = False
+            for component in components:
+                provider = getattr(component, "provider", None) or ""
+                model_id = getattr(component, "model_id", None) or ""
+                cost = turn_cost(f"{provider}/{model_id}" if provider else model_id, component)
+                if cost is None:
+                    unpriceable = True
+                    break
+                descendant += cost
+            if unpriceable:
+                continue
+            if direct is not None or components or descendant:
+                self._subagent_costs[job.id] = (direct or 0.0) + descendant
+
+    def _live_manager_cost(self, manager: Any, default_label: str, seen: set[int]) -> float:
+        """Compatibility total for a live manager lacking durable snapshots."""
+        identity = id(manager)
+        if identity in seen:
+            return 0.0
+        seen.add(identity)
+        total = 0.0
+        for row in manager.list():
+            cost = job_cost(row, default_model_label=default_label)
+            total += cost or 0.0
+            nested = getattr(row, "child_jobs", None)
+            if nested is not None:
+                total += self._live_manager_cost(nested, default_label, seen)
+        return total
 
     def _spend_text(self, total: float | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.

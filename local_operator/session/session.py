@@ -774,6 +774,10 @@ _ROSTER_ROW_FIELDS = frozenset(
         "model_label",
         "context_window",
         "usage",
+        # Bounded by distinct provider/model/accounting-mode tuples, not child
+        # count. This is the durable half of nested accounting after a child
+        # manager is disposed and therefore must survive process resume.
+        "descendant_usage",
         "restored",
         # Small bounded strings, stamped at registration: a restored row must
         # still say what kind of child it was ("task"/"scout") and at what
@@ -5154,9 +5158,10 @@ class Session:
         The manager fires this on the hot path of a registration or settle, so
         it must not block or await: it spawns the snapshot write on the session
         task group and returns at once. A child session (one with a ``job_id``)
-        does not persist a roster of its own — it is itself a leaf whose
-        transcript the PARENT already tracks — so the hook is a no-op there,
-        keeping a grandchild's churn off the child's transcript.
+        does not persist a roster of its own: its parent runner snapshots that
+        ledger into the owning row at settlement. Keeping intermediate churn
+        off the child transcript avoids quadratic snapshots while the final
+        subtree survives durably.
         """
         if self._disposed or self._job_id is not None:
             return

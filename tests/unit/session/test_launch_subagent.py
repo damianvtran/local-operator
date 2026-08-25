@@ -10,7 +10,9 @@ the full lifecycle.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import weakref
 
 import pytest
 
@@ -106,9 +108,8 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert job.type == "task"
     assert job.label == "sub"
 
-    # The parent row links to the child's separately owned ledger while the
-    # child is live, so recursive accounting can see grandchildren without
-    # flattening their usage into every ancestor.
+    # The parent row links to the child's separately owned ledger only while
+    # live; settlement replaces the edge with detached accounting.
     await wait_for(lambda: job.child_jobs is not None)
     assert job.child_jobs is not parent.jobs
 
@@ -124,6 +125,8 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert ends[0].job_id == job_id
     assert ends[0].status == "completed"
     assert "child did the work" in (ends[0].result_text or "")
+    await wait_for(lambda: job.status == "completed")
+    assert job.child_jobs is None
 
     # The child actually ran its own provider turn through the shared stream.
     assert stream.requests
@@ -603,6 +606,33 @@ async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monk
     assert "Review before merge." in child_prompt
     assert "user-dashboard" in child_prompt
     assert "implement the button" in child_prompt
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monkeypatch):
+    """The accounting snapshot must not keep an observability-to-owner edge."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    captured: list[weakref.ReferenceType[Session]] = []
+
+    def remember_child(event):
+        if isinstance(event, SubagentStartEvent):
+            record = parent.subagent_comms._records[event.job_id]
+            assert record.child is not None
+            captured.append(weakref.ref(record.child))
+
+    parent.subscribe(remember_child)
+    job_id = parent._launch_subagent(label="collectible", prompt="finish")
+    await wait_for(
+        lambda: (row := parent.jobs.get(job_id)) is not None and row.status == "completed"
+    )
+    await wait_for(lambda: bool(captured))
+    for _ in range(3):
+        gc.collect()
+        await asyncio.sleep(0)
+    assert captured[0]() is None
+    assert parent.jobs.get(job_id) is not None
     await parent.dispose()
 
 

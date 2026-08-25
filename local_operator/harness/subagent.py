@@ -369,9 +369,10 @@ def _make_runner(
                     )
                     or child.model.context_window
                 )
-                # The direct row owns this child's calls; its manager owns any
-                # grandchildren. Retain the edge rather than flattening usage
-                # upward, so one recursive reader sees each job exactly once.
+                # Live reads may expose descendants before this child settles.
+                # The edge is only a lease: the finalizer atomically replaces it
+                # with detached components before disposal can evict rows or pin
+                # the child Session through its manager callback.
                 job.child_jobs = child.jobs
             if comms is not None:
                 # Before the prompt runs: the parent may already have a
@@ -474,6 +475,14 @@ def _make_runner(
                 # that no longer exists.
                 comms.detach(job_id)
             if child is not None:
+                if job is not None:
+                    # Settlement is the ownership handoff. Snapshot BEFORE
+                    # dispose, whose cancellation/sweep path may immediately
+                    # evict retention_ms=0 descendants; clear the edge in the
+                    # same event-loop turn so the retained parent row cannot
+                    # retain the disposed child graph.
+                    job.descendant_usage = child.jobs.accounting_components()
+                    job.child_jobs = None
                 await _dispose_child(child)
 
     return runner
