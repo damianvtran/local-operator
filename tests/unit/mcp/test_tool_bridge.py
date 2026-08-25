@@ -16,6 +16,7 @@ from mcp.types import (
 )
 
 from local_operator.harness.intent import INTENT_PROPERTY
+from local_operator.harness.types import ToolContext
 from local_operator.mcp.tool_bridge import (
     INTENT_FIELD,
     build_agent_tool,
@@ -25,6 +26,7 @@ from local_operator.mcp.tool_bridge import (
     normalize_input_schema,
     prepare_outbound_args,
 )
+from local_operator.tools import spill
 
 
 class TestCreateMcpToolName:
@@ -242,6 +244,63 @@ class TestFormatMcpResult:
         details = format_mcp_result(result).details
         assert details is not None
         assert details["server_result"] == result.model_dump()
+
+    def test_small_contextual_result_is_unchanged(self, tmp_path, monkeypatch) -> None:
+        """Adding spill context is a no-op below the established 8 KiB budget."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        result = {
+            "content": [{"type": "text", "text": "ok"}],
+            "structuredContent": {"rows": [{"id": 1}]},
+            "isError": False,
+            "meta": {"cursor": "next"},
+        }
+        formatted = format_mcp_result(result, context=ToolContext(session_id="small"))
+        assert formatted.text == "ok"
+        assert formatted.details == {"server_result": result}
+
+    def test_spill_removes_only_duplicate_text_and_recovers_it(self, tmp_path, monkeypatch) -> None:
+        """Spilled text has one durable copy while structured/media metadata survives."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        body = "MCP evidence line\n" * 1_000
+        result = {
+            "content": [
+                {"type": "text", "text": body},
+                {"type": "image", "data": "pixels", "mimeType": "image/png"},
+                {
+                    "type": "resource",
+                    "resource": {"uri": "file:///report", "text": body, "mimeType": "text/plain"},
+                },
+            ],
+            "structuredContent": {"rows": [{"id": 1, "value": "kept"}]},
+            "isError": True,
+            "meta": {"cursor": "next"},
+        }
+        formatted = format_mcp_result(
+            result, "call", "mcp__demo_large", ToolContext(session_id="mcp-spill")
+        )
+        details = formatted.details
+        assert details is not None
+        handle = details["spill"]["handle"]
+        assert formatted.is_error is True
+        assert formatted.text.startswith("Error: MCP evidence line")
+        assert handle in formatted.text
+        assert details["server_result"] == {
+            "content": [
+                {"type": "image", "data": "pixels", "mimeType": "image/png"},
+                {
+                    "type": "resource",
+                    "resource": {"uri": "file:///report", "mimeType": "text/plain"},
+                },
+            ],
+            "structuredContent": {"rows": [{"id": 1, "value": "kept"}]},
+            "isError": True,
+            "meta": {"cursor": "next"},
+        }
+        stored = spill.get_store().read_lines(handle, 1, 2)
+        assert stored is not None
+        lines, total = stored
+        assert lines == ["Error: MCP evidence line", "MCP evidence line"]
+        assert total > 1_000
 
 
 class TestIsRetriableConnectionError:

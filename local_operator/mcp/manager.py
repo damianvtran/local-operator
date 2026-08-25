@@ -1880,6 +1880,7 @@ class McpManager:
                 tool_call_id,
                 args,
                 signal,
+                context,
                 deferred=deferred,
             )
 
@@ -1945,6 +1946,7 @@ class McpManager:
         tool_call_id: str,
         args: dict[str, Any],
         signal: AbortSignal | None,
+        context: ToolContext,
         *,
         deferred: bool,
     ) -> ToolResult:
@@ -1994,7 +1996,10 @@ class McpManager:
                     return self._error_result(tool_call_id, tool_label, exc)
             else:
                 return self._error_result(tool_call_id, tool_label, exc)
-        return format_mcp_result(result, tool_call_id, tool_label)
+        # Flattening can walk megabytes of MCP content and spilling performs
+        # filesystem I/O. Keep both off the event loop so one verbose server
+        # cannot starve streaming, cancellation, or sibling tool progress.
+        return await asyncio.to_thread(format_mcp_result, result, tool_call_id, tool_label, context)
 
     async def _race_abort(
         self, coro: Coroutine[Any, Any, _RaceT], signal: AbortSignal | None

@@ -11,6 +11,7 @@ runs once an SDK-validated content block has actually arrived.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,7 @@ from local_operator.harness.intent import INTENT_FIELD, apply_intent_schema
 from local_operator.harness.types import (
     AgentTool,
     TextContent,
+    ToolContext,
     ToolExecuteFn,
     ToolResult,
 )
@@ -201,10 +203,38 @@ def _model_block_text(block: ContentBlock) -> str | None:
     return None
 
 
+def _without_redundant_content_text(server_result: dict[str, Any]) -> dict[str, Any]:
+    """Retain protocol metadata while dropping text already held by the spill.
+
+    MCP content may mix text with images and embedded resources. Removing the
+    whole ``content`` field would lose media and URI metadata, while retaining
+    it unchanged would persist the oversized text a second time. Only an actual
+    spill calls this helper, so ordinary payloads remain byte-for-byte stable.
+    """
+    sanitized = copy.deepcopy(server_result)
+    raw_content = sanitized.get("content")
+    if not isinstance(raw_content, list):
+        return sanitized
+
+    content: list[Any] = []
+    for block in raw_content:
+        if not isinstance(block, dict):
+            content.append(block)
+            continue
+        if block.get("type") == "text":
+            continue
+        if block.get("type") == "resource" and isinstance(block.get("resource"), dict):
+            block["resource"].pop("text", None)
+        content.append(block)
+    sanitized["content"] = content
+    return sanitized
+
+
 def format_mcp_result(
     result: CallToolResult | dict[str, Any],
     tool_call_id: str = "",
     tool_name: str = "",
+    context: ToolContext | None = None,
 ) -> ToolResult:
     """Flatten an MCP ``tools/call`` result into a harness ``ToolResult``.
 
@@ -237,12 +267,26 @@ def format_mcp_result(
     text = "\n\n".join(parts)
     if is_error:
         text = f"Error: {text}"
+
+    details: dict[str, Any] = {"server_result": server_result}
+    if context is not None:
+        # Keep the optional SDK isolated at this module boundary: importing the
+        # established built-in spill path locally preserves config-only callers'
+        # cheap ``tool_bridge`` import when MCP support is absent.
+        from local_operator.tools.builtin import spill_truncate
+
+        text, spill = spill_truncate(text, tool_name, context)
+        if spill is not None:
+            details.update(spill)
+            if server_result is not None:
+                details["server_result"] = _without_redundant_content_text(server_result)
+
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         content=[TextContent(text=text)],
         is_error=is_error,
-        details={"server_result": server_result},
+        details=details,
     )
 
 
