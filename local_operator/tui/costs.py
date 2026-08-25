@@ -35,26 +35,29 @@ __all__ = ["turn_cost", "job_cost"]
 def _resolve_for_paint(provider: str, model_id: str):
     """The paint-safe resolver, with a background refresh fired on a cold miss.
 
-    One seam so ``turn_cost" and the per-component loop share the exact
+    One seam so ``turn_cost`` and the per-component loop share the exact
     policy: resolve from the warm memo or registry ONLY (never discovery,
-    which is synchronous HTTP), and when that answer carries no price, hand
-    the full resolution to a background thread so the NEXT tick paints the
-    real number. The refresh is what turns a permanent "unpriceable" into a
-    one-tick one; the paint-only resolution is what keeps the keyboard live
-    while it happens.
+    which is synchronous HTTP), and when the memo has no entry for this
+    model, hand the full resolution to a background thread so the NEXT tick
+    paints the real number. The refresh is what keeps a memo rollover from
+    silently switching the band to the (possibly stale) registry row; the
+    paint-only resolution is what keeps the keyboard live while it happens.
     """
     from local_operator.model.configure import (
         refresh_model_info_background,
         resolve_model_info_paint,
     )
 
-    info = resolve_model_info_paint(provider, model_id)
-    if not (info.input_price or info.output_price):
-        # The registry fallback has no money for this id. This is exactly the
-        # population the discovery legs exist for (an unlisted or overridden
-        # model), so ask for the real answer OFF the loop rather than painting
-        # "unpriceable" forever — but the band still shows the honest None
-        # this tick rather than blocking on the fetch.
+    info, memo_hit = resolve_model_info_paint(provider, model_id)
+    if not memo_hit:
+        # Missed the paint memo: either a model this process never resolved
+        # (the registry row may carry no price — exactly the population the
+        # discovery legs exist for) or the TTL bucket rolled over mid-session
+        # (the registry row carries a price that may be staler than the
+        # discovery answer the band showed until that moment). Both want the
+        # same thing: the real answer, fetched OFF the loop, landing next
+        # tick. The band still shows this tick's honest answer — None when
+        # unpriceable, the registry price otherwise — rather than blocking.
         refresh_model_info_background(provider, model_id)
     return info
 
@@ -96,10 +99,7 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
         # estimate, not render an upside-down credit or degrade the whole turn to
         # unpriceable while a table price exists. (The wire client already drops
         # these to ``None``, but ``turn_cost`` also serves rehydrated mappings.)
-        from local_operator.model.configure import (
-            _usage_cost,
-            cost_for_usage,
-        )
+        from local_operator.model.configure import _usage_cost, cost_for_usage
 
         provider, _, model_id = model_label.partition("/")
         components = getattr(usage, "cost_components", None)

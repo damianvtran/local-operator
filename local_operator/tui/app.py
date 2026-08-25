@@ -4130,6 +4130,34 @@ class OperatorApp(App[None]):
         self._submit_command_prompt(request, attachments)
 
     # -- MCP status ---------------------------------------------------------
+    def _on_deferred_mcp_wiring_settled(self, _outcome: Any) -> None:
+        """Re-enter the app when deferred MCP wiring completes or settles.
+
+        The factory's wiring calls this sink from the background task's
+        continuation, on the app's own loop but outside the message pump —
+        so everything below hops through ``call_later`` for the same reason
+        every other manager callback here does: widget mutation happens on
+        the Textual thread or not at all.
+
+        Both moments route through here deliberately. The wiring's GATE
+        pass (manager built, outcome recorded, TUI hooks still missing)
+        needs the subscriptions this installs; the SETTLE pass (last
+        deferred server terminal) needs the boot report re-run against the
+        combined tally. Reading the CURRENT session — not one captured at
+        wire time — keeps a session swap from re-reporting a retired
+        session's outcome onto the live one, the same guard the ordinary
+        settle callback below carries.
+        """
+
+        def _rewire() -> None:
+            current = self._session
+            if current is None:
+                return
+            self._wire_mcp_status(current)
+            self._report_mcp_startup(current)
+
+        self.call_later(_rewire)
+
     def _wire_mcp_status(self, session: SessionProtocol) -> None:
         """Paint the band's MCP segment and keep it LIVE for the session.
 
@@ -4143,9 +4171,30 @@ class OperatorApp(App[None]):
         painted once: discovery may have failed, and that state comes from the boot
         record rather than from the manager that does not exist. Returning without
         painting left the band identical to a machine that never configured MCP.
+
+        A manager that is absent because wiring has not LANDED yet (the
+        deferred-wiring boot path) is a different case from a failed discovery,
+        and the distinction is load-bearing: returning here would leave the
+        settle sink uninstalled, so the wiring's completion would never
+        re-enter the app and the whole live segment — boot toast, failure
+        notices, OAuth-expiry toasts, the post-merge context re-measure —
+        would be severed for the session. The settle sink is therefore
+        installed BEFORE the early return, and it re-runs this method plus
+        the boot report once the manager exists.
         """
         manager = getattr(session, "mcp_manager", None)
         if manager is None:
+            # Deferred wiring in flight: the sink is the ONE route the wiring's
+            # completion has back into this app (the factory's settle callback
+            # looks it up on the session), so it must exist even though there
+            # is no manager to subscribe to yet. Installed through the session
+            # helper rather than by assignment because Session owns the
+            # attribute; guarded for reduced hosts (embedders, pilot fakes)
+            # that lack it — for them nothing is deferred and the paint below
+            # is all there is, exactly as before.
+            setter = getattr(session, "_set_mcp_startup_sink", None)
+            if callable(setter):
+                setter(self._on_deferred_mcp_wiring_settled)
             self._refresh_mcp_status()
             return
         # CHAIN, never replace: the incumbent callback is the composition root's,

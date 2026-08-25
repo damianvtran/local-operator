@@ -41,8 +41,9 @@ def _resolving():
         resolve_model_info=lambda provider, model_id: _MODELS.get(
             model_id, ModelInfo(id=model_id, name=model_id, description="")
         ),
-        resolve_model_info_paint=lambda provider, model_id: _MODELS.get(
-            model_id, ModelInfo(id=model_id, name=model_id, description="")
+        resolve_model_info_paint=lambda provider, model_id: (
+            _MODELS.get(model_id, ModelInfo(id=model_id, name=model_id, description="")),
+            True,
         ),
     )
 

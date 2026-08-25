@@ -1051,7 +1051,7 @@ async def _prepare(
     # ordering (lease before transcript creation) is an invariant, and putting
     # a yield inside that window is how two cold resumes lose the race the
     # lease exists to arbitrate.
-    from local_operator.session.retention import claim_session, sweep_from_config
+    from local_operator.session.retention import sweep_from_config
 
     await asyncio.to_thread(
         sweep_from_config, config_manager, Path(agent_registry.config_dir), transcript_dir
@@ -1269,6 +1269,27 @@ def _collapse_sdk_missing_failures(
     return failures
 
 
+def _fire_mcp_sink(session: Session) -> None:
+    """Hand the just-recorded ``mcp_startup`` outcome to the front-end sink.
+
+    Shared by the wiring's three completion points — the two degradation
+    arms (no MCP layer; discovery raised) and the gate snapshot — because a
+    deferred-boot TUI learns about ALL of them the same way: it installed
+    its sink while the manager was still absent and needs exactly one
+    nudge per outcome to re-run its wiring and report. Guarded like the
+    settle callback's own lookup: a session without a sink (headless, an
+    unadopted session) is the normal case, and a sink that raises must
+    never take the wiring down with it.
+    """
+    sink = getattr(session, "_on_mcp_startup_settled", None)
+    if sink is None:
+        return
+    try:
+        sink(getattr(session, "mcp_startup", None))
+    except Exception:  # noqa: BLE001 — a UI hook must never break the wiring
+        logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
+
+
 async def wire_mcp_into_session(
     session: Session,
     builtin_tools: list[AgentTool],
@@ -1277,6 +1298,7 @@ async def wire_mcp_into_session(
     auth_store: AuthStore | None = None,
     *,
     has_ui: bool = False,
+    _deferred_boot: bool = False,
 ) -> McpManager | None:
     """Discover MCPs but expose their schemas only after explicit reads.
 
@@ -1317,6 +1339,8 @@ async def wire_mcp_into_session(
         # files, so we do not know whether this machine wanted MCP at all, and
         # "MCP is broken" on a host that never used it is noise.
         session.mcp_startup = McpStartupOutcome()
+        if _deferred_boot:
+            _fire_mcp_sink(session)
         return None
 
     try:
@@ -1332,6 +1356,8 @@ async def wire_mcp_into_session(
                 file=sys.stderr,
             )
         session.mcp_startup = McpStartupOutcome(failures={MCP_DISCOVERY_KEY: str(exc)})
+        if _deferred_boot:
+            _fire_mcp_sink(session)
         return None
 
     # One pass over the error entries: the record keys on the BARE server name
@@ -1374,6 +1400,22 @@ async def wire_mcp_into_session(
         tool_count=len(mcp_tools),
         settling=settling,
     )
+    # The gate snapshot above is also the moment the wiring's MANAGER first
+    # exists. On the deferred boot path the TUI adopted the session before
+    # this line ran, found ``mcp_manager`` None, and installed its settle
+    # sink in that state — so tell it now. Without this hop the sink waits
+    # for SETTLE, which a manager with nothing deferred never fires: the
+    # band's live subscriptions and the boot toast would depend on a
+    # callback that a fast, fully-connected round never triggers.
+    # FIRED ONLY on the deferred boot path (``_deferred_boot``): there the
+    # front end adopted the session before this wiring ran, and the sink it
+    # installed in that state is the one route the wiring's completion has
+    # back into the app. The synchronous path keeps its existing contract
+    # — the sink fires on SETTLE only, exactly as the factory's settle test
+    # pins — because an already-adopted session gets its live wiring from
+    # the caller's own return path, not from a mid-function nudge.
+    if _deferred_boot:
+        _fire_mcp_sink(session)
 
     # Re-report once the round settles: the boot snapshot above was taken at the
     # 250 ms gate while OAuth HTTP servers were still connecting. When the last
@@ -1687,6 +1729,7 @@ async def create_session(
                     knowledge_hooks=plan.knowledge_hooks,
                     auth_store=plan.auth_store,
                     has_ui=has_ui,
+                    _deferred_boot=True,
                 )
                 if manager is not None:
                     attach_mcp_dispose(session, manager)

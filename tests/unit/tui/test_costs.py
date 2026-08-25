@@ -38,7 +38,10 @@ def _resolving(**by_model_id: ModelInfo):
     return patch.multiple(
         "local_operator.model.configure",
         resolve_model_info=lambda provider, model_id: by_model_id.get(model_id, _UNPRICED),
-        resolve_model_info_paint=lambda provider, model_id: by_model_id.get(model_id, _UNPRICED),
+        resolve_model_info_paint=lambda provider, model_id: (
+            by_model_id.get(model_id, _UNPRICED),
+            True,
+        ),
     )
 
 

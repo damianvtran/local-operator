@@ -235,6 +235,12 @@ class RemoteSession:
         history, details = await asyncio.to_thread(_replay)
         self._history = history
         self._history_ids = {str(message.id) for message in history if getattr(message, "id", None)}
+        # Frames that arrived during the threaded replay were deduped against
+        # a still-empty id set and buffered. The replay answer is now
+        # authoritative: re-filter before anything drains, so a message that
+        # landed durably mid-replay is not painted twice (once from history,
+        # once from the buffered relay frame).
+        self._filter_known_messages()
         if details and details.get("items"):
             # The standard TUI todo panel reads a process-local store. Restore
             # the newest durable snapshot so a follower's panel starts where
@@ -291,6 +297,11 @@ class RemoteSession:
         # History was read after the socket began buffering. If a turn landed
         # durably in that window, its message-grade relay events are already in
         # history; dropping by stable message id prevents double painting.
+        # The check runs again at DRAIN time (see ``_filter_known_messages``)
+        # because the replay runs in a thread: a frame that arrives while the
+        # ids are still empty passes HERE, sits in the buffer, and would
+        # otherwise double-paint once the replayed history — which already
+        # contains that message — is handed to the app.
         if message_id and message_id in self._history_ids:
             return
         if isinstance(event, AgentStartEvent):
@@ -299,6 +310,30 @@ class RemoteSession:
         elif isinstance(event, AgentEndEvent):
             self._streaming = False
         self._emit_or_buffer(event)
+
+    def _filter_known_messages(self) -> None:
+        """Drop buffered events whose message the replayed history contains.
+
+        The SECOND half of the double-paint guard above. ``_load_history``
+        yields to the loop for the whole transcript replay (that is the A3
+        fix), so relay frames can arrive between the socket opening and the
+        ids binding — each one checked against a still-empty set and
+        buffered. Anything that landed durably in that window is ALREADY in
+        the replayed history, so re-filtering the buffer against the bound
+        ids before delivery drops exactly those. Non-message events (tool
+        cards, notices) keep flowing: they have no stable id to compare and
+        their replay equivalent is not painted from history.
+        """
+        if not self._buffered_events:
+            return
+        kept: list[AgentEvent[Any]] = []
+        for event in self._buffered_events:
+            message = getattr(event, "message", None)
+            message_id = str(getattr(message, "id", "") or "")
+            if message_id and message_id in self._history_ids:
+                continue
+            kept.append(event)
+        self._buffered_events = kept
 
     def _emit_or_buffer(self, event: AgentEvent[Any]) -> None:
         if not self._ready_for_events or not self._handlers:

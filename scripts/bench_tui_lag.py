@@ -338,10 +338,53 @@ async def bench_bash_emit(total_mb: float = 8.0) -> dict[str, Any]:
     }
 
 
+# -- P: parallel instances booting against one shared store ---------------------
+
+
+async def bench_parallel_boot(instances: int = 5, sessions: int = 1000) -> dict[str, Any]:
+    """N instances running the store scans concurrently over ONE store.
+
+    The cross-instance shape the operator reported: every boot sweeps the
+    same shared ``sessions/`` directory. Measures the wall time of N
+    concurrent scan passes (steady state, sentinels in place) against a
+    store fixture, plus the first-boot migration cost once.
+    """
+    import concurrent.futures
+
+    import tempfile as _tempfile
+
+    store = _build_store(Path(_tempfile.mkdtemp()), sessions)
+
+    def one_pass() -> float:
+        from local_operator.resume import backfill_session_origins, backfill_session_titles
+
+        started = time.perf_counter()
+        backfill_session_origins(store)
+        backfill_session_titles(store)
+        return (time.perf_counter() - started) * 1000.0
+
+    # First pass: one-time migration (writes sentinels).
+    first_ms = one_pass()
+
+    # Steady state: N concurrent passes, as N booted instances would run.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=instances) as pool:
+        started = time.perf_counter()
+        passes = list(pool.map(lambda _: one_pass(), range(instances)))
+        wall_ms = (time.perf_counter() - started) * 1000.0
+    return {
+        "instances": instances,
+        "sessions": sessions,
+        "first_pass_ms": round(first_ms, 1),
+        "parallel_steady_wall_ms": round(wall_ms, 1),
+        "slowest_instance_ms": round(max(passes), 1),
+    }
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", type=Path, default=None, help="write results here")
     parser.add_argument("--sessions", type=int, default=1000)
+    parser.add_argument("--instances", type=int, default=5)
     parser.add_argument("--skip-boot", action="store_true")
     args = parser.parse_args()
 
@@ -351,6 +394,9 @@ async def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         if not args.skip_boot:
             results["s1_boot"] = await bench_boot(Path(tmp), sessions=args.sessions)
+            results["p_parallel_boot"] = await bench_parallel_boot(
+                instances=args.instances, sessions=args.sessions
+            )
         results["s2_send"] = await bench_send()
         results["s3_bash_emit"] = await bench_bash_emit()
 

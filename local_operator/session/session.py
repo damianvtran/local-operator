@@ -2877,6 +2877,20 @@ class Session:
 
     # -- live tool refresh (MCP late-connect / reconnect) ---------------------
 
+    def _set_mcp_startup_sink(self, sink: Callable[[Any], None] | None) -> None:
+        """Install the MCP settle/wiring sink through a guarded accessor.
+
+        The attribute itself is private because only two writers should ever
+        touch it: the TUI's ``_wire_mcp_status`` (at adoption, possibly BEFORE
+        the manager exists — deferred wiring) and ``dispose`` (to drop a sink
+        that would otherwise fire into a torn-down app). A setter rather than
+        a bare attribute assignment keeps those call sites greppable and lets
+        a subclass or reduced host intercept. Noop-safe by contract: the
+        wiring's settle path looks the sink up defensively, so a host that
+        never installs one simply gets no re-report — the headless default.
+        """
+        self._on_mcp_startup_settled = sink
+
     def refresh_tools(self, tools: Sequence[AgentTool]) -> None:
         """Replace the full tool inventory mid-session.
 

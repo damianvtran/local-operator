@@ -206,7 +206,10 @@ def test_accumulate_usage_mixes_receipt_and_estimated_calls_without_double_count
     # reaches the pricing path.
     with (
         patch("local_operator.model.configure.resolve_model_info", return_value=priced),
-        patch("local_operator.model.configure.resolve_model_info_paint", return_value=priced),
+        patch(
+            "local_operator.model.configure.resolve_model_info_paint",
+            return_value=(priced, True),
+        ),
     ):
         assert job_cost(job) == pytest.approx(20.001)
 

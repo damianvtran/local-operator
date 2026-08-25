@@ -346,15 +346,26 @@ def monkeypatch_env(tmp_path: Path) -> None:
 
 
 class _SlowListing:
-    """Discovery stub with a controllable latency, counted per call."""
+    """Discovery stub with a controllable latency, counted per call.
+
+    ``latency_s`` is mutable so a test's teardown can shorten it: a refresh
+    thread is fire-and-forget and OUTLIVES the assertion that scheduled it,
+    and the next test in the same worker process would otherwise inherit a
+    thread still sleeping against a stub the teardown already detached.
+    """
 
     def __init__(self, latency_s: float) -> None:
         self.latency_s = latency_s
         self.calls = 0
+        self.in_flight = 0
 
     def __call__(self, provider: str, **_kwargs: Any) -> tuple[list[Any], str]:
         self.calls += 1
-        time.sleep(self.latency_s)
+        self.in_flight += 1
+        try:
+            time.sleep(self.latency_s)
+        finally:
+            self.in_flight -= 1
         return [], "ok"
 
 
@@ -386,7 +397,7 @@ async def test_turn_cost_returns_fast_from_the_loop_path(monkeypatch: pytest.Mon
     # job is to separate "milliseconds" from "seconds" — a loaded CI runner
     # can add tens of ms of scheduling noise to any wall clock.
     assert elapsed_ms < 500.0, f"turn_cost blocked the loop for {elapsed_ms:.0f} ms"
-    recorder.assert_no_stall()
+    recorder.assert_no_stall_loaded()
     assert cost is None  # honestly unpriceable THIS tick, never a wrong number
 
     # The background refresh (C2) did the real work off-loop: exactly one
@@ -396,6 +407,15 @@ async def test_turn_cost_returns_fast_from_the_loop_path(monkeypatch: pytest.Mon
             break
         await asyncio.sleep(0.02)
     assert slow.calls == 1, "the paint miss must fire exactly one background refresh"
+    # Teardown order is load-bearing: the refresh thread is still INSIDE the
+    # 5 s stub sleep. Shorten the sleep so it lands promptly, WAIT for it,
+    # and only then invalidate — an invalidation that races the thread's
+    # memo write leaves a poisoned entry for the next test in this worker.
+    slow.latency_s = 0.0
+    for _ in range(200):
+        if slow.in_flight == 0:
+            break
+        await asyncio.sleep(0.02)
     configure.invalidate_model_info_cache()
 
 
@@ -439,6 +459,15 @@ async def test_background_refresh_lands_for_the_next_tick(
         cost_components = None
 
     assert turn_cost("kimi/unlisted-model-y", _Usage()) is None  # cold miss
+    # DRAIN the cold miss's refresh thread BEFORE flipping the gate: it is
+    # still inside the closed-listing sleep, and an invalidate that races
+    # its memo write re-seeds the unpriced row AFTER the clear — the next
+    # call then memo-HITS on it and never fires a second refresh, so the
+    # priced answer can never land (the 1-in-6 flake this closed).
+    for _ in range(200):
+        await asyncio.sleep(0.02)
+        if not configure._paint_refreshing:
+            break
     gate["open"] = True
     configure.invalidate_model_info_cache()  # drop the degraded row + gate
     started = time.perf_counter()
@@ -494,6 +523,11 @@ async def test_component_pricing_never_calls_discovery_from_paint(
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     assert elapsed_ms < 500.0, f"component pricing blocked for {elapsed_ms:.0f} ms"
     assert cost is None
+    slow.latency_s = 0.0
+    for _ in range(200):
+        if slow.in_flight == 0:
+            break
+        await asyncio.sleep(0.02)
     configure.invalidate_model_info_cache()
 
 
@@ -506,7 +540,7 @@ def test_warm_memo_still_prices_exactly() -> None:
 
     configure.invalidate_model_info_cache()
     cost = turn_cost("anthropic/claude-opus-4-5", Usage(input_tokens=1_000_000, output_tokens=0))
-    registry = configure.resolve_model_info_paint("anthropic", "claude-opus-4-5")
+    registry, memo_hit = configure.resolve_model_info_paint("anthropic", "claude-opus-4-5")
     assert cost == pytest.approx(registry.input_price)
     configure.invalidate_model_info_cache()
 
@@ -875,6 +909,15 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
         for _ in range(20):
             await pilot.pause(0.05)
         await recorder.stop()
+        # Drain the background refresh BEFORE detaching the stub: the thread
+        # is mid-sleep inside it, and restoring the real discovery + clearing
+        # the memo while it runs leaves either a poisoned memo entry or a
+        # thread fetching against a swapped module for the next test.
+        slow.latency_s = 0.0
+        for _ in range(200):
+            if slow.in_flight == 0:
+                break
+            await asyncio.sleep(0.02)
         discovery.available_models = original  # type: ignore[assignment]
         configure.invalidate_model_info_cache()
         # Loaded ceiling: under `-n auto` the probe contends with sibling
@@ -919,7 +962,213 @@ async def test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free(
             await pilot.pause(0.02)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         await recorder.stop()
+        slow.latency_s = 0.0
+        for _ in range(200):
+            if slow.in_flight == 0:
+                break
+            await asyncio.sleep(0.02)
         discovery.available_models = original  # type: ignore[assignment]
         configure.invalidate_model_info_cache()
         assert elapsed_ms < 500.0, f"harvest blocked for {elapsed_ms:.0f} ms"
         recorder.assert_no_stall_loaded()
+
+
+@pytest.mark.asyncio
+async def test_tui_wires_mcp_status_when_deferred_wiring_lands(tmp_path: Path) -> None:
+    """F1: the real TUI against a real deferred-boot session.
+
+    Adoption runs before the wiring lands, so ``_wire_mcp_status`` sees no
+    manager — the exact regression shape. The sink installed at adoption
+    must re-enter the app when the wiring completes: the band's MCP segment
+    fills, the startup toast fires for a FAILED server, and the failure
+    lands in the transcript as the durable notice.
+    """
+    import asyncio as _asyncio
+    import os
+
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp_path)
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session_factory import create_session
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.test_session_factory import _args
+
+    from unittest.mock import patch
+
+    wired = _asyncio.Event()
+
+    class _FailingManager(_WiringManager):
+        """One configured server that fails: the reportable outcome."""
+
+        def get_all_server_names(self) -> list[str]:
+            return ["broken"]
+
+        def get_connected_servers(self) -> list[str]:
+            return []
+
+        def get_connection_status(self, name: str) -> str:
+            return "disconnected"
+
+        def startup_failures(self) -> dict[str, str]:
+            return {"broken": "command not found: nope"}
+
+        def startup_settling(self) -> bool:
+            return False
+
+    manager = _FailingManager()
+
+    async def slow_discover(cwd, auth_store=None):
+        await _asyncio.sleep(0.2)
+        wired.set()
+        # The errors list is what the GATE outcome's failures map is built
+        # from; startup_failures() only feeds the settle rebuild, which a
+        # nothing-deferred round never fires.
+        return manager, [], [{"path": "mcp:broken", "error": "command not found: nope"}]
+
+    # The patch OUTLIVES create_session: deferred wiring runs in a background
+    # task that fires after the factory has returned.
+    patcher = patch("local_operator.mcp.discover_and_load_mcp_tools", slow_discover)
+    patcher.start()
+    session = None
+    try:
+        session = await create_session(
+            _args(hosting="test", model="test-model", yolo=True),
+            ConfigManager(tmp_path / ".local-operator"),
+            CredentialManager(tmp_path / ".local-operator"),
+            AgentRegistry(tmp_path / ".local-operator"),
+            has_ui=True,
+            defer_mcp_wiring=True,
+        )
+
+        async def factory():
+            return session
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            # Wait for ADOPTION before asserting: the boot worker awaits the
+            # factory and adopts on the next loop turns.
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if app._session is session:
+                    break
+            assert app._session is session, "the app never adopted the session"
+            # Adoption happened with the manager absent: the sink is the only
+            # route back in, and it must have been installed.
+            assert getattr(session, "_on_mcp_startup_settled", None) is not None
+            await _asyncio.wait_for(wired.wait(), timeout=5.0)
+            # Let the sink's call_later land and the app process it.
+            for _ in range(50):
+                await pilot.pause(0.05)
+                if getattr(session, "mcp_manager", None) is not None and app._session is session:
+                    break
+            # The band's MCP segment now reads the live manager, not the
+            # adoption-time absence.
+            assert getattr(session, "mcp_manager", None) is manager
+            status = app._mcp_status()
+            assert status.configured == 1
+            assert status.connected == 0
+            assert status.failed is True
+            # The startup toast fired for the failed server — the surface F1
+            # severed. Toast content is the reportable outcome's rendering.
+            from local_operator.tui.widgets.toast import Toast
+
+            toast = app.query_one(Toast)
+            shown = str(getattr(toast, "_message", "") or "")
+            assert "broken" in shown or "MCP" in shown, f"no startup toast fired: {shown!r}"
+    finally:
+        patcher.stop()
+        if session is not None:
+            await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_relay_frame_during_threaded_replay_is_not_double_painted(tmp_path: Path) -> None:
+    """F2: a message landing durably during the replay window is dropped from
+    the buffer once the replay binds its ids — the race the threaded replay
+    opened (invariant 4, gapless mid-turn attach)."""
+    import asyncio as _asyncio
+    import os
+
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp_path)
+    from local_operator.harness.types import (
+        AgentEndEvent,
+        AgentStartEvent,
+        Message,
+        MessageEndEvent,
+        MessageStartEvent,
+        TextContent,
+    )
+    from local_operator.mobile.registrant import Registrant
+    from local_operator.session.remote import RemoteSession
+    from local_operator.session.transcript import Transcript
+    from tests.unit.mobile.test_registrant import FakeHandle
+    from tests.unit.session.test_remote import _wait_record
+
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+
+    # A transcript big enough that the threaded replay takes real time, with
+    # a FINAL durable assistant message the owner wrote just before attach.
+    async def build() -> None:
+        transcript = Transcript(tmp_path / "sessions" / "s1")
+        for index in range(600):
+            body = f"turn {index} " + "z" * 2_000
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text=body)])
+            )
+
+    await build()
+
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        # The owner streams the SAME durable message over the relay while the
+        # follower's replay is still running: message-grade frames for an id
+        # already in history.
+        replay_started = _asyncio.Event()
+
+        real_load = RemoteSession._load_history
+
+        async def instrumented_load(self_inner) -> None:
+            replay_started.set()
+            await real_load(self_inner)
+
+        from unittest.mock import patch as _patch
+
+        with _patch.object(RemoteSession, "_load_history", instrumented_load):
+            connect_task = _asyncio.create_task(
+                RemoteSession.connect(
+                    record,
+                    "s1",
+                    config_dir=tmp_path,
+                    takeover_factory=_never_take_over,
+                )
+            )
+            await _asyncio.wait_for(replay_started.wait(), timeout=5.0)
+            # Fire the relay frames INTO the window: start, message start,
+            # end, agent end, for the message the replay will contain.
+            message = Message.assistant("turn 599 z…")
+            handle.emit_event(AgentStartEvent(generation=9))
+            handle.emit_event(MessageStartEvent(message=message))
+            handle.emit_event(MessageEndEvent(message=message))
+            handle.emit_event(AgentEndEvent())
+            remote = await _asyncio.wait_for(connect_task, timeout=15.0)
+
+        events: list[Any] = []
+        remote.subscribe(events.append)
+        for _ in range(50):
+            await _asyncio.sleep(0.02)
+            if any(getattr(e, "type", "") == "agent_end" for e in events):
+                break
+        kinds = [e.type for e in events]
+        # The seed replay plus relay: exactly ONE message_start for the
+        # durable message — the buffered relay copy was re-filtered out.
+        assert kinds.count("message_start") <= 1, kinds
+        assert kinds.count("message_end") <= 1, kinds
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()

@@ -1311,3 +1311,71 @@ def test_the_spec_knows_which_models_reject_sampling_parameters(
 
     spec = configure_mod.build_model_spec(provider, model_id)
     assert spec.supports_sampling_params is supported
+
+
+def test_concurrent_cold_misses_fetch_exactly_once(tmp_path, monkeypatch) -> None:
+    """DA5: N processes cold-missing one document must not fan out N fetches.
+
+    The lease's whole job: the winner fetches, losers wait briefly and serve
+    the winner's document. A fan-out would hammer the same public listing
+    endpoint (429 risk) for data a single request already fetched.
+    """
+    import threading
+    import time as time_mod
+
+    from local_operator.model.catalogue import cached_listing
+
+    fetches: list[float] = []
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def slow_fetch() -> dict[str, Any]:
+        with lock:
+            fetches.append(time_mod.perf_counter())
+        # Hold the fetch open long enough for every loser to arrive and be
+        # told to wait; a real listing round trip is slower than this.
+        release.wait(timeout=5.0)
+        return {"capture": 1, "models": [{"id": "m1"}]}
+
+    results: list[dict[str, Any] | None] = [None] * 5
+    threads = []
+
+    def worker(index: int) -> None:
+        results[index] = cached_listing("test.listing", slow_fetch, ttl_s=3600, cache_dir=tmp_path)
+
+    try:
+        for index in range(5):
+            thread = threading.Thread(target=worker, args=(index,))
+            thread.start()
+            threads.append(thread)
+            # Stagger slightly so the first thread reliably wins the lease.
+            time_mod.sleep(0.05)
+        # All five have run; let the winner's fetch complete.
+        time_mod.sleep(0.2)
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5.0)
+    finally:
+        release.set()
+
+    assert len(fetches) == 1, f"expected exactly one live fetch, got {len(fetches)}"
+    assert all(result is not None for result in results), results
+
+
+def test_a_lease_from_a_dead_holder_is_stolen_after_expiry(tmp_path) -> None:
+    """A crashed fetcher must not strand the document for the lease TTL."""
+    import json
+    import time as time_mod
+
+    from local_operator.model.catalogue import _ListingFetchLease
+
+    document = tmp_path / "test.listing.json"
+    document.write_text(json.dumps({"payload": {"old": True}, "fetched_at": 0.0}))
+    lease = _ListingFetchLease(document)
+    # Simulate a dead peer's lease: already expired.
+    stale = tmp_path / "test.listing.json.fetching"
+    stale.write_text(json.dumps({"holder": "dead:0000", "expires_at": time_mod.time() - 1.0}))
+    assert lease.acquire() is True
+    assert lease._held is True
+    lease.release()
+    assert not stale.exists(), "release must remove this holder's lease file"

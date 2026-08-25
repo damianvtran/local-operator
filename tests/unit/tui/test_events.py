@@ -329,7 +329,9 @@ def test_agent_end_preserves_mixed_receipt_and_estimate_calls() -> None:
     priced = ModelInfo(id="model", name="model", description="", input_price=20.0)
     # The paint-safe resolver is the one turn_cost consults now; patching the
     # full resolver alone would leave this pricing the real registry row.
-    with patch("local_operator.model.configure.resolve_model_info_paint", return_value=priced):
+    with patch(
+        "local_operator.model.configure.resolve_model_info_paint", return_value=(priced, True)
+    ):
         assert turn_cost(session.model_label, ended.usage) == pytest.approx(20.001)
 
 

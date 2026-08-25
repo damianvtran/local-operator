@@ -74,6 +74,16 @@ TITLE_SIDECAR_NAME = "title.json"
 #: contract applies to it too, for the reason its docstring gives.
 TITLE_SCAN_SENTINEL_NAME = "title-scan.json"
 
+#: The origin sweep's own "considered and not a subagent" marker, mirroring
+#: :data:`TITLE_SCAN_SENTINEL_NAME`. It exists SEPARATELY from that sentinel
+#: because the two sweeps answer different questions and traverse
+#: independently: the origin sweep stops at ``limit`` STAMPS while the title
+#: sweep is uncapped, so a title sentinel must never stand in for an origin
+#: answer — a directory the origin sweep never reached would be suppressed
+#: forever. Only the origin sweep writes this file, so its presence means
+#: exactly "this pass read this opener and it was not a subagent's".
+ORIGIN_SCAN_SENTINEL_NAME = "origin-scan.json"
+
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
 #:
@@ -438,19 +448,18 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
             if not (directory / TRANSCRIPT_NAME).is_file():
                 continue
             # Already answered: never re-stamp, so a marker a user removed by
-            # hand to un-hide a session is not silently written back. The
-            # title-scan sentinel answers the same "considered" question for
-            # the common case (a session with no journalled title): such a
-            # directory can never grow an origin marker either — the openings
-            # only a subagent produces are stamped in FRONT of the caller's
-            # prompt, so a session whose opener is a plain user message is
-            # answered "not a subagent" once and forever. Without this the
-            # origin sweep re-read every opener on every boot, which after the
-            # title sentinel was the remaining ~120 ms of a 1,000-dir store's
-            # startup scan.
+            # hand to un-hide a session is not silently written back.
             if (directory / ORIGIN_NAME).exists():
                 continue
-            if (directory / TITLE_SCAN_SENTINEL_NAME).exists():
+            # This pass's OWN "considered and not a subagent" marker — not
+            # the title sweep's sentinel. The two sweeps traverse
+            # independently and THIS one stops at ``limit`` stamps, so a
+            # title sentinel written for a directory this pass never reached
+            # would suppress the origin question forever (the 501st
+            # stampable subagent behind a >500 backlog, permanently
+            # unmarked). A marker only this pass writes can only exist for
+            # a directory this pass genuinely visited.
+            if (directory / ORIGIN_SCAN_SENTINEL_NAME).exists():
                 continue
         except OSError:
             continue
@@ -460,6 +469,13 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
         if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
             mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
             stamped += 1
+        else:
+            # Not a subagent: record it the same way the marker records the
+            # opposite answer, so the next boot's sweep costs one stat here
+            # too. Best-effort and mtime-preserving for the same reasons the
+            # title sentinel's writer gives; a failed write costs one redundant
+            # opener read, never a lost session.
+            _write_origin_scan_sentinel(directory)
     return stamped
 
 
@@ -506,6 +522,29 @@ def _scan_all_titles(transcript: Path) -> list[tuple[str, bool]]:
     except OSError:
         return titles
     return titles
+
+
+def _write_origin_scan_sentinel(session_dir: Path) -> None:
+    """Record that the origin sweep read this opener and found no subagent.
+
+    Same best-effort, mtime-preserving, atomic-write contract as
+    :func:`_write_title_scan_sentinel` — see its docstring for the reasoning;
+    this is that function with a different file name, kept separate so each
+    sweep owns its own answer.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        sentinel = session_dir / ORIGIN_SCAN_SENTINEL_NAME
+        tmp = sentinel.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"scanned": True}), encoding="utf-8")
+        tmp.replace(sentinel)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
 
 
 def _write_title_scan_sentinel(session_dir: Path) -> None:

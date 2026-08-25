@@ -1366,7 +1366,16 @@ def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
     # Feed the paint memo from the authoritative answer, so a renderer that
     # resolves AFTER the session does (the common order) paints the real row,
     # and so the background refresh is the only writer on a cold process.
+    # Prior-bucket keys are evicted on write rather than left to accrete: the
+    # dict has no TTL of its own, and a long-lived process (the server, a
+    # scheduler worker) would otherwise gain one dead entry per model per
+    # day for its whole lifetime. Evicting on write keeps it bounded by the
+    # models resolved in the CURRENT bucket without a background sweeper.
     _paint_memo[(provider, model_id, bucket)] = info
+    if len(_paint_memo) > 64:
+        stale = [key for key in _paint_memo if key[2] != bucket]
+        for key in stale:
+            del _paint_memo[key]
     return info.model_copy(deep=True)
 
 
@@ -1387,35 +1396,42 @@ _paint_refreshing: set[tuple[str, str]] = set()
 _paint_memo: dict[tuple[str, str, int], ModelInfo] = {}
 
 
-def resolve_model_info_paint(provider: str, model_id: str) -> ModelInfo:
-    """The SAME metadata as :func:`resolve_model_info`, with ZERO I/O legs.
+def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, bool]:
+    """The paint-safe metadata for a model, plus whether the memo answered.
 
-    Warm paint memo only, falling back to the static registry row. The memo is
-    a SEPARATE dict rather than a call into ``_resolve_model_info_cached``
-    because that cached body is itself the discovery path — entering it on a
-    cold key runs the synchronous ``httpx.Client`` legs (measured 418 ms
-    warm-disk, 10 s + 3 s budgets for an unlisted model) on whatever loop
-    called this, and the callers here are the Textual loop (the status band's
-    ``message_end`` pricing and the 1 Hz subagent harvest). A frozen keyboard
-    is a worse failure than a segment that reads "cost unavailable" for one
-    tick, which is the honest degradation the band already renders for a
-    genuinely unpriceable model.
+    Returns ``(info, memo_hit)``. ``memo_hit`` is False on a cold memo — the
+    TTL bucket rolled over mid-session, or the model was never fully
+    resolved in this process — and then ``info`` is the STATIC registry row.
+    The caller uses the flag to decide whether to schedule an off-loop
+    refresh: a priced registry row served after a rollover may be staler
+    than the discovery answer the band showed until that moment, and
+    silently switching to it is the confident-wrong-number failure the
+    module's own docstrings rule out.
 
-    The registry fallback is NOT a guess dressed as data: a row with no prices
-    prices as ``None`` exactly as discovery failing would, so the only thing a
-    paint miss can produce is the SAME unpriceable answer, one tick earlier.
+    The memo is a SEPARATE dict rather than a call into
+    ``_resolve_model_info_cached`` because that cached body is itself the
+    discovery path — entering it on a cold key runs the synchronous
+    ``httpx.Client`` legs (measured 418 ms warm-disk, 10 s + 3 s budgets for
+    an unlisted model) on whatever loop called this, and the callers here
+    are the Textual loop (the status band's ``message_end`` pricing and the
+    1 Hz subagent harvest). A frozen keyboard is a worse failure than a
+    segment that reads "cost unavailable" for one tick, which is the
+    honest degradation the band already renders for a genuinely
+    unpriceable model. The registry fallback is NOT a guess dressed as
+    data either: a row with no prices prices as ``None`` exactly as
+    discovery failing would.
     """
     bucket = int(time.time() // DEFAULT_TTL_S)
     info = _paint_memo.get((provider, model_id, bucket))
     if info is None:
-        info = _registry_fallback(provider, model_id)
-    return info.model_copy(deep=True)
+        return _registry_fallback(provider, model_id).model_copy(deep=True), False
+    return info.model_copy(deep=True), True
 
 
 def refresh_model_info_background(provider: str, model_id: str) -> None:
     """Resolve one model off-loop so the NEXT paint sees the real price.
 
-    Fired by the paint path on a miss (see :func:`resolve_model_info_paint"'s
+    Fired by the paint path on a miss (see :func:`resolve_model_info_paint`'s
     callers): the full resolver runs in a thread and lands in the shared memo,
     so the following tick prices from the warm cache. Gated per model by
     :data:`_paint_refreshing` — the 1 Hz poller re-misses until the fetch
@@ -1446,9 +1462,18 @@ def refresh_model_info_background(provider: str, model_id: str) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No loop (a synchronous caller): run inline. Still bounded by the
-        # gate above, so a tight caller cannot loop the fetch.
-        _refresh()
+        # No running loop. Refuse rather than run inline: the full resolver
+        # is the discovery path (measured up to 13 s for an unlisted model),
+        # and a synchronous caller adopting this "paint-safe" API has made
+        # exactly the mistake the API exists to prevent. Better a loud no-op
+        # with a log line than a silent multi-second block that the next
+        # reader blames on the caller's own code.
+        logger.warning(
+            "refresh_model_info_background called off-loop for %s/%s; skipping",
+            provider,
+            model_id,
+        )
+        _paint_refreshing.discard(key)
         return
     loop.run_in_executor(None, _refresh)
 
