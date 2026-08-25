@@ -541,7 +541,11 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
     is examined by more than one of them. An earlier version let an UNANSWERED
     batch rescan to the end of the list, which made a history of open batches
     quadratic (3.7s at 4000 messages against 2.3ms answered); see
-    ``test_pair_spliced_tool_results_scans_each_message_once``.
+    ``test_pair_spliced_tool_results_scans_each_message_once`` for the speed
+    property and
+    ``test_pair_spliced_tool_results_does_not_pull_the_next_batch_into_an_open_one``
+    for the correctness property, which are pinned separately because the bound
+    carries both.
     """
     # Hot path: ``_render_history`` runs on every provider call, and the
     # overwhelming majority of histories have no tool batch to violate.
@@ -576,10 +580,19 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
                 # rescanned to the end of the list for EVERY later assistant
                 # message -- 4000 messages took 3.7s instead of 2.3ms.
                 #
-                # It is also the more correct stop. Swallowing the next batch
-                # would move ITS results onto this batch's assistant and push
-                # that assistant behind its own answers, turning one illegal
-                # shape into a different one.
+                # It is also the more correct stop, in one specific shape: a
+                # batch whose answer arrives LATE, after the next batch has
+                # already opened. Only then does ``expected`` empty at all, so
+                # only then can the repair fire on a window that spans two
+                # batches -- ``A1(x) A2(y,z) T(y) T(z) T(x)`` would come out as
+                # ``A1 T(y) T(z) T(x) A2``, with A2 emitted BEHIND its own
+                # answers: one illegal shape traded for another.
+                #
+                # A batch that is never answered at all is NOT this case, and
+                # was never at risk: ``expected`` stays non-empty, so the
+                # ``if expected: continue`` guard below suppresses the repair
+                # with or without this bound. Do not reach for an unanswered
+                # batch to justify the stop -- reach for the late answer.
                 break
             if candidate.role == "tool":
                 results.append(candidate)

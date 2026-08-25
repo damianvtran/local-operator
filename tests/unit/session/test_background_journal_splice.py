@@ -628,14 +628,27 @@ def test_pair_spliced_tool_results_scans_each_message_once():
 def test_pair_spliced_tool_results_does_not_pull_the_next_batch_into_an_open_one():
     """Bounding the scan is a correctness fix, not only a speed one.
 
-    An unbounded scan looking for the first batch's missing answer would walk
-    into the SECOND batch, collect its assistant message as an interloper and
-    its results as the first batch's, then emit that assistant behind its own
-    answers — trading one illegal shape for another.
+    The shape that needs the bound is a LATE ANSWER: the first batch's result
+    arrives only after the second batch has opened. An unbounded scan hunting
+    that answer walks through the second batch, banking its assistant message
+    as an interloper and its results as the first batch's, then emits that
+    assistant behind its own answers — one illegal shape traded for another::
+
+        in         A1(x) A2(y,z) T(y) T(z) T(x)
+        unbounded  A1(x) T(y) T(z) T(x) A2(y,z)   <- A2 behind its answers
+        bounded    A1(x) A2(y,z) T(y) T(z) T(x)   <- left alone, correct
+
+    A batch that is never answered AT ALL does not exercise this and must not
+    be used here: ``expected`` never empties, so the ``if expected: continue``
+    guard suppresses the repair with or without the bound and the test passes
+    on the broken code. That is exactly what an earlier version of this test
+    did. Verified both ways against a tree with only the bound removed: this
+    fixture fails there and passes with the bound restored.
     """
-    first, first_result, _ = _batch("toolu_1A", "toolu_1B")  # 1B never answered
+    first, first_result = _batch("toolu_1A")
     second, second_a, second_b = _batch("toolu_2A", "toolu_2B")
-    history = [first, first_result, second, second_a, second_b]
+    # The first batch's answer lands LAST, behind the whole second batch.
+    history = [first, second, second_a, second_b, first_result]
 
     repaired = _pair_spliced_tool_results(history)
 
