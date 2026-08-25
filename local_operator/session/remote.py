@@ -184,7 +184,7 @@ class RemoteSession:
             takeover_factory=takeover_factory,
         )
         await self._dial(record)
-        self._load_history()
+        await self._load_history()
         seed = await self._await_seed()
         self._finish_sync(seed)
         return self
@@ -215,14 +215,26 @@ class RemoteSession:
         except TimeoutError as exc:
             raise ConnectionError("owner did not send attach synchronization") from exc
 
-    def _load_history(self) -> None:
+    async def _load_history(self) -> None:
         """Read model-facing durable history without acquiring the writer lease."""
-        transcript = Transcript(self._config_dir / "sessions" / self._session_id)
-        self._history = transcript.build_llm_history()
-        self._history_ids = {
-            str(message.id) for message in self._history if getattr(message, "id", None)
-        }
-        details = transcript.latest_custom("todo_snapshot")
+
+        # BOTH the transcript construction and the history build are threaded.
+        # ``Transcript.__init__`` eagerly reads and parses the whole file, so
+        # constructing it on the loop was half the stall the to_thread below
+        # was meant to remove; a long session's replay is file I/O plus JSON
+        # parsing from end to end, with nothing the loop needs until the
+        # result is bound. ``restore_todos`` stays ON the loop: it mutates
+        # process-private state (the todo panel's store) that the seed events
+        # replayed immediately after must observe.
+        def _replay() -> tuple[list[Any], dict[str, Any] | None]:
+            transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+            history = transcript.build_llm_history()
+            details = transcript.latest_custom("todo_snapshot")
+            return history, details
+
+        history, details = await asyncio.to_thread(_replay)
+        self._history = history
+        self._history_ids = {str(message.id) for message in history if getattr(message, "id", None)}
         if details and details.get("items"):
             # The standard TUI todo panel reads a process-local store. Restore
             # the newest durable snapshot so a follower's panel starts where

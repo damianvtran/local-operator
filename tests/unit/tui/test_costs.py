@@ -28,11 +28,17 @@ def _resolving(**by_model_id: ModelInfo):
 
     Keyed on the model id alone, which is what the ``provider/model_id`` label
     splits into; an unknown id resolves unpriced, so a test can assert the
-    "no published price" path without inventing a provider.
+    "no published price" path without inventing a provider. Both resolvers
+    are patched: ``turn_cost`` prices through the paint-safe one
+    (:func:`~local_operator.model.configure.resolve_model_info_paint`), and a
+    test that patched only the full resolver would exercise the real disk
+    path instead of its own table — the assertion would still pass or fail,
+    but on the wrong evidence.
     """
-    return patch(
-        "local_operator.model.configure.resolve_model_info",
-        side_effect=lambda provider, model_id: by_model_id.get(model_id, _UNPRICED),
+    return patch.multiple(
+        "local_operator.model.configure",
+        resolve_model_info=lambda provider, model_id: by_model_id.get(model_id, _UNPRICED),
+        resolve_model_info_paint=lambda provider, model_id: by_model_id.get(model_id, _UNPRICED),
     )
 
 
@@ -67,7 +73,8 @@ def test_turn_cost_is_none_without_usage_or_a_label() -> None:
 def test_turn_cost_survives_a_broken_resolver() -> None:
     """A pricing failure degrades to "unknown", never to a broken frame."""
     with patch(
-        "local_operator.model.configure.resolve_model_info", side_effect=RuntimeError("boom")
+        "local_operator.model.configure.resolve_model_info_paint",
+        side_effect=RuntimeError("boom"),
     ):
         assert turn_cost("anthropic/opus", Usage(input_tokens=10)) is None
 

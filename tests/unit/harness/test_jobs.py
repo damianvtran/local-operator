@@ -201,7 +201,13 @@ def test_accumulate_usage_mixes_receipt_and_estimated_calls_without_double_count
     priced = ModelInfo(id="model", name="model", description="", input_price=20.0)
     from unittest.mock import patch
 
-    with patch("local_operator.model.configure.resolve_model_info", return_value=priced):
+    # Both resolvers patched: job_cost prices through the paint-safe one
+    # (resolve_model_info_paint); patching the full resolver alone no longer
+    # reaches the pricing path.
+    with (
+        patch("local_operator.model.configure.resolve_model_info", return_value=priced),
+        patch("local_operator.model.configure.resolve_model_info_paint", return_value=priced),
+    ):
         assert job_cost(job) == pytest.approx(20.001)
 
 

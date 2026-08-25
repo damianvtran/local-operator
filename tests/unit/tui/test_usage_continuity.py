@@ -50,9 +50,13 @@ _MODEL = ModelInfo(id="sonnet", name="sonnet", description="", input_price=10.0,
 
 
 def _resolving():
-    return patch(
-        "local_operator.model.configure.resolve_model_info",
-        side_effect=lambda provider, model_id: _MODEL,
+    # Both resolvers patched: the band's cost path prices through the
+    # paint-safe resolver now, and a patch of the full resolver alone would
+    # not reach it.
+    return patch.multiple(
+        "local_operator.model.configure",
+        resolve_model_info=lambda provider, model_id: _MODEL,
+        resolve_model_info_paint=lambda provider, model_id: _MODEL,
     )
 
 

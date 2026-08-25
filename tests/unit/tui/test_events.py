@@ -327,7 +327,9 @@ def test_agent_end_preserves_mixed_receipt_and_estimate_calls() -> None:
     assert ended.usage.usd_cost is None
     assert len(ended.usage.cost_components) == 2
     priced = ModelInfo(id="model", name="model", description="", input_price=20.0)
-    with patch("local_operator.model.configure.resolve_model_info", return_value=priced):
+    # The paint-safe resolver is the one turn_cost consults now; patching the
+    # full resolver alone would leave this pricing the real registry row.
+    with patch("local_operator.model.configure.resolve_model_info_paint", return_value=priced):
         assert turn_cost(session.model_label, ended.usage) == pytest.approx(20.001)
 
 

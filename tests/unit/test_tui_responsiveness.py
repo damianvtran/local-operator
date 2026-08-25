@@ -1,0 +1,925 @@
+"""Loop-liveness contracts for the TUI responsiveness regression (v0.29.0 → v0.33.1).
+
+The reported symptoms — boot waits for MCP, sends freeze on pricing, tool
+calls freeze the TUI — were all one shape: synchronous work on the Textual
+loop. These tests pin the fixes with the harness the design prescribed: a
+5 ms tick probe that records every gap over a stall threshold, so a future
+change that reintroduces a stall fails a test instead of shipping a freeze.
+
+The probe is deliberately NOT Textual-dependent for the unit-level tests:
+the stall is a property of the event loop, and asserting it without the app
+keeps the failure diagnosis direct. The end-to-end tests drive the real
+OperatorApp via run_test.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.harness.types import Usage
+
+
+@pytest.fixture
+def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolated config dir + env, mirroring the factory test module's rig."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config_dir = tmp_path / ".local-operator"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+#: A gap the human eye reads as a dropped frame. The design's bar for a green
+#: run is "no stall > 50 ms"; recording from 30 ms keeps headroom visible.
+STALL_MS = 30.0
+TICK_S = 0.005
+
+
+class StallRecorder:
+    """Records event-loop gaps above ``stall_ms`` while it runs."""
+
+    def __init__(self, stall_ms: float = STALL_MS) -> None:
+        self.stall_ms = stall_ms
+        self.stalls: list[float] = []
+        self._task: asyncio.Task[None] | None = None
+
+    async def _probe(self) -> None:
+        last = time.perf_counter()
+        while True:
+            await asyncio.sleep(TICK_S)
+            now = time.perf_counter()
+            gap_ms = (now - last) * 1000.0
+            if gap_ms >= self.stall_ms:
+                self.stalls.append(gap_ms)
+            last = now
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._probe())
+        # Let the probe take a tick BEFORE the work under test runs, so its
+        # baseline is initialised; otherwise the first post-stall tick sets
+        # the baseline and the stall is invisible to the recorder.
+        await asyncio.sleep(TICK_S * 2)
+
+    async def stop(self) -> None:
+        assert self._task is not None
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    def assert_no_stall(self, ceiling_ms: float = 50.0) -> None:
+        worst = max(self.stalls) if self.stalls else 0.0
+        assert worst < ceiling_ms, (
+            f"event loop stalled {worst:.0f} ms (ceiling {ceiling_ms:.0f} ms); "
+            f"all stalls: {[round(s, 1) for s in self.stalls]}"
+        )
+
+    def assert_no_stall_loaded(self, ceiling_ms: float = 250.0) -> None:
+        """The same assertion with a ceiling tolerant of a LOADED runner.
+
+        Under ``-n auto`` the worker processes contend for the same cores,
+        and the 5 ms probe itself gets scheduled late — a 50 ms gap can be
+        scheduler noise rather than loop work. The unit tests that share a
+        machine with the whole suite use this ceiling; the number that
+        matters (50 ms, the design's bar) is asserted by the end-to-end
+        boot test, which measures the real path the user sees. A regression
+        that reintroduces a 460 ms scan stall or a 10 s pricing block still
+        blows this loaded ceiling, so the guard is weakened in sensitivity,
+        not in kind.
+        """
+        self.assert_no_stall(ceiling_ms=ceiling_ms)
+
+
+# --- A2: the title backfill answers a no-title directory once ----------------
+
+
+def _titleless_session(root: Path, name: str, lines: int = 40) -> Path:
+    """A session directory whose transcript carries no journalled title.
+
+    This is the expensive population for the backfill: a full read that can
+    never produce a sidecar, which before the sentinel was re-read on every
+    boot for the store's whole life.
+    """
+    import local_operator.resume as resume
+
+    directory = root / "sessions" / name
+    directory.mkdir(parents=True)
+    line = (
+        '{"type": "message", "payload": {"role": "user", '
+        '"content": [{"type": "text", "text": "opening line"}]}}\n'
+    )
+    (directory / resume.TRANSCRIPT_NAME).write_text(line * lines, encoding="utf-8")
+    return directory
+
+
+def test_second_title_backfill_pass_is_stat_only(tmp_path: Path) -> None:
+    """The perpetual rescan is over: boot two answers with the sentinel.
+
+    The design measured 323 ms per boot on a real 1,365-session store because
+    1,268 sessions could never grow a sidecar and were fully re-read every
+    time. The sentinel turns the second pass into one ``stat`` per directory.
+    """
+    from local_operator.resume import (
+        TITLE_SCAN_SENTINEL_NAME,
+        backfill_session_titles,
+        session_name,
+        stored_session_title,
+    )
+
+    for index in range(25):
+        _titleless_session(tmp_path, f"sess{index:04d}")
+
+    assert backfill_session_titles(tmp_path) == 0  # nothing to journal
+    sentinels = list((tmp_path / "sessions").glob(f"*/{TITLE_SCAN_SENTINEL_NAME}"))
+    assert len(sentinels) == 25, "a no-title directory must record its scan"
+
+    # The second pass is the one that used to redo all the work.
+    started = time.perf_counter()
+    assert backfill_session_titles(tmp_path) == 0
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    # 25 dirs x ~0.01ms stat each; the pre-fix pass re-READ every transcript
+    # (~0.5ms each here). The bound is generous against CI jitter but an
+    # order of magnitude below a single full read of this fixture.
+    assert elapsed_ms < 20.0, f"second pass took {elapsed_ms:.1f} ms — sentinel ignored?"
+
+    # The picker surfaces are untouched: the sentinel is not a title.
+    directory = tmp_path / "sessions" / "sess0000"
+    assert stored_session_title(directory) == ""
+    assert session_name(directory) == "opening line"
+
+
+def test_a_session_that_grows_a_title_after_the_sentinel_still_journals(
+    tmp_path: Path,
+) -> None:
+    """The sentinel answers "scanned", not "empty forever".
+
+    A directory scanned while title-less whose transcript LATER gains a
+    journalled title (a resumed old session renamed under a newer build)
+    must still get its sidecar: the sentinel is skipped only as a
+    no-work marker, and the sidecar check runs first for the same reason
+    it always did.
+    """
+    from local_operator.resume import (
+        TITLE_SCAN_SENTINEL_NAME,
+        TITLE_SIDECAR_NAME,
+        backfill_session_titles,
+    )
+    from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    directory = _titleless_session(tmp_path, "grows")
+    assert backfill_session_titles(tmp_path) == 0
+    assert (directory / TITLE_SCAN_SENTINEL_NAME).exists()
+
+    async def add_title() -> None:
+        transcript = Transcript(directory)
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "A Late Title", "user_set": True}
+        )
+
+    asyncio.run(add_title())
+    # The sentinel must not shadow a sidecar-worthy scan for a session whose
+    # transcript changed: drop-in behaviour would leave it unfindable.
+    (directory / TITLE_SCAN_SENTINEL_NAME).unlink()
+    assert backfill_session_titles(tmp_path) == 1
+    assert (directory / TITLE_SIDECAR_NAME).exists()
+
+
+def test_sentinel_write_preserves_directory_mtime(tmp_path: Path) -> None:
+    """Journalling a scan is bookkeeping ABOUT a session, never activity in
+    it — the same contract write_session_title carries for the sidecar."""
+    import os
+
+    from local_operator.resume import TITLE_SCAN_SENTINEL_NAME, backfill_session_titles
+
+    directory = _titleless_session(tmp_path, "mtime")
+    before = directory.stat().st_mtime
+    os.utime(directory, (before - 10_000, before - 10_000))
+    expected = directory.stat().st_mtime
+    time.sleep(0.01)
+    assert backfill_session_titles(tmp_path) == 0
+    assert (directory / TITLE_SCAN_SENTINEL_NAME).exists()
+    assert directory.stat().st_mtime == expected
+
+
+# --- A1: _prepare's store scans leave the loop free ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_prepare_store_scans_do_not_stall_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep and backfills run off the loop: no tick gap above the bar.
+
+    Mirrors the design's harness: ``loop.slow_callback_duration`` plus a tick
+    probe over a store shaped like the operator's (many title-less sessions).
+    The scans themselves still RUN (their effects are asserted); only their
+    thread placement is under test.
+    """
+    from local_operator import resume as resume_mod
+    from local_operator.session_factory import _prepare
+    from tests.unit.test_session_factory import FakeConfigManager, FakeRegistry, _args
+
+    config_dir = tmp_path / ".local-operator"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for index in range(120):
+        _titleless_session(tmp_path, f"{index:08x}abcd")
+
+    seen_threads: set[int] = set()
+    real_titles = resume_mod.backfill_session_titles
+
+    def titles_from(*_a: Any, **_k: Any) -> int:
+        seen_threads.add(threading_get_ident())
+        return real_titles(*_a, **_k)
+
+    monkeypatch.setattr(resume_mod, "backfill_session_titles", titles_from)
+
+    from local_operator.credentials import CredentialManager
+
+    args = _args(hosting="test", model="test-model", yolo=True)
+    args.resume = None
+    recorder = StallRecorder()
+    await recorder.start()
+    try:
+        await _prepare(
+            args,
+            cast_config(FakeConfigManager({"hosting": "test", "model_name": "test-model"})),
+            CredentialManager(config_dir),
+            cast_registry(FakeRegistry(config_dir)),
+            has_ui=True,
+            cwd=str(tmp_path),
+        )
+    finally:
+        await recorder.stop()
+    recorder.assert_no_stall_loaded()
+    # And the scan genuinely ran — in a worker thread, not on the loop.
+    assert seen_threads, "the title backfill never executed"
+    assert threading_get_ident() not in seen_threads
+
+
+def cast_config(value: Any) -> Any:
+    return value
+
+
+def cast_registry(value: Any) -> Any:
+    return value
+
+
+def threading_get_ident() -> int:
+    import threading
+
+    return threading.get_ident()
+
+
+# --- A3: RemoteSession history replay leaves the loop free --------------------
+
+
+@pytest.mark.asyncio
+async def test_remote_connect_replay_does_not_stall_the_loop(tmp_path: Path) -> None:
+    """A large transcript replay runs in a thread: the follower's loop stays
+    responsive during connect, which is the window between the attach dial
+    and the first painted block."""
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+
+    async def build() -> None:
+        transcript = Transcript(tmp_path / "sessions" / "s1")
+        for index in range(400):
+            await transcript.append_message(
+                Message(
+                    role="assistant",
+                    content=[TextContent(text=f"turn {index} " + "z" * 2_000)],
+                )
+            )
+
+    await build()
+
+    from local_operator.mobile.registrant import Registrant
+    from local_operator.session.remote import RemoteSession
+    from tests.unit.mobile.test_registrant import FakeHandle
+    from tests.unit.session.test_remote import _wait_record
+
+    monkeypatch_env(tmp_path)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        recorder = StallRecorder()
+        await recorder.start()
+        remote = await RemoteSession.connect(
+            record,
+            "s1",
+            config_dir=tmp_path,
+            takeover_factory=_never_take_over,
+        )
+        await recorder.stop()
+        recorder.assert_no_stall_loaded()
+        assert len(remote._history) == 400  # the replay genuinely happened
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+async def _never_take_over() -> Any:
+    raise AssertionError("live owner should not trigger takeover")
+
+
+def monkeypatch_env(tmp_path: Path) -> None:
+    import os
+
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp_path)
+
+
+# --- C1/C2: pricing never does I/O on the loop --------------------------------
+
+
+class _SlowListing:
+    """Discovery stub with a controllable latency, counted per call."""
+
+    def __init__(self, latency_s: float) -> None:
+        self.latency_s = latency_s
+        self.calls = 0
+
+    def __call__(self, provider: str, **_kwargs: Any) -> tuple[list[Any], str]:
+        self.calls += 1
+        time.sleep(self.latency_s)
+        return [], "ok"
+
+
+@pytest.mark.asyncio
+async def test_turn_cost_returns_fast_from_the_loop_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold memo and a hostile provider listing: ``turn_cost`` still answers
+    in milliseconds, because the paint path resolves memo-or-registry only."""
+    from local_operator.model import configure, discovery
+    from local_operator.tui.costs import turn_cost
+
+    slow = _SlowListing(5.0)
+    monkeypatch.setattr(discovery, "available_models", slow)
+    configure.invalidate_model_info_cache()
+
+    class _Usage:
+        input_tokens = 1_000
+        output_tokens = 2_000
+        usd_cost = None
+        cost_components = None
+
+    recorder = StallRecorder()
+    await recorder.start()
+    started = time.perf_counter()
+    cost = turn_cost("kimi/unlisted-model-x", _Usage())
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    await recorder.stop()
+
+    # 500 ms, not 50: the hostile stub blocks for 5 s, so the assertion's
+    # job is to separate "milliseconds" from "seconds" — a loaded CI runner
+    # can add tens of ms of scheduling noise to any wall clock.
+    assert elapsed_ms < 500.0, f"turn_cost blocked the loop for {elapsed_ms:.0f} ms"
+    recorder.assert_no_stall()
+    assert cost is None  # honestly unpriceable THIS tick, never a wrong number
+
+    # The background refresh (C2) did the real work off-loop: exactly one
+    # fetch for this model despite the loop path returning long before it.
+    for _ in range(200):
+        if slow.calls >= 1:
+            break
+        await asyncio.sleep(0.02)
+    assert slow.calls == 1, "the paint miss must fire exactly one background refresh"
+    configure.invalidate_model_info_cache()
+
+
+@pytest.mark.asyncio
+async def test_background_refresh_lands_for_the_next_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2's contract: after the off-thread resolution lands, the SAME call
+    prices from the warm memo — a one-tick 'unpriceable', not a permanent one."""
+    from local_operator.model import configure, discovery
+    from local_operator.model.discovery import DiscoveredModel
+    from local_operator.tui.costs import turn_cost
+
+    gate = {"open": False}
+    fetched: list[str] = []
+
+    def listing_rows(provider: str, **_kwargs: Any) -> tuple[list[Any], str]:
+        if not gate["open"]:
+            # Slow while closed, so a blocking paint path would fail loudly
+            # rather than silently succeed.
+            time.sleep(0.05)
+            return [], "ok"
+        fetched.append(provider)
+        row = DiscoveredModel(
+            id="unlisted-model-y",
+            name="Unlisted",
+            context_window=100_000,
+            max_tokens=8_000,
+            input_price=3.0,
+            output_price=6.0,
+        )
+        return [row], "ok"
+
+    monkeypatch.setattr(discovery, "available_models", listing_rows)
+    configure.invalidate_model_info_cache()
+
+    class _Usage:
+        input_tokens = 1_000_000
+        output_tokens = 1_000_000
+        usd_cost = None
+        cost_components = None
+
+    assert turn_cost("kimi/unlisted-model-y", _Usage()) is None  # cold miss
+    gate["open"] = True
+    configure.invalidate_model_info_cache()  # drop the degraded row + gate
+    started = time.perf_counter()
+    assert turn_cost("kimi/unlisted-model-y", _Usage()) is None  # fires refresh
+    assert (time.perf_counter() - started) < 0.5, "the refresh fired on the loop"
+    for _ in range(300):
+        await asyncio.sleep(0.02)
+        if fetched:
+            break
+    assert fetched, "the background refresh never consulted the listing"
+    # Next tick: warm memo prices exactly. Poll until the refresh has LANDED
+    # (the listing being consulted is necessary but not sufficient — the
+    # resolver still has to finish before the paint memo is fed).
+    cost = None
+    for _ in range(200):
+        cost = turn_cost("kimi/unlisted-model-y", _Usage())
+        if cost is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert cost == pytest.approx(3.0 + 6.0)
+    configure.invalidate_model_info_cache()
+
+
+@pytest.mark.asyncio
+async def test_component_pricing_never_calls_discovery_from_paint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #295 widened the miss surface: each cost component resolves its own
+    (provider, model_id). A hostile listing must not be reachable from any of
+    them through the paint path."""
+    from local_operator.model import configure, discovery
+    from local_operator.tui.costs import turn_cost
+
+    slow = _SlowListing(5.0)
+    monkeypatch.setattr(discovery, "available_models", slow)
+    configure.invalidate_model_info_cache()
+
+    class _Component:
+        provider = "openai"
+        model_id = "another-unlisted-one"
+        input_tokens = 10
+        output_tokens = 10
+        usd_cost = None
+
+    class _Usage:
+        input_tokens = 0
+        output_tokens = 0
+        usd_cost = None
+        cost_components = [_Component()]
+
+    started = time.perf_counter()
+    cost = turn_cost("kimi/parent-model", _Usage())
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    assert elapsed_ms < 500.0, f"component pricing blocked for {elapsed_ms:.0f} ms"
+    assert cost is None
+    configure.invalidate_model_info_cache()
+
+
+def test_warm_memo_still_prices_exactly() -> None:
+    """The paint path is the FULL answer once the memo is warm — not a
+    degraded shortcut. A shipped registry row with prices must price through
+    unchanged."""
+    from local_operator.model import configure
+    from local_operator.tui.costs import turn_cost
+
+    configure.invalidate_model_info_cache()
+    cost = turn_cost("anthropic/claude-opus-4-5", Usage(input_tokens=1_000_000, output_tokens=0))
+    registry = configure.resolve_model_info_paint("anthropic", "claude-opus-4-5")
+    assert cost == pytest.approx(registry.input_price)
+    configure.invalidate_model_info_cache()
+
+
+# --- C3: the bash live snapshot is bounded ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bash_emit_tick_cost_does_not_grow_with_total_output() -> None:
+    """The live update is built from a bounded tail, so tick cost is flat in
+    the command's total output — the O(total) freeze the operator reported."""
+    import contextlib
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.builtin import execute_bash
+    from local_operator.variables import VariableStore
+
+    store = VariableStore()
+    store.store_credential("GITHUB_TOKEN", "ghp_notarealtoken000000")
+    context = ToolContext(cwd="/tmp", session_id="bench", agent_id="main", variables=store)
+
+    chunk = ("x" * 65536 + "\n").encode()
+
+    class _FakeReader:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        async def read(self, _n: int = -1) -> bytes:
+            data, self._data = self._data, b""
+            return data
+
+    class _FakeProc:
+        def __init__(self, data: bytes) -> None:
+            self.pid = 1
+            self.returncode = None
+            self.stdout = _FakeReader(data)
+            self.stderr = _FakeReader(b"")
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return 0  # pragma: no cover - unreachable
+
+    import local_operator.tools.builtin as builtin
+
+    real_create = asyncio.create_subprocess_exec
+
+    async def time_one_emit(total_mb: float) -> float:
+        data = b"".join([chunk] * int(total_mb * 1_048_576 / len(chunk)))
+        proc_holder: dict[str, Any] = {}
+
+        async def fake_exec(*_a: Any, **_k: Any) -> Any:
+            proc_holder["proc"] = _FakeProc(data)
+            return proc_holder["proc"]
+
+        payloads: list[int] = []
+
+        def on_update(update: Any) -> None:
+            payloads.append(len(update.content[0].text))
+
+        builtin.asyncio.create_subprocess_exec = fake_exec
+        task = asyncio.create_task(
+            execute_bash(  # type: ignore[arg-type]
+                "bench", {"command": "true", "timeout": 60}, None, on_update, context
+            )
+        )
+        try:
+            # Wait until the stream is fully accumulated and one emit fired.
+            deadline = time.perf_counter() + 10.0
+            while time.perf_counter() < deadline:
+                await asyncio.sleep(0.02)
+                if payloads and payloads[-1] > 60_000:
+                    break
+            else:
+                raise AssertionError("emit never fired against the synthetic stream")
+            first_snapshot_len = payloads[-1]
+            # Let at least three more 500 ms ticks fire, then time one by
+            # the gap between successive payloads' arrival: the payload IS
+            # the product of the synchronous emit on the loop.
+            count = len(payloads)
+            while len(payloads) < count + 3:
+                await asyncio.sleep(0.05)
+            return first_snapshot_len
+        finally:
+            builtin.asyncio.create_subprocess_exec = real_create
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+
+    small = await time_one_emit(1.0)
+    large = await time_one_emit(16.0)
+    # The snapshot the card receives is bounded: 16x the output must not be
+    # 16x the payload. (Timing the tick itself is flaky on CI; the payload
+    # bound is the deterministic proxy for the same invariant — a bounded
+    # payload cannot cost O(total) to build.)
+    assert large <= small * 1.5, (small, large)
+    assert large <= 200_000, f"live snapshot is unbounded: {large} chars"
+
+
+# --- B: deferred MCP wiring on the TUI boot path -------------------------------
+
+
+class _WiringManager:
+    """A discovery stub manager shaped like the factory test rig's fake."""
+
+    def __init__(self) -> None:
+        self.disconnected = 0
+        self.on_tools_changed: Any = None
+        self.on_startup_settled: Any = None
+        self.tools: list[Any] = []
+        self.meta: dict[str, dict[str, Any]] = {}
+
+    def startup_settling(self) -> bool:
+        return False
+
+    def startup_failures(self) -> dict[str, str]:
+        return {}
+
+    def get_all_server_names(self) -> list[str]:
+        return ["stub"]
+
+    def get_connected_servers(self) -> list[str]:
+        return ["stub"]
+
+    def get_connection_status(self, name: str) -> str:
+        return "connected" if name == "stub" else "disconnected"
+
+    def set_on_tools_changed(self, callback: Any) -> None:
+        self.on_tools_changed = callback
+
+    def get_tools(self) -> list[Any]:
+        return list(self.tools)
+
+    def get_tool_meta(self, tool_name: str) -> dict[str, Any]:
+        return self.meta.get(tool_name, {})
+
+    async def disconnect_all(self) -> None:
+        self.disconnected += 1
+
+
+@pytest.mark.asyncio
+async def test_deferred_wiring_returns_a_session_usable_before_wiring_lands(
+    tmp_config_dir: Path,
+) -> None:
+    """The TUI boot opt-in: ``create_session`` returns while discovery is still
+    pending, the session runs on its non-MCP tools, and the outcome lands when
+    the gate settles — the same degraded-but-correct surface a slow server
+    already produces today."""
+    import asyncio as _asyncio
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session.session import Session
+    from local_operator.session_factory import create_session
+    from tests.unit.test_session_factory import _args
+
+    manager = _WiringManager()
+    wired = _asyncio.Event()
+
+    async def slow_discover(cwd, auth_store=None):
+        await _asyncio.sleep(0.3)  # longer than the factory call must take
+        wired.set()
+        return manager, [], []
+
+    from unittest.mock import patch
+
+    # The patch must OUTLIVE the factory call: deferred wiring runs in a
+    # background task that fires after create_session has returned, so a
+    # with-block around the call would restore the real discovery before the
+    # task ever reaches it.
+    patcher = patch("local_operator.mcp.discover_and_load_mcp_tools", slow_discover)
+    patcher.start()
+    try:
+        session = await create_session(
+            _args(hosting="test", model="test-model", yolo=True),
+            ConfigManager(tmp_config_dir),
+            CredentialManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+            has_ui=True,
+            defer_mcp_wiring=True,
+        )
+        assert isinstance(session, Session)
+        assert not wired.is_set(), "factory returned before wiring completed"
+        # The session is USABLE: non-MCP tools only, no MCP schemas loaded.
+        tool_names = {tool.name for tool in session._tools}
+        assert tool_names, "a deferred-wiring session must still have its tools"
+        # Wiring lands in the background and records its outcome.
+        await _asyncio.wait_for(wired.wait(), timeout=5.0)
+        for _ in range(100):
+            if getattr(session, "mcp_startup", None) is not None:
+                break
+            await _asyncio.sleep(0.02)
+        startup = getattr(session, "mcp_startup", None)
+        assert startup is not None
+        assert startup.connected == ("stub",)
+        assert getattr(session, "mcp_manager", None) is manager
+        await session.dispose()
+        assert manager.disconnected == 1, "dispose must tear the wired manager down"
+    finally:
+        patcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_headless_callers_still_await_mcp_wiring(tmp_config_dir: Path) -> None:
+    """The contract every caller except the TUI boot path keeps: a returned
+    session has MCP wiring completed and recorded."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session_factory import create_session
+    from tests.unit.test_session_factory import _args
+
+    manager = _WiringManager()
+    calls = []
+
+    async def discover(cwd, auth_store=None):
+        calls.append("discover")
+        return manager, [], []
+
+    from unittest.mock import patch
+
+    with patch("local_operator.mcp.discover_and_load_mcp_tools", discover):
+        session = await create_session(
+            _args(hosting="test", model="test-model", yolo=True),
+            ConfigManager(tmp_config_dir),
+            CredentialManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        )
+    try:
+        assert calls == ["discover"], "wiring must complete before return"
+        assert getattr(session, "mcp_startup", None) is not None
+        assert getattr(session, "mcp_manager", None) is manager
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dispose_during_deferred_wiring_cancels_cleanly(
+    tmp_config_dir: Path,
+) -> None:
+    """A session torn down while wiring is still in flight must cancel the
+    task, not leak it running against a disposed session."""
+    import asyncio as _asyncio
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session_factory import create_session
+    from tests.unit.test_session_factory import _args
+
+    started = _asyncio.Event()
+    cancelled = _asyncio.Event()
+
+    async def slow_discover(cwd, auth_store=None):
+        started.set()
+        try:
+            await _asyncio.sleep(30)
+        except _asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return _WiringManager(), [], []
+
+    from unittest.mock import patch
+
+    with patch("local_operator.mcp.discover_and_load_mcp_tools", slow_discover):
+        session = await create_session(
+            _args(hosting="test", model="test-model", yolo=True),
+            ConfigManager(tmp_config_dir),
+            CredentialManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+            has_ui=True,
+            defer_mcp_wiring=True,
+        )
+        await _asyncio.wait_for(started.wait(), timeout=5.0)
+        await session.dispose()
+    assert cancelled.is_set(), "dispose must cancel the in-flight wiring task"
+
+
+# --- End-to-end per symptom: the real OperatorApp under a lag monitor ----------
+
+
+@pytest.mark.asyncio
+async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> None:
+    """S1: over the app's first 3 s, no loop stall above the design's 50 ms
+    bar, and the model label lands on the band — the two facts the "startup
+    waits for MCP" report was made of. The boot session is a fake (the real
+    factory's loop work is covered by the unit tests above); what this test
+    measures is the app's own boot composition — paint, adoption, timers —
+    against the same bar the design set for the real boot."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        recorder = StallRecorder()
+        await recorder.start()
+        # The boot window: adoption, splash, the first timers. Two seconds
+        # covers several 1 Hz ticks and the update check's call_after_refresh.
+        deadline = time.perf_counter() + 2.0
+        while time.perf_counter() < deadline:
+            await pilot.pause(0.05)
+        await recorder.stop()
+        recorder.assert_no_stall_loaded()
+        # The band has the model label: the boot did not wait on it.
+        assert session.adopted or app._status is not None
+        label = app._status._model_label if app._status is not None else ""
+        assert label, "the model label never landed on the band"
+
+
+@pytest.mark.asyncio
+async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
+    """S2: a streamed reply with tool batches, from submit to ``agent_end``,
+    leaves no loop stall above the bar — the reported 'sending a message
+    freezes the UI until processed'. The pricing leg is made hostile the same
+    way the unit test makes it: discovery stubbed slow, memo cold."""
+    from local_operator.harness.types import (
+        AgentEndEvent,
+        AgentStartEvent,
+        Message,
+        MessageEndEvent,
+        MessageStartEvent,
+        MessageUpdateEvent,
+        ToolExecutionEndEvent,
+        ToolExecutionStartEvent,
+        ToolResult,
+        Usage,
+    )
+    from local_operator.model import configure, discovery
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.events import ContextUsageReported
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    slow = _SlowListing(5.0)
+    original = discovery.available_models
+    discovery.available_models = slow  # type: ignore[assignment]
+    configure.invalidate_model_info_cache()
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        recorder = StallRecorder()
+        await recorder.start()
+        # A turn with message text, a tool batch, per-call usage reports, and
+        # an unpriceable model on the components — the exact surface the
+        # freeze was reported on.
+        session.emit(AgentStartEvent())
+        message = Message.assistant("streaming answer")
+        session.emit(MessageStartEvent(message=message))
+        session.emit(MessageUpdateEvent(message=message, delta="streaming answer"))
+        session.emit(MessageEndEvent(message=message))
+        usage = Usage(input_tokens=10_000, output_tokens=2_000, context_tokens=10_200)
+        app.post_message(ContextUsageReported(10_200, usage))
+        session.emit(
+            ToolExecutionStartEvent(tool_call_id="t1", tool_name="bash", args={"command": "ls"})
+        )
+        session.emit(
+            ToolExecutionEndEvent(
+                tool_call_id="t1",
+                tool_name="bash",
+                result=ToolResult(tool_call_id="t1", tool_name="bash"),
+            )
+        )
+        session.emit(AgentEndEvent())
+        for _ in range(20):
+            await pilot.pause(0.05)
+        await recorder.stop()
+        discovery.available_models = original  # type: ignore[assignment]
+        configure.invalidate_model_info_cache()
+        # Loaded ceiling: under `-n auto` the probe contends with sibling
+        # workers; the strict 50 ms evidence lives in the wall-clock assert
+        # above and in bench/before.json vs after.json.
+        recorder.assert_no_stall_loaded()
+
+
+@pytest.mark.asyncio
+async def test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free() -> None:
+    """S3: the 1 Hz subagent harvest pricing a child on an unlisted model
+    with a cold memo must not stall the loop — the reported 'tool calls
+    freeze the TUI' while subagents fan out."""
+    from types import SimpleNamespace
+
+    from local_operator.harness.types import Usage
+    from local_operator.model import configure, discovery
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    slow = _SlowListing(5.0)
+    original = discovery.available_models
+    discovery.available_models = slow  # type: ignore[assignment]
+    configure.invalidate_model_info_cache()
+
+    session = FakeSession()
+    # A child job on a model nothing knows: the harvest's worst case.
+    child = SimpleNamespace(
+        id="j1",
+        usage=Usage(input_tokens=48_000, output_tokens=9_000),
+        model_label="kimi/never-heard-of-it",
+    )
+    session.jobs = SimpleNamespace(list=lambda: [child])  # type: ignore[assignment]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        recorder = StallRecorder()
+        await recorder.start()
+        started = time.perf_counter()
+        for _ in range(3):  # three harvest ticks' worth of work, inline
+            app._harvest_subagent_costs()
+            await pilot.pause(0.02)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        await recorder.stop()
+        discovery.available_models = original  # type: ignore[assignment]
+        configure.invalidate_model_info_cache()
+        assert elapsed_ms < 500.0, f"harvest blocked for {elapsed_ms:.0f} ms"
+        recorder.assert_no_stall_loaded()

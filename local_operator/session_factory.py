@@ -1005,7 +1005,7 @@ async def _prepare(
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
 
-    from local_operator.session.retention import claim_session, sweep_from_config
+    from local_operator.session.retention import claim_session
     from local_operator.session_lease import acquire_session_lease
 
     # Sole-writer ownership is acquired at the shared construction boundary,
@@ -1038,7 +1038,24 @@ async def _prepare(
     # explicit user action. Best-effort by construction (see
     # retention.sweep_sessions): cleanup must never be the reason a session
     # fails to start.
-    sweep_from_config(config_manager, Path(agent_registry.config_dir), transcript_dir)
+    #
+    # OFF THE LOOP, unlike the claim/lease above. The sweep and the two
+    # backfills below are pure disk walks over OTHER sessions' directories —
+    # hundreds of stats and reads on a long-lived store — and this coroutine
+    # runs on the Textual loop for the TUI boot path, where they measured one
+    # solid 460-490 ms stall warm (2 s cold) before the first frame. Nothing
+    # they touch is shared with THIS session's construction: the current
+    # directory was claimed synchronously above, so a concurrent sweep can
+    # never reap it, and the claim-marker probe (``os.kill(pid, 0)``) is
+    # thread-safe. The lease/claim stay on the loop deliberately — sole-writer
+    # ordering (lease before transcript creation) is an invariant, and putting
+    # a yield inside that window is how two cold resumes lose the race the
+    # lease exists to arbitrate.
+    from local_operator.session.retention import claim_session, sweep_from_config
+
+    await asyncio.to_thread(
+        sweep_from_config, config_manager, Path(agent_registry.config_dir), transcript_dir
+    )
 
     # Stamp session directories that predate the origin marker, so the
     # ``/resume`` picker stops offering delegated runs on the FIRST launch
@@ -1049,12 +1066,16 @@ async def _prepare(
     # re-stamped.
     from local_operator.resume import backfill_session_origins, backfill_session_titles
 
-    backfill_session_origins(Path(agent_registry.config_dir))
+    # Same thread treatment as the sweep above: the origin backfill reads each
+    # unmarked transcript's opening, and the title backfill FULLY reads every
+    # transcript that has neither sidecar nor scan sentinel — the measured
+    # 323 ms term of the boot stall on a real store.
+    await asyncio.to_thread(backfill_session_origins, Path(agent_registry.config_dir))
     # Stamp the title sidecar alongside the origin marker, so a pre-existing
     # session is findable by every name it has borne on the first launch after
     # upgrade rather than only after its next rename. Same best-effort,
     # once-per-session-ever contract as the origin backfill above.
-    backfill_session_titles(Path(agent_registry.config_dir))
+    await asyncio.to_thread(backfill_session_titles, Path(agent_registry.config_dir))
 
     # --- model + stream fn (stream B contracts) ---------------------------
     from local_operator.env import get_env_config
@@ -1460,6 +1481,29 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     manager.on_incident = session._on_mcp_incident
 
 
+def _cancel_task(task: "asyncio.Task[Any]") -> Callable[[], Awaitable[None] | None]:
+    """A dispose hook that cancels one task and awaits its quietus.
+
+    Used for the TUI boot path's background MCP wiring: a session disposed
+    while wiring is still in flight must not leave the task running against
+    a torn-down session (the wiring writes ``session.mcp_startup`` and merges
+    tools into it). Returning an awaitable is part of the dispose-hook
+    contract — hooks may be coroutines — so the cancellation is AWAITED
+    before the rest of teardown proceeds, and a wiring coroutine already
+    inside ``wire_mcp_into_session`` gets to run its own finally blocks.
+    """
+
+    async def _hook() -> None:
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — teardown proceeds
+            pass
+
+    return _hook
+
+
 def attach_auth_dispose(session: Session, auth_store: AuthStore | None) -> None:
     """Fold ``auth_store.close()`` into the session's dispose path (CL-08).
 
@@ -1492,6 +1536,7 @@ async def create_session(
     has_ui: bool = False,
     cwd: str | None = None,
     _force_local_takeover: bool = False,
+    defer_mcp_wiring: bool = False,
 ) -> "SessionProtocol":
     """Build a fully-wired harness session from parsed CLI args.
 
@@ -1507,6 +1552,19 @@ async def create_session(
     scheduler's per-agent directory) pass it explicitly instead of mutating
     the process-global cwd across awaits — every other session builder in
     the same process would otherwise read the wrong directory.
+
+    ``defer_mcp_wiring`` is the TUI boot path's OPT-IN to having MCP servers
+    wired in the background after the session is returned, so the first
+    frame does not wait for the 250 ms discovery gate. Every other caller
+    keeps the old contract — a returned session has MCP wiring completed
+    (or degraded and recorded) — because headless/exec runs have no front
+    end to re-read ``mcp_startup`` when the background round settles; they
+    would silently miss both the tool merge and the failure report. The
+    deferral is safe for the TUI only because MCP tools were already lazy
+    (see :func:`wire_mcp_into_session`): a turn started before wiring
+    settles sees the same non-MCP tool surface as a session whose servers
+    missed the gate today, and the ``refresh_selected`` merge lands
+    mid-session exactly as a late ``list_changed`` event already does.
 
     Raises ``ValueError`` (caught by the CLI's red-banner handler) when the
     hosting/model configuration is missing.
@@ -1603,6 +1661,48 @@ async def create_session(
     # zero MCP tools on any failure. ``has_ui`` routes the announcement: a
     # front end with a full-screen terminal reads session.mcp_startup instead
     # of being written over by a stderr warning.
+    #
+    # DEFERRED wiring is the TUI boot path's opt-in (``defer_mcp_wiring``):
+    # the session returns immediately and the same wiring runs as a background
+    # task. The task is tracked on the session's dispose hooks so a quit
+    # mid-wiring cancels it (a ``disconnect_all`` on a half-wired manager is
+    # exactly the teardown the manager already handles); nothing else differs —
+    # the outcome lands in ``session.mcp_startup`` and the settle sink fires
+    # when the TUI has installed it, which is the same late-attach the 250 ms
+    # gate already produces for slow OAuth servers.
+    if defer_mcp_wiring:
+
+        async def _wire_mcp_background() -> None:
+            # Runs on the session's loop but OFF the boot critical path. An
+            # exception here is the wiring's own degradation contract
+            # (``wire_mcp_into_session`` never raises for provider reasons);
+            # a genuine coding fault is logged rather than killing the task
+            # silently, and the session keeps its non-MCP surface — the same
+            # state a machine with no ``.mcp.json`` boots into.
+            try:
+                manager = await wire_mcp_into_session(
+                    session,
+                    list(plan.session_kwargs["tools"]),
+                    effective_cwd,
+                    knowledge_hooks=plan.knowledge_hooks,
+                    auth_store=plan.auth_store,
+                    has_ui=has_ui,
+                )
+                if manager is not None:
+                    attach_mcp_dispose(session, manager)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — boot must survive a wiring fault
+                logger.warning("background MCP wiring failed", exc_info=True)
+
+        wiring_task = asyncio.get_running_loop().create_task(_wire_mcp_background())
+        # Dispose-during-wiring cancels the task. Folded as a hook rather than
+        # tracking the task on the Session: every front end already calls
+        # ``session.dispose()`` once, so this is the one place teardown can
+        # live without teaching each caller about the boot path.
+        session.add_dispose_hook(_cancel_task(wiring_task))
+        return session
+
     mcp_manager = await wire_mcp_into_session(
         session,
         list(plan.session_kwargs["tools"]),
