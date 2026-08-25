@@ -919,8 +919,18 @@ def browser_command(args: argparse.Namespace) -> int:
         assert isinstance(health, dict)
         print(f"installed:           {'yes' if result['installed'] else 'no'}")
         print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
-        print(f"extension connected: {'yes' if health.get('extension_connected') else 'no'}")
+        connected = bool(health.get("extension_connected"))
+        print(f"extension connected: {'yes' if connected else 'no'}")
         print(f"paired:              {'yes' if result['paired'] else 'no'}")
+        # A paired-but-not-connected browser is the normal closed/backgrounded
+        # state, not a fault; say so rather than leaving a user to guess (N2).
+        if result["paired"] and not connected:
+            print(
+                "                     (browser not currently attached; it reconnects when opened)"
+            )
+        driven = health.get("current_url")
+        if connected and driven:
+            print(f"driving:             {driven}")
         print(f"port:                {result['port']}")
         print(f"log:                 {result['log']}")
         return 0 if result["healthy"] else 1
