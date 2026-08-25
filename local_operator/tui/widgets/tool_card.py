@@ -999,6 +999,7 @@ class ToolCard(ExpandableActionBlock):
         result_text: str = "",
         details: dict[str, Any] | None = None,
         error: str = "",
+        duration_s: float | None = None,
     ) -> None:
         """Adopt a card for a call from a PREVIOUS session, or another agent's.
 
@@ -1028,6 +1029,9 @@ class ToolCard(ExpandableActionBlock):
         self._settle_live()
         self._state = state
         self._started = None
+        # Replay stays blank for legacy rows, while newly persisted executions
+        # show the exact same receipt as the live card did.
+        self._duration = max(0.0, duration_s) if duration_s is not None else None
         if state == "running":
             # Still live: it keeps `tool-running`, it is not finalized, and the
             # expansion still offers the command. Only the clock is withheld.

@@ -17,14 +17,19 @@ test there is.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
 
-from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
+from local_operator.harness.comms import (
+    HUB_COMMUNICATION_CUSTOM_TYPE,
+    HUB_MESSAGE_TYPE,
+    SubagentComms,
+)
 from local_operator.harness.jobs import CANCELLED_BEFORE_START
 from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
+from local_operator.session.session import Session
 from local_operator.session.transcript import (
     Transcript,
     TranscriptEntry,
@@ -46,10 +51,16 @@ from local_operator.tui.widgets.subagent_view import (
     TRUNCATION_NOTE,
     InstructionBlock,
     SubagentView,
+    entry_block,
     fold_trajectory,
 )
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+    WorkingBlock,
+)
 
 from .test_band_panels import FakeSession, _async_factory, _fake_jobs, _Job
 
@@ -136,6 +147,33 @@ def test_fold_produces_prose_and_tool_rows_in_call_order() -> None:
     assert entries[2].result_text == "2 failed"
 
 
+def test_fold_preserves_tool_duration_diff_counts_and_diff_only_expansion() -> None:
+    events = [
+        _call("e1", "edit", path="a.py", old_text="old", new_text="new"),
+        {
+            **_result("e1", "edit", "Done!"),
+            "duration_s": 1.25,
+            "result": {
+                **_result("e1", "edit", "Done!")["result"],
+                "details": {
+                    "added": 1,
+                    "removed": 1,
+                    "diff": ["---", "+++", "@@ -1 +1 @@", "-old", "+new"],
+                },
+            },
+        },
+    ]
+    entry = fold_trajectory(events, settled=True)[0]
+    assert entry.duration_s == 1.25
+    card = entry_block(entry)
+    assert isinstance(card, ToolCard)
+    assert card._added == 1
+    assert card._removed == 1
+    assert card._duration == 1.25
+    assert card._diff == ["---", "+++", "@@ -1 +1 @@", "-old", "+new"]
+    assert card._output == ["Done!"]
+
+
 def test_fold_keeps_a_live_call_live_and_settles_it_when_the_job_is_over() -> None:
     """A call with no end event means two different things, and the difference
     is whether the child is still running: still executing, or killed mid-turn.
@@ -202,6 +240,56 @@ async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
     app._open_subagent_view(str(job.id))
     await pilot.pause()
     return app.query_one(SubagentView)
+
+
+@pytest.mark.asyncio
+async def test_peer_keys_cycle_all_siblings_in_opposite_directions() -> None:
+    jobs = [
+        _Job(job_id, label) for job_id, label in (("a", "alpha"), ("b", "beta"), ("c", "gamma"))
+    ]
+    session = FakeSession()
+    session.jobs = _fake_jobs(*jobs)
+    comms = SubagentComms(cast(Session, session))
+    for job in jobs:
+        comms.record_launch(job.id, job.label)
+    session._subagent_comms = comms
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, jobs[1])
+        assert view.job_id == "b"
+
+        await pilot.press("]")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "c"
+        await pilot.press("]")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "a"
+        await pilot.press("[")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "c"
+        await pilot.press("[")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "b"
+
+
+@pytest.mark.asyncio
+async def test_narrow_subagent_mode_preserves_a_useful_transcript_viewport() -> None:
+    jobs = [_job_with(TRAJECTORY), _Job("peer", "peer")]
+    session = FakeSession()
+    session.jobs = _fake_jobs(*jobs)
+    comms = SubagentComms(cast(Session, session))
+    for job in jobs:
+        comms.record_launch(job.id, job.label)
+    session._subagent_comms = comms
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = await _open(pilot, app, jobs[0])
+        for _ in range(3):
+            await pilot.pause()
+        assert app.screen.has_class("subagent-compact")
+        assert app.query_one("#band").display is False
+        assert view._body.size.height >= 8, view._body.size
+        assert app.screen.virtual_size.height <= app.screen.size.height
 
 
 @pytest.mark.asyncio
@@ -500,9 +588,9 @@ async def test_durable_communication_dedupes_across_page_boundary(
         notices = [
             entry.text
             for entry in view._history_entries
-            if entry.text == "Parent asked: Which file?"
+            if entry.text == "Parent · asked\nWhich file?"
         ]
-        assert notices == ["Parent asked: Which file?"]
+        assert notices == ["Parent · asked\nWhich file?"]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
@@ -541,11 +629,17 @@ async def test_durable_communications_are_human_facing_and_correlated(tmp_path) 
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
-        page = " ".join(view.rendered_rows())
-        assert "Parent asked: Which file failed?" in page
-        assert "Subagent replied: tests/test_api.py" in page
-        assert "Parent redirected: Focus on retries" in page
-        assert "<parent-message>" not in page
+        communications = [
+            (entry.kind, entry.text)
+            for entry in view._history_entries
+            if entry.kind in ("parent_message", "subagent_message")
+        ]
+        assert communications == [
+            ("parent_message", "Parent · asked\nWhich file failed?"),
+            ("subagent_message", "Subagent · replied\n\ntests/test_api.py"),
+            ("parent_message", "Parent · redirected\nFocus on retries"),
+        ]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
 @pytest.mark.asyncio
@@ -743,14 +837,14 @@ async def test_the_page_follows_a_running_subagent() -> None:
         # Prose, then the live tail row that terminates a running page.
         prose, tail = view._body.blocks()
         assert isinstance(prose, AssistantBlock)
-        assert isinstance(tail, NoticeBlock)
+        assert isinstance(tail, WorkingBlock)
 
         job.trajectory.append(_call("c1", "bash", command="pytest -q"))
         app._refresh_band()
         await pilot.pause()
         blocks = view._body.blocks()
         assert isinstance(blocks[1], ToolCard), [type(b).__name__ for b in blocks]
-        assert isinstance(blocks[2], NoticeBlock)
+        assert isinstance(blocks[2], WorkingBlock)
         assert blocks[1]._state == "running"  # still going, and it says so
         # The prose block is the SAME widget, not a re-render of it. A refresh
         # that rebuilds the page throws away the reader's scroll position and

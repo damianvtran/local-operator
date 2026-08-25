@@ -204,6 +204,35 @@ def assistant(text: str, *, tool_calls: list[ToolCall] | None = None) -> Message
     )
 
 
+def test_lineage_queries_are_recursive_cycle_safe_and_snapshot_durable(tmp_path) -> None:
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    for job_id in ("a", "b", "c", "d"):
+        jobs.add(job_id)
+    comms.record_launch("a", "architect", prompt="root", agent_role="architect")
+    comms.record_launch("b", "coder", parent_job_id="a", effort="hi")
+    comms.record_launch("c", "reviewer", parent_job_id="a")
+    comms.record_launch("d", "scout", parent_job_id="b")
+    for job_id in ("a", "b", "c", "d"):
+        comms._records[job_id].session_dir = tmp_path / job_id
+
+    assert [node.job_id for node in comms.ancestors("d")] == ["a", "b"]
+    assert [node.job_id for node in comms.children("a")] == ["b", "c"]
+    assert [node.job_id for node in comms.peers("b")] == ["c"]
+    assert comms.parent("a") is None
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(comms.snapshot())
+    assert [node.label for node in restored.ancestors("d")] == ["architect", "coder"]
+    restored_a = restored.node("a")
+    restored_b = restored.node("b")
+    assert restored_a is not None and restored_a.prompt == "root"
+    assert restored_b is not None and restored_b.effort == "hi"
+
+    restored._records["a"].parent_job_id = "d"
+    assert len(restored.ancestors("d")) <= 4
+
+
 def wire(*, attach: bool = True) -> tuple[SubagentComms, FakeJobs, FakeChild, FakeParent]:
     jobs = FakeJobs()
     parent = FakeParent(jobs)
@@ -1339,8 +1368,58 @@ def test_the_roster_still_lists_a_child_whose_job_row_was_swept(tmp_path):
     [row] = comms.roster()
 
     assert row.status == "failed"
+    assert row.error_text == "provider 500"
+    assert row.result_text is None
     assert row.resumable is True
     assert "provider 500" in (row.detail or "")
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected", "result", "error"),
+    [
+        ("completed", "cancelled", "completed", "finished report", None),
+        ("failed", "cancelled", "failed", None, "provider 500"),
+        ("cancelled", "failed", "failed", None, "provider 500"),
+        ("failed", "completed", "completed", "finished report", None),
+    ],
+)
+def test_terminal_outcomes_only_advance_in_precedence(first, second, expected, result, error):
+    """Late runner observations cannot regress a stronger terminal fact.
+
+    ``completed`` wins because a returned result proves the work finished;
+    ``failed`` next because a captured exception proves how it stopped; bare
+    cancellation is weakest because it only says the task was interrupted.
+    """
+    comms, _jobs, _child, _parent = wire()
+    payloads = {
+        "completed": {"result_text": "finished report"},
+        "failed": {"error_text": "provider 500"},
+        "cancelled": {},
+    }
+
+    comms.record_outcome("job-1", first, **payloads[first])
+    comms.record_outcome("job-1", second, **payloads[second])
+    [row] = comms.roster()
+
+    assert row.status == expected
+    assert row.result_text == result
+    assert row.error_text == error
+
+
+def test_completed_payload_survives_snapshot_restore_and_job_sweep(tmp_path):
+    comms, _jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), tmp_path)
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "completed", result_text="finished report")
+    comms.detach("job-1")
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(comms.snapshot())
+    [row] = restored.roster()
+
+    assert row.status == "completed"
+    assert row.result_text == "finished report"
+    assert row.error_text is None
 
 
 def test_the_roster_reports_a_never_started_child_as_unresumable():

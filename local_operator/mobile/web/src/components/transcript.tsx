@@ -128,6 +128,22 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 					</div>
 				</div>
 			);
+		case "parent_message":
+			return (
+				<div className="flex min-w-0 justify-end">
+					<div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+						<span className="block text-meta text-ink-dim">Parent</span>
+						<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
+					</div>
+				</div>
+			);
+		case "subagent_message":
+			return (
+				<div className="min-w-0 rounded-sm border-l-2 border-l-hairline pl-3">
+					<span className="block text-meta text-ink-dim">Subagent</span>
+					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
+				</div>
+			);
 		case "assistant":
 			/* No per-row caret: the aggregate WorkingLine at the foot of the
 			   transcript is the turn's ONE in-progress indicator (branding §7 —

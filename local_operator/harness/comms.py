@@ -197,6 +197,11 @@ class ChildInfo:
     age_s: float | None = None
     #: Why ``resumable`` is False, when it is False for an interesting reason.
     detail: str | None = None
+    #: Terminal payloads resolved with the same lifecycle precedence as
+    #: ``status``. These survive the job-manager sweep so reconnecting readers
+    #: do not have to merge an ephemeral row with durable comms state again.
+    result_text: str | None = None
+    error_text: str | None = None
     #: The child's TRANSCRIPT directory name — the id ``--resume`` takes, which
     #: is not the ``job_id`` above. Carried because this roster is now the only
     #: surface that can show it: children were dropped from the ``/resume``
@@ -206,6 +211,20 @@ class ChildInfo:
     #: an hour ago had no in-product path to its transcript at all — exactly
     #: the case this class's docstring says it exists to cover.
     session_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SubagentNode:
+    """Immutable presentation identity for one node in the shared lineage."""
+
+    job_id: str
+    label: str
+    parent_job_id: str | None
+    session_id: str | None
+    session_dir: Path | None
+    prompt: str = ""
+    agent_role: str = ""
+    effort: str = ""
 
 
 class ChildSession(Protocol):
@@ -232,6 +251,12 @@ class _ChildRecord:
 
     job_id: str
     label: str
+    # The shared registry stays flat; this edge supplies lineage without moving
+    # execution ownership out of each session's own job manager.
+    parent_job_id: str | None = None
+    prompt: str = ""
+    agent_role: str = ""
+    effort: str = ""
     #: The child's transcript directory. Set at attach; the whole basis of
     #: resume, and the reason a record outlives the job row.
     session_dir: Path | None = None
@@ -289,9 +314,9 @@ class _ChildRecord:
     #: finished cleanly from one that crashed, which is exactly the question
     #: "which of my subagents failed?" needs answered.
     outcome: str | None = None
-    #: The child's error text when ``outcome == "failed"``. Kept so the roster
-    #: can say WHY a child failed after its job row (which held ``error_text``)
-    #: has been swept.
+    #: The child's terminal payload. Kept with the outcome because status and
+    #: content are one durable fact after the ephemeral job row is swept.
+    result_text: str | None = None
     error_text: str | None = None
 
 
@@ -309,7 +334,16 @@ class SubagentComms:
 
     # -- launch bookkeeping ---------------------------------------------------
 
-    def record_launch(self, job_id: str, label: str) -> None:
+    def record_launch(
+        self,
+        job_id: str,
+        label: str,
+        *,
+        parent_job_id: str | None = None,
+        prompt: str = "",
+        agent_role: str = "",
+        effort: str = "",
+    ) -> None:
         """Note a child that has been registered but may not have started.
 
         Called by :func:`~local_operator.harness.subagent.run_subagent` the
@@ -340,8 +374,19 @@ class SubagentComms:
             # the live child, the flushed asides and the reply watcher; the
             # only fact this call adds is the label run_subagent chose.
             existing.label = label
+            existing.parent_job_id = parent_job_id
+            existing.prompt = prompt
+            existing.agent_role = agent_role
+            existing.effort = effort
             return
-        self._records[job_id] = _ChildRecord(job_id=job_id, label=label)
+        self._records[job_id] = _ChildRecord(
+            job_id=job_id,
+            label=label,
+            parent_job_id=parent_job_id,
+            prompt=prompt,
+            agent_role=agent_role,
+            effort=effort,
+        )
         self._evict_overflow()
 
     def attach(self, job_id: str, child: ChildSession, session_dir: Path) -> None:
@@ -410,6 +455,85 @@ class SubagentComms:
         """
         return job_id is not None and job_id in self._records
 
+    # -- lineage --------------------------------------------------------------
+
+    def nodes(self) -> list[SubagentNode]:
+        """Return every known descendant in stable launch order.
+
+        Nested launches share this registry but do not emit their lifecycle
+        events through the root session. Projection consumers therefore need
+        the registry's complete roster rather than trying to infer lineage from
+        the root event stream, which can only ever describe direct children.
+        """
+        return [node for job_id in self._records if (node := self.node(job_id)) is not None]
+
+    def node(self, job_id: str) -> SubagentNode | None:
+        record = self._records.get(job_id)
+        if record is None:
+            return None
+        session_id = record.session_dir.name if record.session_dir is not None else None
+        child_session_id = getattr(record.child, "session_id", None)
+        if child_session_id:
+            session_id = str(child_session_id)
+        return SubagentNode(
+            job_id=record.job_id,
+            label=record.label,
+            parent_job_id=record.parent_job_id,
+            session_id=session_id,
+            session_dir=record.session_dir,
+            prompt=record.prompt,
+            agent_role=record.agent_role,
+            effort=record.effort,
+        )
+
+    def job(self, job_id: str) -> Any | None:
+        """Find a node's job without centralizing its execution manager."""
+        sessions: list[Any] = [self._session]
+        sessions.extend(
+            record.child for record in self._records.values() if record.child is not None
+        )
+        for session in sessions:
+            manager = getattr(session, "jobs", None)
+            try:
+                job = manager.get(job_id) if manager is not None else None
+            except Exception:
+                job = None
+            if job is not None:
+                return job
+        return None
+
+    def parent(self, job_id: str) -> SubagentNode | None:
+        node = self.node(job_id)
+        return self.node(node.parent_job_id) if node is not None and node.parent_job_id else None
+
+    def children(self, job_id: str | None) -> list[SubagentNode]:
+        rows: list[SubagentNode] = []
+        for record in self._records.values():
+            if record.parent_job_id != job_id:
+                continue
+            node = self.node(record.job_id)
+            if node is not None:
+                rows.append(node)
+        return rows
+
+    def peers(self, job_id: str) -> list[SubagentNode]:
+        node = self.node(job_id)
+        if node is None:
+            return []
+        return [peer for peer in self.children(node.parent_job_id) if peer.job_id != job_id]
+
+    def ancestors(self, job_id: str) -> list[SubagentNode]:
+        """Root-to-parent lineage, cycle-safe for malformed legacy snapshots."""
+        rows: list[SubagentNode] = []
+        seen = {job_id}
+        current = self.parent(job_id)
+        while current is not None and current.job_id not in seen:
+            seen.add(current.job_id)
+            rows.append(current)
+            current = self.parent(current.job_id)
+        rows.reverse()
+        return rows
+
     # -- addressing -----------------------------------------------------------
 
     def live_ids(self) -> list[str]:
@@ -449,8 +573,18 @@ class SubagentComms:
             return matches, None
         return [], f"unknown subagent {target!r}"
 
-    def record_outcome(self, job_id: str, status: str, error_text: str | None = None) -> None:
+    def record_outcome(
+        self,
+        job_id: str,
+        status: str,
+        error_text: str | None = None,
+        result_text: str | None = None,
+    ) -> tuple[str, str | None, str | None] | None:
         """Remember how a child settled, before its job row is swept.
+
+        Returns the resolved ``(status, error, result)`` so a caller interrupted
+        during end-event fan-out can emit the already-winning terminal fact
+        instead of inventing a contradictory cancellation event.
 
         Called from the subagent runner's settle paths. The job manager drops
         settled rows after its retention window while records here outlive
@@ -466,9 +600,32 @@ class SubagentComms:
         """
         record = self._records.get(job_id)
         if record is None:
-            return
+            return None
+
+        # Cancellation is an observation that the runner task was interrupted,
+        # not evidence that work which already returned a result or raised an
+        # error did not settle. End-event fan-out is awaited after those facts
+        # are recorded, so a cancel can arrive in that window. Terminal facts
+        # therefore only move upward in certainty: cancelled < failed <
+        # completed. The winning fact owns its payload; repeated writes of the
+        # same fact may fill a payload that an earlier persistence pass lacked.
+        precedence = {"cancelled": 0, "failed": 1, "completed": 2}
+        current = record.outcome
+        if current in precedence and precedence.get(status, -1) < precedence[current]:
+            # Membership narrows this for human readers; pyright needs it explicit.
+            assert current is not None
+            return current, record.error_text, record.result_text
+        if current == status:
+            assert current is not None
+            if result_text is not None:
+                record.result_text = result_text
+            if error_text is not None:
+                record.error_text = error_text
+            return current, record.error_text, record.result_text
         record.outcome = status
+        record.result_text = result_text
         record.error_text = error_text
+        return status, error_text, result_text
 
     def roster(self) -> list[ChildInfo]:
         """Every child this session launched, live or long settled.
@@ -507,8 +664,13 @@ class SubagentComms:
                 {
                     "job_id": record.job_id,
                     "label": record.label,
+                    "parent_job_id": record.parent_job_id,
+                    "prompt": record.prompt,
+                    "agent_role": record.agent_role,
+                    "effort": record.effort,
                     "session_dir": str(record.session_dir),
                     "outcome": record.outcome,
+                    "result_text": record.result_text,
                     "error_text": record.error_text,
                     "paused": record.paused,
                     "settled_at": record.settled_at,
@@ -542,11 +704,18 @@ class SubagentComms:
             record = _ChildRecord(
                 job_id=job_id,
                 label=str(row.get("label") or job_id),
+                parent_job_id=(str(row["parent_job_id"]) if row.get("parent_job_id") else None),
+                prompt=str(row.get("prompt") or ""),
+                agent_role=str(row.get("agent_role") or ""),
+                effort=str(row.get("effort") or ""),
                 session_dir=session_dir,
                 settled=True,
                 settled_at=row.get("settled_at"),
                 paused=bool(row.get("paused")),
                 outcome=(str(row["outcome"]) if row.get("outcome") is not None else None),
+                result_text=(
+                    str(row["result_text"]) if row.get("result_text") is not None else None
+                ),
                 error_text=(str(row["error_text"]) if row.get("error_text") is not None else None),
             )
             self._records[job_id] = record
@@ -661,6 +830,8 @@ class SubagentComms:
         job = jobs.get(record.job_id) if jobs is not None else None
         age: float | None = None
         detail: str | None = None
+        result_text: str | None = None
+        error_text: str | None = None
 
         if record.paused:
             # DEFENSIVE, not a window anyone can currently observe.
@@ -687,7 +858,18 @@ class SubagentComms:
                 )
             status = "paused"
         elif record.outcome is not None:
+            # ``record_outcome`` lands inside the runner before the manager can
+            # stamp its still-running row. Once terminal, a job id is never
+            # reused, so accepting that stale live status would resurrect work.
+            # A terminal live row may carry the richer final payload; otherwise
+            # the durable record is the post-sweep/reconnect source of truth.
             status = record.outcome
+            if job is not None and job.status != "running":
+                result_text = getattr(job, "result_text", None)
+                error_text = getattr(job, "error_text", None)
+            else:
+                result_text = record.result_text
+                error_text = record.error_text
         elif job is not None and job.status == "running":
             status = "queued" if getattr(job, "queued", False) else "running"
             if record.child is None and status == "running":
@@ -698,6 +880,8 @@ class SubagentComms:
                 status = "starting"
         elif job is not None:
             status = job.status
+            result_text = getattr(job, "result_text", None)
+            error_text = getattr(job, "error_text", None)
         elif record.settled:
             status = "cancelled" if record.session_dir is not None else "gone"
         else:
@@ -772,6 +956,8 @@ class SubagentComms:
             resumable=resumable,
             age_s=age,
             detail=detail,
+            result_text=result_text,
+            error_text=error_text,
             session_id=record.session_dir.name if record.session_dir is not None else None,
         )
 

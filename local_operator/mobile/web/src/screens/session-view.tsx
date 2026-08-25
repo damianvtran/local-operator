@@ -139,7 +139,7 @@ export function SessionScreen({ sessionId }: { sessionId: string }) {
 				<TodosPanel todos={projection.todos} />
 			) : null}
 			{projection.subagents.length > 0 ? (
-				<SubagentsPanel subagents={projection.subagents} />
+				<SubagentsPanel pid={sessionId} subagents={projection.subagents} />
 			) : null}
 
 			{projection.pending ? (
