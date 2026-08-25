@@ -599,56 +599,69 @@ def test_one_long_role_does_not_evict_its_peers_roles() -> None:
     assert role.endswith("…")
 
 
-def test_the_role_column_never_costs_any_rows_activity_a_single_cell() -> None:
-    """The D3 guarantee on the MIXED roster a real dock actually lays out.
+def test_the_role_column_is_stable_when_live_activity_text_changes() -> None:
+    """A child-authored sentence cannot toggle a roster-wide identity column.
 
-    The role is "the most disposable field"; the activity is "never traded for
-    a number". The shared column is paid by every row to preserve alignment,
-    including a plain task that renders no role of its own. The guard must
-    therefore compare every row — not only a row whose own role is non-empty —
-    against the identical roster with the role column removed (agent review
-    round 2, R4). A single-row `_plain` probe cannot observe this defect because
-    its role column collapses to that row's own role.
+    R4 correctly made the activity-floor check symmetric across a mixed roster,
+    but its first form compared against the FULL current sentence. Since that
+    sentence is live and unbounded, one roleless child's progress moved the
+    column's visibility floor from 88 to 127 and made every peer's role flicker
+    at a fixed width. The veto now reserves the stable ACTIVITY_FLOOR instead:
+    whether the column exists is a function of width and the roster's bounded
+    structural fields, never one child's current prose (design round 3, D8).
     """
 
-    def roster(*, with_roles: bool) -> list[Job]:
-        roles = ("", "reviewer", "ux-reviewer") if with_roles else ("", "", "")
+    def roster(progress: str) -> list[Job]:
         jobs = [
-            Job(
-                "plain",
-                "sweep-notes",
-                progress="collecting notes from everywhere and checking every source",
-                agent_role=roles[0],
-            ),
-            Job("review", "review-303", progress="auditing merged MRs", agent_role=roles[1]),
-            Job("ux", "ux-303", progress="walking the flow", agent_role=roles[2]),
+            Job("plain", "sweep-notes", progress=progress),
+            Job("review", "review-303", progress="auditing merged MRs", agent_role="reviewer"),
+            Job("ux", "ux-303", progress="walking the flow", agent_role="ux-reviewer"),
         ]
         for job in jobs:
             job.usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
         return jobs
 
-    def activities(jobs: list[Job], width: int) -> list[str]:
-        measured = [
-            (
-                row_facts(job, fallback_id=job.id, current=False),
-                job_stats(job, default_model_label=PARENT_MODEL),
-            )
-            for job in jobs
-        ]
+    short = roster("collecting release notes")
+    long = roster("collecting notes from everywhere and checking every source twice")
+    for width in range(200, 11, -1):
+        short_rows = _column(short, width)
+        long_rows = _column(long, width)
+        assert ("reviewer" in short_rows[1]) == (
+            "reviewer" in long_rows[1]
+        ), f"live progress toggled the role column at {width}: {short_rows!r} vs {long_rows!r}"
+
+
+def test_the_shared_role_column_never_pushes_activity_below_its_floor() -> None:
+    """R4 remains symmetric, but its bounded guarantee is stated truthfully.
+
+    A roleless row pays the shared blank column while roles are shown because
+    D1 requires what follows to align. That bounded cost is acceptable while
+    the established activity floor fits; once WIDTH cannot pay the floor on
+    any row, the whole role rung sheds. Unlike the old guard, sentence length
+    is irrelevant, so this cannot flicker as progress changes.
+    """
+    jobs = [
+        Job("plain", "sweep-notes", progress="collecting notes from everywhere"),
+        Job("review", "review-303", progress="auditing merged MRs", agent_role="reviewer"),
+        Job("ux", "ux-303", progress="walking the flow", agent_role="ux-reviewer"),
+    ]
+    for job in jobs:
+        job.usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
+    measured = [
+        (
+            row_facts(job, fallback_id=job.id, current=False),
+            job_stats(job, default_model_label=PARENT_MODEL),
+        )
+        for job in jobs
+    ]
+    for width in range(200, 11, -1):
         rung, column, clock, role_column = panel_layout(measured, width)
-        return [
+        activities = [
             _lay_out(facts, stats, width, rung, column, clock, role_column)[4]
             for facts, stats in measured
         ]
-
-    mixed = roster(with_roles=True)
-    baseline = roster(with_roles=False)
-    for width in range(200, 11, -1):
-        shown = activities(mixed, width)
-        bare = activities(baseline, width)
-        assert [cell_len(value) for value in shown] == [
-            cell_len(value) for value in bare
-        ], f"the shared role column shortened an activity at {width}: {shown!r} vs {bare!r}"
+        if role_column:
+            assert all(cell_len(activity) >= ACTIVITY_FLOOR for activity in activities)
 
 
 def test_a_plain_task_roster_is_unchanged_by_the_role_column() -> None:

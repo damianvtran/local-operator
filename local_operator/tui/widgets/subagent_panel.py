@@ -432,10 +432,12 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #:    the page, where a state or a number is not. The two surfaces are read in
 #:    one glance and must not rank the same field differently. It is also the
 #:    only rung whose acceptance is CONDITIONAL: :func:`_row_rung` rejects it
-#:    whenever keeping the shared column would shorten ANY row's activity,
-#:    including a roleless row that reserves blank cells for alignment. Thus
-#:    the rule below stays true for the whole mixed roster, not only the rows
-#:    that render a role.
+#:    whenever keeping the shared column would drive ANY row's activity below
+#:    :data:`ACTIVITY_FLOOR`, including a roleless row that reserves blank
+#:    cells for alignment. The threshold is a WIDTH CAPACITY, not the current
+#:    length of a child-authored progress sentence, so live activity changes
+#:    cannot make the whole column flicker in and out (design review round 3,
+#:    D8).
 #: 1. COST sheds next — it is monotonic and slow, and nothing an operator
 #:    acts on inside a second.
 #: 2. CONTEXT then SHORTENS before it drops: ``5%`` keeps the segment for two
@@ -492,20 +494,6 @@ _RUNGS: tuple[_Rung, ...] = (
     _Rung("none", False, False, LABEL_FLOOR),
 )
 
-#: The first counterpart of the role-bearing rung that keeps every OTHER
-#: field unchanged. Derived from the table instead of assumed to be
-#: ``index + 1``: the D3 guard compares exactly these two candidates, and a
-#: future rung inserted between them must not silently change what "without
-#: role" means (agent review round 2, N2).
-_NO_ROLE_RUNG = next(
-    index
-    for index, rung in enumerate(_RUNGS)
-    if not rung.keep_role
-    and rung.context_spelling == _RUNGS[0].context_spelling
-    and rung.keep_cost == _RUNGS[0].keep_cost
-    and rung.label_budget == _RUNGS[0].label_budget
-)
-
 
 def _row_rung(
     facts: RowFacts,
@@ -524,17 +512,19 @@ def _row_rung(
     acceptance is monotone and the first hit is the answer.
 
     The ROLE rung is additionally rejected when keeping the shared role COLUMN
-    would cost ANY row a shorter ACTIVITY than dropping it would (D3/R4). The
-    ladder's stated principle is that activity is never traded for a number —
-    it is the row's only statement of what the child is DOING, where the role
-    is identity sugar the label already half-carries and is re-derivable by
-    opening the page. The column is roster-wide, so this comparison must be
-    symmetric: a roleless row still reserves the blank column to preserve D1's
-    alignment, and checking only rows whose own ``role`` was non-empty merely
-    moved the 82/81 springback onto the plain-task row (agent review round 2,
-    R4). Comparing every row against the table-derived no-role counterpart
-    keeps alignment where the activity can afford it and sheds the whole
-    column where any row cannot.
+    would leave ANY row fewer than :data:`ACTIVITY_FLOOR` cells for activity
+    (D3/R4/D8). The column is roster-wide, so this capacity check is symmetric:
+    a roleless row still reserves the blank column to preserve D1's alignment.
+
+    Crucially the veto compares CAPACITY, not the current activity's displayed
+    length. The earlier symmetric guard compared against the full unbounded,
+    child-authored sentence; one chatty row therefore moved the role column's
+    visibility floor from width 88 to 127 and made the whole column flicker at
+    a fixed width as that live string changed (design review round 3, D8).
+    Activities already truncate everywhere else. A stable column is the more
+    valuable list-wide invariant, so the role survives while every row can pay
+    the established floor and sheds only when width, not prose, makes that
+    floor unaffordable.
     """
     for index in range(len(_RUNGS)):
         label, role, context, cost, activity = _lay_out(
@@ -548,13 +538,17 @@ def _row_rung(
             + _role_cells(index, role, role_column)
         )
         numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (context, cost) if part)
-        if role_column and _RUNGS[index].keep_role and facts.activity:
-            # Compare with the table-derived counterpart that changes ONLY
-            # ``keep_role``. Crucially this runs for a roleless row too: it
-            # renders whitespace rather than a role, but pays the same shared
-            # column so the measurements beneath the roster remain aligned.
-            without = _lay_out(facts, stats, width, _NO_ROLE_RUNG, column, clock, role_column)[4]
-            if cell_len(activity) < cell_len(without):
+        if role_column and _RUNGS[index].keep_role:
+            # The progress sentence — including whether one happens to be
+            # present this tick — is deliberately NOT consulted here: it
+            # changes live and is unbounded, so it cannot be allowed to toggle
+            # a roster-wide column. Measure only the stable chrome/numeric
+            # fields and reserve the established activity floor on EVERY row.
+            # This applies to roleless rows too, which pay the shared blank
+            # column for D1 alignment (R4). The result is a function of width
+            # and roster identity/stats, never one child's current prose (D8).
+            activity_room = width - head - numbers - ACTIVITY_GAP
+            if activity_room < ACTIVITY_FLOOR:
                 continue
         if not facts.activity:
             if head + numbers <= width:
