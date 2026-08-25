@@ -180,7 +180,7 @@ def _as_phases(raw: list[Any]) -> list[dict[str, Any]]:
     return [{"name": _IMPLICIT_PHASE, "items": list(raw)}]  # legacy/flat
 
 
-def todo_items(session_id: str) -> list[dict[str, Any]]:
+def todo_items(session_id: str, transcript_directory: str | None = None) -> list[dict[str, Any]]:
     """The live todo list for ``session_id``, as phases (copies, never the store).
 
     Reads the todo tool's own store — the one writer is the tool, so the table
@@ -199,6 +199,17 @@ def todo_items(session_id: str) -> list[dict[str, Any]]:
     except Exception:
         return []
     raw = TODO_STORE.get(session_id)
+    if not raw and transcript_directory:
+        # A resumed/swept child has no live process store. Its own transcript is
+        # authoritative; never consult the root session as a convenience.
+        try:
+            from local_operator.session.transcript import Transcript
+
+            details = Transcript(transcript_directory).latest_custom("todo_snapshot") or {}
+            candidate = details.get("items") or []
+            raw = candidate if isinstance(candidate, list) else []
+        except Exception:
+            raw = []
     if not raw:
         return []
     return [
@@ -356,7 +367,15 @@ class TodoPanel(Container):
         #: * hidden — a phase crossing the auto-hide threshold changes the view
         #:   with no store change, same reason.
         self._shown: (
-            tuple[tuple[tuple[str, str, str, str], ...], int, bool, frozenset[str]] | None
+            tuple[
+                str,
+                str | None,
+                tuple[tuple[str, str, str, str], ...],
+                int,
+                bool,
+                frozenset[str],
+            ]
+            | None
         ) = None
         #: Collapse/expand flag flipped by ``ctrl+t`` (:meth:`toggle_expanded`).
         #: Collapsed applies the walking-viewport cap and hides settled phases;
@@ -438,8 +457,14 @@ class TodoPanel(Container):
         yield self._affordance
 
     # -- sync -----------------------------------------------------------------
-    def sync(self, session: Any) -> None:
-        """Re-read the store and repaint only on change.
+    def sync(
+        self,
+        session: Any,
+        *,
+        session_id: str | None = None,
+        transcript_directory: str | None = None,
+    ) -> None:
+        """Re-read the selected session's store and repaint only on change.
 
         Called on the todo tool's ``tool_execution_end`` (immediate) AND on the
         app's 1 Hz job poll (the belt to that event's suspenders: a ``done``
@@ -448,14 +473,19 @@ class TodoPanel(Container):
         """
         try:
             frontend = getattr(session, "frontend_state", None)
-            if frontend is not None:
+            selected_id = (
+                session_id if session_id is not None else getattr(session, "session_id", "")
+            )
+            if frontend is not None and selected_id == getattr(session, "session_id", ""):
                 phases = [phase.model_dump(mode="json") for phase in frontend.todos]
             else:
-                # Reduced/embedder hosts without the canonical contract retain
-                # the legacy store read; production Session and RemoteSession
-                # both arrive through the state above.
-                session_id = getattr(session, "session_id", "") or ""
-                phases = todo_items(session_id)
+                # Historical child pages read their own durable transcript;
+                # the live owner/follower session reads canonical state.
+                phases = (
+                    todo_items(selected_id or "", transcript_directory)
+                    if transcript_directory is not None
+                    else todo_items(selected_id or "")
+                )
             # The phase name and the reason both ride IN the fingerprint: a
             # phase rename, an item moving between phases, or a re-block with a
             # new reason all change what the panel says, and a guard blind to
@@ -480,7 +510,17 @@ class TodoPanel(Container):
             # the toggle or the hide silently no-op. A body one row taller than
             # its budget is clipped, silently, by `Screen { overflow: hidden }`.
             budget = self._body_rows()
-            state = (fingerprint, budget, self._expanded, hidden)
+            # Session identity belongs in the guard even when both lists are
+            # empty or byte-identical: retargeting must never retain another
+            # session's panel state or delayed phase-hide clocks.
+            state = (
+                selected_id,
+                transcript_directory,
+                fingerprint,
+                budget,
+                self._expanded,
+                hidden,
+            )
             if state == self._shown:
                 return  # equality guard — nothing that affects the paint moved
             self._shown = state

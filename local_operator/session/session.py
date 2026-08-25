@@ -774,6 +774,10 @@ _ROSTER_ROW_FIELDS = frozenset(
         "model_label",
         "context_window",
         "usage",
+        # Bounded by distinct provider/model/accounting-mode tuples, not child
+        # count. This is the durable half of nested accounting after a child
+        # manager is disposed and therefore must survive process resume.
+        "descendant_usage",
         "restored",
         # Small bounded strings, stamped at registration: a restored row must
         # still say what kind of child it was ("task"/"scout") and at what
@@ -1240,7 +1244,12 @@ class Session:
         # behaviour is exactly what it was before this was configurable.
         def on_job_change() -> None:
             store = getattr(self, "_frontend_state_store", None)
-            if store is None or getattr(self, "_frontend_jobs_refresh_scheduled", False):
+            # No terminal or attach subscriber can observe these snapshots yet.
+            # Avoid serializing large child trajectories solely for an unused
+            # in-process state object; the first subscription snapshots live data.
+            if store is None or not store.has_subscribers:
+                return
+            if getattr(self, "_frontend_jobs_refresh_scheduled", False):
                 return
             self._frontend_jobs_refresh_scheduled = True
             try:
@@ -3087,12 +3096,17 @@ class Session:
         return self._frontend_state_store.state
 
     def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
-        """Atomically snapshot and subscribe at one session-loop boundary."""
+        """Atomically refresh, snapshot and subscribe on the session loop."""
+        self._frontend_state_store.refresh_from_session(self, initial=True)
         return self._frontend_state_store.subscribe(handler)
 
     def refresh_frontend_state(self) -> None:
         """Publish non-event source changes through the canonical contract."""
         self._frontend_state_store.refresh_from_session(self)
+
+    def refresh_frontend_usage(self) -> None:
+        """Refresh restored usage without scanning transcript/jobs/tool schemas."""
+        self._frontend_state_store.refresh_restored_usage(self)
 
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable. Sync or
@@ -5224,9 +5238,10 @@ class Session:
         The manager fires this on the hot path of a registration or settle, so
         it must not block or await: it spawns the snapshot write on the session
         task group and returns at once. A child session (one with a ``job_id``)
-        does not persist a roster of its own — it is itself a leaf whose
-        transcript the PARENT already tracks — so the hook is a no-op there,
-        keeping a grandchild's churn off the child's transcript.
+        does not persist a roster of its own: its parent runner snapshots that
+        ledger into the owning row at settlement. Keeping intermediate churn
+        off the child transcript avoids quadratic snapshots while the final
+        subtree survives durably.
         """
         if self._disposed or self._job_id is not None:
             return

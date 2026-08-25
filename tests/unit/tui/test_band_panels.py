@@ -27,6 +27,40 @@ from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
 
 
+@pytest.mark.asyncio
+async def test_todo_panel_reads_selected_child_snapshot_without_root_leakage(tmp_path) -> None:
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.builtin import TODO_STORE
+
+    child = Transcript(tmp_path / "child")
+    await child.append_custom(
+        "todo_snapshot",
+        {
+            "items": [
+                {
+                    "name": "Child",
+                    "items": [{"text": "child only", "status": "pending", "reason": ""}],
+                }
+            ]
+        },
+    )
+    TODO_STORE["root"] = [
+        {"name": "Root", "items": [{"text": "root only", "status": "pending", "reason": ""}]}
+    ]
+    try:
+        panel = TodoPanel()
+        session = type("Session", (), {"session_id": "root"})()
+        panel.sync(session, session_id="child", transcript_directory=str(child.directory))
+        assert "child only" in str(panel._body.content)
+        assert "root only" not in str(panel._body.content)
+        panel.sync(session, session_id="missing")
+        assert panel.display is False
+    finally:
+        TODO_STORE.pop("root", None)
+        TODO_STORE.pop("child", None)
+        TODO_STORE.pop("missing", None)
+
+
 class FakeSession:
     """Minimal SessionProtocol the app can boot against."""
 

@@ -756,6 +756,11 @@ BOOT_LAYOUT_CLASS = "boot"
 #: recede rather than disappear, or the page stops reading as the same app.
 #: Flipped in exactly two places, ``_open_subagent_view``/``_close_subagent_view``.
 SUBAGENT_LAYOUT_CLASS = "subagent"
+#: At phone-height terminals the live roster and todos can consume nearly the
+#: entire detail page. The compact mode keeps the selected transcript primary;
+#: secondary context remains one ``Esc`` away in the parent conversation.
+SUBAGENT_COMPACT_LAYOUT_CLASS = "subagent-compact"
+SUBAGENT_COMPACT_MAX_ROWS = 24
 
 #: The screen class the org-chart mode adds, flipped only in
 #: ``_open_org_chart_view``/``_close_org_chart_view``. Named to match its
@@ -1168,6 +1173,11 @@ class OperatorApp(App[None]):
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
         Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
+        Binding("p", "subagent_parent", "Parent subagent", show=False),
+        Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
+        Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
+        Binding("c", "subagent_child", "Child subagent", show=False),
+        Binding("r", "subagent_root", "Root conversation", show=False),
         # Scroll the EXPANDED todo list from the keyboard (U2). When an expanded
         # list is longer than the panel can show, its overflow scrolls inside a
         # non-focusable region (`#todo-scroll`, `can_focus = False` for U3), so a
@@ -1961,9 +1971,9 @@ class OperatorApp(App[None]):
             old_unsubscribe()
         self._unsubscribe_frontend = None
         subscribe_frontend = getattr(session, "subscribe_frontend", None)
-        refresh_frontend = getattr(session, "refresh_frontend_state", None)
-        if callable(refresh_frontend):
-            refresh_frontend()
+        refresh_frontend_usage = getattr(session, "refresh_frontend_usage", None)
+        if callable(refresh_frontend_usage):
+            refresh_frontend_usage()
         if callable(subscribe_frontend):
             from local_operator.session.frontend_state import FrontendSubscription
 
@@ -4606,6 +4616,7 @@ class OperatorApp(App[None]):
         # to run BEFORE the screen arranges, which is what lets the composition below
         # land in the first frame the terminal ever sees.
         self._sync_boot_layout(size=event.size)
+        self._sync_subagent_compact_layout(event.size.height)
         # The overlay cards are hosted in `width: auto` containers, so a
         # terminal resize does not resize THEM and Textual delivers them no
         # event — the aside in particular is sized AND PLACED from the
@@ -4656,6 +4667,13 @@ class OperatorApp(App[None]):
         # cards over whatever the band settled to, which is the order those two
         # already depend on.
         self.call_after_refresh(self._refresh_band)
+
+    def _sync_subagent_compact_layout(self, screen_height: int) -> None:
+        """Keep narrow detail pages useful by yielding secondary dock rows."""
+        self.screen.set_class(
+            self._subagent_view is not None and screen_height <= SUBAGENT_COMPACT_MAX_ROWS,
+            SUBAGENT_COMPACT_LAYOUT_CLASS,
+        )
 
     def _remeasure_prompt(self) -> None:
         """Re-lay a live prompt against the current terminal, then fit the host."""
@@ -5543,6 +5561,12 @@ class OperatorApp(App[None]):
         """
         if self._close_aside():
             return
+        if self._subagent_view is not None and self._session is not None:
+            comms = getattr(self._session, "_subagent_comms", None)
+            parent = comms.parent(self._subagent_view.job_id) if comms is not None else None
+            if parent is not None:
+                self._open_subagent_view(parent.job_id)
+                return
         if self._close_subagent_view():
             return
         # The org-chart mode leaves on Esc the same way the subagent view does,
@@ -8193,7 +8217,28 @@ class OperatorApp(App[None]):
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
             if self._todo_panel is not None:
-                self._todo_panel.sync(session)
+                selected_session_id: str | None = None
+                if self._subagent_view is not None:
+                    comms = getattr(session, "_subagent_comms", None)
+                    try:
+                        node = comms.node(self._subagent_view.job_id) if comms is not None else None
+                    except Exception:
+                        node = None
+                    # An unresolved/legacy child means NO selected todos. Falling
+                    # back to root here is the leakage this mode must prevent.
+                    selected_session_id = node.session_id if node is not None else ""
+                    selected_directory = (
+                        str(node.session_dir)
+                        if node is not None and node.session_dir is not None
+                        else None
+                    )
+                else:
+                    selected_directory = None
+                self._todo_panel.sync(
+                    session,
+                    session_id=selected_session_id,
+                    transcript_directory=selected_directory,
+                )
             self._sync_band_inset()
         # The open subagent page rides the SAME tick, for the same reason: a
         # child's elapsed time and its last tool both move with no event, and
@@ -8301,6 +8346,51 @@ class OperatorApp(App[None]):
         # card asks for the keyboard explicitly instead (Tab, advertised in the
         # footer), which cannot arrive at a moment the user did not choose.
 
+    def action_subagent_parent(self) -> None:
+        self._navigate_subagent("parent")
+
+    def action_subagent_peer(self, direction: int) -> None:
+        self._navigate_subagent("peer", direction=direction)
+
+    def action_subagent_child(self) -> None:
+        self._navigate_subagent("child")
+
+    def action_subagent_root(self) -> None:
+        if self._subagent_view is not None:
+            self._close_subagent_view()
+
+    def _navigate_subagent(self, relation: str, *, direction: int = 1) -> None:
+        view = self._subagent_view
+        session = self._session
+        comms = getattr(session, "_subagent_comms", None) if session is not None else None
+        if view is None or comms is None:
+            return
+        if relation == "parent":
+            target = comms.parent(view.job_id)
+            if target is None:
+                self._close_subagent_view()
+                return
+        elif relation == "child":
+            children = comms.children(view.job_id)
+            target = children[0] if children else None
+        else:
+            node = comms.node(view.job_id)
+            siblings = comms.children(node.parent_job_id) if node is not None else []
+            current = next(
+                (index for index, sibling in enumerate(siblings) if sibling.job_id == view.job_id),
+                None,
+            )
+            # The complete sibling order is authoritative. Cycling a list from
+            # ``peers()`` loses the selected node's position and made both keys
+            # oscillate over the first two children while later peers vanished.
+            target = (
+                siblings[(current + (1 if direction >= 0 else -1)) % len(siblings)]
+                if current is not None and len(siblings) > 1
+                else None
+            )
+        if target is not None:
+            self._open_subagent_view(target.job_id)
+
     def _open_subagent_view(self, job_id: str) -> None:
         """Enter the full-page subagent view for one task job.
 
@@ -8327,6 +8417,7 @@ class OperatorApp(App[None]):
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))
         self.screen.add_class(SUBAGENT_LAYOUT_CLASS)
+        self._sync_subagent_compact_layout(self.size.height)
         self._set_composer_read_only(True)
         self._refresh_subagent_view(job_id)
 
@@ -8346,8 +8437,11 @@ class OperatorApp(App[None]):
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
         self.screen.remove_class(SUBAGENT_LAYOUT_CLASS)
+        self.screen.remove_class(SUBAGENT_COMPACT_LAYOUT_CLASS)
         self._transcript_view().display = True
         self._set_composer_read_only(False)
+        if self._todo_panel is not None and self._session is not None:
+            self._todo_panel.sync(self._session)
         # The band goes back to describing THIS session. Dropping the overlay
         # rather than writing the parent's numbers back is what makes the
         # restoration exact: they never left, they were only shadowed, and
@@ -8364,8 +8458,14 @@ class OperatorApp(App[None]):
         return True
 
     def on_subagent_view_dismissed(self, message: SubagentViewDismissed) -> None:
-        """The page's ``esc`` hint was clicked — same exit as the key itself."""
+        """Esc climbs lineage before returning to the root conversation."""
         message.stop()
+        if self._subagent_view is not None and self._session is not None:
+            comms = getattr(self._session, "_subagent_comms", None)
+            parent = comms.parent(self._subagent_view.job_id) if comms is not None else None
+            if parent is not None:
+                self._open_subagent_view(parent.job_id)
+                return
         self._close_subagent_view()
 
     def _open_org_chart_view(self, team_name: str) -> None:
@@ -8454,18 +8554,27 @@ class OperatorApp(App[None]):
         job_id = job_id or view.job_id
         session = self._session
         manager = getattr(session, "jobs", None) if session is not None else None
-        try:
-            job = manager.get(job_id) if manager is not None else None
-        except Exception:
-            job = None
         comms = getattr(session, "_subagent_comms", None) if session is not None else None
+        try:
+            lookup = getattr(comms, "job", None) if comms is not None else None
+            job = lookup(job_id) if callable(lookup) else manager.get(job_id) if manager else None
+        except Exception:
+            job = manager.get(job_id) if manager is not None else None
         try:
             transcript_directory = comms.session_dir_of(job_id) if comms is not None else None
         except Exception:
             transcript_directory = None
+        try:
+            node = comms.node(job_id) if comms is not None else None
+        except Exception:
+            node = None
+        try:
+            ancestors = comms.ancestors(job_id) if comms is not None else []
+        except Exception:
+            ancestors = []
         view.show(
             job_id=job_id,
-            label=str(getattr(job, "label", "") or job_id),
+            label=str(getattr(job, "label", "") or getattr(node, "label", "") or job_id),
             # A swept job reads as `gone`, not as `running`: the row it was
             # opened from has been evicted from the ledger, and claiming the
             # child is still working would be the one wrong answer.
@@ -8484,7 +8593,7 @@ class OperatorApp(App[None]):
             # the turn pipeline without emitting an event, so no amount of
             # trajectory carries it. `None` — a job type that records none —
             # is distinct from `""`, and neither prints a row.
-            prompt=str(getattr(job, "prompt", None) or ""),
+            prompt=str(getattr(job, "prompt", None) or getattr(node, "prompt", "") or ""),
             events=getattr(job, "trajectory", None) or [],
             progress=str((getattr(job, "latest_details", None) or {}).get("progress") or ""),
             # Launch-time identity: the child's role and effort tier, recorded
@@ -8492,8 +8601,11 @@ class OperatorApp(App[None]):
             # title names them so the page says WHAT kind of child this is; the
             # band below gets the effort by a separate path (`_point_band_at`)
             # because it belongs to the model segment there.
-            agent_role=str(getattr(job, "agent_role", None) or ""),
-            effort=str(getattr(job, "effort", None) or ""),
+            agent_role=str(
+                getattr(job, "agent_role", None) or getattr(node, "agent_role", "") or ""
+            ),
+            effort=str(getattr(job, "effort", None) or getattr(node, "effort", "") or ""),
+            ancestors=[ancestor.label for ancestor in ancestors],
             transcript_directory=(
                 str(transcript_directory) if transcript_directory is not None else None
             ),
@@ -8501,6 +8613,16 @@ class OperatorApp(App[None]):
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(job_id)
         self._point_band_at(job)
+        if self._todo_panel is not None and session is not None:
+            self._todo_panel.sync(
+                session,
+                session_id=getattr(node, "session_id", "") or "",
+                transcript_directory=(
+                    str(node.session_dir)
+                    if node is not None and getattr(node, "session_dir", None) is not None
+                    else None
+                ),
+            )
 
     def _point_band_at(self, job: Any) -> None:
         """Make the status band describe the CHILD while its page is open.
@@ -12834,19 +12956,14 @@ class OperatorApp(App[None]):
         return turn_cost(_effective_label(self._session), usage)
 
     def _harvest_subagent_costs(self) -> None:
-        """Record what each child has spent, keyed by job id.
+        """Record each root task's whole subtree, keyed in the root namespace.
 
-        REPLACES each entry rather than adding to a running total, because a
-        child's figure grows while it works: the same job is observed many times
-        and only its latest value is its spend.
-
-        Called from the 1 Hz poll rather than only at turn end. A delegated child
-        outlives the turn that launched it — the parent finishes, the band goes
-        idle, and the child keeps spending for minutes — so a turn-end-only
-        harvest would leave the total frozen through exactly the period when it
-        is moving. This is also why the entries are never dropped: settled jobs
-        leave the ledger after ``AsyncJobManager``'s retention window, and a
-        total that falls when a finished child is evicted is worse than none.
+        REPLACES each entry because a running subtree grows. Descendants are
+        read live only for display freshness; their owning root row receives a
+        detached summary before settlement, so polling is never the durability
+        mechanism. Keeping one accumulator entry per root also respects the
+        actual uniqueness boundary: independent child managers may reuse the
+        same local job id without overwriting one another.
         """
         session = self._session
         manager = getattr(session, "jobs", None)
@@ -12858,9 +12975,55 @@ class OperatorApp(App[None]):
             return
         label = getattr(session, "model_label", "")
         for job in jobs:
-            cost = job_cost(job, default_model_label=label)
-            if cost is not None:
-                self._subagent_costs[job.id] = cost
+            direct = job_cost(job, default_model_label=label)
+            descendant = 0.0
+            components = list(getattr(job, "descendant_usage", ()) or ())
+            child_manager = getattr(job, "child_jobs", None)
+            if child_manager is not None:
+                try:
+                    # The live lease is replaced by the same bounded snapshot at
+                    # settlement, so this branch changes freshness, not totals.
+                    accounting = getattr(child_manager, "accounting_components", None)
+                    if callable(accounting):
+                        snapshot = accounting()
+                        if isinstance(snapshot, (list, tuple)):
+                            components = list(snapshot)
+                    else:
+                        # Reduced/embedder hosts expose only ``list()``. Sum
+                        # within this root instead of assigning manager-local ids
+                        # into the app-wide accumulator, preserving collision
+                        # safety even on that compatibility path.
+                        descendant += self._live_manager_cost(child_manager, label, set())
+                except Exception:  # noqa: BLE001 — one unreadable branch must not hide its siblings
+                    pass
+            unpriceable = False
+            for component in components:
+                provider = getattr(component, "provider", None) or ""
+                model_id = getattr(component, "model_id", None) or ""
+                cost = turn_cost(f"{provider}/{model_id}" if provider else model_id, component)
+                if cost is None:
+                    unpriceable = True
+                    break
+                descendant += cost
+            if unpriceable:
+                continue
+            if direct is not None or components or descendant:
+                self._subagent_costs[job.id] = (direct or 0.0) + descendant
+
+    def _live_manager_cost(self, manager: Any, default_label: str, seen: set[int]) -> float:
+        """Compatibility total for a live manager lacking durable snapshots."""
+        identity = id(manager)
+        if identity in seen:
+            return 0.0
+        seen.add(identity)
+        total = 0.0
+        for row in manager.list():
+            cost = job_cost(row, default_model_label=default_label)
+            total += cost or 0.0
+            nested = getattr(row, "child_jobs", None)
+            if nested is not None:
+                total += self._live_manager_cost(nested, default_label, seen)
+        return total
 
     def _spend_text(self, total: float | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.

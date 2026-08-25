@@ -150,6 +150,44 @@ async def test_a_completed_subagent_is_restored_and_resumable(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_descendant_accounting_survives_process_resume(tmp_path, monkeypatch):
+    """Nested spend lives on the owning row, not an in-process child manager."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.harness.types import Usage
+
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="nested", prompt="do nested work")
+    await wait_for(lambda: _status(parent, job_id) == "completed")
+    row = parent.jobs.get(job_id)
+    assert row is not None
+    row.descendant_usage = [
+        Usage(
+            input_tokens=5,
+            usd_cost=0.125,
+            provider="openrouter",
+            model_id="routed",
+        ),
+        Usage(input_tokens=7, provider="test", model_id="m"),
+    ]
+    await parent._persist_subagent_roster()
+    await parent.dispose()
+
+    resumed = _session(tmp_path, IdleStream())
+    await resumed.async_init()
+    restored = resumed.jobs.get(job_id)
+    assert restored is not None
+    assert [
+        (item.provider, item.model_id, item.usd_cost) for item in restored.descendant_usage
+    ] == [
+        ("openrouter", "routed", 0.125),
+        ("test", "m", None),
+    ]
+    assert sum(item.input_tokens for item in resumed.jobs.accounting_components()) >= 12
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
 async def test_role_and_effort_survive_a_resume(tmp_path, monkeypatch):
     """The child's agent ROLE and effort TIER are on the roster allowlist, so a
     restored row still names them.

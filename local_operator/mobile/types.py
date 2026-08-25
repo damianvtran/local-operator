@@ -308,7 +308,16 @@ EventOp = Literal[
 #: rows: user/assistant text, one line per tool call, notices. ``details``
 #: carries the expand-on-tap payload (args, output, diff) so a collapsed row
 #: is one line and an expanded one needs no round trip.
-EntryKind = Literal["user", "assistant", "tool", "notice", "steer", "compaction"]
+EntryKind = Literal[
+    "user",
+    "assistant",
+    "tool",
+    "notice",
+    "steer",
+    "compaction",
+    "parent_message",
+    "subagent_message",
+]
 
 ToolState = Literal["composing", "running", "done", "failed", "interrupted"]
 
@@ -396,6 +405,16 @@ class SubagentRow:
     model_label: str = ""
     result_text: str = ""  # settled outcome, one line
     error_text: str = ""
+    parent_job_id: str | None = None
+    session_id: str | None = None
+    prompt: str = ""
+    effort: str = ""
+    ancestors: list[str] = field(default_factory=list)
+    child_ids: list[str] = field(default_factory=list)
+    peer_ids: list[str] = field(default_factory=list)
+    transcript: list[TranscriptEntry] = field(default_factory=list)
+    todos: list[TodoPhase] = field(default_factory=list)
+    activity: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

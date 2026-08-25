@@ -421,6 +421,10 @@ class FrontendStateStore:
     def state(self) -> FrontendSessionState:
         return self._state.model_copy(deep=True)
 
+    @property
+    def has_subscribers(self) -> bool:
+        return bool(self._subscribers)
+
     def replace(self, state: FrontendSessionState) -> None:
         self._state = state.model_copy(deep=True)
 
@@ -667,6 +671,27 @@ class FrontendStateStore:
         else:
             self.mutate(**changes)
         return self.state
+
+    def refresh_restored_usage(self, session: Any) -> FrontendUpdate | None:
+        """Price the restored point-in-time reading without rescanning state."""
+        restore = getattr(session, "restored_usage", None)
+        usage = restore() if callable(restore) else None
+        if not isinstance(usage, Usage):
+            return None
+        state = self._state
+        changes: dict[str, Any] = {
+            "last_usage": usage.model_dump(mode="json"),
+            "context_tokens": usage.context_tokens,
+            "context_is_estimate": False if usage.context_tokens else state.context_is_estimate,
+        }
+        if state.cumulative_parent_cost is None:
+            cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
+            if cost is not None:
+                changes.update(
+                    cumulative_parent_cost=cost,
+                    cost_knowledge=CostKnowledge.FLOOR,
+                )
+        return self.mutate(**changes)
 
     def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
         """Accrue a provider call outside the ordinary agent event stream."""

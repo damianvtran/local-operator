@@ -137,6 +137,9 @@ class ToolResult(BaseModel):
     # serialized to providers; always a JSON-ish mapping so consumers can
     # index it without probing the value's shape first.
     details: dict[str, Any] | None = None
+    # Active wall time is captured beside execution, not reconstructed by a
+    # replaying surface whose clock starts when it paints the historical row.
+    duration_s: float | None = None
     is_error: bool = False
     useless: bool = False
 
@@ -978,6 +981,7 @@ class ToolExecutionEndEvent(AgentEvent[Literal["tool_execution_end"]]):
     tool_call_id: str
     tool_name: str
     result: ToolResult
+    duration_s: float | None = None
     is_error: bool = False
 
     @model_validator(mode="after")

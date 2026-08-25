@@ -720,6 +720,9 @@ class TuiSessionHandle(SessionHandle):
             # lifecycle events are authoritative for ``streaming``;
             # ``_reconcile_streaming`` covers attach and command boundaries.
         )
+        comms = getattr(session, "_subagent_comms", None)
+        if comms is not None:
+            self._fold.set_subagent_details(comms)
 
     def _reconcile_streaming(self) -> None:
         """Seed/align ``streaming`` from the session flag at attach and command
