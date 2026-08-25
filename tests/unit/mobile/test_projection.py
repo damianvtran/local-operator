@@ -35,10 +35,12 @@ from local_operator.mobile.projection import (
     _image_refs,
     _summarize_args,
 )
+from local_operator.mobile.registry import SessionRecord
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     PendingRequest,
     SessionProjection,
+    _projection_from_json,
 )
 from local_operator.session.session import Session
 
@@ -151,6 +153,42 @@ def test_subagent_roster_running_first_then_settled() -> None:
     assert rows[0].progress == "reading files"
     assert rows[1].status == "completed"
     assert rows[1].result_text == "done"
+
+
+def test_legacy_subagent_projection_rebuilds_new_detail_collections() -> None:
+    """A rolling upgrade can pair an older registrant with the current daemon.
+
+    The older row lacks every recursive-detail collection added by this PR;
+    rebuilding at the shared socket seam must produce the complete browser
+    contract rather than forwarding undefined values into React.
+    """
+    record = SessionRecord(
+        pid=42,
+        kind="tui",
+        session_id="s1",
+        conversation_name="legacy",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="secret",
+    )
+    projection = _projection_from_json(
+        {
+            "session_id": "s1",
+            "pid": 0,
+            "subagents": [{"job_id": "legacy", "label": "legacy child"}],
+        },
+        record,
+    )
+
+    row = projection.subagents[0]
+    assert projection.pid == 42
+    assert row.ancestors == []
+    assert row.child_ids == []
+    assert row.peer_ids == []
+    assert row.transcript == []
+    assert row.todos == []
+    assert projection.to_json()["subagents"][0]["child_ids"] == []
 
 
 def test_subagent_details_seed_nested_descendants_for_recursive_navigation() -> None:
