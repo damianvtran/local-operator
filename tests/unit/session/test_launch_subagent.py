@@ -10,11 +10,14 @@ the full lifecycle.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import weakref
 
 import pytest
 
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.types import (
     AbortSignal,
     AgentEvent,
@@ -27,6 +30,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     SubagentEndEvent,
     SubagentStartEvent,
+    Usage,
 )
 from local_operator.mobile.projection import ProjectionFold, SessionProjection
 from local_operator.session.session import Session
@@ -106,6 +110,11 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert job.type == "task"
     assert job.label == "sub"
 
+    # The parent row links to the child's separately owned ledger only while
+    # live; settlement replaces the edge with detached accounting.
+    await wait_for(lambda: job.child_jobs is not None)
+    assert job.child_jobs is not parent.jobs
+
     # Wait for the child run to settle and the parent stream to see the end.
     await wait_for(lambda: any(e.type == "subagent_end" for e in events))
 
@@ -118,6 +127,9 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert ends[0].job_id == job_id
     assert ends[0].status == "completed"
     assert "child did the work" in (ends[0].result_text or "")
+    await wait_for(lambda: job.status == "completed")
+    assert job.child_jobs is None
+    assert job.descendant_usage == []
 
     # The child actually ran its own provider turn through the shared stream.
     assert stream.requests
@@ -601,6 +613,33 @@ async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monkeypatch):
+    """The accounting snapshot must not keep an observability-to-owner edge."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    captured: list[weakref.ReferenceType[Session]] = []
+
+    def remember_child(event):
+        if isinstance(event, SubagentStartEvent):
+            record = parent.subagent_comms._records[event.job_id]
+            assert record.child is not None
+            captured.append(weakref.ref(record.child))
+
+    parent.subscribe(remember_child)
+    job_id = parent._launch_subagent(label="collectible", prompt="finish")
+    await wait_for(
+        lambda: (row := parent.jobs.get(job_id)) is not None and row.status == "completed"
+    )
+    await wait_for(lambda: bool(captured))
+    for _ in range(3):
+        gc.collect()
+        await asyncio.sleep(0)
+    assert captured[0]() is None
+    assert parent.jobs.get(job_id) is not None
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_launch_subagent_is_wired_as_subagent_launcher(tmp_path, monkeypatch):
     """The ToolContext built for a turn carries _launch_subagent as the
     subagent_launcher, so the task tool can call it."""
@@ -647,6 +686,80 @@ async def test_launch_subagent_cancels_on_parent_dispose(tmp_path, monkeypatch):
     await parent.dispose()
     assert (job := parent.jobs.get(job_id)) is not None
     assert job.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_hands_off_final_descendant_usage_after_disposal(tmp_path, monkeypatch):
+    """Cancellation joins descendant settlement before detaching its ledger.
+
+    This is the production ordering from the review probe: the running row first
+    exposes four tokens, cancellation cleanup finalizes six, and zero retention
+    removes the row immediately. The parent must keep six without retaining the
+    disposed child Session.
+    """
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    descendant_started = asyncio.Event()
+    child_refs: list[weakref.ReferenceType[Session]] = []
+    child_managers: list[AsyncJobManager] = []
+    orig_build = subagent_mod._build_child_session
+
+    async def build_with_running_descendant(**kwargs):
+        child = await orig_build(**kwargs)
+        child.jobs = AsyncJobManager(retention_ms=0)
+        child_refs.append(weakref.ref(child))
+        child_managers.append(child.jobs)
+
+        async def descendant(job_id, signal, report_progress):
+            row = child.jobs.get(job_id)
+            assert row is not None
+            row.usage = Usage(input_tokens=4)
+            descendant_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                # Models a provider call that reports its final receipt while
+                # unwinding cancellation, after the pre-dispose live snapshot.
+                row.usage = Usage(input_tokens=6)
+                raise
+
+        child.jobs.register("task", "nested", descendant)
+        return child
+
+    class _HangStream:
+        def __call__(self, request, signal):
+            async def gen():
+                await asyncio.Future()
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    monkeypatch.setattr(subagent_mod, "_build_child_session", build_with_running_descendant)
+    parent = make_session(tmp_path, _HangStream())
+    job_id = parent._launch_subagent(label="slow", prompt="never finish")
+    await asyncio.wait_for(descendant_started.wait(), timeout=5.0)
+    row = parent.jobs.get(job_id)
+    assert row is not None
+    live_child_jobs = row.child_jobs
+    assert isinstance(live_child_jobs, AsyncJobManager)
+    assert sum(item.input_tokens for item in live_child_jobs.accounting_components()) == 4
+
+    assert await parent.jobs.cancel(job_id) is True
+    assert row.status == "cancelled"
+    assert row.child_jobs is None
+    assert sum(item.input_tokens for item in row.descendant_usage) == 6
+    assert child_managers[0].list() == []
+    assert sum(item.input_tokens for item in parent.jobs.accounting_components()) == 6
+
+    # The probe kept the manager only to inspect zero-retention settlement; drop
+    # that artificial reference before proving the production parent edge is gone.
+    child_managers.clear()
+    for _ in range(3):
+        gc.collect()
+        await asyncio.sleep(0)
+    assert child_refs[0]() is None
+    await parent.dispose()
 
 
 @pytest.mark.asyncio

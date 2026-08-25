@@ -369,6 +369,11 @@ def _make_runner(
                     )
                     or child.model.context_window
                 )
+                # Live reads may expose descendants before this child settles.
+                # The edge is only a lease: the finalizer atomically replaces it
+                # with detached components before disposal can evict rows or pin
+                # the child Session through its manager callback.
+                job.child_jobs = child.jobs
             if comms is not None:
                 # Before the prompt runs: the parent may already have a
                 # question queued for this child, and attach is what flushes
@@ -470,7 +475,18 @@ def _make_runner(
                 # that no longer exists.
                 comms.detach(job_id)
             if child is not None:
-                await _dispose_child(child)
+                try:
+                    # Disposal owns cancellation settlement for every running
+                    # descendant. Await it before detaching the ledger so a
+                    # cancellation cleanup's final provider delta reaches the
+                    # manager accumulator even when retention evicts its row.
+                    await _dispose_child(child)
+                finally:
+                    if job is not None:
+                        # Clear the live edge even if teardown itself fails: a
+                        # retained parent row must never pin the child Session.
+                        job.descendant_usage = child.jobs.accounting_components()
+                        job.child_jobs = None
 
     return runner
 
@@ -568,19 +584,28 @@ def _answered_prefix(messages: list[Any]) -> list[Any]:
 
 
 async def _dispose_child(child: "Session") -> None:
-    """Dispose the child even when the runner itself is being cancelled.
+    """Finish child teardown even while the runner itself is being cancelled.
 
-    Shielded: on the cancellation path the outer await raises immediately,
-    but the dispose task shielded inside keeps running and completes on the
-    loop — the child's transcript flush and task-group close must not be
-    skipped because its parent job was cancelled.
+    Shielding alone is insufficient here: it lets teardown continue but returns
+    control before descendant cancellation has settled, which makes the caller's
+    accounting handoff stale. Keep joining the one dispose task after each outer
+    cancellation so teardown remains single-shot and the ledger is final when
+    this function returns.
     """
-    try:
-        await asyncio.shield(child.dispose())
-    except asyncio.CancelledError:
-        pass  # the shielded dispose task continues without us
-    except Exception:
-        logger.warning("subagent child session dispose failed", exc_info=True)
+    dispose_task = asyncio.create_task(child.dispose())
+    while not dispose_task.done():
+        try:
+            await asyncio.shield(dispose_task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            logger.warning("subagent child session dispose failed", exc_info=True)
+            return
+    if not dispose_task.cancelled():
+        try:
+            dispose_task.result()
+        except Exception:
+            logger.warning("subagent child session dispose failed", exc_info=True)
 
 
 async def _publish_terminal_outcome(
