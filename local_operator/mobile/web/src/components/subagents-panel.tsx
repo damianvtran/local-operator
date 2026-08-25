@@ -23,18 +23,23 @@ export function agentStatusClass(status: SubagentRow["status"]): string {
 export function AgentRow({
 	sessionId,
 	agent,
+	onNavigate,
+	showMetadata = false,
 }: {
 	sessionId: string;
 	agent: SubagentRow;
+	onNavigate?: () => void;
+	showMetadata?: boolean;
 }) {
 	return (
 		<button
 			type="button"
-			onClick={() =>
-				navigate(
+			onClick={() => {
+				onNavigate?.();
+					navigate(
 					`/s/${encodeURIComponent(sessionId)}/a/${encodeURIComponent(agent.job_id)}`,
-				)
-			}
+				);
+			}}
 			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-left active:bg-elevated"
 		>
 			<span
@@ -45,8 +50,13 @@ export function AgentRow({
 			>
 				{AGENT_GLYPH[agent.status]}
 			</span>
-			<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
-				{agent.label}
+			<span className="min-w-0 flex flex-1 flex-col">
+				<span className="truncate text-body-sm text-ink">{agent.label}</span>
+				{showMetadata ? (
+					<span className="truncate text-meta text-ink-dim">
+						{agent.agent}{agent.effort ? ` · ${agent.effort}` : ""}
+					</span>
+				) : null}
 			</span>
 			<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
 				{agent.elapsed_s > 0 ? formatElapsed(agent.elapsed_s) : ""}
@@ -60,11 +70,15 @@ export function AgentRoster({
 	subagents,
 	parentJobId,
 	collapsible = false,
+	embedded = false,
+	label = "subagents",
 }: {
 	sessionId: string;
 	subagents: SubagentRow[];
 	parentJobId: string | null;
 	collapsible?: boolean;
+	embedded?: boolean;
+	label?: string;
 }) {
 	const direct = subagents.filter((agent) => agent.parent_job_id === parentJobId);
 	if (direct.length === 0) return null;
@@ -76,14 +90,14 @@ export function AgentRoster({
 			))}
 		</div>
 	);
-	if (!collapsible) return <section className="border-t border-hairline px-3">{rows}</section>;
+	if (!collapsible) return <section className={cn("border-t border-hairline", embedded ? "pt-1" : "px-3")}>{rows}</section>;
 	return (
 		<Disclosure
 			defaultOpen={running > 0}
 			className="border-t border-hairline px-3"
 			header={
 				<span className="text-body-sm text-ink-muted">
-				subagents{" "}
+				{label}{" "}
 					<span className="font-mono text-mono-sm text-ink-dim">
 						{running}/{direct.length} running
 					</span>

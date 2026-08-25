@@ -1,18 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getSubagentDetail } from "../api";
+import { AgentsSheet } from "../components/agents-sheet";
 import {
 	AGENT_GLYPH,
 	AgentRoster,
 	agentStatusClass,
 } from "../components/subagents-panel";
+import { Markdown } from "../components/markdown";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
-import { Markdown } from "../components/markdown";
 import { DetailRequestCoordinator } from "../detail-loader";
 import { cn } from "../lib/cn";
 import { navigate, navigateUp } from "../router";
-import type { SessionProjection, SubagentDetail, SubagentRow } from "../types";
+import type { SessionProjection, SubagentDetail, TranscriptEntry } from "../types";
 
 const CACHE_MAX = 24;
 const detailCache = new Map<string, SubagentDetail>();
@@ -31,31 +32,241 @@ function agentPath(sessionId: string, jobId: string): string {
 	return `/s/${encodeURIComponent(sessionId)}/a/${encodeURIComponent(jobId)}`;
 }
 
-function Lineage({
-	sessionId,
+/** A prompt is legacy fallback context. Current projections also carry the
+ * authored parent_message in the transcript; rendering both makes one request
+ * look like two distinct turns. */
+export function agentConversationEntries(detail: SubagentDetail): TranscriptEntry[] {
+	if (!detail.prompt || detail.transcript.some((entry) => entry.kind === "parent_message")) {
+		return detail.transcript;
+	}
+	return [
+		{
+			id: `prompt:${detail.job_id}`,
+			kind: "parent_message",
+			text: detail.prompt,
+			tool_call_id: "",
+			tool_name: "",
+			tool_state: "done",
+			summary: "",
+			intent: "",
+			diff_added: 0,
+			diff_removed: 0,
+			elapsed_s: 0,
+			error: "",
+			details: {},
+			final: true,
+		},
+		...detail.transcript,
+	];
+}
+
+function Outcome({ detail }: { detail: SubagentDetail }) {
+	if (detail.status === "completed") {
+		return (
+			<section aria-live="polite" className="mt-2 border-l-2 border-success pl-3">
+				<p className="mb-1 text-meta font-medium text-success">
+					✓ Handoff from {detail.label}
+				</p>
+				{detail.result_text ? (
+					<Markdown text={detail.result_text} />
+				) : (
+					<p className="text-body-sm text-ink-muted">Agent completed without a handoff.</p>
+				)}
+			</section>
+		);
+	}
+	if (detail.status === "failed") {
+		return (
+			<section role="alert" className="mt-2 border-l-2 border-danger pl-3">
+				<p className="mb-1 text-meta font-medium text-danger">✕ Agent failed</p>
+				{detail.error_text ? (
+					<Markdown text={detail.error_text} />
+				) : (
+					<p className="text-body-sm text-ink-muted">No failure details were recorded.</p>
+				)}
+			</section>
+		);
+	}
+	if (detail.status === "cancelled" || detail.status === "parked") {
+		return (
+			<p className="mt-2 text-body-sm text-ink-muted">
+				{detail.status === "cancelled" ? "Agent stopped." : "Agent paused."}
+			</p>
+		);
+	}
+	return null;
+}
+
+function ConversationTail({
 	detail,
-	roster,
+	sessionId,
+	projection,
+}: {
+	detail: SubagentDetail;
+	sessionId: string;
+	projection: SessionProjection;
+}) {
+	const children = projection.subagents.filter((row) => row.parent_job_id === detail.job_id);
+	return (
+		<>
+			{detail.status === "running" ? (
+				<WorkingLine
+					activity={detail.activity || detail.progress || "Waiting for the first response…"}
+					startedS={detail.elapsed_s}
+				/>
+			) : (
+				<Outcome detail={detail} />
+			)}
+			{detail.todos.some((phase) => phase.items.length > 0) ? (
+				<div className="mt-2">
+					<TodosPanel todos={detail.todos} embedded />
+				</div>
+			) : null}
+			{children.length > 0 ? (
+				<div className="mt-1">
+					<AgentRoster
+						sessionId={sessionId}
+						subagents={projection.subagents}
+						parentJobId={detail.job_id}
+						collapsible
+						embedded
+						label="child agents"
+					/>
+				</div>
+			) : null}
+		</>
+	);
+}
+
+function AgentHeader({
+	detail,
+	parentPath,
+	onOpenAgents,
+}: {
+	detail: SubagentDetail | null;
+	parentPath: string;
+	onOpenAgents?: () => void;
+}) {
+	return (
+		<header className="flex min-h-[52px] items-center gap-1 border-b border-hairline bg-surface px-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
+			<button
+				type="button"
+				onClick={() => navigateUp(parentPath)}
+				aria-label="back to parent conversation"
+				className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
+			>
+				‹
+			</button>
+			<div className="min-w-0 flex-1">
+				<p className="truncate text-body-sm font-medium">{detail?.label || "Agent"}</p>
+				<p className="truncate text-meta text-ink-dim">
+					{detail ? `${detail.agent}${detail.effort ? ` · ${detail.effort}` : ""}` : "Loading activity"}
+				</p>
+			</div>
+			{detail ? (
+				<span className={cn("max-w-20 shrink truncate text-meta", agentStatusClass(detail.status))}>
+					<span aria-hidden className="font-mono">{AGENT_GLYPH[detail.status]}</span>{" "}
+					{detail.status}
+				</span>
+			) : null}
+			{detail && onOpenAgents ? (
+				<button
+					type="button"
+					onClick={onOpenAgents}
+					aria-label="open agent navigation"
+					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm px-2 text-body-sm text-ink-muted active:bg-elevated"
+				>
+					Agents
+				</button>
+			) : null}
+		</header>
+	);
+}
+
+function InlineState({ children }: { children: ReactNode }) {
+	return <main className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-4">{children}</main>;
+}
+
+export function AgentUnavailable({ sessionId }: { sessionId: string }) {
+	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
+	return (
+		<>
+			<AgentHeader detail={null} parentPath={rootPath} />
+			<InlineState>
+				<p role="alert" className="text-body-sm font-medium text-ink">This agent is no longer available.</p>
+				<p className="text-body-sm text-ink-dim">It may have expired or been removed.</p>
+				<div className="mt-2 flex flex-wrap gap-2">
+					<button type="button" onClick={() => navigateUp(rootPath)} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Back to parent</button>
+					<button type="button" onClick={() => navigate(rootPath)} className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated">View root</button>
+				</div>
+			</InlineState>
+		</>
+	);
+}
+
+export function AgentLoading({ sessionId, connected }: { sessionId: string; connected: boolean }) {
+	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
+	return (
+		<>
+			<AgentHeader detail={null} parentPath={rootPath} />
+			<InlineState>
+				<p className="text-body-sm text-ink-dim">{connected ? "Loading agent activity…" : "Connecting to saved agent activity…"}</p>
+				<div aria-hidden className="mt-2 flex flex-col gap-3">
+					<span className="h-4 w-3/4 rounded-sm bg-sunken" />
+					<span className="h-4 w-full rounded-sm bg-sunken" />
+					<span className="h-4 w-2/3 rounded-sm bg-sunken" />
+				</div>
+			</InlineState>
+		</>
+	);
+}
+
+/** Keep loading/cache ownership outside the visual component so its complete
+ * state can be exercised independently without introducing a second route. */
+export function AgentConversation({
+	sessionId,
+	jobId,
+	projection,
+	connected,
+	detail,
+	initialAgentsOpen = false,
 }: {
 	sessionId: string;
+	jobId: string;
+	projection: SessionProjection;
+	connected: boolean;
 	detail: SubagentDetail;
-	roster: SubagentRow[];
+	initialAgentsOpen?: boolean;
 }) {
-	const byId = useMemo(() => new Map(roster.map((row) => [row.job_id, row])), [roster]);
-	const parent = detail.parent_job_id ? byId.get(detail.parent_job_id) : null;
-	const ancestors = detail.ancestor_ids
-		.map((id) => byId.get(id))
-		.filter(Boolean) as SubagentRow[];
-	const peers = detail.peer_ids.map((id) => byId.get(id)).filter(Boolean) as SubagentRow[];
+	const [agentsOpen, setAgentsOpen] = useState(initialAgentsOpen);
+	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
+	const parentPath = detail.parent_job_id
+		? agentPath(sessionId, detail.parent_job_id)
+		: rootPath;
+	const entries = useMemo(() => agentConversationEntries(detail), [detail]);
 	return (
-		<nav
-			aria-label="agent lineage"
-			className="lo-scroll flex min-h-11 items-center gap-1 overflow-x-auto border-b border-hairline px-2 py-1"
-		>
-			<button type="button" onClick={() => navigate(`/s/${encodeURIComponent(sessionId)}`)} className="min-h-11 shrink-0 rounded-sm border border-hairline px-3 text-meta active:bg-elevated">root</button>
-			{ancestors.slice(0, -1).map((ancestor) => <button key={ancestor.job_id} type="button" onClick={() => navigate(agentPath(sessionId, ancestor.job_id))} className="min-h-11 max-w-40 shrink-0 truncate rounded-sm border border-hairline px-3 text-meta active:bg-elevated">ancestor · {ancestor.label}</button>)}
-			{parent ? <button type="button" onClick={() => navigate(agentPath(sessionId, parent.job_id))} className="min-h-11 shrink-0 rounded-sm border border-hairline px-3 text-meta active:bg-elevated">parent · {parent.label}</button> : null}
-			{peers.map((peer) => <button key={peer.job_id} type="button" onClick={() => navigate(agentPath(sessionId, peer.job_id))} className="min-h-11 max-w-40 shrink-0 truncate rounded-sm border border-hairline px-3 text-meta active:bg-elevated">peer · {peer.label}</button>)}
-		</nav>
+		<>
+			<AgentHeader detail={detail} parentPath={parentPath} onOpenAgents={() => setAgentsOpen(true)} />
+			{!connected ? (
+				<div role="status" className="border-b border-warning-border bg-warning-wash px-3 py-2 text-meta text-warning">
+					Reconnecting. Showing saved agent activity.
+				</div>
+			) : null}
+			<Transcript
+				pid={sessionId}
+				jobId={jobId}
+				entries={entries}
+				tailContent={<ConversationTail detail={detail} sessionId={sessionId} projection={projection} />}
+				emptyContent={null}
+			/>
+			{detail.status === "running" ? (
+				<footer className="flex min-h-11 items-center justify-between border-t border-hairline bg-surface px-3 pb-[max(env(safe-area-inset-bottom),0.25rem)] text-meta">
+					<span className="text-ink-dim">Read-only</span>
+					<button type="button" onClick={() => navigate(parentPath)} className="min-h-11 rounded-sm px-2 text-info active:bg-elevated">Open parent to steer</button>
+				</footer>
+			) : null}
+			<AgentsSheet open={agentsOpen} onClose={() => setAgentsOpen(false)} sessionId={sessionId} detail={detail} roster={projection.subagents} />
+		</>
 	);
 }
 
@@ -97,46 +308,16 @@ export function AgentScreen({
 		loaderRef.current?.request(projection.version);
 	}, [projection.version]);
 
-	if (error && !detail) {
-		return <main className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><p role="alert" className="text-body-sm text-danger">agent unavailable · {error}</p><button type="button" onClick={() => navigate(`/s/${encodeURIComponent(sessionId)}`)} className="min-h-11 rounded-sm border border-hairline px-4 text-body-sm">return to root</button></main>;
-	}
-	if (!detail) {
-		return <main className="flex flex-1 items-center justify-center"><p className="text-body-sm text-ink-dim">{connected ? "loading agent…" : "reconnecting to agent…"}</p></main>;
-	}
-	const directChildren = projection.subagents.filter((row) => row.parent_job_id === jobId);
-	const parentPath = detail.parent_job_id
-		? agentPath(sessionId, detail.parent_job_id)
-		: `/s/${encodeURIComponent(sessionId)}`;
-	const outcome = detail.status === "completed" && detail.result_text ? (
-		<section aria-live="polite" className="mt-2 border-t border-success-border bg-success-wash px-3 py-3">
-			<p className="mb-2 text-meta font-medium text-success">Handoff</p>
-			<Markdown text={detail.result_text} />
-		</section>
-	) : detail.status === "failed" && detail.error_text ? (
-		<section role="alert" className="mt-2 border-t border-danger-border bg-danger-wash px-3 py-3">
-			<p className="mb-2 text-meta font-medium text-danger">Failure</p>
-			<Markdown text={detail.error_text} />
-		</section>
-	) : null;
-	return <>
-		<header className="flex min-h-11 items-center gap-2 border-b border-hairline px-2 pt-[max(env(safe-area-inset-top),0.25rem)]">
-			<button type="button" onClick={() => navigateUp(parentPath)} aria-label="back to parent conversation" className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated">‹</button>
-			<div className="min-w-0 flex-1"><p className="truncate text-body-sm font-medium">{detail.label}</p><p className="truncate font-mono text-mono-sm text-ink-dim">{detail.agent}{detail.effort ? ` · ${detail.effort}` : ""}</p></div>
-			<span className={cn("shrink-0 font-mono text-mono-sm", agentStatusClass(detail.status))}>{AGENT_GLYPH[detail.status]} {detail.status}</span>
-		</header>
-		<Lineage sessionId={sessionId} detail={detail} roster={projection.subagents} />
-		{!connected ? <div role="status" className="border-b border-warning-border bg-warning-wash px-3 py-2 text-meta text-warning">connection lost · reconnecting with cached agent detail…</div> : null}
-		{detail.prompt ? <section className="border-b border-hairline px-3 py-2"><p className="text-meta text-ink-dim">Parent request</p><p className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words text-body-sm">{detail.prompt}</p></section> : null}
-		<Transcript
-			pid={sessionId}
+	if (error && !detail) return <AgentUnavailable sessionId={sessionId} />;
+	if (!detail) return <AgentLoading sessionId={sessionId} connected={connected} />;
+
+	return (
+		<AgentConversation
+			sessionId={sessionId}
 			jobId={jobId}
-			entries={detail.transcript}
-			tailContent={outcome}
-			emptyContent={outcome ? null : <div className="flex flex-1 items-center justify-center px-8 text-center"><p className="text-body-sm text-ink-dim">no agent messages recorded</p></div>}
+			projection={projection}
+			connected={connected}
+			detail={detail}
 		/>
-		{detail.status === "running" ? <WorkingLine activity={detail.activity || detail.progress || "thinking"} startedS={detail.elapsed_s} /> : null}
-		{detail.todos.some((phase) => phase.items.length > 0) ? <TodosPanel todos={detail.todos} /> : null}
-		{directChildren.length > 0 ? <AgentRoster sessionId={sessionId} subagents={projection.subagents} parentJobId={jobId} /> : null}
-		<footer className="border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] text-center text-meta text-ink-dim">read-only · send commands from the root conversation</footer>
-	</>;
+	);
 }

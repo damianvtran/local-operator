@@ -26,3 +26,23 @@ Connection recovery:
 controlled post-connect SSE close -> "connection lost · reconnecting with cached agent detail…"
 cached transcript/tool/todo/child roster remained visible
 stream retry after fixture recovery cleared banner and retained #/s/fixture-root/a/child
+
+Visual-direction remediation (current head d6ce4458 before edit):
+- BEFORE inspected from current head: running-390x844.png and completed-390x844.png; live browser route also reproduced the duplicate Parent request + Parent row, outlined lineage strip, detached working line, permanent root-command footer, and dominant semantic outcome wash.
+- Live AFTER route exercised: #/s/fixture-root/a/child rendered one parent request, assistant/tool rows, inline working state, tasks, two child agents, and running-only Open parent to steer action.
+- Live Agents control exercised against the real fixture; interaction tests verify the sheet groups Path, Peers, and direct Children, closes on row selection, and navigates through the existing recursive hash route.
+- Authenticated API proof: POST /login -> 303; GET /api/sessions/fixture-root/agents/child -> 200 (running, transcript=3, todos=1, children=1, peers=2); unknown agent -> 404 {"error":"unknown subagent"}.
+- Browser diagnostics: no console entries or browser errors.
+
+Geometry and responsive constraints:
+- App bar visual row: 52px; Back and Agents targets: min 44x44px.
+- Page/transcript inset: 12px at both 360px and 390px; app bar labels and every AgentRow use single-line truncation, with no peer-button band or horizontal page scroller.
+- Agents sheet: max 85dvh, independently vertical-scrollable for long/deep rosters; every destination reuses the 44px-min AgentRow target.
+- Conversation remains the sole flex-1 vertical scroll; parent context, messages/tools, working/outcome, tasks, and children share that surface. Terminal routes have no persistent footer.
+- Consecutive browser reads after settle retained identical structure; reduced-motion remains governed by the shared global media query.
+
+Validation:
+- pnpm check; pnpm test -> 14 passed; pnpm build; pnpm check-themes; pnpm audit --audit-level high -> clean.
+- pytest tests/unit/mobile -q -> 158 passed.
+- flake8 ., black --check ., isort --check ., pyright -> clean.
+- pytest tests/unit -q -> 6734 passed, 7 skipped, 2 unrelated reproducible TUI failures: test_esc_with_no_children_says_nothing_about_subagents; test_history_prepend_preserves_anchor_and_home_dedupes_requests.

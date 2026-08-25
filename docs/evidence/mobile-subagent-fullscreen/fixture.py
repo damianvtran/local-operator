@@ -111,6 +111,8 @@ projection.subagents = [
         prompt="Build nested mobile fixture.",
         ancestor_ids=["child"],
         ancestors=["mobile-fullscreen-remediation"],
+        peer_ids=["grandchild-peer"],
+        child_ids=["great-grandchild"],
         result_text=long_result,
         transcript=[
             entry(
@@ -119,6 +121,30 @@ projection.subagents = [
                 "The nested fixture is populated and ready for route testing.",
             )
         ],
+    ),
+    SubagentRow(
+        job_id="grandchild-peer",
+        label="responsive-hierarchy-audit-with-a-deliberately-long-label",
+        agent="reviewer",
+        status="running",
+        elapsed_s=19,
+        parent_job_id="child",
+        session_id="fixture-grandchild-peer",
+        peer_ids=["grandchild"],
+        progress="checking deep hierarchy navigation",
+        activity="checking deep hierarchy navigation",
+    ),
+    SubagentRow(
+        job_id="great-grandchild",
+        label="true-pixel-capture",
+        agent="designer",
+        status="completed",
+        elapsed_s=31,
+        parent_job_id="grandchild",
+        session_id="fixture-great-grandchild",
+        ancestor_ids=["child", "grandchild"],
+        ancestors=["mobile-fullscreen-remediation", "fixture-builder"],
+        result_text="Captured nested evidence without horizontal overflow.",
     ),
     SubagentRow(
         job_id="peer-complete",
