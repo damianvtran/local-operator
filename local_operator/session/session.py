@@ -138,6 +138,12 @@ if TYPE_CHECKING:
     # It only holds the manager the composition root hands it.
     from local_operator.mcp.manager import McpManager
 
+    # Type-only for the same reason ``resume`` is imported lazily at its two
+    # call sites below: ``cli.py``'s startup path is guarded by a test that
+    # fails if resolving ``--resume`` drags the engine in, and that guard runs
+    # in the other direction too.
+    from local_operator.resume import SessionAttachment
+
 logger = logging.getLogger(__name__)
 
 #: Transcript custom-entry type recording which model is ACTUALLY serving
@@ -1157,6 +1163,23 @@ class Session:
         #: collaboration and project briefs without the manager restating them.
         #: ``None`` on an ordinary session.
         self.active_team: Any | None = None
+        #: Why a stored attachment did NOT come back ("" when it did, or when
+        #: there was none). Set by :meth:`_restore_attachment` for a team or
+        #: profile the operator has since renamed or deleted. Held instead of
+        #: raised because a missing team must never make a conversation
+        #: unopenable, and held instead of logged because the reader who needs
+        #: it is the user staring at a band segment that stayed blank.
+        self.attachment_restore_error: str = ""
+        #: True only while :meth:`_restore_attachment` is re-applying the stored
+        #: attachment, which suppresses the journal write in
+        #: :meth:`_persist_attachment`. Without it the restore would write back
+        #: through the very mutators it calls, and a PARTIAL restore would erase
+        #: the half it could not resolve: a session whose team is momentarily
+        #: unresolvable (registry not wired on this host, a team dir not yet
+        #: synced) would persist ``team=""`` and lose the name for good, turning
+        #: a recoverable miss into permanent data loss. A restore is a READ of
+        #: state that is already on disk; it has nothing new to record.
+        self._restoring_attachment = False
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -1454,6 +1477,16 @@ class Session:
         # answering when it closed, not silently re-route the first prompt to
         # the provider that was failing.
         self._restore_active_route()
+        # Same contract as the route restore, for the other half of what a
+        # session was when it closed: the ``/team`` roster, ``/agent`` profile
+        # and ``/goal`` ride the prompt's volatile tail, which is rebuilt empty
+        # on every construction, so without this a resume dropped the persona
+        # from the model's instructions entirely. Here rather than in
+        # ``async_init`` because the tail must be populated before ANY turn can
+        # be built, and quiet (no event) for the reason the route restore is:
+        # nothing has subscribed yet, so hosts read the restored state when
+        # they build their chrome.
+        self._restore_attachment()
         # Owned here, not by the browser tool, for the same reason the wake
         # scheduler is: _build_tool_context runs at the start of EVERY turn, so
         # a handle the tool stored on the ToolContext lived exactly one turn.
@@ -2216,7 +2249,11 @@ class Session:
         goal rides the system prompt's volatile tail, so it applies from the
         next turn and only invalidates that tail — never the cached prefix.
         """
-        return self._goal_state.set(text)
+        stored = self._goal_state.set(text)
+        # Same tail, same fate on resume as the team/agent briefs, so the goal
+        # is journalled by the same mechanism rather than a second one.
+        self._persist_attachment()
+        return stored
 
     @property
     def active_team_name(self) -> str:
@@ -2245,6 +2282,7 @@ class Session:
         self.active_team = team
         if team is None:
             self._goal_state.team_brief = ""
+            self._persist_attachment()
             return
         preamble = getattr(team, "manager_preamble", lambda: "")()
         # The manager's own profile instructions (the reusable BASE) sit in
@@ -2275,6 +2313,141 @@ class Session:
                     + (preamble or "")
                 )
         self._goal_state.team_brief = preamble or ""
+        # Journal the NAME so a resume can rebuild this tail. On change only:
+        # the roster moves a handful of times per session, and the brief itself
+        # is deliberately not stored (see ``SessionAttachment``).
+        self._persist_attachment()
+
+    def _persist_attachment(self) -> None:
+        """Journal the attached team/agent/goal beside the transcript.
+
+        Called from every mutation of the attached identity — ``attach_team``,
+        ``_stamp_agent_brief``, ``clear_agent_profile``, ``set_goal`` — because
+        those four are the only ways the volatile tail's persistent half moves.
+        Writing from the mutators rather than from the TUI commands is what
+        makes this hold for every front end: the mobile relay sets a goal
+        through ``Session.set_goal`` too, and a front-end-side write would have
+        left that path unpersisted.
+
+        Synchronous and best-effort. The write is a sub-kilobyte atomic replace
+        and these mutators are not on the hot turn path, so a thread hop would
+        buy nothing and would open a window where a session disposed
+        immediately after ``/team`` lost the attachment it just reported. The
+        helper never raises by contract (see ``write_session_attachment``), and
+        the broad guard here covers a reduced test double whose transcript has
+        no directory rather than any failure of the write itself.
+        """
+        from local_operator.resume import write_session_attachment
+
+        if self._restoring_attachment:
+            return
+        try:
+            directory = self._transcript.directory
+        except Exception:  # noqa: BLE001 — a reduced host must not lose its turn
+            return
+        write_session_attachment(
+            directory,
+            team=self.active_team_name,
+            agent=self._goal_state.agent_name,
+            goal=self._goal_state.text,
+        )
+
+    def _restore_attachment(self) -> None:
+        """Re-attach the team/agent/goal this session was carrying when it closed.
+
+        THE resume fix. The team and agent briefs live only in ``GoalState``,
+        which ``session_factory`` builds empty on every construction, so before
+        this a ``--resume`` reopened the conversation with the persona GONE
+        from the system prompt — not merely missing from the status band. The
+        band was reporting the truth, which is why it must keep being driven
+        from the session (see the TUI's ``_sync_team_band``) and never painted
+        from the sidecar directly: a segment naming a team that failed to
+        resolve would turn an honest blank into a lie.
+
+        Re-resolves by NAME through the same entry points the live ``/team``
+        and ``/agent`` commands use (``attach_team`` after a registry lookup,
+        ``attach_agent_profile``, and through it the one shared
+        ``_resolve_profile_or_specialist`` ordering). Deliberate, and the
+        reason the sidecar stores names instead of briefs: the operator may
+        have edited the team's briefs or the profile's instructions since the
+        session last ran, and a stored brief would resume them onto a
+        definition that no longer exists. Going through the live resolvers also
+        means this path cannot drift from the attach path — a change to
+        resolution order applies to a resumed session automatically.
+
+        Runs during construction, BEFORE any turn, so the restored briefs are
+        in the tail the first prompt is built from. It mutates the shared
+        ``GoalState`` holder the system-blocks provider already closed over, so
+        nothing is rebuilt and the cached persona PREFIX is untouched — only
+        the volatile tail this state has always lived in.
+
+        Failures degrade to unattached and are RECORDED for the host to report
+        (:attr:`attachment_restore_error`) rather than raised: a team the user
+        renamed or deleted must not make a conversation unopenable.
+        """
+        from local_operator.resume import read_session_attachment
+
+        try:
+            stored = read_session_attachment(self._transcript.directory)
+        except Exception:  # noqa: BLE001 — a resume must always open
+            return
+        if stored is None:
+            return
+
+        self._restoring_attachment = True
+        try:
+            self._apply_stored_attachment(stored)
+        finally:
+            self._restoring_attachment = False
+
+    def _apply_stored_attachment(self, stored: "SessionAttachment") -> None:
+        """Re-apply one parsed attachment; see :meth:`_restore_attachment`.
+
+        Split out so the suppression flag around it is a plain ``try/finally``
+        with no early ``return`` able to skip the reset.
+        """
+        if stored.goal:
+            # Straight onto the holder: ``set_goal`` would re-journal a value
+            # that just came off disk, and the restore is not a user action.
+            self._goal_state.set(stored.goal)
+
+        missing: list[str] = []
+        if stored.team:
+            team = None
+            registry = self.team_registry
+            if registry is not None:
+                try:
+                    team = registry.get_team_by_name(stored.team)
+                except Exception:  # noqa: BLE001 — a bad registry row is not fatal
+                    team = None
+            if team is None:
+                missing.append(f"team {stored.team!r}")
+            else:
+                # Through ``attach_team`` rather than by setting the brief, so
+                # ``active_team`` (what subagents inherit) is restored too, not
+                # just the prompt text.
+                self.attach_team(team)
+        if stored.agent:
+            resolved = None
+            try:
+                resolved = self.attach_agent_profile(stored.agent)
+            except Exception:  # noqa: BLE001 — same contract as the team path
+                resolved = None
+            if resolved is None:
+                missing.append(f"agent {stored.agent!r}")
+        if missing:
+            #: Held rather than logged, because the person who needs to know is
+            #: the one looking at a band segment that did NOT come back. The TUI
+            #: reads this once on adopt and says so in its ordinary
+            #: system-notice style; headless hosts may ignore it.
+            # Names what did NOT come back, never a blanket "unattached": a
+            # partial miss is the common case (a deleted team beside a profile
+            # that resolved fine), and claiming the whole session is bare would
+            # contradict the band segment still showing the half that restored.
+            self.attachment_restore_error = (
+                f"could not restore {' and '.join(missing)} from the previous session "
+                "(renamed or deleted); continuing without it"
+            )
 
     def _resolve_profile_or_specialist(self, name: str) -> tuple[str | None, Any, str, str]:
         """Resolve a NAME to an attachable profile, priority order fixed here.
@@ -2371,6 +2544,10 @@ class Session:
         # contradicting each other. Both fields are stamped together in
         # ``_stamp_agent_brief``; they must be cleared together too.
         self._goal_state.agent_name = ""
+        # A detach is as much a fact to survive a resume as an attach: without
+        # this the sidecar would still name the profile the user just dropped,
+        # and the next resume would silently re-attach it.
+        self._persist_attachment()
 
     def _stamp_agent_brief(self, body: str, display_name: str) -> str:
         """Store the resolved brief on the volatile tail and report success.
@@ -2386,6 +2563,10 @@ class Session:
         # case): the profile IS attached and the band must name it, so the
         # segment tracks "which profile is in force", not "did it layer text".
         self._goal_state.agent_name = display_name
+        # The single funnel every successful ``/agent`` attach passes through
+        # (role, seed and specialist all land here), so journalling once from
+        # this point cannot miss a path the way three call-site writes could.
+        self._persist_attachment()
         return display_name
 
     @property

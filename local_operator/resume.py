@@ -84,6 +84,27 @@ TITLE_SCAN_SENTINEL_NAME = "title-scan.json"
 #: exactly "this pass read this opener and it was not a subagent's".
 ORIGIN_SCAN_SENTINEL_NAME = "origin-scan.json"
 
+#: The session's ATTACHED IDENTITY — the ``/team`` roster, the ``/agent``
+#: profile, and the ``/goal`` — journalled beside the transcript, mirroring
+#: :data:`TITLE_SIDECAR_NAME` exactly.
+#:
+#: Why this file has to exist at all: the team and agent briefs ride the
+#: VOLATILE TAIL of the system prompt (see ``prompts_api.build_system_blocks``
+#: and ``session/goal.py``), and the tail is rebuilt from a ``GoalState`` that
+#: ``session_factory`` constructs EMPTY on every session. Nothing in the
+#: transcript reproduces it, so a ``--resume`` genuinely dropped the persona
+#: from the prompt — the manager a user attached with ``/team`` was not merely
+#: missing from the status band, it was gone from the model's instructions and
+#: the conversation carried on as an ordinary session. Only the FRONT END could
+#: see the blank band, which is why this read as a display bug for so long.
+#:
+#: A SIDECAR rather than a transcript row, for the reasons the title sidecar
+#: documents and one more that is specific to this state: the attachment is a
+#: property OF the session, not an event IN the conversation, and the restore
+#: runs during construction, before any replay, so a value it had to scan the
+#: JSONL for would arrive too late to reach the first prompt's tail.
+ATTACHMENT_SIDECAR_NAME = "attachment.json"
+
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
 #:
@@ -395,6 +416,109 @@ def write_session_title(
         # The temp carries the writer's PID so two sessions writing at once do
         # not ``replace`` a document the other is still filling — the same
         # torn-write hazard ``search_index._save`` documents.
+        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(sidecar)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+class SessionAttachment(NamedTuple):
+    """What ``/team``, ``/agent`` and ``/goal`` had put on a session.
+
+    NAMES, never brief BODIES, and that is the load-bearing decision rather
+    than a size optimisation. A stored brief is a SNAPSHOT of a team's
+    collaboration/project text or a profile's instructions at attach time; the
+    operator edits those files between sessions (that is the whole point of a
+    durable registry), so replaying a stored copy would resume the session onto
+    instructions that no longer exist anywhere. Re-resolving the name through
+    the live registry on restore means a resumed session runs the CURRENT
+    definition, which is what the user means by "resume my lopdev manager".
+
+    The tradeoff is accepted deliberately: a renamed or deleted team cannot be
+    restored, where a stored brief could have been. That case is handled by
+    saying so plainly (see the TUI's restore notice) rather than by silently
+    reviving a definition the operator removed.
+    """
+
+    #: ``/team`` roster name; "" when no team was attached.
+    team: str
+    #: ``/agent`` profile DISPLAY name; "" when no profile was attached.
+    agent: str
+    #: The standing ``/goal`` text; "" when unset. Stored here rather than left
+    #: to the transcript because it shares the volatile tail's fate exactly.
+    goal: str
+
+
+def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
+    """Parse ``attachment.json``, or ``None`` when absent or unusable.
+
+    Tolerant on exactly the same terms as :func:`_read_title_sidecar`, and the
+    ``errors="replace"`` is load-bearing for the same reason: a process killed
+    mid-write can cut the file inside a multi-byte character, and a strict
+    decode raises ``UnicodeDecodeError`` — a ``ValueError``, which would sail
+    past an ``except OSError`` and take down not a picker row this time but the
+    whole RESUME. A session must always reopen; losing an attachment is a
+    notice, losing the conversation is not survivable.
+    """
+    try:
+        raw = (session_dir / ATTACHMENT_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    def _text(key: str) -> str:
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
+
+
+def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
+    """Journal the session's attached identity so a resume can rebuild it.
+
+    Called on CHANGE (attach, detach, goal set/clear), never per turn: the
+    attachment moves a handful of times in a session's life, and a per-turn
+    write would be pure I/O for a value that did not move.
+
+    Best-effort by contract, exactly like :func:`write_session_title` and
+    :func:`mark_session_origin`. An attachment that cannot be journalled
+    (read-only volume, full disk) must never fail the turn that changed it: the
+    cost is one resume that opens unattached, which is the behaviour every
+    session had before this file existed.
+
+    The write is ATOMIC (pid-named temp + ``replace``) because two processes
+    can hold the same session directory — a live owner and a ``/resume`` that
+    is about to be refused both touch it — and a reader hitting a half-written
+    document would parse as "no attachment" and silently drop the persona. The
+    PID in the temp name keeps two concurrent writers from ``replace``-ing a
+    document the other is still filling, the same hazard ``write_session_title``
+    and ``search_index._save`` document.
+
+    **The directory's mtime is preserved**, for the reason the other two
+    sidecars preserve it: recency ranks by the transcript's mtime, and
+    journalling an attachment is bookkeeping ABOUT a session, never activity IN
+    it. Attaching a team must not reorder the ``/resume`` picker.
+    """
+    payload = {
+        "team": " ".join((team or "").split()),
+        "agent": " ".join((agent or "").split()),
+        "goal": (goal or "").strip(),
+    }
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
         tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(sidecar)

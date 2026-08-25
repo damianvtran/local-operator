@@ -2032,6 +2032,7 @@ class OperatorApp(App[None]):
         )
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
+        self._report_attachment_restore(session)
         self._render_resumed_history(session)
         # AFTER the history is on screen, because that is where the fallback
         # label comes from: a session resumed from a transcript written before
@@ -4348,6 +4349,31 @@ class OperatorApp(App[None]):
         # server that does not exist.
         for name, error in sorted(outcome.failures.items()):
             self._system_notice(f"MCP {name} failed: {error}", "error")
+
+    def _report_attachment_restore(self, session: SessionProtocol) -> None:
+        """Say so when a resumed session's team/agent could not be re-attached.
+
+        A resume re-resolves the stored team/agent by NAME (see
+        ``Session._restore_attachment``), so one the operator has since renamed
+        or deleted resolves to nothing and the session opens unattached. That
+        is the honest outcome, but a SILENT one would be the worst of both: the
+        user left a manager attached, comes back, and the agent answers in its
+        base voice with nothing on screen explaining why.
+
+        Once, on adopt, in the same system-notice style a failed ``/team`` or
+        ``/agent`` attach already uses — which also keeps it out of the empty
+        state, exactly like the MCP startup record above: a stale attachment is
+        infrastructure news the user did not ask for, and it must not collapse
+        the boot composition.
+
+        The band is NOT touched here. It is driven from the session, so a team
+        that failed to resolve leaves its segment blank on its own; painting
+        the stored name would contradict the notice and claim a persona the
+        prompt does not carry.
+        """
+        detail = str(getattr(session, "attachment_restore_error", "") or "")
+        if detail:
+            self._system_notice(detail, "warning")
 
     # -- text selection (TUI-021) -------------------------------------------
     def on_text_selected(self, event: TextSelected) -> None:
