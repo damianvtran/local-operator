@@ -1,5 +1,32 @@
 # Browser extension bridge: execution evidence
 
+## Round 3 remediation: origin-prompt host quarantined + reconnect hardening
+
+Design round 3 flagged one MAJOR (D11) and a nit (D12); code round 3 was clean
+with two minors (A11, A12). All four fixed.
+
+- **D11 (MAJOR):** the per-site allow prompt no longer renders the host in the
+  serif display heading. The heading is fixed prose ("Let the agent use this
+  site?") and the origin is quarantined to a monospace `.trough` (`--sunken`,
+  1px `--hairline-strong`, radius 2px, `overflow-wrap: anywhere`) under a "SITE"
+  label — the same treatment `callback_page.py` gives every URL/host and the
+  same trough the connected-state driven URL already used. Re-captured
+  `popup-origin-prompt.png` / `-dark.png` with a long host
+  (`accounts.corp.internal.staging.example.com`): it wraps at a token boundary
+  inside the trough (reads as a URL), the heading stays prose, no mid-word break.
+- **D12 (nit):** `white-space: nowrap` on `.sub code` keeps `lop browser status`
+  a single unbroken chip; re-captured `popup-disconnected.png` / `-dark.png`.
+- **A11 (minor):** the service-worker dial is wrapped in try/catch so a
+  `chrome.storage` await rejection resets `connecting=false` and reschedules the
+  reconnect instead of wedging the guard.
+- **A12 (minor):** an explicit 10s dial timeout force-closes a socket that never
+  fires `onopen`/`onerror`/`onclose`, cleared on any real settle, so a dead
+  handshake can no longer deadlock the connecting state.
+
+Frames re-captured from the real extension in Chrome 151 (CDP `loadUnpacked`)
+against the live daemon, both ramps; the allow-site store screenshot was
+regenerated from the new origin-prompt frame.
+
 ## Design-language pass: popup + options redrawn (real Chrome, both ramps)
 
 The popup and options pages were redrawn in Local Operator's own design system —

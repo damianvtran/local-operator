@@ -26,6 +26,11 @@ const HANDLERS: Record<
   status,
 };
 
+// How long a dial may sit unresolved before we force it closed and retry. A
+// live loopback WS opens in milliseconds; this only bounds a pathological
+// handshake that neither opens nor errors (finding A12).
+const DIAL_TIMEOUT_MS = 10_000;
+
 let socket: WebSocket | undefined;
 let paired = false;
 let attempt = 0;
@@ -110,11 +115,51 @@ async function connect(): Promise<void> {
   // makes reconnection converge on a single stable socket.
   if (connected || connecting || !alive) return;
   connecting = true;
-  const { token } = await getLocal();
-  const port = await daemonPort();
+
+  let token: string | undefined;
+  let port: number;
+  try {
+    ({ token } = await getLocal());
+    port = await daemonPort();
+  } catch {
+    // A transient chrome.storage rejection must not leave `connecting` stuck
+    // true — that would wedge every later dial at the guard above until the
+    // next worker suspend reset the globals (finding A11). Reset and retry.
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
+
   const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
   socket = wire;
+
+  // Explicit dial deadline: if a dead loopback handshake neither opens nor
+  // fires onerror/onclose, `connecting` would otherwise stay true forever and
+  // deadlock reconnection (finding A12). Force the socket closed after the
+  // deadline; close() surfaces as onclose→teardown, which clears the guard and
+  // reschedules. Cleared on any real settle below so a live socket is untouched.
+  let dialTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    dialTimer = undefined;
+    if (wire.readyState !== WebSocket.OPEN) {
+      connecting = false;
+      try {
+        wire.close();
+      } catch {
+        // Already closing; teardown/scheduleReconnect still run below.
+      }
+      if (socket === wire) socket = undefined;
+      scheduleReconnect();
+    }
+  }, DIAL_TIMEOUT_MS);
+  const clearDialTimer = () => {
+    if (dialTimer !== undefined) {
+      clearTimeout(dialTimer);
+      dialTimer = undefined;
+    }
+  };
+
   wire.onopen = () => {
+    clearDialTimer();
     connected = true;
     connecting = false;
     attempt = 0;
@@ -131,6 +176,7 @@ async function connect(): Promise<void> {
     } else if (frame.event === "pair_result" && frame.ok) chrome.storage.local.set({ token: frame.token });
   };
   const teardown = (event?: CloseEvent) => {
+    clearDialTimer();
     connected = false;
     connecting = false;
     paired = false;
@@ -148,6 +194,7 @@ async function connect(): Promise<void> {
     // onerror without a prior onopen still needs the connecting guard cleared,
     // else a failed dial wedges the worker as permanently "connecting". close()
     // triggers onclose→teardown which clears it.
+    clearDialTimer();
     connecting = false;
     wire.close();
   };

@@ -141,6 +141,11 @@ body {
   border-radius: 2px;
   background: var(--sunken);
   color: var(--ink);
+  /* Keep the whole command on one line so its chip background does not split
+   * across a wrap and stagger — the one thing the user is told to run should
+   * read as a single token (D12). The command wraps as a unit to the next line
+   * instead. */
+  white-space: nowrap;
 }
 
 /* The driven-site line — a labelled trough, exactly the callback page's

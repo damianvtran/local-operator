@@ -55,8 +55,12 @@ async function render(): Promise<void> {
   const health = await daemonHealth();
   const pendingHost = pendingOrigin?.hostname || hostnameOf(health?.pending_origin);
   if (pendingHost) {
-    const title = document.getElementById("origin-title");
-    if (title) title.textContent = `Let the agent use ${pendingHost}?`;
+    // The heading is fixed prose; the host — the string the user must verify
+    // before granting a standing browsing grant — goes in the monospace trough
+    // where it renders intact and reads unambiguously as data (D11). The
+    // heading id stays constant, so no per-host text in the serif face.
+    const host = document.getElementById("origin-host");
+    if (host) host.textContent = pendingHost;
     show("origin");
     return;
   }

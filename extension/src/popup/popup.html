@@ -84,13 +84,20 @@
           class="state hidden"
           role="alertdialog"
           aria-labelledby="origin-title"
-          aria-describedby="origin-body"
+          aria-describedby="origin-host origin-body"
         >
-          <h1 class="title" id="origin-title"></h1>
+          <!-- The heading stays PROSE. The host being authorized is data, so it
+               is quarantined to a monospace trough below (never the serif
+               display face) — matching callback_page.py's rule for every
+               URL/host value, so a long host reads as an intact string and a
+               mid-token break reads as "this is a URL", not a typo (D11). -->
+          <h1 class="title" id="origin-title">Let the agent use this site?</h1>
           <p class="sub" id="origin-body">
             The agent wants to open a page on this site with your current login. It can only use
             sites you allow, and you can take this back any time in Settings.
           </p>
+          <p class="label" id="origin-host-label">Site</p>
+          <p class="trough" id="origin-host"></p>
           <div class="actions">
             <div class="row">
               <button id="origin-allow" class="btn primary">Allow once</button>
