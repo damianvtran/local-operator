@@ -16,6 +16,7 @@ import pytest
 from local_operator.mobile import registry
 from local_operator.mobile.peer_client import send_peer_message
 from local_operator.mobile.registrant import Registrant
+from local_operator.mobile.types import TranscriptEntry
 from tests.unit.mobile.test_registrant import FakeHandle, NoPeerHandle, _wait_record
 
 
@@ -41,6 +42,44 @@ async def test_send_returns_ack_detail_and_passes_args() -> None:
         assert args == ("gates are green",)
         sender = cast("dict[str, Any]", kwargs["sender"])
         assert sender["pid"] == 999
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_send_survives_an_oversized_welcome_projection() -> None:
+    """U1 regression: a daemon-class dial receives an unsolicited full-projection
+    ``welcome`` as its first frame, and a busy target's transcript can make that
+    single JSON line exceed any fixed readline limit. The sender must skip the
+    oversized welcome and still return its ack cleanly, never raise
+    ``ValueError``/``LimitOverrunError`` (which crashed the CLI while the message
+    was already delivered).
+    """
+    handle = FakeHandle()
+    # Seed the projection with a transcript tail whose serialized welcome line
+    # exceeds 1 MiB — the old readline limit — so this test would have crashed
+    # with the exact ``ValueError: Separator is not found, and chunk exceed the
+    # limit`` U1 reported. 80 rows is the projection's transcript cap
+    # (PROJECTION_TRANSCRIPT_LIMIT), so 20 KB per row lands ~1.6 MB on the wire.
+    handle._projection.transcript = [
+        TranscriptEntry(id=f"row-{i}", kind="assistant", text="x" * 20000) for i in range(80)
+    ]
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    try:
+        record = await _wait_record()
+        detail = await send_peer_message(
+            record,
+            text="gates are green",
+            mode="mailbox",
+            wake=False,
+            sender={"pid": 999, "conversation_name": "sender"},
+        )
+        # The ack came through despite the >1 MiB welcome preceding it.
+        assert "mailbox" in detail
+        name, args, kwargs = handle.calls[-1]
+        assert name == "receive_peer_message"
+        assert args == ("gates are green",)
     finally:
         registrant.close()
 
