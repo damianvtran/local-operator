@@ -4,6 +4,10 @@ streaming rows that update in place, subagent roster aggregation."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+
+from local_operator.harness.comms import SubagentComms
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
@@ -36,6 +40,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionProjection,
 )
+from local_operator.session.session import Session
 
 
 def make_fold() -> ProjectionFold:
@@ -146,6 +151,53 @@ def test_subagent_roster_running_first_then_settled() -> None:
     assert rows[0].progress == "reading files"
     assert rows[1].status == "completed"
     assert rows[1].result_text == "done"
+
+
+def test_subagent_details_seed_nested_descendants_for_recursive_navigation() -> None:
+    """Nested jobs never emit lifecycle events through the root fold.
+
+    The shared registry must still project a complete root -> child ->
+    grandchild graph so every advertised child id resolves on the phone, and a
+    later refresh must keep enriching that same nested record.
+    """
+
+    class Jobs:
+        def __init__(self) -> None:
+            self.rows = {
+                "parent": SimpleNamespace(status="running", agent_role="coder", latest_details={}),
+                "child": SimpleNamespace(
+                    status="completed", agent_role="reviewer", latest_details={}
+                ),
+                "grandchild": SimpleNamespace(
+                    status="running", agent_role="scout", latest_details={"progress": "reading"}
+                ),
+            }
+
+        def get(self, job_id: str):
+            return self.rows.get(job_id)
+
+    session = SimpleNamespace(jobs=Jobs())
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("parent", "parent", prompt="plan")
+    comms.record_launch("child", "child", parent_job_id="parent", prompt="build")
+    comms.record_launch("grandchild", "grandchild", parent_job_id="child", prompt="inspect")
+    fold = make_fold()
+    # Only the direct child reaches the root event stream.
+    fold.fold_event(SubagentStartEvent(job_id="parent", label="parent"))
+
+    fold.set_subagent_details(comms)
+    by_id = {row.job_id: row for row in fold.projection.subagents}
+    assert set(by_id) == {"parent", "child", "grandchild"}
+    assert by_id["parent"].child_ids == ["child"]
+    assert by_id["child"].child_ids == ["grandchild"]
+    assert by_id["grandchild"].parent_job_id == "child"
+    assert by_id["grandchild"].ancestors == ["parent", "child"]
+    assert by_id["grandchild"].activity == "reading"
+
+    session.jobs.rows["grandchild"].latest_details = {"progress": "summarizing"}
+    fold.set_subagent_details(comms)
+    refreshed = {row.job_id: row for row in fold.projection.subagents}
+    assert refreshed["grandchild"].activity == "summarizing"
 
 
 def test_history_fold_pairs_tool_calls_with_results() -> None:

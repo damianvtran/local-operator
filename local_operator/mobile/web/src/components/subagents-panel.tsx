@@ -25,6 +25,10 @@ export function SubagentsPanel({ subagents, pid = "" }: { subagents: SubagentRow
 	useEffect(() => { if (selectedId && !byId.has(selectedId)) setSelectedId(null); }, [byId, selectedId]);
 	const running = subagents.filter((s) => s.status === "running").length;
 	const relatives = (ids: string[]) => ids.map((id) => byId.get(id)).filter((row): row is SubagentRow => Boolean(row));
+	// These controls are the phone's only path through recursive lineage. Keep
+	// each target at the same 44 px minimum as the sheet close button so wrapped
+	// peer/child rows cannot turn a small miss into opening the wrong transcript.
+	const hierarchyControl = "inline-flex min-h-11 items-center rounded-sm border border-hairline px-3 py-2 text-left text-meta active:bg-elevated";
 	return <>
 		<Disclosure defaultOpen={running > 0} className="border-t border-hairline px-4" header={<span className="text-body-sm text-ink-muted">subagents <span className="font-mono text-mono-sm text-ink-dim">{running}/{subagents.length} running</span></span>}>
 			<div className="flex flex-col gap-1 pb-2 pl-5">{subagents.filter((s) => !s.parent_job_id).map((s) => <button key={s.job_id} type="button" onClick={() => setSelectedId(s.job_id)} className="flex min-h-8 w-full items-center gap-2 rounded-sm px-1 text-left active:bg-elevated"><span className={cn("w-4 text-center font-mono text-mono-sm", statusClass(s.status))}>{GLYPH[s.status]}</span><span className="min-w-0 flex-1 truncate text-body-sm text-ink">{s.label}</span><span className="font-mono text-mono-sm text-ink-dim">{s.elapsed_s > 0 ? formatElapsed(s.elapsed_s) : ""}</span></button>)}</div>
@@ -34,11 +38,11 @@ export function SubagentsPanel({ subagents, pid = "" }: { subagents: SubagentRow
 				<div className="border-b border-hairline px-4 py-2">
 					<p className="truncate text-meta text-ink-dim">Conversation {selected.ancestors.map((label) => `› ${label} `)}› {selected.label}</p>
 					<div className="mt-1 flex items-center gap-2"><span className={cn("font-mono text-mono-sm", statusClass(selected.status))}>{GLYPH[selected.status]} {selected.status}</span><span className="font-mono text-mono-sm text-ink-dim">{selected.agent}{selected.effort ? ` · ${selected.effort}` : ""}</span></div>
-					<div className="mt-2 flex flex-wrap gap-1">
-						<button type="button" className="rounded-sm border border-hairline px-2 py-1 text-meta" onClick={() => setSelectedId(null)}>root</button>
-						{selected.parent_job_id && byId.get(selected.parent_job_id) ? <button type="button" className="rounded-sm border border-hairline px-2 py-1 text-meta" onClick={() => setSelectedId(selected.parent_job_id)}>parent</button> : null}
-						{relatives(selected.peer_ids).map((row) => <button key={row.job_id} type="button" className="rounded-sm border border-hairline px-2 py-1 text-meta" onClick={() => setSelectedId(row.job_id)}>peer · {row.label}</button>)}
-						{relatives(selected.child_ids).map((row) => <button key={row.job_id} type="button" className="rounded-sm border border-hairline px-2 py-1 text-meta" onClick={() => setSelectedId(row.job_id)}>child · {row.label}</button>)}
+					<div className="mt-3 flex flex-wrap gap-2">
+						<button type="button" className={hierarchyControl} onClick={() => setSelectedId(null)}>root</button>
+						{selected.parent_job_id && byId.get(selected.parent_job_id) ? <button type="button" className={hierarchyControl} onClick={() => setSelectedId(selected.parent_job_id)}>parent</button> : null}
+						{relatives(selected.peer_ids).map((row) => <button key={row.job_id} type="button" className={hierarchyControl} onClick={() => setSelectedId(row.job_id)}>peer · {row.label}</button>)}
+						{relatives(selected.child_ids).map((row) => <button key={row.job_id} type="button" className={hierarchyControl} onClick={() => setSelectedId(row.job_id)}>child · {row.label}</button>)}
 					</div>
 				</div>
 				{selected.prompt ? <div className="border-b border-hairline px-4 py-2"><span className="text-meta text-ink-dim">Parent request</span><p className="text-body-sm whitespace-pre-wrap">{selected.prompt}</p></div> : null}

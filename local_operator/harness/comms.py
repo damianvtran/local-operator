@@ -452,6 +452,16 @@ class SubagentComms:
 
     # -- lineage --------------------------------------------------------------
 
+    def nodes(self) -> list[SubagentNode]:
+        """Return every known descendant in stable launch order.
+
+        Nested launches share this registry but do not emit their lifecycle
+        events through the root session. Projection consumers therefore need
+        the registry's complete roster rather than trying to infer lineage from
+        the root event stream, which can only ever describe direct children.
+        """
+        return [node for job_id in self._records if (node := self.node(job_id)) is not None]
+
     def node(self, job_id: str) -> SubagentNode | None:
         record = self._records.get(job_id)
         if record is None:

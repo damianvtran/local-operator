@@ -644,11 +644,29 @@ class ProjectionFold:
     # -- todos / pending / state -------------------------------------------
 
     def set_subagent_details(self, comms: Any) -> None:
-        """Enrich roster rows from the shared lineage and durable transcripts."""
-        for node in (comms.node(row.job_id) for row in self._subagents.values()):
-            if node is None:
-                continue
-            row = self._subagents[node.job_id]
+        """Project the shared lineage and enrich every descendant transcript.
+
+        Only direct children emit lifecycle events through the root session;
+        nested children still live in the shared comms registry. Seed missing
+        rows from that authoritative registry so each ``child_ids`` edge has a
+        corresponding phone-addressable record.
+        """
+        for node in comms.nodes():
+            job = comms.job(node.job_id)
+            row = self._subagents.get(node.job_id)
+            if row is None:
+                status = str(getattr(job, "status", "running") or "running")
+                if status not in {"running", "completed", "failed", "cancelled", "parked"}:
+                    status = "completed"
+                row = SubagentRow(
+                    job_id=node.job_id,
+                    label=node.label,
+                    status=status,  # type: ignore[arg-type] -- narrowed above
+                )
+                self._subagents[node.job_id] = row
+            else:
+                row.label = node.label
+            row.parent_job_id = node.parent_job_id
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
             row.prompt = node.prompt
@@ -656,7 +674,6 @@ class ProjectionFold:
             row.ancestors = [ancestor.label for ancestor in comms.ancestors(node.job_id)]
             row.child_ids = [child.job_id for child in comms.children(node.job_id)]
             row.peer_ids = [peer.job_id for peer in comms.peers(node.job_id)]
-            job = comms.job(node.job_id)
             if job is not None:
                 row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
                 row.progress = str(

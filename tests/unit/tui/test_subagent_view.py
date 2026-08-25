@@ -17,14 +17,19 @@ test there is.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
 
-from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
+from local_operator.harness.comms import (
+    HUB_COMMUNICATION_CUSTOM_TYPE,
+    HUB_MESSAGE_TYPE,
+    SubagentComms,
+)
 from local_operator.harness.jobs import CANCELLED_BEFORE_START
 from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
+from local_operator.session.session import Session
 from local_operator.session.transcript import (
     Transcript,
     TranscriptEntry,
@@ -235,6 +240,56 @@ async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
     app._open_subagent_view(str(job.id))
     await pilot.pause()
     return app.query_one(SubagentView)
+
+
+@pytest.mark.asyncio
+async def test_peer_keys_cycle_all_siblings_in_opposite_directions() -> None:
+    jobs = [
+        _Job(job_id, label) for job_id, label in (("a", "alpha"), ("b", "beta"), ("c", "gamma"))
+    ]
+    session = FakeSession()
+    session.jobs = _fake_jobs(*jobs)
+    comms = SubagentComms(cast(Session, session))
+    for job in jobs:
+        comms.record_launch(job.id, job.label)
+    session._subagent_comms = comms
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, jobs[1])
+        assert view.job_id == "b"
+
+        await pilot.press("]")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "c"
+        await pilot.press("]")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "a"
+        await pilot.press("[")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "c"
+        await pilot.press("[")
+        await pilot.pause()
+        assert app.query_one(SubagentView).job_id == "b"
+
+
+@pytest.mark.asyncio
+async def test_narrow_subagent_mode_preserves_a_useful_transcript_viewport() -> None:
+    jobs = [_job_with(TRAJECTORY), _Job("peer", "peer")]
+    session = FakeSession()
+    session.jobs = _fake_jobs(*jobs)
+    comms = SubagentComms(cast(Session, session))
+    for job in jobs:
+        comms.record_launch(job.id, job.label)
+    session._subagent_comms = comms
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = await _open(pilot, app, jobs[0])
+        for _ in range(3):
+            await pilot.pause()
+        assert app.screen.has_class("subagent-compact")
+        assert app.query_one("#band").display is False
+        assert view._body.size.height >= 8, view._body.size
+        assert app.screen.virtual_size.height <= app.screen.size.height
 
 
 @pytest.mark.asyncio

@@ -756,6 +756,11 @@ BOOT_LAYOUT_CLASS = "boot"
 #: recede rather than disappear, or the page stops reading as the same app.
 #: Flipped in exactly two places, ``_open_subagent_view``/``_close_subagent_view``.
 SUBAGENT_LAYOUT_CLASS = "subagent"
+#: At phone-height terminals the live roster and todos can consume nearly the
+#: entire detail page. The compact mode keeps the selected transcript primary;
+#: secondary context remains one ``Esc`` away in the parent conversation.
+SUBAGENT_COMPACT_LAYOUT_CLASS = "subagent-compact"
+SUBAGENT_COMPACT_MAX_ROWS = 24
 
 #: The screen class the org-chart mode adds, flipped only in
 #: ``_open_org_chart_view``/``_close_org_chart_view``. Named to match its
@@ -1169,8 +1174,8 @@ class OperatorApp(App[None]):
         # editing key it had.
         Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
         Binding("p", "subagent_parent", "Parent subagent", show=False),
-        Binding("left_square_bracket", "subagent_peer", "Previous peer", show=False),
-        Binding("right_square_bracket", "subagent_peer", "Next peer", show=False),
+        Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
+        Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
         Binding("c", "subagent_child", "Child subagent", show=False),
         Binding("r", "subagent_root", "Root conversation", show=False),
         # Scroll the EXPANDED todo list from the keyboard (U2). When an expanded
@@ -4516,6 +4521,7 @@ class OperatorApp(App[None]):
         # to run BEFORE the screen arranges, which is what lets the composition below
         # land in the first frame the terminal ever sees.
         self._sync_boot_layout(size=event.size)
+        self._sync_subagent_compact_layout(event.size.height)
         # The overlay cards are hosted in `width: auto` containers, so a
         # terminal resize does not resize THEM and Textual delivers them no
         # event — the aside in particular is sized AND PLACED from the
@@ -4566,6 +4572,13 @@ class OperatorApp(App[None]):
         # cards over whatever the band settled to, which is the order those two
         # already depend on.
         self.call_after_refresh(self._refresh_band)
+
+    def _sync_subagent_compact_layout(self, screen_height: int) -> None:
+        """Keep narrow detail pages useful by yielding secondary dock rows."""
+        self.screen.set_class(
+            self._subagent_view is not None and screen_height <= SUBAGENT_COMPACT_MAX_ROWS,
+            SUBAGENT_COMPACT_LAYOUT_CLASS,
+        )
 
     def _remeasure_prompt(self) -> None:
         """Re-lay a live prompt against the current terminal, then fit the host."""
@@ -8237,8 +8250,8 @@ class OperatorApp(App[None]):
     def action_subagent_parent(self) -> None:
         self._navigate_subagent("parent")
 
-    def action_subagent_peer(self) -> None:
-        self._navigate_subagent("peer")
+    def action_subagent_peer(self, direction: int) -> None:
+        self._navigate_subagent("peer", direction=direction)
 
     def action_subagent_child(self) -> None:
         self._navigate_subagent("child")
@@ -8247,7 +8260,7 @@ class OperatorApp(App[None]):
         if self._subagent_view is not None:
             self._close_subagent_view()
 
-    def _navigate_subagent(self, relation: str) -> None:
+    def _navigate_subagent(self, relation: str, *, direction: int = 1) -> None:
         view = self._subagent_view
         session = self._session
         comms = getattr(session, "_subagent_comms", None) if session is not None else None
@@ -8262,8 +8275,20 @@ class OperatorApp(App[None]):
             children = comms.children(view.job_id)
             target = children[0] if children else None
         else:
-            peers = comms.peers(view.job_id)
-            target = peers[0] if peers else None
+            node = comms.node(view.job_id)
+            siblings = comms.children(node.parent_job_id) if node is not None else []
+            current = next(
+                (index for index, sibling in enumerate(siblings) if sibling.job_id == view.job_id),
+                None,
+            )
+            # The complete sibling order is authoritative. Cycling a list from
+            # ``peers()`` loses the selected node's position and made both keys
+            # oscillate over the first two children while later peers vanished.
+            target = (
+                siblings[(current + (1 if direction >= 0 else -1)) % len(siblings)]
+                if current is not None and len(siblings) > 1
+                else None
+            )
         if target is not None:
             self._open_subagent_view(target.job_id)
 
@@ -8293,6 +8318,7 @@ class OperatorApp(App[None]):
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))
         self.screen.add_class(SUBAGENT_LAYOUT_CLASS)
+        self._sync_subagent_compact_layout(self.size.height)
         self._set_composer_read_only(True)
         self._refresh_subagent_view(job_id)
 
@@ -8312,6 +8338,7 @@ class OperatorApp(App[None]):
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
         self.screen.remove_class(SUBAGENT_LAYOUT_CLASS)
+        self.screen.remove_class(SUBAGENT_COMPACT_LAYOUT_CLASS)
         self._transcript_view().display = True
         self._set_composer_read_only(False)
         if self._todo_panel is not None and self._session is not None:

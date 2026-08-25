@@ -1199,6 +1199,14 @@ Screen.subagent SubagentRow.current {
     background: $lo-tint-select;
 }
 
+/* A 24-row terminal cannot carry the selected transcript plus an unbounded
+ * live roster and selected todos without reducing the conversation to a
+ * single row. In compact detail mode the conversation is the primary surface;
+ * the hidden parent-session context returns unchanged when the reader leaves. */
+Screen.subagent-compact #band {
+    display: none;
+}
+
 /* ── full-page subagent view ───────────────────────────────────────────── *
  *
  * Opened from a band row (click or Enter). NOT an overlay: it takes the
