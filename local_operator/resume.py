@@ -61,6 +61,29 @@ ORIGIN_SUBAGENT = "subagent"
 #: the window scan for sessions written before the sidecar existed.
 TITLE_SIDECAR_NAME = "title.json"
 
+#: The title backfill's per-directory "nothing to journal" marker. The sweep
+#: used to treat only an existing :data:`TITLE_SIDECAR_NAME` as answered, so a
+#: session with no journalled title anywhere in its transcript — the majority
+#: of a long-lived store, since every session that simply never got renamed
+#: stays in that state forever — was FULLY RE-READ on every boot: measured 323
+#: ms per boot on a 1,365-session store, 1,268 of which could never produce a
+#: sidecar. The sentinel records that the scan RAN and found nothing, so the
+#: second boot's answer costs one ``stat`` per directory. JSON rather than an
+#: empty file so a future reader can carry a reason (``scanned_at``) without a
+#: second format migration; ``write_session_title``'s mtime-preservation
+#: contract applies to it too, for the reason its docstring gives.
+TITLE_SCAN_SENTINEL_NAME = "title-scan.json"
+
+#: The origin sweep's own "considered and not a subagent" marker, mirroring
+#: :data:`TITLE_SCAN_SENTINEL_NAME`. It exists SEPARATELY from that sentinel
+#: because the two sweeps answer different questions and traverse
+#: independently: the origin sweep stops at ``limit`` STAMPS while the title
+#: sweep is uncapped, so a title sentinel must never stand in for an origin
+#: answer — a directory the origin sweep never reached would be suppressed
+#: forever. Only the origin sweep writes this file, so its presence means
+#: exactly "this pass read this opener and it was not a subagent's".
+ORIGIN_SCAN_SENTINEL_NAME = "origin-scan.json"
+
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
 #:
@@ -428,6 +451,16 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
             # hand to un-hide a session is not silently written back.
             if (directory / ORIGIN_NAME).exists():
                 continue
+            # This pass's OWN "considered and not a subagent" marker — not
+            # the title sweep's sentinel. The two sweeps traverse
+            # independently and THIS one stops at ``limit`` stamps, so a
+            # title sentinel written for a directory this pass never reached
+            # would suppress the origin question forever (the 501st
+            # stampable subagent behind a >500 backlog, permanently
+            # unmarked). A marker only this pass writes can only exist for
+            # a directory this pass genuinely visited.
+            if (directory / ORIGIN_SCAN_SENTINEL_NAME).exists():
+                continue
         except OSError:
             continue
         opening = session_name(directory, max_chars=NAME_MAX_CHARS, condense=False)
@@ -436,6 +469,13 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
         if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
             mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
             stamped += 1
+        else:
+            # Not a subagent: record it the same way the marker records the
+            # opposite answer, so the next boot's sweep costs one stat here
+            # too. Best-effort and mtime-preserving for the same reasons the
+            # title sentinel's writer gives; a failed write costs one redundant
+            # opener read, never a lost session.
+            _write_origin_scan_sentinel(directory)
     return stamped
 
 
@@ -484,6 +524,56 @@ def _scan_all_titles(transcript: Path) -> list[tuple[str, bool]]:
     return titles
 
 
+def _write_origin_scan_sentinel(session_dir: Path) -> None:
+    """Record that the origin sweep read this opener and found no subagent.
+
+    Same best-effort, mtime-preserving, atomic-write contract as
+    :func:`_write_title_scan_sentinel` — see its docstring for the reasoning;
+    this is that function with a different file name, kept separate so each
+    sweep owns its own answer.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        sentinel = session_dir / ORIGIN_SCAN_SENTINEL_NAME
+        tmp = sentinel.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"scanned": True}), encoding="utf-8")
+        tmp.replace(sentinel)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def _write_title_scan_sentinel(session_dir: Path) -> None:
+    """Record that the title backfill scanned this directory and found nothing.
+
+    Mirrors :func:`write_session_title`'s best-effort contract, because it is
+    the same trade: the sentinel is a boot-cost optimisation, and a session on
+    a read-only volume must still RUN. The cost of a failed write is one
+    redundant full scan on the next boot — the pre-fix behaviour — never a
+    lost turn. Mtime is preserved and the write is atomic (pid-named temp +
+    ``replace``) for the reasons the title sidecar's writer documents at
+    length: journalling a scan is bookkeeping ABOUT a session, never activity
+    IN it, and a concurrent reader must never see a torn file.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        sentinel = session_dir / TITLE_SCAN_SENTINEL_NAME
+        tmp = sentinel.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"scanned": True}), encoding="utf-8")
+        tmp.replace(sentinel)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
 def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     """Write the title sidecar for sessions that predate it, and return how many.
 
@@ -502,6 +592,17 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     it is confined to this startup path — bounded by ``limit`` and run once per
     session ever, never per picker-open — exactly the trade
     :func:`backfill_session_origins` makes.
+
+    "Once per session ever" now includes the no-title case. A directory with
+    no journalled title gets a sentinel (:data:`TITLE_SCAN_SENTINEL_NAME`) so
+    the next boot answers it with one ``stat`` instead of another full read;
+    without it the sweep was perpetual on exactly the store it was meant to
+    fix once — a session that never bore a title can never grow a sidecar, so
+    it was re-scanned to the same "nothing" on every launch for the store's
+    whole life (measured 323 ms per boot on a real 1,365-session store,
+    1,268 of them permanently in that state). The sentinel is deliberately
+    NOT a title: neither the picker nor :func:`stored_session_title` reads it,
+    so their behaviour is byte-identical before and after.
 
     Best-effort and bounded like every other function here: an unreadable
     directory is skipped rather than raised, and ``limit`` caps how many
@@ -529,8 +630,11 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
             # Already answered: never re-stamp. The sidecar is event-sourced
             # from here on, so a rewrite would only risk clobbering a newer
             # sidecar with an older full scan on a session that has since been
-            # renamed.
+            # renamed. The scan sentinel answers the same "considered" question
+            # for the no-title case, which is what ends the perpetual rescan.
             if (directory / TITLE_SIDECAR_NAME).exists():
+                continue
+            if (directory / TITLE_SCAN_SENTINEL_NAME).exists():
                 continue
         except OSError:
             continue
@@ -539,7 +643,9 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
             # No journalled title at all (a session that predates title
             # journalling, or one closed before its naming call landed). Leave
             # it to the window-scan fallback and the opening-message name; there
-            # is nothing to journal.
+            # is nothing to journal — but RECORD that the scan ran, so the next
+            # boot does not pay for the same answer again.
+            _write_title_scan_sentinel(directory)
             continue
         past_names = [text for text, _ in titles]
         newest_text, newest_user_set = titles[-1]

@@ -1,0 +1,30 @@
+{
+  "s1_boot": {
+    "sessions": 1000,
+    "first_pass_ms": 1475.9,
+    "second_pass_ms": 48.5,
+    "max_stall_ms": 0.0,
+    "stalls_over_30ms": 0
+  },
+  "p_parallel_boot": {
+    "instances": 5,
+    "sessions": 1000,
+    "first_pass_ms": 1123.4,
+    "parallel_steady_wall_ms": 391.3,
+    "slowest_instance_ms": 362.5
+  },
+  "s2_send": {
+    "discovery_latency_s": 0.4,
+    "loop_ms": 0.82,
+    "max_stall_ms": 0.0,
+    "cost": null,
+    "discovery_calls": 2
+  },
+  "s3_bash_emit": {
+    "total_mb": 8.0,
+    "emit_body_ms_median": 0.09,
+    "emit_body_ms_max": 0.13,
+    "live_payload_chars": 131110,
+    "max_stall_ms": 0.0
+  }
+}

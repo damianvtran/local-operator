@@ -1,0 +1,22 @@
+{
+  "s1_boot": {
+    "sessions": 1000,
+    "first_pass_ms": 184.2,
+    "second_pass_ms": 178.5,
+    "max_stall_ms": 0.0,
+    "stalls_over_30ms": 0
+  },
+  "s2_send": {
+    "discovery_latency_s": 0.4,
+    "loop_ms": 806.91,
+    "max_stall_ms": 812.2,
+    "cost": null,
+    "discovery_calls": 2
+  },
+  "s3_bash_emit": {
+    "total_mb": 8.0,
+    "tick_ms_median": 1.73,
+    "tick_ms_max": 5.36,
+    "max_stall_ms": 0.0
+  }
+}

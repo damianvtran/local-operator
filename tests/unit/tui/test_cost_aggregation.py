@@ -33,10 +33,17 @@ _MODELS = {"opus": _PARENT_MODEL, "haiku": _CHILD_MODEL}
 
 
 def _resolving():
-    return patch(
-        "local_operator.model.configure.resolve_model_info",
-        side_effect=lambda provider, model_id: _MODELS.get(
+    # Both resolvers patched: turn_cost prices through the paint-safe one
+    # (resolve_model_info_paint), and patching only the full resolver would
+    # leave the paint path reading the real (unpriced) registry.
+    return patch.multiple(
+        "local_operator.model.configure",
+        resolve_model_info=lambda provider, model_id: _MODELS.get(
             model_id, ModelInfo(id=model_id, name=model_id, description="")
+        ),
+        resolve_model_info_paint=lambda provider, model_id: (
+            _MODELS.get(model_id, ModelInfo(id=model_id, name=model_id, description="")),
+            True,
         ),
     )
 
