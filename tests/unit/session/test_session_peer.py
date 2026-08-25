@@ -98,6 +98,100 @@ async def test_peer_message_reaches_the_model_via_allow_list(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_record_only_while_busy_parks_to_the_turn_boundary(tmp_path):
+    """C1 regression: record-only delivery against a BUSY session (mid tool
+    batch) must NOT splice the user-attributed peer message between the open
+    assistant tool_calls and their tool_results. A bare
+    ``_context.messages.append`` produced the illegal
+    ``assistant(tool_use) -> user -> tool_result`` order every provider rejects
+    (and tripped ``_pair_spliced_tool_results``, same class as PR #302). The
+    fix routes the live append through ``_append_or_park_journal``, which parks
+    it to the next turn-safe boundary while writing the transcript now.
+    """
+    import asyncio
+
+    from local_operator.harness.types import (
+        AgentTool,
+        StreamToolCallDelta,
+        TextContent,
+        ToolResult,
+    )
+
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        await release_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="block", content=[TextContent(text="done")]
+        )
+
+    tool = AgentTool(
+        name="block",
+        parameters={"type": "object", "properties": {}},
+        execute=blocking_execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="block", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            # Third script feeds the NEXT turn that must read the parked peer
+            # message as model input.
+            [StreamTextDelta(delta="next"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[tool])
+
+    prompt_task = asyncio.ensure_future(session.prompt("long task"))
+    await wait_for(lambda: tool_started.is_set())  # tool batch is OPEN: busy, splicing window
+
+    detail = await session.receive_peer_message(
+        "busy note", mode="mailbox", wake=False, sender={"pid": 42, "conversation_name": "peer"}
+    )
+    assert "mailbox" in detail
+
+    # While the tool batch is open, the peer message must NOT be spliced into
+    # the live list: it is parked for the turn boundary.
+    assert any(
+        getattr(m, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE
+        for m in session._pending_context_journal
+    )
+    assert not any(
+        getattr(m, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE
+        for m in session._context.messages
+    )
+    # But the transcript row is written NOW (durably), exactly once.
+    assert len(_peer_rows(session)) == 1
+
+    release_tool.set()
+    await prompt_task
+
+    # After the turn boundary the parked message drained into live context, in a
+    # legal position (after the tool batch closed — never between tool_use and
+    # tool_result).
+    assert any(
+        getattr(m, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE
+        for m in session._context.messages
+    )
+    # Still exactly ONE durable row (the parked append did not re-write).
+    assert len(_peer_rows(session)) == 1
+
+    # The NEXT turn reads the parked peer message as model input: prompt() holds
+    # the turn lock, so the parked journal drains at its boundary and the next
+    # request's context includes "busy note".
+    next_prompt = asyncio.ensure_future(session.prompt("what now"))
+    await wait_for(lambda: len(stream.requests) >= 3)
+    next_turn_msgs = stream.requests[2].messages
+    assert any("busy note" in (m.text or "") for m in next_turn_msgs)
+    await next_prompt
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_steer_while_busy_routes_through_the_steer_queue(tmp_path):
     """Steer mode against a busy session injects mid-turn through steer(),
     which persists its own row — the method must not also append."""

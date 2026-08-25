@@ -2967,11 +2967,21 @@ class Session:
             self._spawn_background(self._prompt_messages([message]))
             return "delivered and woke the session"
         # Record-only (idle without wake, or busy): persist durably NOW so the
-        # human sees it and a crash cannot lose it, and append to live context
-        # so the model reads it on its next turn. This is the ONE branch that
-        # appends directly; the wake/steer branches must not (see above).
+        # human sees it and a crash cannot lose it, and make it visible to the
+        # model on its next turn. The transcript write is immediate; the live
+        # append routes through _append_or_park_journal, NOT a bare
+        # _context.messages.append. A bare append is a splice hazard on the
+        # BUSY path: appending a user-attributed message while a tool batch is
+        # open leaves the live list ending assistant(tool_use) -> user with the
+        # tool_results still to come, which every provider rejects and which
+        # trips _pair_spliced_tool_results (same class as PR #302, C1). The
+        # journal path parks the live append to the next turn-safe boundary
+        # while writing the transcript now, so the record-only guarantee holds:
+        # the human sees the row immediately, and the parked append lands
+        # before the next turn reads context. On the idle path it appends
+        # straight through, matching the prior behaviour.
         await self._transcript.append_message(message)
-        self._context.messages.append(message)
+        self._append_or_park_journal(message)
         await self._emit_peer_receipt(message, sender)
         return "delivered to the mailbox (will be read on the next turn)"
 
