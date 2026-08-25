@@ -18,9 +18,14 @@ icons were present under `extension/dist/`. Google Chrome 151 was started with
 `--load-extension=/tmp/lop-webbridge/extension/dist` and a fresh temporary
 profile. Chrome itself started and exposed CDP (`Chrome/151.0.7922.174`), but
 its current automation policy did not register the command-line-loaded unpacked
-extension in that fresh profile. No claim is made that the popup or browser
-actions were manually exercised in Chrome in this run. The extension build,
-TypeScript gate, and pure origin/AX tests did run.
+extension in that fresh profile. No claim is made that extension APIs or browser actions were manually exercised
+in Chrome in this run. The built popup was served as a static page and inspected
+in a real browser. The first frame exposed a blank-state defect because every
+section started hidden; after fixing the disconnected state as the safe first
+paint, `/tmp/lop-webbridge-popup-after.png` showed the icon, “Not connected.”,
+a reconnect instruction, Retry, and Settings without reflow. This validates the
+rendered disconnected frame, not Chrome extension API integration. The extension
+build, TypeScript gate, and pure origin/AX tests also ran.
 
 ## Real daemon, HTTP authorization, and invalid input
 
