@@ -10,6 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCommands, sendCommand } from "../api";
+import { submitContinuation } from "../continuation-command";
 import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
 import { useDraft } from "../store";
@@ -214,6 +215,7 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
+const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 const COMPOSER_PLACEHOLDER = "Message Local Operator…";
 
 export function Composer({
@@ -299,19 +301,10 @@ export function Composer({
 			} else {
 				const chosen =
 					op ?? (projection.streaming ? "steer" : "prompt");
-				const commandId =
-					localStorage.getItem(`lo-mobile-command:${pid}`) ?? crypto.randomUUID();
-				localStorage.setItem(`lo-mobile-command:${pid}`, commandId);
 				const payloadImages = images.length
 					? images.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
 					: undefined;
-				await sendCommand(
-					pid,
-					chosen === "prompt"
-						? { op: "prompt", command_id: commandId, text: trimmed, images: payloadImages }
-						: { op: "steer", text: trimmed, images: payloadImages },
-				);
-				if (chosen === "prompt") localStorage.removeItem(`lo-mobile-command:${pid}`);
+				await submitContinuation(pid, chosen, trimmed, payloadImages);
 				images.forEach((i) => URL.revokeObjectURL(i.preview));
 				setImages([]);
 			}
@@ -323,9 +316,11 @@ export function Composer({
 			   giving every continuation failure one actionable product message. */
 			const continuingPrevious = projection.kind === "daemon" && !projection.streaming;
 			setError(
-				continuingPrevious
-					? CONTINUATION_ERROR
-					: String((e as Error).message ?? e),
+				projection.streaming
+					? STEER_ERROR
+					: continuingPrevious
+						? CONTINUATION_ERROR
+						: String((e as Error).message ?? e),
 			);
 		} finally {
 			setSending(false);

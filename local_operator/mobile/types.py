@@ -251,7 +251,7 @@ class SessionRecord:
 # frames stay plain dicts — json.loads output needs no decoding step.
 ControlOp = Literal[
     "prompt",  # {command_id, text, images?} — durable idempotent user turn
-    "steer",  # {text} — inject mid-turn
+    "steer",  # {command_id, text, images?} — idempotent mid-turn injection
     "abort",  # {} — the stop button; never kills the session
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder

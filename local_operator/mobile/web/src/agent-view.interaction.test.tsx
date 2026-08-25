@@ -1,13 +1,18 @@
 // @vitest-environment happy-dom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { App } from "./app";
 import { AgentConversation, AgentUnavailable } from "./screens/agent-view";
+import * as api from "./api";
+import * as store from "./store";
 import type { SessionProjection, SubagentDetail, SubagentRow, TranscriptEntry } from "./types";
 
 vi.mock("./api", () => ({
 	getHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	getSubagentHistory: vi.fn(async () => ({ entries: [], has_more: false })),
+	getSubagentDetail: vi.fn(),
 	imageUrl: vi.fn(() => ""),
+	sendCommand: vi.fn(async () => ({ ok: true, detail: "steering queued" })),
 }));
 
 function entry(id: string, kind: TranscriptEntry["kind"], text: string): TranscriptEntry {
@@ -147,6 +152,74 @@ describe("AgentConversation", () => {
 		]) {
 			expect(control.className).toContain("min-h-11");
 		}
+	});
+
+	it("opens the real parent composer and submits one UUID-addressed steer", async () => {
+		const { detail, projection } = fixture();
+		const topLevel = { ...detail, parent_job_id: null };
+		const sendCommand = vi.mocked(api.sendCommand);
+		vi.mocked(api.getSubagentDetail).mockResolvedValue(topLevel);
+		vi.spyOn(store, "useProjection").mockReturnValue({ projection, connected: true });
+		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		vi.stubGlobal("crypto", {
+			randomUUID: vi.fn(() => "12345678-1234-4678-9234-567812345678"),
+		});
+		history.replaceState({}, "", "#/s/root/a/current");
+		render(<App />);
+
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "Open parent to steer" })).toBeTruthy(),
+		);
+		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
+		expect(location.hash).toBe("#/s/root");
+		const composer = screen.getByPlaceholderText("Message Local Operator…");
+		const steer = screen.getByRole("button", { name: "steer" });
+		expect((steer as HTMLButtonElement).disabled).toBe(true);
+		fireEvent.change(composer, { target: { value: "Please report back once" } });
+		fireEvent.click(steer);
+
+		await waitFor(() => expect(sendCommand).toHaveBeenCalledOnce());
+		expect(sendCommand).toHaveBeenCalledWith("root", {
+			op: "steer",
+			command_id: "12345678-1234-4678-9234-567812345678",
+			text: "Please report back once",
+			images: undefined,
+		});
+		expect(location.hash).toBe("#/s/root");
+		history.back();
+		window.dispatchEvent(new PopStateEvent("popstate"));
+		await waitFor(() => expect(location.hash).toBe("#/s/root/a/current"));
+		expect(screen.getByText("Preserve this later steering message")).toBeTruthy();
+	});
+
+	it("keeps a failed parent instruction with an actionable non-protocol error", async () => {
+		const { detail, projection } = fixture();
+		const topLevel = { ...detail, parent_job_id: null };
+		vi.mocked(api.getSubagentDetail).mockResolvedValue(topLevel);
+		vi.mocked(api.sendCommand).mockRejectedValueOnce(
+			new Error("command_id must be a UUID string"),
+		);
+		vi.spyOn(store, "useProjection").mockReturnValue({ projection, connected: true });
+		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		history.replaceState({}, "", "#/s/root/a/current");
+		render(<App />);
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "Open parent to steer" })).toBeTruthy(),
+		);
+		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
+		const composer = screen.getByPlaceholderText(
+			"Message Local Operator…",
+		) as HTMLTextAreaElement;
+		fireEvent.change(composer, { target: { value: "Retry this instruction" } });
+		fireEvent.click(screen.getByRole("button", { name: "steer" }));
+
+		await waitFor(() =>
+			expect(screen.getByRole("alert").textContent).toBe(
+				"Couldn’t send this instruction. Try again.",
+			),
+		);
+		expect(composer.value).toBe("Retry this instruction");
+		expect(screen.queryByText(/command_id/)).toBeNull();
 	});
 
 	it("keeps the delegated request singular and removes dominant legacy chrome", () => {

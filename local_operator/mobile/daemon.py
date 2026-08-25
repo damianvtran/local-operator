@@ -28,6 +28,7 @@ phone starting a session never stalls the SSE streams of the others.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -376,7 +377,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     continue
                 entry.projection.degraded = False
                 entry.projection.ended = False
-                daemon.capture_subagent_details(entry.projection)
+                entry.projection = daemon.capture_subagent_details(entry.projection)
                 daemon.table.provisional_active.discard(entry.record.session_id)
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
@@ -636,19 +637,35 @@ class MobileDaemon:
         self.session_projections: dict[str, SessionProjection] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
 
-    def capture_subagent_details(self, projection: SessionProjection) -> None:
-        """Move descendant-only state out of the aggregate repaint.
+    def capture_subagent_details(self, projection: SessionProjection) -> SessionProjection:
+        """Cache full descendant state and return a lightweight aggregate copy.
 
-        Keeping the legacy fields on ``SubagentRow`` makes mixed-version
-        registrants additive: an old host can still send the aggregate shape,
-        while every browser receives lightweight summaries and asks for only
-        the selected child. The cache is bounded by root sessions because a
-        phone can navigate only within one root lineage at a time.
+        The retained aggregate is deliberately safe to recapture during wake and
+        reconnect. It contains empty detail-only fields, so replacing the detail
+        cache from it would erase the last rich host repaint exactly when no host
+        is available to repair the loss.
         """
         session_id = projection.session_id
+        previous_projection = self.session_projections.get(session_id)
+        if previous_projection is not None and projection.version < previous_projection.version:
+            # A delayed durable fold must not move either cache behind a live
+            # host repaint. Touching the unit still reflects active route use.
+            self.session_projections.pop(session_id)
+            self.session_projections[session_id] = previous_projection
+            return previous_projection
+
+        retained_recapture = projection is previous_projection
+        # Root transcript and todo state are immutable during this call; copying
+        # only descendant rows avoids duplicating the whole repaint per token.
+        summary = copy.copy(projection)
+        summary.subagents = copy.deepcopy(projection.subagents)
+        summary.version = max(
+            projection.version,
+            previous_projection.version if previous_projection is not None else 0,
+        )
         # Reinsert on every repaint so active/reconnected routes are most recent.
         self.session_projections.pop(session_id, None)
-        self.session_projections[session_id] = projection
+        self.session_projections[session_id] = summary
         while len(self.session_projections) > MAX_RETAINED_SESSION_PROJECTIONS:
             expired = next(iter(self.session_projections))
             self.session_projections.pop(expired, None)
@@ -665,19 +682,47 @@ class MobileDaemon:
             if key[0] == session_id and key[1] not in published_ids
         ]:
             self.subagent_details.pop(key, None)
-        for row in projection.subagents:
-            detail = row.to_json()
-            detail["version"] = projection.version
-            self.subagent_details[(session_id, row.job_id)] = detail
+        for row, summary_row in zip(projection.subagents, summary.subagents, strict=True):
+            key = (session_id, row.job_id)
+            incoming = row.to_json()
+            existing = self.subagent_details.get(key)
+            if existing is not None:
+                # Summary fields are real lifecycle updates even when empty.
+                # Detail-only empties are ambiguous after projection stripping,
+                # so only nonempty values replace the richer cached payload.
+                for field in ("prompt", "launch_message_id", "transcript", "todos"):
+                    if not incoming[field]:
+                        incoming[field] = existing.get(field, incoming[field])
+                if retained_recapture:
+                    # Only the retained aggregate is known to have had these
+                    # lifecycle payloads stripped. A fresh host repaint owns
+                    # empty values too, which clears stale terminal outcomes
+                    # when a child is resumed or settles without result text.
+                    for field in ("result_text", "error_text"):
+                        if not incoming[field]:
+                            incoming[field] = existing.get(field, incoming[field])
+                if row.status == "completed":
+                    incoming["error_text"] = ""
+                elif row.status == "failed":
+                    incoming["result_text"] = ""
+                elif not retained_recapture:
+                    incoming["result_text"] = ""
+                    incoming["error_text"] = ""
+            incoming["version"] = max(
+                projection.version,
+                int(existing.get("version", 0)) if existing is not None else 0,
+            )
+            self.subagent_details[key] = incoming
             # The aggregate needs enough to paint and route rows, not the launch
             # prompt or terminal payload. Those can each be many kilobytes and
             # belong to selected detail exactly like transcript and todos.
-            row.prompt = ""
-            row.launch_message_id = ""
-            row.result_text = ""
-            row.error_text = ""
-            row.transcript = []
-            row.todos = []
+            summary_row.prompt = ""
+            summary_row.launch_message_id = ""
+            summary_row.result_text = ""
+            summary_row.error_text = ""
+            summary_row.transcript = []
+            summary_row.todos = []
+        return summary
 
     # -- scanning --------------------------------------------------------------
 
@@ -726,7 +771,7 @@ class MobileDaemon:
                 self.table.provisional_active.discard(record.session_id)
                 projection = await asyncio.to_thread(_durable_projection, record.session_id)
                 if projection is not None:
-                    self.capture_subagent_details(projection)
+                    projection = self.capture_subagent_details(projection)
                     for queue in self.table.session_subscribers.get(record.session_id, set()):
                         try:
                             queue.put_nowait(projection.to_json())
@@ -758,7 +803,7 @@ class MobileDaemon:
                     self.table.provisional_active.discard(session_id)
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        self.capture_subagent_details(projection)
+                        projection = self.capture_subagent_details(projection)
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
                                 queue.put_nowait(projection.to_json())
@@ -785,7 +830,7 @@ class MobileDaemon:
                     self.table.provisional_active.discard(session_id)
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        self.capture_subagent_details(projection)
+                        projection = self.capture_subagent_details(projection)
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
                                 queue.put_nowait(projection.to_json())
@@ -1067,7 +1112,7 @@ def build_app(daemon: MobileDaemon):
                 if projection is None:
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        daemon.capture_subagent_details(projection)
+                        projection = daemon.capture_subagent_details(projection)
                 if projection is not None:
                     yield _sse("projection", projection.to_json())
                 while True:
@@ -1309,7 +1354,7 @@ def build_app(daemon: MobileDaemon):
                 if projection is not None:
                     projection.ended = False
                     projection.degraded = False
-                    daemon.capture_subagent_details(projection)
+                    projection = daemon.capture_subagent_details(projection)
                     for target in daemon.table.session_subscribers.get(session_id, set()):
                         target.put_nowait(projection.to_json())
                 try:

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -10,6 +11,7 @@ PORT = int(os.environ.get("LO_MOBILE_FIXTURE_PORT", "4179"))
 DISCONNECT_SENTINEL = Path(f"/tmp/lop-fixture-disconnect-{PORT}")
 DETAIL_FAILURE_SENTINEL = Path(f"/tmp/lop-fixture-detail-failure-{PORT}")
 DETAIL_DELAY_SENTINEL = Path(f"/tmp/lop-fixture-detail-delay-{PORT}")
+COMMAND_LOG = Path(f"/tmp/lop-fixture-command-{PORT}.json")
 
 from local_operator.mobile.daemon import (  # noqa: E402
     MobileDaemon,
@@ -227,6 +229,63 @@ class FixtureRecovery:
 
     async def __call__(self, scope, receive, send):
         detail_prefix = f"/api/sessions/{SESSION}/agents/"
+        command_path = f"/api/sessions/{SESSION}/command"
+        if scope["type"] == "http" and scope["path"] == command_path:
+            headers = dict(scope.get("headers", []))
+            cookie = headers.get(b"cookie", b"").decode("utf-8", "replace")
+            if "lop_mobile=" not in cookie:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
+                return
+            chunks = []
+            while True:
+                message = await receive()
+                chunks.append(message.get("body", b""))
+                if not message.get("more_body", False):
+                    break
+            try:
+                body = json.loads(b"".join(chunks))
+                command_id = body.get("command_id")
+                uuid.UUID(command_id)
+                text = body.get("text")
+                if body.get("op") != "steer" or not isinstance(text, str) or not text.strip():
+                    raise ValueError
+            except (ValueError, TypeError, AttributeError):
+                response = b'{"error":"Enter an instruction before sending."}'
+                status = 422
+            else:
+                accepted = {
+                    "command_id": command_id,
+                    "text": text.strip(),
+                    "deliveries": 1,
+                    "parent_transcript": [text.strip()],
+                }
+                if COMMAND_LOG.exists():
+                    previous = json.loads(COMMAND_LOG.read_text())
+                    if previous.get("command_id") == command_id:
+                        accepted = previous
+                COMMAND_LOG.write_text(json.dumps(accepted, indent=2))
+                print(
+                    f"fixture parent steer {accepted['command_id']} {accepted['text']}",
+                    flush=True,
+                )
+                response = b'{"ok":true,"detail":"steering queued"}'
+                status = 200
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": status,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": response})
+            return
         detail_job = scope["path"].removeprefix(detail_prefix)
         if scope["type"] == "http" and scope["path"].startswith(detail_prefix):
             # Delay is checked before the one-shot failure so a real in-flight
