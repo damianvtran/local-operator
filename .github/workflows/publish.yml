@@ -39,13 +39,26 @@ jobs:
       - name: Decide whether the extension changed since the previous tag
         id: ext-changed
         run: |
+          set -euo pipefail
           CURRENT_TAG="${{ github.event.release.tag_name }}"
-          # The most recent tag strictly before the current release tag. If
-          # there is none (first ever release), treat the extension as changed
-          # so the first release always carries the binary.
-          PREV_TAG=$(git tag --sort=-creatordate | grep -vx "$CURRENT_TAG" | head -1 || true)
+          # Find the previous RELEASE tag by ANCESTRY, not by creation date.
+          # `git describe --abbrev=0 <tag>^` returns the nearest tag reachable
+          # from the current tag's first parent — i.e. the release this one was
+          # actually cut on top of. This is correct even when a backport/hotfix
+          # tag was created later on an older commit (the A15 case that a
+          # `--sort=-creatordate` scan gets wrong), because reachability, not
+          # wall-clock time, defines "the previous release".
+          #
+          # `--exclude '*-*'` skips prerelease tags (v1.2.3-rc1, -beta, etc.)
+          # so a prerelease is never treated as the baseline for the diff (A16);
+          # our tags are plain vMAJOR.MINOR.PATCH, but this keeps the gate
+          # correct if prereleases are ever adopted.
+          #
+          # If there is no ancestor tag (the first release ever), treat the
+          # extension as changed so the first release always carries the binary.
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude '*-*' "${CURRENT_TAG}^" 2>/dev/null || true)
           if [ -z "$PREV_TAG" ]; then
-            echo "No previous tag; attaching the extension."
+            echo "No previous release tag reachable from ${CURRENT_TAG}; attaching the extension."
             echo "changed=true" >> "$GITHUB_OUTPUT"
           elif git diff --quiet "$PREV_TAG" "$CURRENT_TAG" -- extension/; then
             echo "extension/ unchanged since $PREV_TAG; skipping the extension asset."
