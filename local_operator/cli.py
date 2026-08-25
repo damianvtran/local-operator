@@ -1548,18 +1548,26 @@ async def create_session(
     agent_registry: "AgentRegistry",
     *,
     has_ui: bool = False,
+    defer_mcp_wiring: bool = False,
 ):
     """Build a wired harness session for interactive/headless use.
 
     Thin facade over :func:`local_operator.session_factory.create_session`
     (the composition root shared with ``exec`` and the background worker).
     The engine import is lazy so importing ``cli`` never pulls in
-    providers/session internals.
+    providers/session internals. ``defer_mcp_wiring`` passes through to the
+    factory's TUI-boot opt-in unchanged (see its docstring for why only a
+    full front end may take it).
     """
     from local_operator.session_factory import create_session as _create_session
 
     return await _create_session(
-        args, config_manager, credential_manager, agent_registry, has_ui=has_ui
+        args,
+        config_manager,
+        credential_manager,
+        agent_registry,
+        has_ui=has_ui,
+        defer_mcp_wiring=defer_mcp_wiring,
     )
 
 
@@ -2461,6 +2469,7 @@ def main() -> int:
                     credential_manager,
                     agent_registry,
                     has_ui=True,
+                    defer_mcp_wiring=True,
                 )
 
             # The provider controller gives the TUI the full provider/model/
@@ -2514,6 +2523,7 @@ def main() -> int:
                         credential_manager,
                         agent_registry,
                         has_ui=True,
+                        defer_mcp_wiring=True,
                     )
 
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)

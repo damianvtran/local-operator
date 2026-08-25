@@ -32,6 +32,36 @@ from typing import Any
 __all__ = ["turn_cost", "job_cost"]
 
 
+def _resolve_for_paint(provider: str, model_id: str):
+    """The paint-safe resolver, with a background refresh fired on a cold miss.
+
+    One seam so ``turn_cost`` and the per-component loop share the exact
+    policy: resolve from the warm memo or registry ONLY (never discovery,
+    which is synchronous HTTP), and when the memo has no entry for this
+    model, hand the full resolution to a background thread so the NEXT tick
+    paints the real number. The refresh is what keeps a memo rollover from
+    silently switching the band to the (possibly stale) registry row; the
+    paint-only resolution is what keeps the keyboard live while it happens.
+    """
+    from local_operator.model.configure import (
+        refresh_model_info_background,
+        resolve_model_info_paint,
+    )
+
+    info, memo_hit = resolve_model_info_paint(provider, model_id)
+    if not memo_hit:
+        # Missed the paint memo: either a model this process never resolved
+        # (the registry row may carry no price — exactly the population the
+        # discovery legs exist for) or the TTL bucket rolled over mid-session
+        # (the registry row carries a price that may be staler than the
+        # discovery answer the band showed until that moment). Both want the
+        # same thing: the real answer, fetched OFF the loop, landing next
+        # tick. The band still shows this tick's honest answer — None when
+        # unpriceable, the registry price otherwise — rather than blocking.
+        refresh_model_info_background(provider, model_id)
+    return info
+
+
 def turn_cost(model_label: str, usage: Any) -> float | None:
     """What ``usage`` cost on the model named by ``model_label``, or ``None``.
 
@@ -44,9 +74,15 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
     ``$0.0000`` on a turn that billed tokens reads as "that was free", which is
     the more expensive lie of the two.
 
-    Resolution is memoized per model per TTL bucket
-    (:func:`~local_operator.model.configure.resolve_model_info`), so calling this
-    once per subagent row on a 1 Hz repaint is a dict hit and four multiplies.
+    Resolution for the PAINT path is memo-or-registry only
+    (:func:`~local_operator.model.configure.resolve_model_info_paint`): the
+    full resolver's discovery legs are synchronous HTTP (measured 418 ms
+    warm-disk, 10 s + 3 s worst case for an unlisted model), and this
+    function runs on the Textual loop at ``message_end" and on the 1 Hz
+    subagent harvest — a blocking miss there is the frozen-keyboard
+    regression, not a slow number. A cold miss fires one background refresh
+    per model so the following tick prices from the warm memo; ``None" for
+    one tick is the same honest degradation the band already renders.
     """
     if usage is None or not model_label:
         return None
@@ -63,11 +99,7 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
         # estimate, not render an upside-down credit or degrade the whole turn to
         # unpriceable while a table price exists. (The wire client already drops
         # these to ``None``, but ``turn_cost`` also serves rehydrated mappings.)
-        from local_operator.model.configure import (
-            _usage_cost,
-            cost_for_usage,
-            resolve_model_info,
-        )
+        from local_operator.model.configure import _usage_cost, cost_for_usage
 
         provider, _, model_id = model_label.partition("/")
         components = getattr(usage, "cost_components", None)
@@ -83,7 +115,7 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
                 if reported is not None:
                     total += reported
                     continue
-                info = resolve_model_info(component_provider, component_model)
+                info = _resolve_for_paint(component_provider, component_model)
                 if not (info.input_price or info.output_price):
                     return None
                 total += cost_for_usage(component_provider, info, component)
@@ -93,7 +125,7 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
         if reported is not None:
             return reported
 
-        info = resolve_model_info(provider, model_id)
+        info = _resolve_for_paint(provider, model_id)
         if not (info.input_price or info.output_price):
             return None
         return cost_for_usage(provider, info, usage)
@@ -117,13 +149,14 @@ def job_cost(job: Any, *, default_model_label: str | None = None) -> float | Non
     ``model_spec`` override, and a child that WAS overridden records its own
     label — so the two together price a mixed-model fan-out correctly.
 
-    MUST NOT BLOCK, and today does not: every path it takes is a memo hit or
-    pure arithmetic. It is called from the Textual event loop (`app.py`'s
-    `_harvest_subagent_costs`, on the 1 Hz poll), so anything added here that
-    can wait on I/O freezes the keyboard. The one hazard is indirect and
-    already bounded: `resolve_model_info` will consult a listing for a model id
-    it has not seen this TTL bucket, which is why callers that can be on a
-    hot paint path resolve off-thread instead (`subagent_panel.job_stats`).
+    MUST NOT BLOCK, and every path it takes is now a warm-memo hit, pure
+    arithmetic, or a fire-and-forget background refresh. It is called from
+    the Textual event loop (`app.py`'s `_harvest_subagent_costs`, on the 1 Hz
+    poll), so anything added here that can wait on I/O freezes the keyboard.
+    The paint-safe resolver (:func:`turn_cost`'s seam) is what keeps that
+    true on a cold memo: a miss returns the registry row immediately and
+    resolves the real price in a thread, so a child on a model this process
+    has never priced costs one tick of "unpriceable", not a stalled frame.
     A new caller on the event loop should assume the memo is cold.
 
     Duck-typed means the two field reads are guarded, not just the pricing. The

@@ -1160,6 +1160,41 @@ def _stream_budgets(stdout: str, stderr: str, budget: int, failed: bool) -> tupl
     return max(stdout_budget, 1), max(stderr_budget, 1)
 
 
+#: Bytes of accumulated output the bash live-update snapshot is built from,
+#: counted from the END. The card's live view ingests only the last
+#: :data:`~local_operator.tui.widgets.tool_card.LIVE_INGEST_CHARS` (64 KB) of
+#: the payload anyway, so a producer snapshot beyond one tail is work whose
+#: result is dropped unrendered. Before this bound the emit was O(total
+#: output) per 500 ms tick — join, decode and redact of EVERYTHING the command
+#: has ever printed, twice a second, for a command that has printed megabytes —
+#: which is the tool-call freeze the operator reported. Kept one power of two
+#: above the ingest bound so the banner framing and the redaction of a secret
+#: that straddles the cut cannot shrink the visible tail below what the card
+#: expects. The FINAL result path is untouched: it still joins and prices the
+#: whole output once, off-loop, exactly as before.
+_EMIT_SNAPSHOT_BYTES = 128 * 1024
+
+
+def _tail_chunks(chunks: list[bytes], budget: int) -> list[bytes]:
+    """The trailing ``budget`` bytes of ``chunks`` without a full join.
+
+    Walking from the end keeps the work proportional to the BUDGET rather
+    than to the accumulated output: a command that has printed 40 MB costs
+    the same slice as one that has printed 40 KB. Chunks are immutable
+    records of what the pipe reader delivered, so slicing the straddling
+    one copies at most ``budget`` bytes once — still O(budget).
+    """
+    taken: list[bytes] = []
+    remaining = budget
+    for chunk in reversed(chunks):
+        if remaining <= 0:
+            break
+        taken.append(chunk[-remaining:] if len(chunk) > remaining else chunk)
+        remaining -= len(taken[-1])
+    taken.reverse()
+    return taken
+
+
 @_guard("bash")
 async def execute_bash(
     tool_call_id: str,
@@ -1273,11 +1308,25 @@ async def execute_bash(
     def _emit_update() -> None:
         if on_update is None:
             return
+        # Bounded to the live-view tail (see _EMIT_SNAPSHOT_BYTES): the card
+        # renders at most 64 KB of this snapshot, so building more is pure
+        # per-tick cost that scales with the command's TOTAL output — the
+        # reported freeze. The tail is taken from the raw chunk list so the
+        # join itself is bounded too; a chunk straddling the cut is sliced,
+        # which can split a multi-byte character, and the errors="replace"
+        # decode below is exactly the repair that path already relies on for
+        # arbitrary command bytes.
         stdout = _redact_tool_text(
-            b"".join(stdout_chunks).decode("utf-8", errors="replace"), context
+            b"".join(_tail_chunks(stdout_chunks, _EMIT_SNAPSHOT_BYTES)).decode(
+                "utf-8", errors="replace"
+            ),
+            context,
         )
         stderr = _redact_tool_text(
-            b"".join(stderr_chunks).decode("utf-8", errors="replace"), context
+            b"".join(_tail_chunks(stderr_chunks, _EMIT_SNAPSHOT_BYTES)).decode(
+                "utf-8", errors="replace"
+            ),
+            context,
         )
         on_update(
             AgentToolUpdate(
