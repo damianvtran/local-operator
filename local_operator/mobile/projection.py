@@ -655,18 +655,10 @@ class ProjectionFold:
             job = comms.job(node.job_id)
             row = self._subagents.get(node.job_id)
             if row is None:
-                status = str(getattr(job, "status", "running") or "running")
-                if status not in {"running", "completed", "failed", "cancelled", "parked"}:
-                    status = "completed"
-                row = SubagentRow(
-                    job_id=node.job_id,
-                    label=node.label,
-                    status=status,  # type: ignore[arg-type] -- narrowed above
-                )
+                row = SubagentRow(job_id=node.job_id, label=node.label)
                 self._subagents[node.job_id] = row
             else:
                 row.label = node.label
-            row.parent_job_id = node.parent_job_id
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
             row.prompt = node.prompt
@@ -676,9 +668,20 @@ class ProjectionFold:
             row.peer_ids = [peer.job_id for peer in comms.peers(node.job_id)]
             if job is not None:
                 row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
-                row.progress = str(
-                    (getattr(job, "latest_details", None) or {}).get("progress") or row.progress
-                )
+                row.model_label = str(getattr(job, "model_label", None) or "")
+                status = str(getattr(job, "status", "running") or "running")
+                # ``interrupted`` is the job manager's terminal spelling for an
+                # externally stopped run; the mobile roster's equivalent is
+                # ``cancelled``. Refresh every field even when empty because a
+                # resumed or settled descendant must erase its previous terminal
+                # text or live progress without receiving a root lifecycle event.
+                row.status = (
+                    "cancelled" if status == "interrupted" else status
+                )  # type: ignore[assignment] -- normalized job/mobile literals
+                row.result_text = _compact(str(getattr(job, "result_text", None) or ""), 200)
+                row.error_text = _compact(str(getattr(job, "error_text", None) or ""), 200)
+                progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
+                row.progress = progress if row.status == "running" else ""
                 row.activity = row.progress or ("thinking" if row.status == "running" else "")
             try:
                 if node.session_dir is not None:

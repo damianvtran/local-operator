@@ -238,6 +238,75 @@ def test_subagent_details_seed_nested_descendants_for_recursive_navigation() -> 
     assert refreshed["grandchild"].activity == "summarizing"
 
 
+def test_nested_subagent_completion_refreshes_selected_detail() -> None:
+    """A nested row has no root lifecycle event to settle its phone detail."""
+
+    job = SimpleNamespace(
+        status="running",
+        agent_role="coder",
+        model_label="test/running",
+        latest_details={"progress": "working"},
+        result_text=None,
+        error_text=None,
+    )
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: job))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("parent", "parent")
+    comms.record_launch("nested", "nested", parent_job_id="parent")
+    fold = make_fold()
+
+    fold.set_subagent_details(comms)
+    selected = {row.job_id: row for row in fold.projection.subagents}["nested"]
+    assert (selected.status, selected.progress, selected.activity) == (
+        "running",
+        "working",
+        "working",
+    )
+
+    job.status = "completed"
+    job.model_label = "test/completed"
+    job.latest_details = {}
+    job.result_text = "finished result"
+    fold.set_subagent_details(comms)
+
+    selected = {row["job_id"]: row for row in fold.projection.to_json()["subagents"]}["nested"]
+    assert selected["status"] == "completed"
+    assert selected["model_label"] == "test/completed"
+    assert selected["result_text"] == "finished result"
+    assert selected["error_text"] == ""
+    assert selected["progress"] == ""
+    assert selected["activity"] == ""
+
+
+def test_nested_subagent_failure_refreshes_error_and_clears_progress() -> None:
+    job = SimpleNamespace(
+        status="running",
+        agent_role="reviewer",
+        model_label="test/model",
+        latest_details={"progress": "checking"},
+        result_text=None,
+        error_text=None,
+    )
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: job))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("parent", "parent")
+    comms.record_launch("nested", "nested", parent_job_id="parent")
+    fold = make_fold()
+
+    fold.set_subagent_details(comms)
+    job.status = "failed"
+    job.latest_details = {"progress": "stale progress"}
+    job.error_text = "provider failed"
+    fold.set_subagent_details(comms)
+
+    selected = {row.job_id: row for row in fold.projection.subagents}["nested"]
+    assert selected.status == "failed"
+    assert selected.result_text == ""
+    assert selected.error_text == "provider failed"
+    assert selected.progress == ""
+    assert selected.activity == ""
+
+
 def test_history_fold_pairs_tool_calls_with_results() -> None:
     fold = make_fold()
     call = ToolCall(id="c1", name="read", arguments={"path": "/x.py"})
