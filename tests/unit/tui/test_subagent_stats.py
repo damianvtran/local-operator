@@ -86,9 +86,14 @@ class Job:
         usage: Usage | None = None,
         result_text: str | None = None,
         error_text: str | None = None,
+        agent_role: str = "",
     ) -> None:
         self.id = job_id
         self.type = "task"
+        # The child's ROLE, as ``run_subagent`` records it at registration.
+        # Defaults to "" rather than "task" so the existing rows in this file
+        # keep saying what they said: a plain task shows no role segment.
+        self.agent_role = agent_role
         self.status = status
         self.label = label
         self.start_time = time.time() - age
@@ -454,6 +459,91 @@ def test_the_floors_are_what_the_ladder_stops_at() -> None:
     """The two constants are load-bearing, so they are asserted, not assumed."""
     assert ACTIVITY_FLOOR >= len("running 3 tools")
     assert LABEL_FLOOR >= len("MR review a")
+
+
+# -- the role column ---------------------------------------------------------
+#
+# A row named a child only by the label its parent happened to choose, so
+# whether `review-301-r2` was a reviewer or a coder asked to look at a review
+# was a guess. The column says which, and the tests below pin the three things
+# that make it safe to add: it is the FIRST thing shed, it costs a plain task
+# nothing, and it does not disturb any width that could not afford it.
+
+
+def test_a_row_names_the_childs_role_when_there_is_room_for_it() -> None:
+    """The column's whole point, at a width that can pay for it."""
+    job = Job(
+        label="review-301-r2",
+        progress="auditing merged MRs",
+        agent_role="reviewer",
+        usage=Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200),
+    )
+    # Between the clock and the context, in the panel's own ` · ` seam: the
+    # role qualifies WHAT the child is, so it leads the numbers rather than
+    # trailing them (the full-page title reads `Subagent · reviewer · <label>`).
+    assert " · reviewer · " in _plain(job, 120)
+
+
+def test_the_default_task_role_is_never_printed() -> None:
+    """``task`` is the no-role default: every child is a task unless told
+    otherwise, so the word says nothing a reader did not already assume and
+    would cost eight cells on every ordinary row. Matches the full-page view's
+    title, which hides it for the same reason."""
+    assert "task" not in _plain(Job(progress="auditing merged MRs", agent_role="task"), 120)
+    assert "task" not in _plain(Job(progress="auditing merged MRs"), 120)
+
+
+def test_the_role_is_the_first_thing_the_ladder_sheds() -> None:
+    """It sheds before the cost, which is the widest rung the ladder had
+    before this column existed. That ordering is what makes the column
+    ADDITIVE: a terminal that could not afford the role is laid out exactly as
+    it was, and only spare cells buy the new field."""
+    job = Job(
+        label="review-301-r2",
+        progress="auditing merged MRs",
+        agent_role="reviewer",
+        usage=Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200),
+    )
+    role_widths = [w for w in range(120, 53, -1) if "reviewer" in _plain(job, w)]
+    cost_widths = [w for w in range(120, 53, -1) if "$" in _plain(job, w)]
+    assert role_widths and cost_widths
+    # The narrowest width still showing the role is wider than the narrowest
+    # still showing the cost: the role gave up first.
+    assert min(role_widths) > min(cost_widths)
+
+
+def test_the_role_column_is_monotone_in_width() -> None:
+    """A segment must never come BACK as the terminal gets narrower.
+
+    The panel's documented property, re-checked with the new field in the
+    ladder — the status band has a known non-monotonic shedding bug and this
+    surface must not grow one of its own.
+    """
+    job = Job(label="review-301-r2", progress="auditing merged MRs", agent_role="reviewer")
+    was_present = True
+    for width in range(120, 53, -1):
+        present = "reviewer" in _plain(job, width)
+        assert not (present and not was_present), f"role reappeared at {width}"
+        was_present = present
+
+
+def test_a_role_row_never_overruns_the_width_it_was_given() -> None:
+    """The new segment is measured, not merely appended: a row that overflows
+    its dock is the failure the whole ladder exists to prevent."""
+    for role in ("reviewer", "designer", "architect", ""):
+        job = Job(label="review-301-r2", progress="auditing merged MRs", agent_role=role)
+        for width in range(120, 19, -1):
+            assert cell_len(_plain(job, width)) <= width, f"{role} at {width}"
+
+
+def test_a_plain_task_row_is_unchanged_by_the_role_column() -> None:
+    """A child with no role pays nothing for the column at any width. The
+    segment is per-ROW (unlike cost, which sheds for the whole list at once),
+    so an ordinary fan-out is laid out exactly as before."""
+    for width in range(120, 39, -1):
+        assert _plain(Job(progress="auditing merged MRs"), width) == _plain(
+            Job(progress="auditing merged MRs", agent_role="task"), width
+        )
 
 
 # -- the band under the page -------------------------------------------------

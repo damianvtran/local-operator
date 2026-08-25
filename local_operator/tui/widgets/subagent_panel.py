@@ -284,6 +284,17 @@ class RowFacts:
     #: restating what the page's title says three rows above it — see
     #: :func:`compose_row`.
     current: bool = False
+    #: The child's ROLE (``AsyncJob.agent_role``, recorded at registration by
+    #: ``run_subagent``), or ``""`` when there is nothing worth saying.
+    #:
+    #: Empty for the ``"task"`` default, matching the full-page view's title
+    #: (``subagent_view._title_row``): every child is a task unless told
+    #: otherwise, so the word says nothing a reader did not already assume and
+    #: would cost eight cells on every ordinary row. Without this the list
+    #: names a child only by the label its parent happened to choose, so
+    #: whether ``review-301-r2`` is a reviewer or a coder that was asked to
+    #: look at a review was a guess.
+    agent_role: str = ""
 
 
 def row_facts(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
@@ -366,6 +377,13 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
         # and glancing at the dock instead of scanning the page is why the
         # dock stayed visible — so that one is kept.
         activity = ""
+    # ``strip_control_sequences`` for the same reason the label gets it: a
+    # role name reaches this from an operator-authored registry entry, which
+    # is not a trusted source of terminal-safe text.
+    agent_role = strip_control_sequences(str(getattr(job, "agent_role", "") or "")).strip()
+    if agent_role == "task":
+        # The no-role default carries no information (see ``RowFacts``).
+        agent_role = ""
     return RowFacts(
         label=strip_control_sequences(str(getattr(job, "label", "") or fallback_id)),
         status=status,
@@ -374,6 +392,7 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
         elapsed=job_elapsed(job),
         activity=activity,
         current=current,
+        agent_role=agent_role,
     )
 
 
@@ -385,7 +404,18 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #: reduction order (``status_line._DROP_LADDER``) because the two surfaces are
 #: read in one glance:
 #:
-#: 1. COST sheds first — it is monotonic and slow, and nothing an operator
+#: 0. The ROLE sheds first, and it is the only rung above the ladder as it
+#:    stood: the widest rung is the previous widest rung PLUS the role, so a
+#:    terminal that showed a given set of fields before this column existed
+#:    still shows exactly that set at exactly that width, and only a terminal
+#:    with spare cells gains the new one. That is what makes this column
+#:    additive rather than a re-litigation of every width below it. It leads
+#:    for the same reason the full-page view's title makes it the most
+#:    disposable field (``subagent_view._title_row``): the role is identity
+#:    sugar the label already half-carries, and it is re-derivable by opening
+#:    the page, where a state or a number is not. The two surfaces are read in
+#:    one glance and must not rank the same field differently.
+#: 1. COST sheds next — it is monotonic and slow, and nothing an operator
 #:    acts on inside a second.
 #: 2. CONTEXT then SHORTENS before it drops: ``5%`` keeps the segment for two
 #:    cells instead of thirteen, and a bare percentage still answers "is this
@@ -398,8 +428,8 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #: of what the child is DOING — every number here is re-derivable by opening
 #: the page — so it truncates against :data:`ACTIVITY_FLOOR` and disappears
 #: only when even the floor cannot be paid.
-#: ``(context spelling, keep cost, label budget)``; ``None`` means "a third of
-#: the width", which is only known at measure time.
+#: ``(context spelling, keep cost, keep role, label budget)``; ``None`` means
+#: "a third of the width", which is only known at measure time.
 #:
 #: The context has THREE spellings, not two, because the middle one is what
 #: keeps a mixed-model fan-out comparable: ``24%`` and ``31%`` beside each
@@ -415,13 +445,14 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #: it is beneath any width this dock is read at, and the alternative — freezing
 #: the budget once it stops shrinking — buys monotonicity by holding cells the
 #: narrowest rows most need.
-_RUNGS: tuple[tuple[str, bool, int | None], ...] = (
-    ("full", True, None),
-    ("full", False, None),
-    ("nodec", False, None),
-    ("short", False, None),
-    ("none", False, None),
-    ("none", False, LABEL_FLOOR),
+_RUNGS: tuple[tuple[str, bool, bool, int | None], ...] = (
+    ("full", True, True, None),
+    ("full", True, False, None),
+    ("full", False, False, None),
+    ("nodec", False, False, None),
+    ("short", False, False, None),
+    ("none", False, False, None),
+    ("none", False, False, LABEL_FLOOR),
 )
 
 
@@ -435,14 +466,14 @@ def _row_rung(facts: RowFacts, stats: JobStats, width: int, column: int, clock: 
     acceptance is monotone and the first hit is the answer.
     """
     for index in range(len(_RUNGS)):
-        label, context, cost, activity = _lay_out(facts, stats, width, index, column, clock)
+        label, role, context, cost, activity = _lay_out(facts, stats, width, index, column, clock)
         head = (
             _CHROME_CELLS
             + max(cell_len(label), column)
             + max(cell_len(facts.elapsed), clock)
             + _glyph_cells(facts)
         )
-        numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (context, cost) if part)
+        numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (role, context, cost) if part)
         if not facts.activity:
             if head + numbers <= width:
                 return index
@@ -485,14 +516,14 @@ def _glyph_cells(facts: RowFacts) -> int:
 
 def _lay_out(
     facts: RowFacts, stats: JobStats, width: int, rung: int, column: int = 0, clock: int = 0
-) -> tuple[str, str, str, str]:
-    """``(label, context, cost, activity)`` exactly as ``rung`` will paint them.
+) -> tuple[str, str, str, str, str]:
+    """``(label, role, context, cost, activity)`` exactly as ``rung`` paints them.
 
     ``column`` is the shared label width the row will be padded to; the
     activity is measured against it, not against this row's own label, or a
     short-labelled row would be handed slack the padding is about to spend.
     """
-    spelling, keep_cost, budget = _RUNGS[min(rung, len(_RUNGS) - 1)]
+    spelling, keep_cost, keep_role, budget = _RUNGS[min(rung, len(_RUNGS) - 1)]
     # The last rungs carry no reading at all; every other spelling is one the
     # band names too (`status_line.CONTEXT_FORMS`), so the same child's
     # occupancy cannot be written two ways four rows apart.
@@ -501,6 +532,12 @@ def _lay_out(
         if spelling == "none"
         else context_spelling(stats.context_tokens, stats.context_window, form=spelling)
     )
+    # A row with no role to show pays nothing for the column at any rung: the
+    # segment is per-ROW, unlike cost, which sheds for the whole list at once
+    # so a blank cell there cannot be read as "did not fit". Here a missing
+    # role means the child is a plain task, which is the same thing the
+    # full-page title says by omitting it.
+    role = facts.agent_role if keep_role else ""
     if not keep_cost:
         cost = ""
     elif stats.cost is not None:
@@ -522,10 +559,10 @@ def _lay_out(
         + max(cell_len(facts.elapsed), clock)
         + _glyph_cells(facts)
     )
-    numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (context, cost) if part)
+    numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (role, context, cost) if part)
     room = width - head - numbers - ACTIVITY_GAP
     activity = truncate_cells(facts.activity, room) if facts.activity and room > 0 else ""
-    return label, context, cost, activity
+    return label, role, context, cost, activity
 
 
 def panel_layout(rows: Sequence[tuple[RowFacts, JobStats]], width: int) -> tuple[int, int, int]:
@@ -613,7 +650,7 @@ def compose_row(
     dim = Style(color=theme_mod.semantic_color("dim"))
     faint = Style(color=theme_mod.semantic_color("faint"))
 
-    label, context, cost, activity = _lay_out(facts, stats, width, rung, column, clock)
+    label, role, context, cost, activity = _lay_out(facts, stats, width, rung, column, clock)
     glyph, _word, token = status_glyph(
         facts.status, queued=facts.queued, spinner_glyph=spinner_glyph
     )
@@ -629,7 +666,7 @@ def compose_row(
         # statements inside twenty-five rows, in three vocabularies; the row's
         # job in this mode is WHICH subagent, and the numbers are the one
         # thing the title does not carry. Non-current rows are unchanged.
-        for index, value in enumerate(part for part in (context, cost) if part):
+        for index, value in enumerate(part for part in (role, context, cost) if part):
             if index:
                 row.append(STATS_SEAM, style=faint)
             row.append(value, style=muted)
@@ -651,7 +688,15 @@ def compose_row(
     # else's. Durations right-align by convention and the pad abuts the glyph,
     # so no seam moves.
     row.append(f" {facts.elapsed.rjust(max(clock, cell_len(facts.elapsed)))}", style=muted)
-    for value in (context, cost):
+    # The role leads the numbers run rather than trailing it: it qualifies WHAT
+    # the child is, the way the page title reads ``Subagent · reviewer ·
+    # <label>``, and reading it after the clock and the percentage would put
+    # the row's identity behind its measurements. It takes the same ` · ` seam
+    # and ``muted`` ink as every other segment here — a second visual idiom
+    # beside an established one is a defect — which also means it inherits the
+    # contrast decision recorded above (``dim`` is under WCAG AA on this
+    # ground; ``muted`` is 7.93:1).
+    for value in (role, context, cost):
         if value:
             row.append(STATS_SEAM, style=faint)
             row.append(value, style=muted)
@@ -1105,6 +1150,22 @@ class SubagentPanel(Container):
             ceiling = self.screen.size.width or 0
         except Exception:
             ceiling = 0  # not on a screen yet; the arrange that follows fixes it
+        if ceiling:
+            # The screen ceiling has to be charged the SAME padding the rows
+            # already pay. ``.band-body`` is ``padding: 0 1``, and Textual is
+            # border-box, so a row inside it never has more than
+            # ``screen - 2`` cells even though the screen is ``screen`` wide.
+            # Comparing an unpadded ceiling against a padded ``own`` only
+            # matters once the panel over-grows its dock (``#band`` is
+            # ``width: auto``, so a long row widens it past the screen and the
+            # surplus is clipped) — and there the ladder was handed two cells
+            # that do not exist, kept a rung the terminal could not show, and
+            # the row lost its tail to a hard cut with no ellipsis: precisely
+            # the failure the ceiling exists to prevent, two cells short of
+            # preventing it. Read off the container rather than hardcoding 2,
+            # so a stylesheet change to the rail cannot silently desync this.
+            padding = self._list.styles.padding
+            ceiling = max(0, ceiling - padding.left - padding.right)
         own = self._list.size.width or self.size.width or 0
         if own and ceiling:
             return min(own, ceiling)

@@ -54,6 +54,7 @@ from local_operator.harness.types import (
     CustomMessage,
     Message,
     MessageEndEvent,
+    ModelSpec,
     StaleAside,
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
@@ -1426,12 +1427,51 @@ class SubagentComms:
         jobs = self._jobs()
         if jobs is None:
             return None, "no job manager attached to this session"
+        # The role and tier are carried FORWARD, not re-defaulted. Everything
+        # that makes a child what it is hangs off ``agent``: ``_resolve_role``
+        # picks the preamble (a role's instructions, a specialist's own
+        # ``system_prompt.md``, or ``SCOUT_PREAMBLE``), and the profile it
+        # returns decides the tool allowlist. That allowlist is a CAPABILITY
+        # BOUNDARY rather than advice (see ``_build_child_session``): resumed
+        # without it, a reviewer regains ``edit``/``write`` and can "helpfully"
+        # fix the very code it was asked to review, a scout loses its
+        # read-only promise, and the MCP tools restricted roles are denied
+        # come back wholesale. It also re-stamps ``origin.json`` with the
+        # agent, so a defaulted resume overwrites the real role on disk.
+        # ``run_subagent`` defaults ``agent`` to ``"task"``, so omitting these
+        # silently downgraded every resumed child to a generic no-role one.
+        agent = record.agent_role or "task"
+        effort = record.effort or None
+        # ``effort`` alone is display-only — ``run_subagent`` records it on the
+        # job and never re-reads it, because the LAUNCH path resolves the tier
+        # into a ``model_spec`` before calling (``Session._resolve_subagent_model``).
+        # A resume is a second launch and has to do that same resolution, or a
+        # child launched at ``hi`` would come back on the parent's model while
+        # the panel still displayed ``hi``. Resolved through the parent because
+        # the tier-to-model mapping lives in the operator's config, and the
+        # role's own default tier applies when the launch pinned none — which
+        # is exactly the precedence the first launch used.
+        # Guarded rather than called outright: ``_session`` is a full
+        # ``Session`` in production, but this class is also driven by the
+        # reduced hosts and test doubles that supply only the queue/steer/
+        # subscribe surface (see ``ChildSession``). A parent that cannot price
+        # a tier must still be able to resume its child on the parent's model,
+        # so a missing resolver degrades instead of raising.
+        model_spec: ModelSpec | None = None
+        resolve = getattr(self._session, "_resolve_subagent_model", None)
+        if callable(resolve):
+            resolved = resolve(agent, effort)
+            if isinstance(resolved, ModelSpec):
+                model_spec = resolved
         new_job_id = run_subagent(
             label=record.label,
             prompt=message,
             parent_session=self._session,
             jobs_manager=jobs,
+            model_spec=model_spec,
             resume_dir=record.session_dir,
+            agent=agent,
+            effort=effort,
         )
         # The pause is over the moment its continuation exists. Left set, the
         # old record would keep advertising ``paused`` in the roster forever
