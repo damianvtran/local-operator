@@ -5435,6 +5435,183 @@ async def _browser_type(
     )
 
 
+def bridge_browser_available() -> bool:
+    """Cheap browser-bridge discovery, imported lazily off the CLI path."""
+    from local_operator.browser_bridge.backend import (
+        bridge_browser_available as available,
+    )
+
+    return available()
+
+
+async def _bridge_call(
+    tool_call_id: str,
+    action: str,
+    params: dict[str, Any],
+    *,
+    surface: str = "",
+) -> tuple[dict[str, Any] | None, ToolResult | None]:
+    from local_operator.browser_bridge.backend import (
+        BridgeClient,
+        BridgeError,
+        BridgeUnreachable,
+        format_error,
+    )
+
+    try:
+        return await BridgeClient().call(action, params), None
+    except BridgeError as exc:
+        return None, _error(
+            tool_call_id,
+            "browser",
+            format_error(exc, action=action, surface=surface),
+        )
+    except BridgeUnreachable as exc:
+        return None, _error(tool_call_id, "browser", str(exc))
+
+
+async def _bridge_open(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    raw_url: str,
+) -> ToolResult:
+    params: dict[str, Any] = {"url": raw_url.strip()}
+    if state.surface_id.startswith("bridge:"):
+        params["tab"] = state.surface_id
+    result, problem = await _bridge_call(tool_call_id, "open", params, surface=state.surface_id)
+    if problem is not None:
+        return problem
+    assert result is not None
+    surface = str(result.get("tab", ""))
+    if not re.match(r"^bridge:\d+:[A-Za-z0-9_-]+$", surface):
+        return _error(
+            tool_call_id, "browser", "browser extension opened a tab but returned no valid handle"
+        )
+    state.surface_id = surface
+    href = str(result.get("url", ""))
+    title = str(result.get("title", ""))
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Opened browser surface {surface}: {_page_line(title, href)}",
+        details={"surface_id": surface, "url": href, "title": title},
+    )
+
+
+async def _bridge_action(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    action: str,
+    params: BrowserParams,
+    context: ToolContext | None,
+) -> ToolResult:
+    surface = state.surface_id
+    wire: dict[str, Any] = {"tab": surface}
+    if action == "goto":
+        wire["url"] = params.url.strip()
+    elif action in ("read", "snapshot"):
+        if params.selector.strip():
+            wire["selector"] = params.selector.strip()
+    elif action in ("click", "type"):
+        wire["selector"] = params.selector.strip()
+        if action == "type":
+            wire["text"] = params.text
+    result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface)
+    if problem is not None:
+        # A nonce-invalid or user-closed tab must be forgotten immediately;
+        # retaining it would make even the recovery verb target stale state.
+        if "is gone; dropped the handle" in problem.text:
+            state.surface_id = ""
+        return problem
+    assert result is not None
+    href = str(result.get("url", ""))
+    title = str(result.get("title", ""))
+    details: dict[str, Any] = {"surface_id": surface}
+    if href:
+        details.update(url=href, title=title)
+    if action == "goto":
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Navigated {surface}: {_page_line(title, href)}",
+            details=details,
+        )
+    if action == "read":
+        selector = params.selector.strip() or "body"
+        details["selector"] = selector
+        body = truncate_output(str(result.get("text", "")), BROWSER_TEXT_LIMIT_CHARS)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{_page_line(title, href)}\n\n{body or '(no text)'}",
+            details=details,
+        )
+    if action == "snapshot":
+        return _text(
+            tool_call_id,
+            "browser",
+            truncate_output(str(result.get("snapshot", "")), BROWSER_TEXT_LIMIT_CHARS)
+            or "(empty snapshot)",
+            details=details,
+        )
+    if action == "click":
+        navigation = "" if result.get("navigated") else " (no navigation)"
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Clicked {params.selector.strip()}{navigation}. Page: {_page_line(title, href)}",
+            details=details,
+        )
+    if action == "type":
+        got = str(result.get("value", "")).strip()
+        if got != params.text.strip():
+            return _error(
+                tool_call_id,
+                "browser",
+                f"fill of {params.selector.strip()} did not take: the field holds "
+                f"{got!r}, not {params.text!r}. Check the selector names an editable "
+                "field ('snapshot' shows what is there).",
+            )
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Typed into {params.selector.strip()}. Value is now {got!r}.",
+            details={**details, "selector": params.selector.strip()},
+        )
+
+    # The extension returns bytes, never a filesystem path. The Python tool
+    # keeps path resolution, PNG validation and write approval in one place.
+    if params.path:
+        resolved, _inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
+        target = str(resolved)
+    else:
+        import tempfile
+
+        safe_surface = re.sub(r"[^A-Za-z0-9_-]", "-", surface)
+        target = os.path.join(tempfile.gettempdir(), f"lo-browser-{safe_surface}.png")
+    try:
+        payload = base64.b64decode(str(result.get("data", "")), validate=True)
+    except ValueError:
+        return _error(tool_call_id, "browser", "browser extension returned invalid screenshot data")
+    if not payload.startswith(PNG_MAGIC):
+        return _error(
+            tool_call_id,
+            "browser",
+            f"browser extension capture is not a PNG ({len(payload)} bytes)",
+        )
+    try:
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_bytes(payload)
+    except OSError as exc:
+        return _error(tool_call_id, "browser", f"could not write screenshot to {target}: {exc}")
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Screenshot of {_page_line(title, href)} saved to {target} ({len(payload)} bytes).",
+        details={"path": target, "bytes": len(payload)},
+    )
+
+
 async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
     """Close the recorded surface and drop the handle. Returns "" on success
     (or when there was nothing open), else cmux's diagnostic.
@@ -5453,6 +5630,14 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
     surface = state.surface_id
     if not surface:
         return ""
+    if surface.startswith("bridge:"):
+        _result, problem = await _bridge_call(
+            "teardown", "close", {"tab": surface}, surface=surface
+        )
+        state.surface_id = ""
+        if problem is None:
+            return ""
+        return "browser extension could not close the tab"
     code, out = await _run_cmux(["close-surface", "--surface", surface])
     state.surface_id = ""
     return "" if code == 0 else out or f"cmux exited {code}"
@@ -5480,7 +5665,7 @@ async def execute_browser(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Drive the CMUX browser. Degrades to a clear error when cmux is absent."""
+    """Drive cmux when present, else the paired Local Operator extension."""
     try:
         params = BrowserParams(**args)
     except ValidationError as exc:
@@ -5492,14 +5677,16 @@ async def execute_browser(
             "browser",
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
-    if not cmux_browser_available():
+    cmux_available = cmux_browser_available()
+    bridge_available = bridge_browser_available()
+    if not cmux_available and not bridge_available:
         return _error(
             tool_call_id,
             "browser",
-            "CMUX browser not available: no cmux binary on PATH and no "
-            "CMUX_BUNDLED_CLI_PATH. This host cannot drive a browser. Do not "
-            "install or script one instead — say screenshots are unavailable "
-            "and why.",
+            "browser not available: neither cmux nor a connected Local Operator browser extension "
+            "is reachable. Run 'lop browser status' and 'lop browser install' to set "
+            "up the bridge. Do not install or script one instead; a separate browser engine "
+            "cannot preserve the user's real logins.",
         )
     # Before the state lookup and before every subprocess, including the
     # liveness probe below: see _validate_browser_args.
@@ -5508,14 +5695,21 @@ async def execute_browser(
         return _error(tool_call_id, "browser", problem)
     state = _browser_state(context)
 
-    # 'open' creates the surface and 'close' must stay callable without one, so
-    # both run before the have-a-surface gate below.
+    # Backend is selected only for an empty surface. A prefixed handle pins the
+    # transport, so a browser opening or closing mid-session cannot silently
+    # move the agent to a different surface.
     if action == "open":
-        return await _browser_open(tool_call_id, state, params.url)
+        if state.surface_id.startswith("bridge:"):
+            return await _bridge_open(tool_call_id, state, params.url)
+        if state.surface_id.startswith("surface:") or cmux_available:
+            return await _browser_open(tool_call_id, state, params.url)
+        return await _bridge_open(tool_call_id, state, params.url)
     if action == "close":
         return await _browser_close(tool_call_id, state)
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
+    if state.surface_id.startswith("bridge:"):
+        return await _bridge_action(tool_call_id, state, action, params, context)
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
     # ACTIVE surface with exit 0, so without this check 'read', 'snapshot',
@@ -5683,7 +5877,7 @@ def _parse_surface_id(out: str) -> str:
 
 
 def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
-    """Advertise the browser tool only when a CMUX browser is reachable.
+    """Advertise the browser tool when cmux or the extension bridge is reachable.
 
     Mirrors the wake builder: an environment-specific capability that returns
     None (excluded from the inventory) when the host cannot support it.
@@ -5707,15 +5901,15 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     between sessions and the user can sign in by hand when asked, which is
     exactly what a freshly downloaded headless Chromium can never do.
     """
-    if not cmux_browser_available():
+    if not cmux_browser_available() and not bridge_browser_available():
         return None
     return AgentTool(
         name="browser",
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
-            "Drive the user's REAL browser (the CMUX browser panel in their "
-            "terminal): open/goto a URL, read page text, snapshot the "
+            "Drive the user's REAL browser (a cmux browser panel or their paired "
+            "Local Operator browser extension): open/goto a URL, read page text, snapshot the "
             "accessibility tree for click refs, click, type, screenshot, close. "
             "Cookies and logins persist across calls and across sessions, and "
             "the user can sign in by hand when you ask them to, so this reaches "

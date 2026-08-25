@@ -400,6 +400,31 @@ def build_cli_parser() -> argparse.ArgumentParser:
     serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
     serve_mobile_parser.add_argument("--port", type=int, default=4098)
 
+    # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
+    # startup must not pull Starlette/uvicorn in just to render --help.
+    browser_parser = subparsers.add_parser(
+        "browser", help="Connect the browser tool to a Chromium extension", parents=[parent_parser]
+    )
+    browser_subparsers = browser_parser.add_subparsers(dest="browser_command")
+    install_browser = browser_subparsers.add_parser("install", help="Install the bridge daemon")
+    install_browser.add_argument("--port", type=int, default=4099)
+    browser_subparsers.add_parser("status", help="Show daemon, extension and pairing status")
+    for action in ("start", "stop", "restart"):
+        browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
+    pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
+    pair_browser.add_argument(
+        "--reset", action="store_true", help="Revoke the paired browser first"
+    )
+    logs_browser = browser_subparsers.add_parser("logs", help="Tail the daemon log")
+    logs_browser.add_argument("--lines", type=int, default=100)
+    logs_browser.add_argument("--follow", "-f", action="store_true")
+    uninstall_browser = browser_subparsers.add_parser("uninstall", help="Remove the bridge daemon")
+    uninstall_browser.add_argument("--purge", action="store_true", help="Also delete pairing state")
+    serve_browser = browser_subparsers.add_parser(
+        "serve", help="Run the bridge daemon (foreground)"
+    )
+    serve_browser.add_argument("--port", type=int, default=4099)
+
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
@@ -863,6 +888,81 @@ def config_list_command() -> int:
         print(f"\033[1;32m│   Description: {description}\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
     return 0
+
+
+def browser_command(args: argparse.Namespace) -> int:
+    """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
+    command = getattr(args, "browser_command", None)
+    if command == "serve":
+        from local_operator.browser_bridge.daemon import main as serve_main
+
+        return serve_main(["--port", str(args.port)])
+
+    from local_operator.browser_bridge import install as browser_install
+    from local_operator.browser_bridge.daemon import pairing_status, reset_pairing
+
+    if command == "install":
+        result = browser_install.install(args.port)
+        steps = result.get("steps", [])
+        assert isinstance(steps, list)
+        for step in steps:
+            print(f"  {step}")
+        if not result.get("ok"):
+            print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
+            return 1
+        print("\nbrowser bridge installed and healthy.")
+        print("  load the Local Operator extension, then run `lop browser pair`.")
+        return 0
+    if command == "status":
+        result = browser_install.status()
+        health = result.get("health") or {}
+        assert isinstance(health, dict)
+        print(f"installed:           {'yes' if result['installed'] else 'no'}")
+        print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
+        print(f"extension connected: {'yes' if health.get('extension_connected') else 'no'}")
+        print(f"paired:              {'yes' if result['paired'] else 'no'}")
+        print(f"port:                {result['port']}")
+        print(f"log:                 {result['log']}")
+        return 0 if result["healthy"] else 1
+    if command == "pair":
+        if args.reset:
+            reset_pairing()
+            print("revoked the paired browser; reconnect the extension to get a new code.")
+        pair = pairing_status()
+        code = pair.get("pending_code")
+        if code:
+            print(f"pairing code: {code}")
+            print("enter this 6-digit code in the Local Operator extension popup.")
+            return 0
+        if pair.get("paired"):
+            print("browser extension is already paired. Use --reset to pair another profile.")
+            return 0
+        print("no extension is waiting to pair. Open the extension popup, then retry.")
+        return 1
+    if command in ("start", "stop", "restart"):
+        result = browser_install.service_action(command)
+        if not result["ok"]:
+            print(f"\033[1;31m{result['error']}\033[0m")
+            return 1
+        print(f"browser bridge {command} ok")
+        return 0
+    if command == "logs":
+        import subprocess
+
+        command_line = ["tail", "-n", str(args.lines)]
+        if args.follow:
+            command_line.append("-f")
+        command_line.append(str(browser_install.log_path()))
+        return subprocess.call(command_line)
+    if command == "uninstall":
+        result = browser_install.uninstall(purge=args.purge)
+        steps = result.get("steps", [])
+        assert isinstance(steps, list)
+        for step in steps:
+            print(f"  {step}")
+        return 0 if result.get("ok") else 1
+    print("usage: lop browser {install|status|start|stop|restart|pair|logs|uninstall|serve}")
+    return 1
 
 
 def mobile_command(args: argparse.Namespace) -> int:
@@ -1889,7 +1989,7 @@ def main() -> int:
         # round-trip (`$SHELL -l -c 'echo $PATH'`) on startup. The helper keeps
         # a per-process cache, so a session that later needs it still primes at
         # most once. ``None`` is the bare interactive launch.
-        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile"})
+        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile", "browser"})
         if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
             setup_cross_platform_environment()
 
@@ -2098,6 +2198,8 @@ def main() -> int:
             return serve_command(args.host, args.port, args.reload)
         elif args.subcommand == "mobile":
             return mobile_command(args)
+        elif args.subcommand == "browser":
+            return browser_command(args)
         elif args.subcommand == "login":
             return login_command(args)
         elif args.subcommand == "logout":
