@@ -497,6 +497,95 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
 )
 
 
+def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
+    """``messages`` with any message spliced INTO a tool batch moved after it.
+
+    The last line of defence for the invariant Layer 1 (``_append_or_park_journal``)
+    enforces at the source: the rendered history must never carry a non-tool
+    message between an assistant's ``tool_calls`` and the ``tool_result``s
+    answering them. A session already bricked IN MEMORY predates that guard and
+    cannot be helped by it, and a future writer appending straight to
+    ``_context.messages`` would reintroduce the same 400. This runs at request
+    assembly so neither case reaches a provider.
+
+    The constraint is POSITIONAL, not set membership. Verified against the live
+    Anthropic API (claude-sonnet-4-5, 2026-08-25), because
+    ``AnthropicClient._build_body`` coalesces tool results onto a preceding user
+    message and the difference decides what a repair has to do::
+
+        [tool_result, tool_result]            -> 200
+        [tool_result, tool_result, text]      -> 200
+        [text, tool_result, tool_result]      -> 400
+        interloper as its own message between -> 400
+
+    So results must be the LEADING run of the message that follows the calls,
+    and the repair is to MOVE the interloper after them. Synthesizing
+    placeholder results instead is wrong and was tested as such: it draws a
+    different 400 (``unexpected tool_use_id found in tool_result blocks``)
+    because the genuine results still arrive behind the placeholders.
+    Synthesis is only correct for a genuinely UNANSWERED tail, which is
+    :meth:`Session._history_snapshot`'s job — an unanswered batch is left
+    untouched here.
+
+    Relative order among several interlopers is preserved, and moving them is
+    safe ONLY because everything that can land in that window is a
+    harness-authored notice (``session_model_switch``, ``session_incident``):
+    reordering advisory chrome against a tool batch changes nothing the user
+    wrote. **If a custom type is ever added that carries user-authored text,
+    this assumption needs revisiting** — moving a user's words past a tool
+    batch would silently reorder the conversation they see.
+    """
+    # Hot path: ``_render_history`` runs on every provider call, and the
+    # overwhelming majority of histories have no tool batch to violate.
+    if not any(message.role == "assistant" and message.tool_calls for message in messages):
+        return messages
+
+    out: list[Message] = []
+    index = 0
+    total = len(messages)
+    repaired = False
+    while index < total:
+        message = messages[index]
+        out.append(message)
+        index += 1
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        # Collect the batch's answers and anything spliced among them, stopping
+        # at the first message that is neither — that is the end of the batch,
+        # and a trailing non-tool message there is already legal.
+        expected = {call.id for call in message.tool_calls}
+        results: list[Message] = []
+        interlopers: list[Message] = []
+        scan = index
+        while scan < total and expected:
+            candidate = messages[scan]
+            if candidate.role == "tool":
+                results.append(candidate)
+                expected.discard(candidate.tool_call_id or "")
+            else:
+                interlopers.append(candidate)
+            scan += 1
+        if expected or not interlopers:
+            # Unanswered tail (leave it to ``_wire_legal_snapshot``) or nothing
+            # spliced. Either way this batch is not ours to touch.
+            continue
+        out.extend(results)
+        out.extend(interlopers)
+        index = scan
+        repaired = True
+
+    if repaired:
+        # After Layer 1 this is dead code. Logging at warning rather than debug
+        # is deliberate: silence here would hide a regression that reintroduces
+        # the splice, and the repair would mask it right up until some future
+        # shape it cannot fix.
+        logger.warning(
+            "repaired a message spliced into an open tool batch; a journal "
+            "append bypassed the turn-boundary guard (see _append_or_park_journal)"
+        )
+    return out
+
+
 def _paired_prefix(messages: Sequence[AgentMessage]) -> list[AgentMessage]:
     """``messages`` truncated so it never ENDS in unanswered tool calls.
 
@@ -1226,6 +1315,16 @@ class Session:
         # Error text from the run just ended, journalled as a session incident
         # once persistence finishes (see _run_turn / journal_incident).
         self._pending_incident: str | None = None
+        #: Journal notices (model switch / session incident) whose LIVE append
+        #: arrived while a turn owned the message list. They are already on
+        #: disk; only the live splice is parked, because appending one between
+        #: an assistant's ``tool_calls`` and their ``tool_result``s builds a
+        #: list no provider accepts and NOTHING repairs it afterwards, so the
+        #: session re-sends the illegal prefix on every later turn and is
+        #: bricked for good. Drained at the turn-safe boundaries (steering
+        #: drain, pipeline exit, prompt entry, dispose) in the manner of
+        #: ``_pending_shell_records``.
+        self._pending_context_journal: list[CustomMessage] = []
         # (new_label, transient) of the last model switch made model-visible, so
         # the two edges that can both fire for one change (``set_model`` and a
         # route-settled event) do not double-announce. See journal_model_switch.
@@ -1369,6 +1468,14 @@ class Session:
         that reaches a provider has to be free of them.
         """
         rendered = self._convert_to_llm(self._live_todo_reminders(messages))
+        # Immediately after the conversion and before any other pass, so EVERY
+        # caller of this method is covered by one application: the turn path,
+        # compaction, `_history_snapshot` and the token counter. Repairing at
+        # the render rather than in a client fixes both wires at once — the
+        # OpenAI Responses path emits a bare `role:user` item between
+        # `function_call` and `function_call_output` and is rejected for the
+        # same reason Anthropic rejects the coalesced form.
+        rendered = _pair_spliced_tool_results(rendered)
         if self._images_rejected:
             # Nothing to rebound once images are being dropped outright, and
             # dropping first saves decoding a block that is about to become a
@@ -2574,6 +2681,10 @@ class Session:
             # receipt may have queued while the previous owner still held the
             # lock. It must be visible before this prompt builds its request.
             await self._flush_shell_records()
+            # Same race, same window: a journal notice parked by the previous
+            # owner must reach the model before this prompt's request is built,
+            # or the switch it announces goes unmentioned for another turn.
+            self._flush_context_journal()
             # A fresh user prompt supersedes any earlier interrupt request.
             self._abort_requested = False
             if self._is_streaming:
@@ -3177,6 +3288,10 @@ class Session:
             # Same shell-receipt boundary as prompt(): a wake turn must not
             # build from context that omits a command already visible in TUI.
             await self._flush_shell_records()
+            # Same boundary, same reason: a notice parked by a turn that ended
+            # without reaching a steering drain (an abort mid-batch) rejoins
+            # here, before this turn builds its request.
+            self._flush_context_journal()
             # Same flush as prompt(): a wake-delivery turn is still a prompt
             # path, and the catch-up must not be stranded behind it.
             self._handle_missed_wakes()
@@ -3227,6 +3342,11 @@ class Session:
             # provider message list. Persist it before releasing `_turn_lock`,
             # when no next prompt can build from a half-updated conversation.
             await self._flush_shell_records()
+            # Likewise for a journal notice parked mid-turn. The tool batch is
+            # closed by now, so the append is legal, and doing it here means an
+            # aborted turn still hands the notice to the next one instead of
+            # stranding it until the session is disposed.
+            self._flush_context_journal()
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
@@ -3625,6 +3745,61 @@ class Session:
             )
             return None
 
+    def _append_or_park_journal(self, message: CustomMessage) -> None:
+        """Put a journal notice on the live context, or park it for a boundary.
+
+        The live context may not take a non-tool message while a turn owns it.
+        ``AgentLoop`` appends the assistant message the moment the model turn
+        ends and appends the tool results only once the WHOLE batch returns
+        (``_append_results``), so for the entire duration of a tool batch the
+        list ends in an assistant whose ``tool_calls`` have no answers.
+        Splicing a notice in there produces
+        ``assistant(tool_use) -> user -> tool_result``, which every provider
+        rejects ("`tool_use` ids were found without `tool_result` blocks
+        immediately after") — and because nothing repairs the live list, the
+        session re-sends that prefix on every later turn and is bricked until
+        it is restarted. Observed live: a ``/model`` press mid-batch killed a
+        session outright, including a bare "Continue".
+
+        BOTH conditions are tested, for the reason :meth:`prompt` spells out:
+        ``_is_streaming`` covers only ``_run_turn``, while ``_turn_lock`` spans
+        the whole pipeline including a post-compaction auto-continuation.
+        ``record_shell`` and ``adopt_aside`` guard on the same pair.
+
+        The delay is accepted, not a compromise to be "fixed" later by
+        re-splicing: the notice is advisory, the env block's ``Model:`` line
+        already carries the live identity, and the transcript write has already
+        happened, so the worst case is that a switch NOTICE lands at the end of
+        a long tool batch instead of inside it. Re-splicing to make it prompt
+        is precisely the bug above.
+        """
+        if self._is_streaming or self._turn_lock.locked():
+            self._pending_context_journal.append(message)
+            return
+        self._context.messages.append(message)
+
+    def _drain_context_journal(self) -> list[CustomMessage]:
+        """Pop every parked journal notice, oldest first.
+
+        Synchronous and total: the transcript write already happened at park
+        time, so there is nothing here that can fail and nothing to retry —
+        unlike ``_flush_shell_records``, which pops only after a successful
+        write. Callers either extend the live context with the result or hand
+        it to the loop ahead of steering messages.
+        """
+        parked = self._pending_context_journal
+        self._pending_context_journal = []
+        return parked
+
+    def _flush_context_journal(self) -> None:
+        """Fold parked journal notices into the live context at a safe
+        boundary. A parked notice must never be silently dropped: it is the
+        only thing telling the model it was switched or that the last run
+        failed."""
+        parked = self._drain_context_journal()
+        if parked:
+            self._context.messages.extend(parked)
+
     async def journal_incident(self, raw: str) -> None:
         """Persist and surface WHY the session last failed.
 
@@ -3648,7 +3823,7 @@ class Session:
         )
         try:
             await self._transcript.append_message(message)
-            self._context.messages.append(message)
+            self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal session incident", exc_info=True)
 
@@ -3712,7 +3887,7 @@ class Session:
             # fallback is live-context-only (see _is_persistable_message).
             if _is_persistable_message(message):
                 await self._transcript.append_message(message)
-            self._context.messages.append(message)
+            self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal model switch", exc_info=True)
 
@@ -3793,6 +3968,30 @@ class Session:
         overwhelmingly common case — this is called at EVERY tool and message
         boundary, and an event per boundary would be noise with no receiver.
         """
+        # Journal notices parked by ``_append_or_park_journal`` ride out ahead
+        # of the steering messages. This is the loop's own injection boundary —
+        # it runs only after ``_append_results`` has closed the tool batch — so
+        # it is the earliest point at which a notice can rejoin the context
+        # legally, and ordering it first keeps "you were switched" ahead of the
+        # steer the user typed after switching. Already persisted at park time,
+        # so these are NOT re-appended to the transcript here.
+        # Journal notices parked by ``_append_or_park_journal`` rejoin the live
+        # context HERE, appended directly rather than returned. This is the
+        # loop's own injection boundary — it runs only after ``_append_results``
+        # has closed the tool batch — so it is the earliest point at which a
+        # notice can rejoin legally, and it lands ahead of any steering message
+        # the caller is about to drain in (``_drain_pending`` appends those
+        # after), which keeps "you were switched" before the steer the user
+        # typed after switching.
+        #
+        # NOT returned, and that distinction is load-bearing: anything this
+        # method hands back becomes a loop INJECTION, and a non-empty injection
+        # list keeps the inner loop running (``while has_more_tool_calls or
+        # pending``). Returning an advisory notice would therefore buy an entire
+        # extra provider call to tell the model something the next turn would
+        # have carried for free. Already persisted at park time, so there is no
+        # transcript write here either.
+        self._flush_context_journal()
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
@@ -5782,6 +5981,13 @@ class Session:
             # switch made moments before quitting is exactly the write that
             # must still land for the next `--resume` to honour it.
             await self._flush_selected_model()
+            # Fold any still-parked journal notice back into the live context
+            # before the durability flush reads it. The transcript write
+            # already happened at park time, so `--resume` is correct either
+            # way and `_persist_new_messages` dedups by id; this keeps the
+            # in-memory list consistent with what was persisted rather than
+            # leaving a notice stranded in the FIFO at teardown.
+            self._flush_context_journal()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):
