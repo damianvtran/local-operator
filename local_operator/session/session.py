@@ -524,7 +524,7 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
     different 400 (``unexpected tool_use_id found in tool_result blocks``)
     because the genuine results still arrive behind the placeholders.
     Synthesis is only correct for a genuinely UNANSWERED tail, which is
-    :meth:`Session._history_snapshot`'s job — an unanswered batch is left
+    :meth:`Session._wire_legal_snapshot`'s job — an unanswered batch is left
     untouched here.
 
     Relative order among several interlopers is preserved, and moving them is
@@ -534,6 +534,14 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
     wrote. **If a custom type is ever added that carries user-authored text,
     this assumption needs revisiting** — moving a user's words past a tool
     batch would silently reorder the conversation they see.
+
+    Linear in ``len(messages)``, and that has to stay true because this sits on
+    every provider call. Each batch's inner scan stops at the next assistant
+    carrying ``tool_calls``, so the scanned windows are disjoint and no message
+    is examined by more than one of them. An earlier version let an UNANSWERED
+    batch rescan to the end of the list, which made a history of open batches
+    quadratic (3.7s at 4000 messages against 2.3ms answered); see
+    ``test_pair_spliced_tool_results_scans_each_message_once``.
     """
     # Hot path: ``_render_history`` runs on every provider call, and the
     # overwhelming majority of histories have no tool batch to violate.
@@ -559,9 +567,28 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
         scan = index
         while scan < total and expected:
             candidate = messages[scan]
+            if candidate.role == "assistant" and candidate.tool_calls:
+                # A new batch opens here, so this one is over whatever is still
+                # unanswered. Bounding the scan is what keeps the whole pass
+                # linear: every batch's window ends at the next batch's start,
+                # so the windows are disjoint and each message is examined by at
+                # most one of them. Without this bound an unanswered batch
+                # rescanned to the end of the list for EVERY later assistant
+                # message -- 4000 messages took 3.7s instead of 2.3ms.
+                #
+                # It is also the more correct stop. Swallowing the next batch
+                # would move ITS results onto this batch's assistant and push
+                # that assistant behind its own answers, turning one illegal
+                # shape into a different one.
+                break
             if candidate.role == "tool":
                 results.append(candidate)
-                expected.discard(candidate.tool_call_id or "")
+                # Guarded rather than ``or ""``: coercing a missing id to the
+                # empty string would let an unidentified result answer a call
+                # only if some call also had an empty id. A result with no id
+                # answers nothing, so it closes no call.
+                if candidate.tool_call_id is not None:
+                    expected.discard(candidate.tool_call_id)
             else:
                 interlopers.append(candidate)
             scan += 1
@@ -601,7 +628,7 @@ def _paired_prefix(messages: Sequence[AgentMessage]) -> list[AgentMessage]:
     tool_call_id"). Measured: a Ctrl+C mid-batch left two unpaired calls on
     disk and an unusable session.
 
-    :meth:`Session._history_snapshot` faces the same illegal tail for a
+    :meth:`Session._wire_legal_snapshot` faces the same illegal tail for a
     request it is about to send and pairs the calls with placeholders. This is
     the persistence counterpart, and it DROPS rather than pairs: a placeholder
     is the honest answer to "what are you doing right now", but on disk it
@@ -1470,7 +1497,7 @@ class Session:
         rendered = self._convert_to_llm(self._live_todo_reminders(messages))
         # Immediately after the conversion and before any other pass, so EVERY
         # caller of this method is covered by one application: the turn path,
-        # compaction, `_history_snapshot` and the token counter. Repairing at
+        # compaction, `_wire_legal_snapshot` and the token counter. Repairing at
         # the render rather than in a client fixes both wires at once — the
         # OpenAI Responses path emits a bare `role:user` item between
         # `function_call` and `function_call_output` and is rejected for the
@@ -3784,18 +3811,19 @@ class Session:
         Synchronous and total: the transcript write already happened at park
         time, so there is nothing here that can fail and nothing to retry —
         unlike ``_flush_shell_records``, which pops only after a successful
-        write. Callers either extend the live context with the result or hand
-        it to the loop ahead of steering messages.
+        write. Split out from its one caller, ``_flush_context_journal``, so
+        the drain is testable on its own.
         """
         parked = self._pending_context_journal
         self._pending_context_journal = []
         return parked
 
     def _flush_context_journal(self) -> None:
-        """Fold parked journal notices into the live context at a safe
-        boundary. A parked notice must never be silently dropped: it is the
-        only thing telling the model it was switched or that the last run
-        failed."""
+        """Fold parked journal notices into the live context at a safe boundary.
+
+        A parked notice must never be silently dropped: it is the only thing
+        telling the model it was switched or that the last run failed.
+        """
         parked = self._drain_context_journal()
         if parked:
             self._context.messages.extend(parked)
@@ -3968,13 +3996,6 @@ class Session:
         overwhelmingly common case — this is called at EVERY tool and message
         boundary, and an event per boundary would be noise with no receiver.
         """
-        # Journal notices parked by ``_append_or_park_journal`` ride out ahead
-        # of the steering messages. This is the loop's own injection boundary —
-        # it runs only after ``_append_results`` has closed the tool batch — so
-        # it is the earliest point at which a notice can rejoin the context
-        # legally, and ordering it first keeps "you were switched" ahead of the
-        # steer the user typed after switching. Already persisted at park time,
-        # so these are NOT re-appended to the transcript here.
         # Journal notices parked by ``_append_or_park_journal`` rejoin the live
         # context HERE, appended directly rather than returned. This is the
         # loop's own injection boundary — it runs only after ``_append_results``

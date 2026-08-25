@@ -577,6 +577,71 @@ def test_pair_spliced_tool_results_warns_when_it_fires(caplog):
     ), "the repair fired without logging"
 
 
+class _CountingHistory(list[Message]):
+    """A message list that counts INDEXED reads, so a rescan is measurable.
+
+    Only ``__getitem__`` is counted, which isolates the pairing scan: the
+    function's early exit iterates (``for message in messages``) and so does
+    not register here.
+    """
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.reads = 0
+
+    def __getitem__(self, index):
+        self.reads += 1
+        return super().__getitem__(index)
+
+
+def test_pair_spliced_tool_results_scans_each_message_once():
+    """The pass is linear, asserted by counting rather than by timing.
+
+    Regression test for a quadratic scan: when a batch went unanswered the
+    loop did not advance past it, so every later assistant message rescanned
+    to the end of the list. On a 4000-message history of open batches that was
+    3.7s against 2.3ms for the answered shape, on a function that runs at
+    EVERY provider call. A wall-clock assertion would be flaky on a loaded
+    machine, so this counts reads instead: with each batch's window bounded by
+    the next batch's start the windows are disjoint, so no message is read by
+    more than one of them plus once by the outer walk.
+    """
+    messages: list[Message] = []
+    for index in range(400):
+        assistant, result_a, _ = _batch(f"toolu_{index}A", f"toolu_{index}B")
+        # Only the first call is answered, so `expected` never empties and the
+        # inner scan has no early exit to save it.
+        messages.extend([assistant, result_a])
+
+    history = _CountingHistory(messages)
+    repaired = _pair_spliced_tool_results(history)
+
+    assert [message.id for message in repaired] == [
+        message.id for message in messages
+    ], "unanswered batches are _wire_legal_snapshot's job and must be left alone"
+    assert history.reads <= 2 * len(history), (
+        f"the scan read {history.reads} times for {len(history)} messages; "
+        "an unanswered batch is being rescanned instead of advanced past"
+    )
+
+
+def test_pair_spliced_tool_results_does_not_pull_the_next_batch_into_an_open_one():
+    """Bounding the scan is a correctness fix, not only a speed one.
+
+    An unbounded scan looking for the first batch's missing answer would walk
+    into the SECOND batch, collect its assistant message as an interloper and
+    its results as the first batch's, then emit that assistant behind its own
+    answers — trading one illegal shape for another.
+    """
+    first, first_result, _ = _batch("toolu_1A", "toolu_1B")  # 1B never answered
+    second, second_a, second_b = _batch("toolu_2A", "toolu_2B")
+    history = [first, first_result, second, second_a, second_b]
+
+    repaired = _pair_spliced_tool_results(history)
+
+    assert [message.id for message in repaired] == [message.id for message in history]
+
+
 # --- Layer 2: end-to-end self-heal and both wires -----------------------------
 
 
