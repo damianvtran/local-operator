@@ -5,7 +5,11 @@ from pathlib import Path
 
 sys.path.insert(0, "/tmp/lop-mobile-subagent-fullscreen")
 
-from local_operator.mobile.daemon import MobileDaemon, SessionEntry, build_app  # noqa: E402
+from local_operator.mobile.daemon import (  # noqa: E402
+    MobileDaemon,
+    SessionEntry,
+    build_app,
+)
 from local_operator.mobile.types import (  # noqa: E402
     SessionProjection,
     SessionRecord,
