@@ -9,10 +9,13 @@ protocol would drift from the first, so there is none.
 
 Design constraints baked in:
 
-- **No auto-reconnect.** Owner death (socket EOF) is a DECISION POINT for the
-  hosting screen — "resume here / detach" — not something to paper over by
-  redialing a pid that may have been reused. The callback fires once and the
-  client is dead.
+- **No auto-reconnect.** Owner death (socket EOF) is terminal for the
+  CONNECTION — never papered over by redialing a pid that may have been
+  reused. The callback fires once and the client is dead. What the HOST does
+  next changed in v4: ``RemoteSession`` runs a silent reattach-or-takeover
+  loop (re-discover the owner, or become it through the normal resume
+  factory) instead of showing a decision card, but each loop iteration still
+  builds a FRESH client against a freshly discovered record.
 - **Identity over pid trust.** ``live_session_owner`` cannot probe pids on
   Windows, and a recycled pid anywhere defeats pid trust. After auth the
   registrant sends a full projection unprompted; the client requires that
@@ -100,18 +103,30 @@ def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord 
 class AttachClient:
     """One authenticated ``attach`` connection to a live session's registrant.
 
-    The host (an ``AttachScreen``) supplies two callbacks — both fire on the
-    client's own reader task, so the host must hop to its UI thread. The
-    client is single-use: after ``on_disconnected`` it is dead by design.
+    The host supplies projection/disconnect callbacks (and, in v4 events mode,
+    raw event + sync callbacks). All fire on the client's reader task, so a UI
+    host must marshal widget work onto its message pump. The client is
+    single-use: after ``on_disconnected`` it is dead by design.
     """
 
     def __init__(
         self,
         on_projection: Callable[[SessionProjection], None],
         on_disconnected: Callable[[str], None],
+        *,
+        events: bool = False,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+        on_attach_sync: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._on_projection = on_projection
         self._on_disconnected = on_disconnected
+        # v4 events mode: subscribe to the owner's raw AgentEvent relay. The
+        # callbacks receive the WIRE dicts — deserialization back into concrete
+        # AgentEvent subclasses is RemoteSession's job, so this transport stays
+        # pydantic-free and cheap to import (module docstring contract).
+        self._events = events
+        self._on_event = on_event
+        self._on_attach_sync = on_attach_sync
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -143,7 +158,12 @@ class AttachClient:
             raise ConnectionError(f"owner socket unreachable: {exc}") from exc
         self._reader = reader
         self._writer = writer
-        auth = {"key": record.control_key, "client": "attach"}
+        auth: dict[str, Any] = {"key": record.control_key, "client": "attach"}
+        if self._events:
+            # v4 capability flag. A v3 owner ignores unknown auth fields and
+            # simply never sends event frames — the caller gates on
+            # ``record.protocol >= 4`` before relying on the relay.
+            auth["events"] = True
         writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         # The welcome projection doubles as the identity check: it names the
@@ -209,6 +229,20 @@ class AttachClient:
                         )
                     except Exception:  # noqa: BLE001 — a malformed push must not kill the pump
                         continue
+                elif op == "event":
+                    # v4 relay frame. Deliver the raw dict; a callback failure
+                    # must not kill the pump (same contract as projections).
+                    if self._on_event is not None:
+                        try:
+                            self._on_event(frame.get("data") or {})
+                        except Exception:  # noqa: BLE001
+                            continue
+                elif op == "attach_sync":
+                    if self._on_attach_sync is not None:
+                        try:
+                            self._on_attach_sync(frame.get("data") or {})
+                        except Exception:  # noqa: BLE001
+                            continue
                 elif op in ("ack", "error"):
                     future = self._pending.pop(frame.get("req"), None)
                     if future is not None and not future.done():
@@ -322,8 +356,19 @@ class AttachClient:
             "approval_answer", request_id=request_id, approved=approved, remember=False
         )
 
-    async def ask_answer(self, request_id: str, value: str) -> str:
-        return await self._request("ask_answer", request_id=request_id, value=value)
+    async def ask_answer(
+        self, request_id: str, value: str, *, question_index: int | None = None
+    ) -> str:
+        fields: dict[str, Any] = {"request_id": request_id, "value": value}
+        if question_index is not None:
+            # The stale-answer guard (U8): name the question that was on
+            # screen when the user answered, so an advanced picker refuses it.
+            fields["question_index"] = question_index
+        return await self._request("ask_answer", **fields)
+
+    async def recall_steer(self, command_id: str) -> str:
+        """Unsend the queued steer submitted under ``command_id`` (v4)."""
+        return await self._request("recall_steer", command_id=command_id)
 
     async def detach(self) -> None:
         """Close the connection from our side. ``on_disconnected`` still fires

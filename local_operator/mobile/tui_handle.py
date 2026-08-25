@@ -24,10 +24,11 @@ its own ``settle`` path on the Textual loop, so the terminal screen comes down
 too and exactly one answer wins whichever front end got there first. When the
 picker settles by any route, :meth:`note_ask_settled` clears the phone card.
 
-Approvals on a TUI session are NOT answerable from the phone: the TUI boots in
-auto-approve, so it never parks an approval card the phone would need to reach
-(:meth:`approval_answer` stays a terminal-only stub). Answering approvals over
-mobile is a daemon-owned-session capability today (see :mod:`owned`).
+Protocol-v4 full-TUI followers can answer approvals mounted by the owner TUI.
+The approval is carried as follower-only pending state (never added to daemon
+projection frames, preserving the phone path byte-for-byte) and
+:meth:`approval_answer` resolves the owner's real ``ApprovalPrompt`` on the
+Textual loop, so exactly one front end wins.
 """
 
 from __future__ import annotations
@@ -41,7 +42,11 @@ from typing import TYPE_CHECKING, Any, Callable
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle, image_blocks
-from local_operator.mobile.types import SessionProjection, ask_pending_request
+from local_operator.mobile.types import (
+    PendingRequest,
+    SessionProjection,
+    ask_pending_request,
+)
 
 if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
@@ -79,6 +84,12 @@ class TuiSessionHandle(SessionHandle):
         self._fold = ProjectionFold(self._projection)
         self._on_projection: Callable[[], None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        # v4 raw-event relay subscription, separate from the projection fold:
+        # the registrant serializes/fans events to full-TUI followers while
+        # the phone continues receiving only projections. Rebound beside the
+        # projection subscription on session swaps.
+        self._on_event: Callable[[dict[str, Any]], None] | None = None
+        self._unsubscribe_events: Callable[[], None] | None = None
         # Mutated only on Textual's loop, making admission atomic even though
         # several registrant coroutines may cross from its socket thread.
         self._command_reservations = CommandReservations(session)
@@ -95,6 +106,12 @@ class TuiSessionHandle(SessionHandle):
         # too (``ask_answer`` hops onto it before touching this), so the
         # single-winner race is decided by one owner, not by dict atomicity.
         self._ask_pending: dict[str, Any] = {}
+        # Approval pending state is follower-only. The phone path did not
+        # receive TUI approvals before protocol v4 and must stay byte-identical;
+        # Registrant overlays this field only onto event-client projection
+        # frames. Ask pending remains in the ordinary fold because phones
+        # already supported TUI asks before this change.
+        self._event_pending: PendingRequest | None = None
 
     def _session(self) -> Any:
         """The app's current session. A property method (not cached) because
@@ -116,11 +133,18 @@ class TuiSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001
                 logger.debug("mobile unsubscribe failed", exc_info=True)
             self._unsubscribe = None
+        if self._unsubscribe_events is not None:
+            try:
+                self._unsubscribe_events()
+            except Exception:  # noqa: BLE001
+                logger.debug("mobile event unsubscribe failed", exc_info=True)
+            self._unsubscribe_events = None
         self._projection.session_id = session.session_id
         self._projection.transcript.clear()
         self._projection.todos.clear()
         self._projection.subagents.clear()
         self._projection.pending = None
+        self._event_pending = None
         self._fold = ProjectionFold(self._projection)
         # A /new or /resume mid-ask abandons the old picker; drop its mapping
         # so a late phone answer for a question that no longer exists reports
@@ -132,6 +156,8 @@ class TuiSessionHandle(SessionHandle):
         self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         if self._on_projection is not None:
             self.subscribe(self._on_projection)
+        if self._on_event is not None:
+            self.subscribe_events(self._on_event)
 
     # -- SessionHandle -----------------------------------------------------------
 
@@ -168,6 +194,26 @@ class TuiSessionHandle(SessionHandle):
         # ``_reconcile_streaming`` for why per-event reads are poison.
         self._reconcile_streaming()
         self._unsubscribe = unsubscribe
+        return unsubscribe
+
+    def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+        """Feed serialized AgentEvents to the registrant's v4 relay.
+
+        Serialization happens on the Textual/session loop where the event is
+        emitted. The callback itself is thread-safe (Registrant._relay_event
+        only schedules onto its own loop), so this preserves producer order
+        without moving pydantic objects across threads.
+        """
+        self._on_event = on_event
+
+        def handler(event: Any) -> None:
+            try:
+                on_event(event.model_dump(mode="json"))
+            except Exception:  # noqa: BLE001 — relay is additive, never a gate
+                logger.debug("mobile event serialization failed", exc_info=True)
+
+        unsubscribe = self._session().subscribe(handler)
+        self._unsubscribe_events = unsubscribe
         return unsubscribe
 
     # -- mutations: every one hops to the Textual thread ---------------------------
@@ -259,6 +305,21 @@ class TuiSessionHandle(SessionHandle):
             self._on_projection()
         return "steering queued"
 
+    async def recall_steer(self, command_id: str) -> str:
+        """Recall one queued steer by the Message id its producer supplied."""
+
+        def do_recall() -> bool:
+            session = self._session()
+            for message in session.queued_steering():
+                if str(getattr(message, "id", "")) == command_id:
+                    return bool(session.recall_steering(message))
+            return False
+
+        if not await self._on_app(do_recall):
+            raise ValueError("that steering message is no longer queued")
+        self._command_reservations.reject(command_id)
+        return "steering recalled"
+
     async def abort(self) -> str:
         await self._on_app(self._app._interrupt)
         return "stopping"
@@ -307,11 +368,25 @@ class TuiSessionHandle(SessionHandle):
         return f"resumed {session_id}"
 
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
-        # A TUI session boots in auto-approve (OperatorApp._load_approvals_default),
-        # so it never parks an approval card the phone could reach. Answering
-        # approvals over mobile is a daemon-owned-session capability (owned.py);
-        # keep the honest terminal-only stub rather than pretend otherwise.
-        raise ValueError("this approval is on the terminal — answer it there")
+        """Settle the owner's real ApprovalPrompt from another front end.
+
+        The prompt's ``resolve`` is idempotent and runs on Textual's loop, so
+        terminal, phone and follower answers share one arbitration point. A
+        stale request id is rejected rather than applied to the next prompt.
+        """
+
+        def settle() -> bool:
+            prompt = self._app._approval
+            if prompt is None or prompt.answered:
+                return False
+            if getattr(prompt, "_mobile_request_id", "") != request_id:
+                return False
+            prompt.resolve(approved, answer="y" if approved else "n")
+            return True
+
+        if not await self._on_app(settle):
+            raise ValueError("that approval is no longer waiting")
+        return "approved" if approved else "denied"
 
     async def ask_answer(
         self, request_id: str, value: str, question_index: int | None = None
@@ -405,7 +480,41 @@ class TuiSessionHandle(SessionHandle):
         # path. See ``_reconcile_streaming``.
         self._reconcile_streaming()
 
-    # -- ask-picker mirroring ----------------------------------------------------
+    # -- approval / ask mirroring ---------------------------------------------
+
+    def note_approval_pending(self, card: Any) -> None:
+        """Project the owner's real approval prompt to v4 followers.
+
+        The request id is stored on the prompt itself because approvals are
+        serialized and the prompt is the one arbitration object every answer
+        route ultimately resolves. The phone also sees this projection, gaining
+        parity rather than a second approval-specific channel.
+        """
+        request_id = secrets.token_hex(8)
+        setattr(card, "_mobile_request_id", request_id)
+        self._event_pending = PendingRequest(
+            request_id=request_id,
+            kind="approval",
+            title=str(getattr(card, "tool_name", "") or "tool approval"),
+            detail=str(getattr(card, "description", "") or ""),
+        )
+        if self._on_projection is not None:
+            self._on_projection()
+
+    def note_approval_settled(self, card: Any) -> None:
+        """Remove exactly this prompt's projected approval, on every exit path."""
+        request_id = str(getattr(card, "_mobile_request_id", "") or "")
+        if not request_id:
+            return
+        if self._event_pending is not None and self._event_pending.request_id == request_id:
+            self._event_pending = None
+        if self._on_projection is not None:
+            self._on_projection()
+
+    @property
+    def event_pending(self) -> PendingRequest | None:
+        """Follower-only gate overlaid by Registrant on event clients."""
+        return self._event_pending
 
     def note_ask_pending(self, card: Any) -> None:
         """Project a freshly mounted TUI ask picker to the phone as an

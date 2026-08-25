@@ -451,8 +451,8 @@ async def test_resume_of_a_live_session_does_not_open_a_second_writer(
         # The refuse is a system notice (splash stays), not the slash
         # receipt callback — look at the transcript, not ``notices``.
         text = _transcript_text(app)
-        assert "already open" in text
-        assert "pid 4242" in text
+        assert "open in an older Local Operator process" in text
+        assert "pid" in text and "4242" in text
         assert "second writer" not in text
         assert app._session is session
         # Splash survives a refused navigation (D1).
