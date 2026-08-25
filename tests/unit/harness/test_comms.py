@@ -1374,6 +1374,38 @@ def test_the_roster_still_lists_a_child_whose_job_row_was_swept(tmp_path):
     assert "provider 500" in (row.detail or "")
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "expected", "result", "error"),
+    [
+        ("completed", "cancelled", "completed", "finished report", None),
+        ("failed", "cancelled", "failed", None, "provider 500"),
+        ("cancelled", "failed", "failed", None, "provider 500"),
+        ("failed", "completed", "completed", "finished report", None),
+    ],
+)
+def test_terminal_outcomes_only_advance_in_precedence(first, second, expected, result, error):
+    """Late runner observations cannot regress a stronger terminal fact.
+
+    ``completed`` wins because a returned result proves the work finished;
+    ``failed`` next because a captured exception proves how it stopped; bare
+    cancellation is weakest because it only says the task was interrupted.
+    """
+    comms, _jobs, _child, _parent = wire()
+    payloads = {
+        "completed": {"result_text": "finished report"},
+        "failed": {"error_text": "provider 500"},
+        "cancelled": {},
+    }
+
+    comms.record_outcome("job-1", first, **payloads[first])
+    comms.record_outcome("job-1", second, **payloads[second])
+    [row] = comms.roster()
+
+    assert row.status == expected
+    assert row.result_text == result
+    assert row.error_text == error
+
+
 def test_completed_payload_survives_snapshot_restore_and_job_sweep(tmp_path):
     comms, _jobs, _child, _parent = wire()
     comms.attach("job-1", FakeChild(), tmp_path)

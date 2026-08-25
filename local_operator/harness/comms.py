@@ -579,8 +579,12 @@ class SubagentComms:
         status: str,
         error_text: str | None = None,
         result_text: str | None = None,
-    ) -> None:
+    ) -> tuple[str, str | None, str | None] | None:
         """Remember how a child settled, before its job row is swept.
+
+        Returns the resolved ``(status, error, result)`` so a caller interrupted
+        during end-event fan-out can emit the already-winning terminal fact
+        instead of inventing a contradictory cancellation event.
 
         Called from the subagent runner's settle paths. The job manager drops
         settled rows after its retention window while records here outlive
@@ -596,10 +600,32 @@ class SubagentComms:
         """
         record = self._records.get(job_id)
         if record is None:
-            return
+            return None
+
+        # Cancellation is an observation that the runner task was interrupted,
+        # not evidence that work which already returned a result or raised an
+        # error did not settle. End-event fan-out is awaited after those facts
+        # are recorded, so a cancel can arrive in that window. Terminal facts
+        # therefore only move upward in certainty: cancelled < failed <
+        # completed. The winning fact owns its payload; repeated writes of the
+        # same fact may fill a payload that an earlier persistence pass lacked.
+        precedence = {"cancelled": 0, "failed": 1, "completed": 2}
+        current = record.outcome
+        if current in precedence and precedence.get(status, -1) < precedence[current]:
+            # Membership narrows this for human readers; pyright needs it explicit.
+            assert current is not None
+            return current, record.error_text, record.result_text
+        if current == status:
+            assert current is not None
+            if result_text is not None:
+                record.result_text = result_text
+            if error_text is not None:
+                record.error_text = error_text
+            return current, record.error_text, record.result_text
         record.outcome = status
         record.result_text = result_text
         record.error_text = error_text
+        return status, error_text, result_text
 
     def roster(self) -> list[ChildInfo]:
         """Every child this session launched, live or long settled.

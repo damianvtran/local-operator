@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from local_operator.harness.comms import SubagentComms
 from local_operator.harness.types import (
     AbortSignal,
     AgentEvent,
@@ -27,6 +28,7 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentStartEvent,
 )
+from local_operator.mobile.projection import ProjectionFold, SessionProjection
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 
@@ -118,6 +120,53 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert any("background job 'sub' completed" in m.text for m in stream.requests[1].messages)
 
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completion_survives_cancellation_during_end_event_fanout(tmp_path, monkeypatch):
+    """A result is final before its end event fan-out begins.
+
+    Cancellation can still interrupt that awaited fan-out, but it must not
+    rewrite the durable result or emit a contradictory terminal event. The
+    restored projection models the reconnect after the manager row was swept.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    end_emit_started = asyncio.Event()
+    completed_events: list[SubagentEndEvent] = []
+
+    async def suspend_first_completed_end(event: AgentEvent) -> None:
+        if not isinstance(event, SubagentEndEvent) or event.status != "completed":
+            return
+        completed_events.append(event)
+        if len(completed_events) == 1:
+            end_emit_started.set()
+            await asyncio.Event().wait()
+
+    parent.subscribe(suspend_first_completed_end)
+    job_id = parent._launch_subagent(label="sub", prompt="go do a thing")
+    await asyncio.wait_for(end_emit_started.wait(), timeout=5)
+
+    assert await parent.jobs.cancel(job_id) is True
+    snapshot = parent.subagent_comms.snapshot()
+    restored_parent = make_session(tmp_path / "restored", OneShotStream())
+    restored = SubagentComms(restored_parent)
+    restored.restore(snapshot)
+    fold = ProjectionFold(SessionProjection(session_id="restored", pid=1))
+    fold.set_subagent_details(restored)
+    [row] = fold.projection.subagents
+
+    assert [(event.status, event.result_text) for event in completed_events] == [
+        ("completed", "child did the work"),
+        ("completed", "child did the work"),
+    ]
+    assert row.status == "completed"
+    assert row.result_text == "child did the work"
+    assert row.error_text == ""
+    assert row.progress == ""
+    assert row.activity == ""
+    await parent.dispose()
+    await restored_parent.dispose()
 
 
 def _agent_fields(**overrides):

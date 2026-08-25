@@ -438,11 +438,19 @@ def _make_runner(
             # arrives here too (it cancels underneath); record_outcome leaves
             # the record's ``paused`` flag alone precisely so the roster can
             # still tell the two apart.
-            if comms is not None:
-                comms.record_outcome(job_id, "cancelled")
+            outcome = comms.record_outcome(job_id, "cancelled") if comms is not None else None
+            status, error_text, result_text = outcome or ("cancelled", None, None)
             with contextlib.suppress(BaseException):
                 await asyncio.shield(
-                    emit(SubagentEndEvent(job_id=job_id, label=label, status="cancelled"))
+                    emit(
+                        SubagentEndEvent(
+                            job_id=job_id,
+                            label=label,
+                            status=status,
+                            error_text=error_text,
+                            result_text=result_text,
+                        )
+                    )
                 )
             raise
         except Exception as exc:
