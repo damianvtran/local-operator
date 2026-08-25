@@ -101,11 +101,12 @@ export function useProjection(sessionId: string): ProjectionSlot {
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 15000;
 
-function openEventStream(
+export function openEventStream(
 	url: string,
 	event: string,
 	onData: (data: string) => void,
 	onOpen: () => void,
+	onDisconnect: () => void,
 ): () => void {
 	let closed = false;
 	let attempt = 0;
@@ -127,6 +128,7 @@ function openEventStream(
 			es?.close();
 			es = null;
 			if (closed) return;
+			onDisconnect();
 			const delay = Math.min(
 				BACKOFF_MAX_MS,
 				BACKOFF_MIN_MS * 2 ** attempt++,
@@ -170,6 +172,10 @@ export function retainSessionListStream(): () => void {
 			},
 			() => {
 				sessionsConnected = true;
+				emit();
+			},
+			() => {
+				sessionsConnected = false;
 				emit();
 			},
 		);
@@ -223,6 +229,16 @@ export function retainProjectionStream(sessionId: string): () => void {
 				const cur = projections.get(sessionId);
 				if (cur) {
 					projections.set(sessionId, { ...cur, connected: true });
+					emit();
+				}
+			},
+			() => {
+				const cur = projections.get(sessionId);
+				if (cur) {
+					/* Retain the last good projection while making its staleness
+					   explicit. Recovery swaps only the connection flag until a fresh
+					   frame arrives, so a flaky link never blanks selected detail. */
+					projections.set(sessionId, { ...cur, connected: false });
 					emit();
 				}
 			},

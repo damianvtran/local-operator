@@ -1,0 +1,28 @@
+Fixture: .venv/bin/python docs/evidence/mobile-subagent-fullscreen/fixture.py
+Credentials used only by the local review fixture: fixture-review
+
+API proof:
+GET /api/sessions/fixture-root/agents/child
+-> child version=41 transcript=3 todo_phases=1 child_ids=[grandchild]
+GET /api/sessions/fixture-root/agents/peer-complete
+-> completed result_text_bytes=647
+
+390x844 geometry:
+back button 44x44; root lineage 48.94x44
+inner 390x844; body 390x844; document 390x844
+
+360x780 geometry:
+inner 360x780; body 360x780; document 360x780
+completed transcript scroll surface client=644 scroll=644
+handoff section client=408 scroll=408 overflow=visible
+Markdown PR link count=1
+
+Navigation:
+direct grandchild Header Back -> #/s/fixture-root/a/child
+child -> grandchild click; browser Back -> child; browser Forward -> grandchild
+Header Back from in-app grandchild -> child; reload retained child route
+
+Connection recovery:
+controlled post-connect SSE close -> "connection lost · reconnecting with cached agent detail…"
+cached transcript/tool/todo/child roster remained visible
+stream retry after fixture recovery cleared banner and retained #/s/fixture-root/a/child

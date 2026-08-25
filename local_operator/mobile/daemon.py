@@ -578,7 +578,18 @@ class MobileDaemon:
             expired = self._subagent_detail_sessions.pop(0)
             for key in [key for key in self.subagent_details if key[0] == expired]:
                 self.subagent_details.pop(key, None)
-        for row in projection.subagents[:256]:
+        # Every summary published in the roster must resolve through the detail
+        # route. The process already bounds concurrent jobs; settled lineage is
+        # intentionally durable, so a second arbitrary 256-row cache bound made
+        # older rendered rows deterministic 404s in long-lived sessions.
+        published_ids = {row.job_id for row in projection.subagents}
+        for key in [
+            key
+            for key in self.subagent_details
+            if key[0] == session_id and key[1] not in published_ids
+        ]:
+            self.subagent_details.pop(key, None)
+        for row in projection.subagents:
             detail = row.to_json()
             detail["version"] = projection.version
             self.subagent_details[(session_id, row.job_id)] = detail

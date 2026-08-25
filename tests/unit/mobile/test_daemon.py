@@ -221,6 +221,23 @@ def test_subagent_summary_detail_and_child_history_are_isolated(tmp_path, monkey
     assert client.get("/api/sessions/root-session/agents/not-related").status_code == 404
 
 
+def test_every_published_subagent_resolves_beyond_legacy_256_limit() -> None:
+    """A rendered roster row must never lead to a deterministic detail 404."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    projection = SessionProjection(session_id="root-session", pid=9, version=11)
+    projection.subagents = [
+        SubagentRow(job_id=f"job-{index:03d}", label=f"child {index}") for index in range(300)
+    ]
+    daemon.capture_subagent_details(projection)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    assert len(projection.subagents) == 300
+    assert client.get("/api/sessions/root-session/agents/job-000").status_code == 200
+    assert client.get("/api/sessions/root-session/agents/job-256").status_code == 200
+    assert client.get("/api/sessions/root-session/agents/job-299").status_code == 200
+
+
 def test_unknown_session_command_is_a_409() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     app = build_app(daemon)

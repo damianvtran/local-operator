@@ -8,7 +8,7 @@
  * Auto-scroll: the view follows the tail only while the user is already at
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
@@ -176,11 +176,17 @@ export function Transcript({
 	entries,
 	jobId,
 	scrollKey = `${pid}:${jobId ?? "root"}`,
+	tailContent,
+	emptyContent,
 }: {
 	pid: string;
 	entries: TranscriptEntry[];
 	jobId?: string;
 	scrollKey?: string;
+	/** Lifecycle outcomes belong in the conversation's one discoverable scroll
+	 * surface, not in a clipped nested footer beneath it. */
+	tailContent?: ReactNode;
+	emptyContent?: ReactNode;
 }) {
 	const [windowSize, setWindowSize] = useState(PAGE);
 	/* Older entries the daemon served, PREPENDED above the live window. The
@@ -338,6 +344,8 @@ export function Transcript({
 					<Entry entry={e} pid={pid} />
 				</RowBoundary>
 			))}
+			{visible.length === 0 ? emptyContent : null}
+			{tailContent}
 		</div>
 	);
 }
