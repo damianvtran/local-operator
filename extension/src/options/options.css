@@ -1,0 +1,245 @@
+/* The extension options page, in Local Operator's design language — the same
+ * system the OAuth/MCP auth-callback page uses (local_operator/callback_page.py).
+ * Tokens copied VERBATIM (names kept) from that page's :root and its
+ * prefers-color-scheme:dark block. Unlike the 300px popup this page is wide
+ * enough to carry the masked dot field (motif M5), hidden below 520px exactly
+ * as the callback page hides it.
+ *
+ * Preserves every review fix: live pairing status (D8), empty state (D8),
+ * confirmations (U7), long origins wrap with the Remove action intact (D8),
+ * AA/AAA contrast on the warm tokens (D6). */
+:root {
+  color-scheme: light;
+  --paper: #f7f4ee;
+  --surface: #fcfbf7;
+  --sunken: #efece3;
+  --ink: #211e18;
+  --ink-muted: #565147;
+  --ink-dim: #6c675c;
+  --hairline: #e5e0d5;
+  --hairline-strong: #d5cfc2;
+  --success: #1e7b4e;
+  --danger: #b23a31;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --paper: #16130e;
+    --surface: #1e1a14;
+    --sunken: #0f0c08;
+    --ink: #f1eee6;
+    --ink-muted: #b5afa2;
+    --ink-dim: #918b7d;
+    --hairline: #2b2619;
+    --hairline-strong: #3b3527;
+    --success: #57c785;
+    --danger: #ef8078;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+html {
+  height: 100%;
+}
+/* SAFE centring, as the callback page: align-content gives away free space only
+ * when there is some, so a too-tall page can only ever overflow downward. */
+body {
+  margin: 0;
+  min-height: 100%;
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  padding: 40px 24px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Motif M5: a 1px dot on a 24px pitch, masked so it fades before the edges.
+ * The one texture the system allows; hidden on small viewports where it would
+ * read as noise rather than texture. Copied from the callback page's .field. */
+.field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle at 1px 1px, var(--hairline-strong) 1px, transparent 0);
+  background-size: 24px 24px;
+  -webkit-mask-image: radial-gradient(120% 80% at 50% 42%, #000 20%, transparent 72%),
+    linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%),
+    linear-gradient(to bottom, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  mask-image: radial-gradient(120% 80% at 50% 42%, #000 20%, transparent 72%),
+    linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%),
+    linear-gradient(to bottom, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+}
+@media (max-width: 520px) {
+  .field {
+    display: none;
+  }
+}
+
+main {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 34rem;
+}
+
+/* Page identity: the shared vector mark in --ink beside a serif wordmark. */
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 24px;
+}
+.mark {
+  width: 28px;
+  height: 28px;
+  color: var(--ink);
+  flex: none;
+}
+h1 {
+  margin: 0;
+  font-family: ui-serif, "Iowan Old Style", Georgia, "Palatino Linotype",
+    "URW Palladio L", serif;
+  font-size: 1.75rem;
+  line-height: 1.1;
+  font-weight: 400;
+  letter-spacing: -0.022em;
+  color: var(--ink);
+}
+
+/* Cards by the system reading: 10px radius, one hairline, NO shadow. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin-bottom: 16px;
+}
+/* Section headings in the monospace uppercase register — the callback page's
+ * .label / .wordmark voice for a small heading. */
+h2 {
+  margin: 0 0 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.status {
+  margin: 0 0 16px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.field-label {
+  display: block;
+  margin: 12px 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+input[type="number"] {
+  width: 8rem;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+}
+input:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+.hint {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+.btn {
+  appearance: none;
+  padding: 8px 14px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn:hover {
+  background: var(--sunken);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+.btn.danger {
+  margin-top: 16px;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.btn.danger:hover {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+}
+.confirm {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--success);
+}
+.empty {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--ink-dim);
+}
+
+/* Allowed-sites rows: hairline-separated, the origin in monospace so a long
+ * host wraps at sensible points while the Remove action stays put (D8). */
+ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--hairline);
+}
+li:first-child {
+  border-top: none;
+}
+li span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+li .btn {
+  flex: none;
+}
+
+.hidden {
+  display: none !important;
+}

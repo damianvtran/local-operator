@@ -24,6 +24,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
 
     assert [guide.name for guide in guides] == [
         "agents",
+        "browser",
         "configuration",
         "extensions",
         "mcp",
