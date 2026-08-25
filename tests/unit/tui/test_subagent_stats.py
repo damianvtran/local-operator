@@ -32,6 +32,7 @@ from local_operator.tui.widgets.status_line import StatusLine, SubagentBand
 from local_operator.tui.widgets.subagent_panel import (
     ACTIVITY_FLOOR,
     LABEL_FLOOR,
+    ROLE_CEILING,
     JobStats,
     SubagentPanel,
     SubagentRow,
@@ -121,7 +122,7 @@ def _plain(job: Job, width: int, *, parent: str = PARENT_MODEL, current: bool = 
     """One row as the string a reader sees, laid out alone at ``width``."""
     facts = row_facts(job, fallback_id=job.id, current=current)
     stats = job_stats(job, default_model_label=parent)
-    rung, column, clock = panel_layout([(facts, stats)], width)
+    rung, column, clock, role_column = panel_layout([(facts, stats)], width)
     return compose_row(
         facts=facts,
         stats=stats,
@@ -130,6 +131,7 @@ def _plain(job: Job, width: int, *, parent: str = PARENT_MODEL, current: bool = 
         rung=rung,
         column=column,
         clock=clock,
+        role_column=role_column,
     ).plain
 
 
@@ -142,7 +144,7 @@ def _column(jobs: list[Job], width: int) -> list[str]:
         )
         for job in jobs
     ]
-    rung, column, clock = panel_layout(measured, width)
+    rung, column, clock, role_column = panel_layout(measured, width)
     return [
         compose_row(
             facts=f,
@@ -152,6 +154,7 @@ def _column(jobs: list[Job], width: int) -> list[str]:
             rung=rung,
             column=column,
             clock=clock,
+            role_column=role_column,
         ).plain
         for f, s in measured
     ]
@@ -520,11 +523,17 @@ def test_the_role_column_is_monotone_in_width() -> None:
     surface must not grow one of its own.
     """
     job = Job(label="review-301-r2", progress="auditing merged MRs", agent_role="reviewer")
-    was_present = True
-    for width in range(120, 53, -1):
-        present = "reviewer" in _plain(job, width)
-        assert not (present and not was_present), f"role reappeared at {width}"
-        was_present = present
+    # BOTH branches: ``compose_row`` renders the current row through a separate
+    # path (the page is already showing that child, so the row drops the glyph,
+    # the clock and the activity), and the role was threaded into that path
+    # too. Sweeping only the ordinary branch would leave the one the reader
+    # sees while a page is open unasserted (agent review round 1, R3).
+    for current in (False, True):
+        was_present = True
+        for width in range(120, 53, -1):
+            present = "reviewer" in _plain(job, width, current=current)
+            assert not (present and not was_present), f"role reappeared at {width} ({current=})"
+            was_present = present
 
 
 def test_a_role_row_never_overruns_the_width_it_was_given() -> None:
@@ -534,6 +543,69 @@ def test_a_role_row_never_overruns_the_width_it_was_given() -> None:
         job = Job(label="review-301-r2", progress="auditing merged MRs", agent_role=role)
         for width in range(120, 19, -1):
             assert cell_len(_plain(job, width)) <= width, f"{role} at {width}"
+
+
+def test_the_role_is_a_shared_column_so_the_numbers_stay_aligned() -> None:
+    """What follows the role starts in the SAME cell on every row.
+
+    An inline role of a different length per row shoved that row's context,
+    cost and activity sideways by a different amount: four `$` signs that had
+    formed a vertical line sat at four x positions, and the plain-task row was
+    worst, its whole tail pulled left of its peers. Comparing two children's
+    spend is a scan down a column, so there has to be a column (design review
+    round 1, D1).
+    """
+    jobs = [
+        Job("j1", "resume-team-state", progress="wiring the resume path", agent_role="coder"),
+        Job("j2", "review-301-r2", progress="auditing merged MRs", agent_role="reviewer"),
+        Job("j3", "design-301-r2", progress="capturing frames", agent_role="designer"),
+        Job("j4", "sweep-notes", progress="collecting notes"),  # no role at all
+    ]
+    for job in jobs:
+        job.usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
+    rows = _column(jobs, 110)
+    starts = [row.index("%/") for row in rows]
+    assert len(set(starts)) == 1, rows
+    # The roleless row pays the column as WHITESPACE, not as a seam separating
+    # nothing: a lone `·` reads as a missing value rather than as a child with
+    # nothing to say.
+    assert " ·  · " not in rows[3]
+
+
+def test_one_long_role_does_not_evict_its_peers_roles() -> None:
+    """Role names are operator-authored and uncapped, and the column is shared,
+    so an untruncated 34-cell specialist name would decide for the whole dock
+    whether ANYBODY gets a role. Bounding it keeps the cost per roster
+    predictable (design review round 1, D2)."""
+    long_name = "enrichment-data-quality-specialist"
+    jobs = [
+        Job("j1", "review-301-r2", progress="auditing merged MRs", agent_role="reviewer"),
+        Job("j2", "dq-child", progress="scoring records", agent_role=long_name),
+    ]
+    for job in jobs:
+        job.usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
+    rows = _column(jobs, 100)
+    assert "reviewer" in rows[0], rows
+    assert long_name not in rows[1], "the role is rendered untruncated"
+    assert cell_len(_plain(jobs[1], 200).split("·")[1].strip()) <= ROLE_CEILING
+
+
+def test_the_role_never_costs_the_activity_a_single_cell() -> None:
+    """The ladder's stated rule, applied to the field that was breaking it.
+
+    The role is "the most disposable field"; the activity is "never traded for
+    a number". Charging the role against the activity's budget inverted both at
+    once, and made narrowing the terminal LENGTHEN the activity. A role is now
+    offered only where it is free (design review round 1, D3).
+    """
+    with_role = Job(label="review-301-r2", progress="auditing merged MRs", agent_role="reviewer")
+    without = Job(label="review-301-r2", progress="auditing merged MRs")
+    for job in (with_role, without):
+        job.usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
+    for width in range(200, 39, -1):
+        shown = _plain(with_role, width).split("    ")[-1]
+        bare = _plain(without, width).split("    ")[-1]
+        assert cell_len(shown) >= cell_len(bare), f"role shortened the activity at {width}"
 
 
 def test_a_plain_task_row_is_unchanged_by_the_role_column() -> None:
@@ -867,6 +939,47 @@ async def test_a_mounted_panel_lays_out_against_the_screen_not_its_own_width() -
             assert "%" in row, row  # the context stayed, shortened
         # Both rows shed the same field, so a blank cost means one thing.
         assert "auditing merged" in rows[0] and "running 3 tools" in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_an_overgrown_panel_charges_the_rail_padding_to_its_ceiling() -> None:
+    """The screen ceiling must be net of `.band-body`'s own `padding: 0 1`.
+
+    `#band` is `width: auto`, so a long row grows the panel PAST the screen and
+    the surplus is clipped. The ladder clamps to the screen for exactly that
+    case — but the rows sit inside `.band-body`, which is `padding: 0 1`, and
+    Textual is border-box, so a row never has more than `screen - 2` cells. An
+    unpadded ceiling therefore handed the ladder two cells that do not exist:
+    it kept a rung the terminal could not show, and the row lost its tail to a
+    hard cut with no ellipsis, which is the exact failure the ceiling exists to
+    prevent. Read off the container rather than hardcoded, so a stylesheet
+    change to the rail cannot silently desync it (agent review round 1, R1).
+    """
+    jobs = [
+        Job(
+            "j1",
+            "a-deliberately-long-child-label-that-overgrows-the-dock",
+            progress="auditing merged MRs and then some more words",
+            usage=Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200),
+        )
+    ]
+    session = FakeSession()
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(60, 40)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+        panel.sync(session)
+        await pilot.pause()
+        panel._tick()
+        await pilot.pause()
+
+        screen = app.screen.size.width
+        padding = panel._list.styles.padding
+        assert padding.left + padding.right == 2, "the rail's padding is the premise"
+        # The panel really did over-grow; otherwise this asserts nothing.
+        assert panel.size.width >= screen
+        assert panel._row_width() == screen - 2
 
 
 @pytest.mark.asyncio

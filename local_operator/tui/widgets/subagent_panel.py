@@ -99,6 +99,22 @@ ACTIVITY_FLOOR = 16
 #: indistinguishable — which is the one thing a list of rows may not do.
 LABEL_FLOOR = 12
 
+#: The widest a ROLE segment may be before it is truncated with the usual `…`.
+#:
+#: Role names are operator-authored (`agent op=create`) and have no length cap,
+#: and the `agent`/`team` tooling actively encourages descriptive specialist
+#: names — `user-dashboard-agent` is 20 cells, and nothing stops a 60-cell one.
+#: Left unbounded the segment is a per-LIST cost paid by every row: the longest
+#: role in the roster decides whether ANYBODY gets one, so a single verbose
+#: specialist silently strips the role from its short-named peers and the
+#: feature reads as "the role column is gone again" (design review round 1, D2).
+#: Fourteen holds every packaged role whole (`ux-reviewer` is the longest at 11)
+#: and `architect`, `designer`, `reviewer` and `coder` with room to spare, while
+#: keeping the shared column below in the same order of magnitude as the label's
+#: own floor. A truncated role still identifies the child: it is a disambiguator
+#: beside the label, not the label itself.
+ROLE_CEILING = 14
+
 #: Width the ladder assumes before the first layout has measured a row. Wide
 #: rather than narrow on purpose: an over-generous guess degrades to Rich's
 #: own ellipsis at the row's real edge, while an under-generous one would shed
@@ -414,7 +430,10 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #:    disposable field (``subagent_view._title_row``): the role is identity
 #:    sugar the label already half-carries, and it is re-derivable by opening
 #:    the page, where a state or a number is not. The two surfaces are read in
-#:    one glance and must not rank the same field differently.
+#:    one glance and must not rank the same field differently. It is also the
+#:    only rung whose acceptance is CONDITIONAL: :func:`_row_rung` rejects it
+#:    whenever keeping the role would shorten the activity, so the rule below
+#:    stays true of the role too and the role costs only what is free.
 #: 1. COST sheds next — it is monotonic and slow, and nothing an operator
 #:    acts on inside a second.
 #: 2. CONTEXT then SHORTENS before it drops: ``5%`` keeps the segment for two
@@ -456,7 +475,14 @@ _RUNGS: tuple[tuple[str, bool, bool, int | None], ...] = (
 )
 
 
-def _row_rung(facts: RowFacts, stats: JobStats, width: int, column: int, clock: int = 0) -> int:
+def _row_rung(
+    facts: RowFacts,
+    stats: JobStats,
+    width: int,
+    column: int,
+    clock: int = 0,
+    role_column: int = 0,
+) -> int:
     """The LEAST-REDUCED rung this row still reads correctly at.
 
     Walks :data:`_RUNGS` widest-first and takes the first that fits, so a
@@ -464,16 +490,38 @@ def _row_rung(facts: RowFacts, stats: JobStats, width: int, column: int, clock: 
     the reduction every row can live with. Well-founded because both the
     numbers and the label budget are non-increasing in the index, so
     acceptance is monotone and the first hit is the answer.
+
+    The ROLE rung is additionally rejected when keeping the role would cost the
+    row a shorter ACTIVITY than dropping it would (D3). The ladder's stated
+    principle is that the activity is never traded for a number — it is the
+    row's only statement of what the child is DOING, where the role is
+    identity sugar the label already half-carries and is re-derivable by
+    opening the page. Charging the role against the activity's budget inverted
+    that: between 82 and 84 cells the operator lost words of the activity to
+    keep a word they could infer, and narrowing from 82 to 81 then made the
+    activity spring back LONGER, a new non-monotonic jump in the band this
+    column created. Comparing the two candidate layouts directly is what keeps
+    the code honest to the docstring; the role now costs only where it is free.
     """
     for index in range(len(_RUNGS)):
-        label, role, context, cost, activity = _lay_out(facts, stats, width, index, column, clock)
+        label, role, context, cost, activity = _lay_out(
+            facts, stats, width, index, column, clock, role_column
+        )
         head = (
             _CHROME_CELLS
             + max(cell_len(label), column)
             + max(cell_len(facts.elapsed), clock)
             + _glyph_cells(facts)
+            + _role_cells(index, role, role_column)
         )
-        numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (role, context, cost) if part)
+        numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (context, cost) if part)
+        if role and facts.activity:
+            # What this row's activity would be one rung down, i.e. with the
+            # role shed and nothing else changed. Only rung 0 carries a role,
+            # so index + 1 is exactly the no-role counterpart of this layout.
+            without = _lay_out(facts, stats, width, index + 1, column, clock, role_column)[4]
+            if cell_len(activity) < cell_len(without):
+                continue
         if not facts.activity:
             if head + numbers <= width:
                 return index
@@ -514,14 +562,50 @@ def _glyph_cells(facts: RowFacts) -> int:
     return max(_GLYPH_COL, cell_len(glyph))
 
 
+def _role_width(rung: int, role: str, role_column: int) -> int:
+    """Cells the role FIELD occupies on one row, seam EXCLUDED.
+
+    One definition shared by the two measurement sites and the painter, because
+    a budget computed one way and spent another is exactly how a row ends up
+    one cell over its width. The width is the shared ``role_column`` rather
+    than this row's own role, so a roleless row pays the same as its peers and
+    the seam run after it stays put (D1).
+
+    Zero at any rung that has already SHED the role: a rung with no role at all
+    must charge nothing, or the blank column would be paid for at every width
+    below the role's own rung and the ladder would hand the activity fewer
+    cells than it had before this field existed.
+    """
+    if not _RUNGS[min(rung, len(_RUNGS) - 1)][2]:
+        return 0
+    return max(role_column, cell_len(role))
+
+
+def _role_cells(rung: int, role: str, role_column: int) -> int:
+    """:func:`_role_width` plus the seam that precedes it, or zero for neither."""
+    width = _role_width(rung, role, role_column)
+    return len(STATS_SEAM) + width if width else 0
+
+
 def _lay_out(
-    facts: RowFacts, stats: JobStats, width: int, rung: int, column: int = 0, clock: int = 0
+    facts: RowFacts,
+    stats: JobStats,
+    width: int,
+    rung: int,
+    column: int = 0,
+    clock: int = 0,
+    role_column: int = 0,
 ) -> tuple[str, str, str, str, str]:
     """``(label, role, context, cost, activity)`` exactly as ``rung`` paints them.
 
     ``column`` is the shared label width the row will be padded to; the
     activity is measured against it, not against this row's own label, or a
     short-labelled row would be handed slack the padding is about to spend.
+
+    ``role_column`` is the same idea for the role: the width EVERY row's role
+    field occupies, so what follows it starts in one vertical line instead of
+    being shoved sideways by each row's own role length. Zero means "lay this
+    row out alone", which is what a caller measuring a single row wants.
     """
     spelling, keep_cost, keep_role, budget = _RUNGS[min(rung, len(_RUNGS) - 1)]
     # The last rungs carry no reading at all; every other spelling is one the
@@ -532,12 +616,9 @@ def _lay_out(
         if spelling == "none"
         else context_spelling(stats.context_tokens, stats.context_window, form=spelling)
     )
-    # A row with no role to show pays nothing for the column at any rung: the
-    # segment is per-ROW, unlike cost, which sheds for the whole list at once
-    # so a blank cell there cannot be read as "did not fit". Here a missing
-    # role means the child is a plain task, which is the same thing the
-    # full-page title says by omitting it.
-    role = facts.agent_role if keep_role else ""
+    # Bounded before it is measured, so one verbose specialist cannot make the
+    # shared column below 34 cells wide and evict its peers' roles (D2).
+    role = truncate_cells(facts.agent_role, ROLE_CEILING) if keep_role else ""
     if not keep_cost:
         cost = ""
     elif stats.cost is not None:
@@ -558,38 +639,75 @@ def _lay_out(
         + max(cell_len(label), column)
         + max(cell_len(facts.elapsed), clock)
         + _glyph_cells(facts)
+        # The role is charged as a COLUMN, not as a number: every row pays the
+        # shared width whether or not it has a role to put in it, which is what
+        # keeps the context, the cost and the activity on one vertical line
+        # (D1). A row that suppresses its role therefore pays for the blank and
+        # stays flush with its peers, instead of pulling its whole tail left.
+        + _role_cells(rung, role, role_column)
     )
-    numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (role, context, cost) if part)
+    numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (context, cost) if part)
     room = width - head - numbers - ACTIVITY_GAP
     activity = truncate_cells(facts.activity, room) if facts.activity and room > 0 else ""
     return label, role, context, cost, activity
 
 
-def panel_layout(rows: Sequence[tuple[RowFacts, JobStats]], width: int) -> tuple[int, int, int]:
-    """``(rung, label column)`` for the whole list — the panel's one layout.
+def panel_layout(
+    rows: Sequence[tuple[RowFacts, JobStats]], width: int
+) -> tuple[int, int, int, int]:
+    """``(rung, label column, clock, role column)`` — the panel's one layout.
 
-    Two decisions that cannot be made apart. The rung says which fields every
-    row carries; the column says where they sit, so that two children's spend
+    Decisions that cannot be made apart. The rung says which fields every
+    row carries; the columns say where they sit, so that two children's spend
     can be compared by looking down instead of reading across. Padding costs
     the shorter rows cells they were spending on activity slack, which can
-    push a row under its floor — so the rung is re-checked WITH the column
-    applied and reduced until the pair fits, rather than each being solved
+    push a row under its floor — so the rung is re-checked WITH the columns
+    applied and reduced until they fit, rather than each being solved
     against a layout the other has not happened yet.
 
-    Terminates: the column is non-increasing in the rung (the last rung caps
-    the label at :data:`LABEL_FLOOR`) and the final rung carries no numbers at
-    all, so the loop is bounded by ``len(_RUNGS)``.
+    The ROLE column is settled the same way and for the same reason as the
+    label's: an inline role of a different length on every row shoved that
+    row's context, cost and activity sideways by a different amount, turning a
+    column of four ``$`` signs into four x positions (design review round 1,
+    D1). Bounded by :data:`ROLE_CEILING` before it is measured, so the column
+    cannot be widened without limit by one operator-authored specialist name.
+
+    Terminates: the columns are non-increasing in the rung (the last rung caps
+    the label at :data:`LABEL_FLOOR` and no rung past the first carries a role)
+    and the final rung carries no numbers at all, so the loop is bounded by
+    ``len(_RUNGS)``.
     """
     # The clock column is width-independent — a duration is as wide as it is —
     # so it is settled once, before the rung search that consumes it.
     clock = max((cell_len(facts.elapsed) for facts, _ in rows), default=0)
-    rung = max((_row_rung(facts, stats, width, 0, clock) for facts, stats in rows), default=0)
+    rung = max(
+        (_row_rung(facts, stats, width, 0, clock, _role_column(rows)) for facts, stats in rows),
+        default=0,
+    )
     while rung < len(_RUNGS) - 1:
         column = _label_column(rows, width, rung, clock)
-        if all(_row_rung(facts, stats, width, column, clock) <= rung for facts, stats in rows):
-            return rung, column, clock
+        role_column = _role_column(rows) if _RUNGS[rung][2] else 0
+        if all(
+            _row_rung(facts, stats, width, column, clock, role_column) <= rung
+            for facts, stats in rows
+        ):
+            return rung, column, clock, role_column
         rung += 1
-    return rung, _label_column(rows, width, rung, clock), clock
+    role_column = _role_column(rows) if _RUNGS[rung][2] else 0
+    return rung, _label_column(rows, width, rung, clock), clock, role_column
+
+
+def _role_column(rows: Sequence[tuple[RowFacts, JobStats]]) -> int:
+    """Cells the role field occupies on EVERY row that shows one.
+
+    Width-independent: the roles are already bounded by :data:`ROLE_CEILING`,
+    so this is a property of the roster rather than of the terminal, and a
+    roster with no roles at all yields zero and costs nothing.
+    """
+    return max(
+        (cell_len(truncate_cells(facts.agent_role, ROLE_CEILING)) for facts, _ in rows),
+        default=0,
+    )
 
 
 def _label_column(
@@ -622,6 +740,7 @@ def compose_row(
     rung: int,
     column: int = 0,
     clock: int = 0,
+    role_column: int = 0,
 ) -> Text:
     """One row at the panel's chosen ``rung``: identity, state, numbers, activity.
 
@@ -650,7 +769,16 @@ def compose_row(
     dim = Style(color=theme_mod.semantic_color("dim"))
     faint = Style(color=theme_mod.semantic_color("faint"))
 
-    label, role, context, cost, activity = _lay_out(facts, stats, width, rung, column, clock)
+    label, role, context, cost, activity = _lay_out(
+        facts, stats, width, rung, column, clock, role_column
+    )
+    # The cells the role field occupies on THIS row, seam included. A row with
+    # no role pays the same width as its peers so the segments after it stay in
+    # column (D1), but pays it as pure whitespace: emitting the ` · ` seam with
+    # nothing after it would paint a separator separating nothing, which reads
+    # as a missing value rather than as a child with nothing to say.
+    role_width = _role_width(rung, role, role_column)
+    role_pad = " " * max(0, role_width - cell_len(role))
     glyph, _word, token = status_glyph(
         facts.status, queued=facts.queued, spinner_glyph=spinner_glyph
     )
@@ -666,8 +794,13 @@ def compose_row(
         # statements inside twenty-five rows, in three vocabularies; the row's
         # job in this mode is WHICH subagent, and the numbers are the one
         # thing the title does not carry. Non-current rows are unchanged.
-        for index, value in enumerate(part for part in (role, context, cost) if part):
-            if index:
+        if role:
+            row.append(role, style=muted)
+            row.append(role_pad, style=dim)
+        elif role_width:
+            row.append(" " * (role_width + len(STATS_SEAM)), style=dim)
+        for index, value in enumerate(part for part in (context, cost) if part):
+            if index or role:
                 row.append(STATS_SEAM, style=faint)
             row.append(value, style=muted)
         row.truncate(width, overflow="ellipsis")
@@ -696,7 +829,13 @@ def compose_row(
     # beside an established one is a defect — which also means it inherits the
     # contrast decision recorded above (``dim`` is under WCAG AA on this
     # ground; ``muted`` is 7.93:1).
-    for value in (role, context, cost):
+    if role:
+        row.append(STATS_SEAM, style=faint)
+        row.append(role, style=muted)
+        row.append(role_pad, style=dim)
+    elif role_width:
+        row.append(" " * (role_width + len(STATS_SEAM)), style=dim)
+    for value in (context, cost):
         if value:
             row.append(STATS_SEAM, style=faint)
             row.append(value, style=muted)
@@ -786,6 +925,7 @@ class SubagentRow(Static):
         rung: int,
         column: int,
         clock: int,
+        role_column: int = 0,
     ) -> bool:
         """Repaint from already-derived state; returns the row's running-ness.
 
@@ -807,6 +947,11 @@ class SubagentRow(Static):
             rung,
             column,
             clock,
+            # In the fingerprint because the role column is a property of the
+            # ROSTER: a child arriving or leaving can change it without
+            # changing anything else about this row, and a row that skipped
+            # that repaint would keep a stale pad and sit out of column.
+            role_column,
         )
         if fingerprint == self._fingerprint:
             return facts.running
@@ -827,6 +972,7 @@ class SubagentRow(Static):
                 rung=rung,
                 column=column,
                 clock=clock,
+                role_column=role_column,
             ),
             layout=False,
         )
@@ -934,6 +1080,10 @@ class SubagentPanel(Container):
         self._rung = 0
         self._column = 0
         self._clock = 0
+        #: Shared width of the role field, so the segments after it line up on
+        #: every row (:func:`panel_layout`). Zero when no child on the roster
+        #: carries a role, which is the ordinary fan-out and costs nothing.
+        self._role_column = 0
         self.display = False
 
     def compose(self):  # type: ignore[override]
@@ -1103,7 +1253,7 @@ class SubagentPanel(Container):
                 continue
             facts = row_facts(job, fallback_id=job_id, current=row.current)
             measured.append((job_id, row, facts, self._stats_for(job_id, job, reread_stats)))
-        self._rung, self._column, self._clock = panel_layout(
+        self._rung, self._column, self._clock, self._role_column = panel_layout(
             [(facts, stats) for _, _, facts, stats in measured], width
         )
         for _job_id, row, facts, stats in measured:
@@ -1115,6 +1265,7 @@ class SubagentPanel(Container):
                 rung=self._rung,
                 column=self._column,
                 clock=self._clock,
+                role_column=self._role_column,
             )
         self._paint_header()
         self._dirty = False
@@ -1303,6 +1454,7 @@ class SubagentPanel(Container):
                         rung=self._rung,
                         column=self._column,
                         clock=self._clock,
+                        role_column=self._role_column,
                     )
         # Sampled AFTER the paint, from the rows this tick has just produced.
         # Read beforehand it said False for a queued child that started in

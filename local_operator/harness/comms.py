@@ -1442,15 +1442,12 @@ class SubagentComms:
         # silently downgraded every resumed child to a generic no-role one.
         agent = record.agent_role or "task"
         effort = record.effort or None
-        # ``effort`` alone is display-only — ``run_subagent`` records it on the
-        # job and never re-reads it, because the LAUNCH path resolves the tier
-        # into a ``model_spec`` before calling (``Session._resolve_subagent_model``).
-        # A resume is a second launch and has to do that same resolution, or a
-        # child launched at ``hi`` would come back on the parent's model while
-        # the panel still displayed ``hi``. Resolved through the parent because
-        # the tier-to-model mapping lives in the operator's config, and the
-        # role's own default tier applies when the launch pinned none — which
-        # is exactly the precedence the first launch used.
+        # A resume is a SECOND LAUNCH, so it must re-resolve the tier into a
+        # model the way the first one did (``run_subagent`` explains why the
+        # tier does not survive that resolution and rides separately). Passing
+        # ``effort`` alone would return a child launched at ``hi`` on the
+        # parent's model while the panel still displayed ``hi``.
+        #
         # Guarded rather than called outright: ``_session`` is a full
         # ``Session`` in production, but this class is also driven by the
         # reduced hosts and test doubles that supply only the queue/steer/
