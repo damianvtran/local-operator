@@ -323,9 +323,7 @@ async def bench_bash_emit(total_mb: float = 8.0) -> dict[str, Any]:
     for _ in range(5):
         started = time.perf_counter()
         stdout = _redact_tool_text(
-            b"".join(_tail_chunks(chunks, _EMIT_SNAPSHOT_BYTES)).decode(
-                "utf-8", errors="replace"
-            ),
+            b"".join(_tail_chunks(chunks, _EMIT_SNAPSHOT_BYTES)).decode("utf-8", errors="replace"),
             context,
         )
         stderr = _redact_tool_text("", context)
