@@ -6,20 +6,47 @@
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
+    <!-- Motif M5: the masked dot field, the one texture the system allows.
+         Hidden below 520px by CSS. -->
+    <div class="field" aria-hidden="true"></div>
     <main>
-      <h1>Local Operator</h1>
-      <section>
+      <div class="masthead">
+        <svg
+          class="mark"
+          viewBox="285 253 520 520"
+          fill="none"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle cx="490" cy="355" r="78" stroke-width="35" />
+          <circle cx="720" cy="326" r="42" stroke-width="29" />
+          <circle cx="368" cy="686" r="41" stroke-width="29" />
+          <path d="M370 645 V545 a90 90 0 0 1 90 -90 h60 a78 78 0 0 1 66 44" stroke-width="33" />
+          <path d="M590 498 V750" stroke-width="33" />
+          <path d="M600 492 C 646 512 686 480 706 400 L 712 378" stroke-width="33" />
+        </svg>
+        <h1>Local Operator</h1>
+      </div>
+
+      <section class="card">
         <h2>Connection</h2>
         <p class="status" id="pair-status">Checking status…</p>
-        <label for="port">Daemon port</label>
+        <label class="field-label" for="port">Daemon port</label>
         <input id="port" type="number" min="1024" max="65535" />
         <p class="hint">Change this only if you changed the port in Local Operator.</p>
-        <button id="unpair" class="danger">Unpair this browser</button>
+        <button id="unpair" class="btn danger">Unpair this browser</button>
         <p class="confirm hidden" id="confirm" role="status" aria-live="polite"></p>
       </section>
-      <section>
+
+      <section class="card">
         <h2>Allowed sites</h2>
-        <p class="hint">The agent can open a site only after you allow it, and you can take that back any time here.</p>
+        <p class="hint">
+          The agent can open a site only after you allow it, and you can take that back any time
+          here.
+        </p>
         <ul id="sites"></ul>
         <p class="empty hidden" id="sites-empty">No sites allowed yet.</p>
       </section>

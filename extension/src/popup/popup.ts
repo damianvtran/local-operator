@@ -14,8 +14,22 @@ interface Health {
   pending_origin?: string;
 }
 
+// The card's 2px top rule is the design system's ONE spend of colour, and it is
+// only ever spent on real semantics: success when the agent can drive, danger
+// when the user must recover (error/incompatible), and a neutral hairline for
+// the transitional states (disconnected/pairing/origin prompt). The identity
+// mark is never tinted — see popup.css. Mirrors callback_page.py's _TONE_VARS.
+const TONE: Record<State, string> = {
+  connected: "var(--success)",
+  pairing: "var(--hairline-strong)",
+  disconnected: "var(--hairline-strong)",
+  incompatible: "var(--danger)",
+  origin: "var(--hairline-strong)",
+};
+
 function show(state: State): void {
   for (const section of sections) section?.classList.toggle("hidden", section.id !== state);
+  document.getElementById("card")?.style.setProperty("--tone", TONE[state]);
   if (state === "pairing") {
     const input = document.getElementById("pair-code") as HTMLInputElement | null;
     input?.focus();
@@ -62,13 +76,21 @@ async function render(): Promise<void> {
   }
   if (health.paired) {
     // Name the site the agent is driving so the user can see it without
-    // hunting for a background tab (finding U3).
+    // hunting for a background tab (finding U3). The URL rides in a labelled
+    // trough (the callback page's treatment); when nothing is open the label
+    // hides and the trough carries a plain note.
+    const label = document.getElementById("connected-label");
     const detail = document.getElementById("connected-detail");
-    if (detail) {
+    if (detail && label) {
       const url = health.current_url;
-      detail.textContent = url
-        ? `Driving: ${health.current_title ? `${health.current_title} — ` : ""}${url}`
-        : "No page open yet.";
+      if (url) {
+        label.textContent = health.current_title || "Driving";
+        detail.textContent = url;
+        label.classList.remove("hidden");
+      } else {
+        label.classList.add("hidden");
+        detail.textContent = "No page open yet.";
+      }
     }
     show("connected");
     return;
@@ -137,11 +159,15 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
         frame.message ??
         "That code didn't match. Codes expire after two minutes — check the app for a fresh one.";
       error.classList.remove("hidden");
+      // A live pairing error turns the status rule danger — the one place the
+      // pairing state spends colour, and only on a real failure.
+      document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
       input.focus();
     }
   } catch {
     error.textContent = "Could not reach Local Operator on this machine.";
     error.classList.remove("hidden");
+    document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
   }
 });
 

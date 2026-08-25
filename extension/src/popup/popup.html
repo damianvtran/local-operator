@@ -5,55 +5,104 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <header><img src="../icons/icon-32.png" alt="" /><h1>Local Operator</h1></header>
+    <!-- The card carries the design system: a 2px top status rule (--tone, set
+         per state by popup.ts), a header band on --sunken, and the shared
+         vector mark stroked in --ink. Never tint the mark by state. -->
+    <div class="card" id="card">
+      <header class="head">
+        <svg
+          class="mark"
+          viewBox="285 253 520 520"
+          fill="none"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle cx="490" cy="355" r="78" stroke-width="35" />
+          <circle cx="720" cy="326" r="42" stroke-width="29" />
+          <circle cx="368" cy="686" r="41" stroke-width="29" />
+          <path d="M370 645 V545 a90 90 0 0 1 90 -90 h60 a78 78 0 0 1 66 44" stroke-width="33" />
+          <path d="M590 498 V750" stroke-width="33" />
+          <path d="M600 492 C 646 512 686 480 706 400 L 712 378" stroke-width="33" />
+        </svg>
+        <span class="wordmark">Local Operator</span>
+      </header>
 
-    <section id="connected" class="state hidden">
-      <p class="title">Connected.</p>
-      <p class="sub">Local Operator can use this browser.</p>
-      <p class="detail" id="connected-detail"></p>
-    </section>
+      <div class="body">
+        <section id="connected" class="state hidden">
+          <h1 class="title">Connected.</h1>
+          <p class="sub">Local Operator can use this browser.</p>
+          <p class="label" id="connected-label">Driving</p>
+          <p class="trough" id="connected-detail"></p>
+        </section>
 
-    <section id="pairing" class="state hidden">
-      <p class="title">Waiting to pair.</p>
-      <p class="sub">Enter the code shown in Local Operator.</p>
-      <form id="pair-form">
-        <label for="pair-code">Pairing code</label>
-        <input
-          id="pair-code"
-          inputmode="numeric"
-          pattern="[0-9]*"
-          maxlength="6"
-          autocomplete="one-time-code"
-          aria-describedby="pair-error"
-        />
-        <button type="submit">Pair</button>
-      </form>
-      <p class="error hidden" id="pair-error" role="alert"></p>
-    </section>
+        <section id="pairing" class="state hidden">
+          <h1 class="title">Pair with Local Operator</h1>
+          <p class="sub">Enter the code shown in Local Operator.</p>
+          <form id="pair-form">
+            <label class="field-label" for="pair-code">Pairing code</label>
+            <input
+              id="pair-code"
+              type="text"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              maxlength="6"
+              autocomplete="one-time-code"
+              aria-describedby="pair-error"
+            />
+            <div class="actions">
+              <button type="submit" class="btn primary block">Pair</button>
+            </div>
+          </form>
+          <p class="error hidden" id="pair-error" role="alert"></p>
+        </section>
 
-    <section id="disconnected" class="state">
-      <p class="title">Not connected.</p>
-      <p class="sub">Local Operator isn't reachable on this computer. Make sure it's running (<code>lop browser status</code>).</p>
-      <button id="retry">Retry</button>
-    </section>
+        <section id="disconnected" class="state">
+          <h1 class="title">Not connected.</h1>
+          <p class="sub">
+            Local Operator isn't reachable on this computer. Make sure it's running
+            (<code>lop browser status</code>).
+          </p>
+          <div class="actions"><button id="retry" class="btn block">Retry</button></div>
+        </section>
 
-    <section id="incompatible" class="state hidden">
-      <p class="title">Update needed.</p>
-      <p class="sub">This extension and the Local Operator app speak different versions. Update both to the latest, then reopen this popup. Pairing won't fix a version mismatch.</p>
-      <button id="retry-incompatible">Check again</button>
-    </section>
+        <section id="incompatible" class="state hidden">
+          <h1 class="title">Update needed.</h1>
+          <p class="sub">
+            This extension and the Local Operator app speak different versions. Update both to the
+            latest, then reopen this popup. Pairing won't fix a version mismatch.
+          </p>
+          <div class="actions">
+            <button id="retry-incompatible" class="btn block">Check again</button>
+          </div>
+        </section>
 
-    <section id="origin" class="state hidden" role="alertdialog" aria-labelledby="origin-title" aria-describedby="origin-body">
-      <p class="title" id="origin-title"></p>
-      <p class="sub" id="origin-body">The agent wants to open a page on this site with your current login. It can only use sites you allow, and you can take this back any time in Settings.</p>
-      <div class="row">
-        <button id="origin-allow" class="primary">Allow once</button>
-        <button id="origin-always">Always allow</button>
+        <section
+          id="origin"
+          class="state hidden"
+          role="alertdialog"
+          aria-labelledby="origin-title"
+          aria-describedby="origin-body"
+        >
+          <h1 class="title" id="origin-title"></h1>
+          <p class="sub" id="origin-body">
+            The agent wants to open a page on this site with your current login. It can only use
+            sites you allow, and you can take this back any time in Settings.
+          </p>
+          <div class="actions">
+            <div class="row">
+              <button id="origin-allow" class="btn primary">Allow once</button>
+              <button id="origin-always" class="btn">Always allow</button>
+            </div>
+            <button id="origin-deny" class="btn danger block">Deny</button>
+          </div>
+        </section>
       </div>
-      <button id="origin-deny" class="deny">Deny</button>
-    </section>
 
-    <footer><a href="../options/options.html" target="_blank">Settings</a></footer>
+      <div class="foot"><a href="../options/options.html" target="_blank">Settings</a></div>
+    </div>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

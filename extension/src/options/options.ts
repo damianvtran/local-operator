@@ -55,6 +55,7 @@ async function render(): Promise<void> {
     const name = document.createElement("span");
     name.textContent = origin;
     const remove = document.createElement("button");
+    remove.className = "btn";
     remove.textContent = "Remove";
     remove.addEventListener("click", async () => {
       const next = { ...(await getLocal()).origins };

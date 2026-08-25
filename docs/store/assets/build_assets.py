@@ -41,6 +41,7 @@ Outputs land next to this script in docs/store/assets/.
 from __future__ import annotations
 
 import os
+
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 # ---------------------------------------------------------------------------
@@ -62,14 +63,14 @@ def evid(name: str) -> str:
 # ---------------------------------------------------------------------------
 # Sampled directly from the validated icons-on-dark.png and the rendered frames
 # so the composites sit in the same colour world as the real UI.
-INK = (17, 17, 19)            # near-black headline/glyph ink
-INK_SOFT = (74, 74, 82)       # secondary caption text
-PLATE = (247, 247, 249)       # validated off-white backplate (#F7F7F9)
-CANVAS_DARK = (24, 24, 27)    # deep neutral marketing canvas
+INK = (17, 17, 19)  # near-black headline/glyph ink
+INK_SOFT = (74, 74, 82)  # secondary caption text
+PLATE = (247, 247, 249)  # validated off-white backplate (#F7F7F9)
+CANVAS_DARK = (24, 24, 27)  # deep neutral marketing canvas
 CANVAS_LIGHT = (247, 247, 249)
 CARD_BORDER = (228, 228, 232)
 WHITE = (255, 255, 255)
-ACCENT = (176, 58, 46)        # the extension's own deny/unpair red, used sparingly
+ACCENT = (176, 58, 46)  # the extension's own deny/unpair red, used sparingly
 
 # ---------------------------------------------------------------------------
 # Fonts — Helvetica Neue matches the extension UI's system sans closely.
@@ -93,9 +94,7 @@ def content_bbox(im: Image.Image, bg: tuple[int, int, int], thresh: int = 12):
     """
     rgb = im.convert("RGB")
     flat = Image.new("RGB", rgb.size, bg)
-    diff = ImageChops.difference(rgb, flat).convert("L").point(
-        lambda v: 255 if v > thresh else 0
-    )
+    diff = ImageChops.difference(rgb, flat).convert("L").point(lambda v: 255 if v > thresh else 0)
     return diff.getbbox()
 
 
@@ -149,8 +148,20 @@ def wrap(draw, text, fnt, max_w):
     return lines
 
 
-def draw_caption(draw, x, y, title, sub, title_fnt, sub_fnt, max_w, fill=INK,
-                 sub_fill=INK_SOFT, line_gap=10, block_gap=16):
+def draw_caption(
+    draw,
+    x,
+    y,
+    title,
+    sub,
+    title_fnt,
+    sub_fnt,
+    max_w,
+    fill=INK,
+    sub_fill=INK_SOFT,
+    line_gap=10,
+    block_gap=16,
+):
     """Render a headline + optional subline, return the y below the block."""
     for line in wrap(draw, title, title_fnt, max_w):
         draw.text((x, y), line, font=title_fnt, fill=fill)
@@ -177,9 +188,9 @@ def build_store_icon(path: str):
     store card without darkening it.
     """
     S = 128
-    glyph = Image.open(
-        os.path.join(STATIC, "local-operator-icon-2-light-clear.png")
-    ).convert("RGBA")
+    glyph = Image.open(os.path.join(STATIC, "local-operator-icon-2-light-clear.png")).convert(
+        "RGBA"
+    )
     gb = glyph.split()[3].getbbox()  # (888,202,1206,550)
     g = glyph.crop(gb)  # 318x348 black glyph, tight
 
@@ -209,9 +220,9 @@ def build_store_icon(path: str):
 def _icon_plate(size: int, radius: int) -> Image.Image:
     """Small rounded off-white brand chip carrying the black glyph, reused in
     the promo tiles as the product mark."""
-    glyph = Image.open(
-        os.path.join(STATIC, "local-operator-icon-2-light-clear.png")
-    ).convert("RGBA")
+    glyph = Image.open(os.path.join(STATIC, "local-operator-icon-2-light-clear.png")).convert(
+        "RGBA"
+    )
     g = glyph.crop(glyph.split()[3].getbbox())
     th = int(size * 0.54)
     g = g.resize((round(g.width * th / g.height), th), Image.LANCZOS)
@@ -311,10 +322,17 @@ def build_screenshot_action(path: str):
     title_f = font(46, "bold")
     sub_f = font(23, "regular")
     y = draw_caption(
-        d, 90, 66, "It drives one tab — never yours.",
+        d,
+        90,
+        66,
+        "It drives one tab — never yours.",
         "Ask in Local Operator; the agent opens its own tab, reaches the page, and "
         "reports the real result.",
-        title_f, sub_f, max_w=W - 180, fill=WHITE, sub_fill=(196, 196, 204),
+        title_f,
+        sub_f,
+        max_w=W - 180,
+        fill=WHITE,
+        sub_fill=(196, 196, 204),
     )
     top = y + 24
 
@@ -335,9 +353,7 @@ def build_screenshot_action(path: str):
     # The connected popup overlapping to the right, proving the agent owns it.
     pop = prep_popup("popup-connected.png")
     pop = _fit(pop, max_h=430, max_w=360)
-    rounded_shadow_card(
-        cv, pop, (W - pop.width - 80, py + page_card.height - pop.height + 10)
-    )
+    rounded_shadow_card(cv, pop, (W - pop.width - 80, py + page_card.height - pop.height + 10))
     cv.save(path)
     return path
 
@@ -395,8 +411,16 @@ def _left_caption(cv: Image.Image, title: str, sub: str):
     total = th + sh
     y = (cv.height - total) // 2
     draw_caption(
-        d, 90, y, title, sub, title_f, sub_f, max_w,
-        fill=WHITE, sub_fill=(196, 196, 204),
+        d,
+        90,
+        y,
+        title,
+        sub,
+        title_f,
+        sub_f,
+        max_w,
+        fill=WHITE,
+        sub_fill=(196, 196, 204),
     )
 
 
@@ -415,11 +439,11 @@ def _browser_chrome(page: Image.Image, url: str) -> Image.Image:
         d.ellipse([cx, bar // 2 - 6, cx + 12, bar // 2 + 6], fill=col)
     # URL pill
     pill_x0 = 96
-    d.rounded_rectangle([pill_x0, 10, w - 20, bar - 10], radius=10, fill=WHITE,
-                        outline=(224, 224, 228), width=1)
+    d.rounded_rectangle(
+        [pill_x0, 10, w - 20, bar - 10], radius=10, fill=WHITE, outline=(224, 224, 228), width=1
+    )
     uf = font(18, "regular")
-    d.text((pill_x0 + 16, bar // 2 - uf.getmetrics()[0] // 2 - 2), url,
-           font=uf, fill=INK_SOFT)
+    d.text((pill_x0 + 16, bar // 2 - uf.getmetrics()[0] // 2 - 2), url, font=uf, fill=INK_SOFT)
     out.paste(page, (0, bar))
     return out
 
@@ -441,11 +465,13 @@ def build_small_tile(path: str):
     name = "Local Operator"
     d.text(((W - d.textlength(name, font=name_f)) // 2, 138), name, font=name_f, fill=WHITE)
     line = "Your browser. Your logins. Your machine."
-    d.text(((W - d.textlength(line, font=line_f)) // 2, 182), line, font=line_f,
-           fill=(198, 198, 206))
+    d.text(
+        ((W - d.textlength(line, font=line_f)) // 2, 182), line, font=line_f, fill=(198, 198, 206)
+    )
     tag = "Free and open source"
-    d.text(((W - d.textlength(tag, font=small_f)) // 2, 220), tag, font=small_f,
-           fill=(140, 140, 150))
+    d.text(
+        ((W - d.textlength(tag, font=small_f)) // 2, 220), tag, font=small_f, fill=(140, 140, 150)
+    )
     cv.save(path)
     return path
 
@@ -462,11 +488,9 @@ def build_marquee(path: str):
     line_f = font(28, "regular")
     small_f = font(20, "regular")
     d.text((96, 258), "Local Operator", font=name_f, fill=WHITE)
-    for i, ln in enumerate(wrap(d, "The agent works where you're already signed in.",
-                                line_f, 470)):
+    for i, ln in enumerate(wrap(d, "The agent works where you're already signed in.", line_f, 470)):
         d.text((96, 322 + i * 40), ln, font=line_f, fill=(198, 198, 206))
-    d.text((96, 322 + 2 * 40 + 16), "Free and open source", font=small_f,
-           fill=(140, 140, 150))
+    d.text((96, 322 + 2 * 40 + 16), "Free and open source", font=small_f, fill=(140, 140, 150))
 
     # Right ~60%: the reached page in browser chrome with the connected popup.
     page = Image.open(evid("action-screenshot-page2.png")).convert("RGB")

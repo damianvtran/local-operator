@@ -1,5 +1,41 @@
 # Browser extension bridge: execution evidence
 
+## Design-language pass: popup + options redrawn (real Chrome, both ramps)
+
+The popup and options pages were redrawn in Local Operator's own design system —
+the same one the OAuth/MCP auth-callback page uses (`local_operator/
+callback_page.py`): warm paper, one accent spent only on real semantics,
+hairlines instead of shadows, an old-style serif display over a humanist sans,
+a monospace label/wordmark register, and a full dark ramp. The token blocks
+(light `:root` and `prefers-color-scheme: dark`) are copied verbatim with their
+names kept; the header identity is the shared inline SVG mark stroked in
+`--ink`, never state-tinted; the 2px top status rule is `--success` for
+connected, `--danger` for error/incompatible, and a neutral hairline for the
+transitional states.
+
+Every state was re-captured from the real extension loaded into Chrome 151 (via
+CDP `Extensions.loadUnpacked`) against the live daemon, in BOTH ramps, under
+`docs/evidence/browser-extension/` (`*-dark.png` for the dark variants):
+`popup-connected` (with the live driven URL in a monospace trough),
+`popup-origin-prompt` (long hostname wraps inside 300px — D1/N4 preserved),
+`popup-pairing`, `popup-pairing-error` (danger rule + `role="alert"` — D7),
+`popup-disconnected` (neutral rule, `lop browser status` chip — U4),
+`popup-incompatible` (danger rule, update-needed copy — D2),
+`options-empty`, `options-populated` (masked dot field, live pairing status,
+styled Remove actions, long origins wrapping — D8). The store screenshots and
+promo tiles were regenerated from the new frames with
+`docs/store/assets/build_assets.py`. Both ramps were eyeballed frame by frame.
+
+**Reconnect-storm bug found and fixed during capture.** Driving the real
+extension surfaced a genuine defect: a `chrome.alarms` tick firing in the window
+between `new WebSocket()` and its `onopen` started a second socket, the daemon's
+"later-connection-wins" rule closed the first, and the resulting teardown →
+reconnect cascaded into a tight loop (measured 79 WS accepts in seconds, and
+commands hung because each RPC raced the churn). Fixed with a synchronous
+`connecting` guard in the service worker so only one dial is ever in flight;
+after the fix the same sequence converges to a single stable socket (1–2
+accepts) and all eight actions drive cleanly again.
+
 ## Round 1 remediation: real Chrome, real extension, real daemon (A9/D4 closed)
 
 The round-1 reviews flagged that the earlier `--load-extension` was ignored by

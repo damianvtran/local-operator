@@ -1,124 +1,288 @@
-/* Fixed 300px popup. Every control must stay within this width — a security
- * decision that overflows the popup (finding D1) is a decision the user cannot
- * read. Contrast tokens meet WCAG AA on white (finding D6). */
+/* The extension popup, drawn in Local Operator's own design language — the
+ * same system the OAuth/MCP auth-callback page uses (local_operator/
+ * callback_page.py): warm paper, one accent, hairlines instead of shadows, an
+ * old-style serif display over a humanist sans, and a dark ramp for a dark OS.
+ *
+ * Tokens are copied VERBATIM (names kept) from that page's :root and its
+ * prefers-color-scheme:dark block, so a change there is greppable here. The
+ * popup is 300px — below the callback page's 520px dot-field breakpoint — so
+ * the masked dot field (motif M5) is deliberately omitted; a small card with a
+ * header band and hairlines does not read as an empty page.
+ *
+ * Every review-round fix is preserved: the origin control fits 300px (D1), the
+ * update-needed state exists (D2), errors are announced (D7), the driven-URL
+ * line wraps rather than overflowing (U3/N4). Contrast pairs are the system's:
+ * ink is AAA on its ground both ramps, ink-dim (the dimmest text used) is
+ * 5.43:1 light / 5.11:1 dark. */
+:root {
+  color-scheme: light;
+  --paper: #f7f4ee;
+  --surface: #fcfbf7;
+  --sunken: #efece3;
+  --ink: #211e18;
+  --ink-muted: #565147;
+  --ink-dim: #6c675c;
+  --hairline: #e5e0d5;
+  --hairline-strong: #d5cfc2;
+  --success: #1e7b4e;
+  --danger: #b23a31;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --paper: #16130e;
+    --surface: #1e1a14;
+    --sunken: #0f0c08;
+    --ink: #f1eee6;
+    --ink-muted: #b5afa2;
+    --ink-dim: #918b7d;
+    --hairline: #2b2619;
+    --hairline-strong: #3b3527;
+    --success: #57c785;
+    --danger: #ef8078;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Humanist sans for body, matching the callback page's body stack. */
 body {
-  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   margin: 0;
   width: 300px;
-  color: #17171c;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
-header {
+
+/* A card, by the system's Card/panel reading: 10px radius, ONE hairline, and
+ * NO shadow. Elevation is the --surface-on---paper step plus the hairline. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 10px;
+  overflow: hidden;
+  margin: 10px;
+}
+/* The one spend of colour: a 2px status rule along the card's top edge, read as
+ * a status light, not a banner. --tone is set per state by the popup script and
+ * is spent ONLY on real semantics (success = connected/paired, danger = error/
+ * incompatible, neutral hairline = disconnected/pairing). Never the identity. */
+.card::before {
+  content: "";
+  display: block;
+  height: 2px;
+  background: var(--tone, var(--hairline-strong));
+}
+
+/* Header band on --sunken with a bottom hairline — the callback page's .head. */
+.head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px 4px;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--sunken);
 }
-header img {
-  width: 24px;
-  height: 24px;
+/* The shared vector mark, stroked in currentColor pinned to --ink. Never
+ * tinted by state: the software's identity must not look conditional. */
+.mark {
+  width: 22px;
+  height: 22px;
+  color: var(--ink);
+  flex: none;
 }
-h1 {
-  font-size: 14px;
-  margin: 0;
-  letter-spacing: 0.01em;
+/* Uppercase letter-spaced wordmark in the monospace stack. */
+.wordmark {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
 }
-.state {
-  padding: 4px 16px 12px;
+
+.body {
+  padding: 18px 16px 16px;
 }
+
+/* State titles in the old-style serif display, sized for a 300px popup
+ * (~18px, not the callback page's 2.5rem). */
 .title {
-  font-size: 15px;
-  font-weight: 600;
-  margin: 6px 0 2px;
+  margin: 0;
+  font-family: ui-serif, "Iowan Old Style", Georgia, "Palatino Linotype",
+    "URW Palladio L", serif;
+  font-size: 19px;
+  line-height: 1.12;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  text-wrap: pretty;
+  /* A long unbroken hostname in the origin-prompt title must break rather than
+   * clip at the 300px edge (D1/N4). `pretty` alone will not split an
+   * over-long token, so allow the wrap explicitly. */
+  overflow-wrap: anywhere;
 }
 .sub {
-  color: #48484f;
-  margin: 0 0 10px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+  text-wrap: pretty;
 }
 .sub code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-  background: #f2f2f5;
-  padding: 1px 4px;
-  border-radius: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 2px;
+  background: var(--sunken);
+  color: var(--ink);
 }
-/* The driven-site line. Long URLs/UA strings must wrap, never overflow the
- * 300px popup (finding N4). */
-.detail {
-  color: #56565d;
-  font-size: 12px;
-  margin: 0 0 8px;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+
+/* The driven-site line — a labelled trough, exactly the callback page's
+ * treatment: --sunken well, monospace, and overflow-wrap:anywhere so a long URL
+ * wraps at a sensible point rather than overflowing the 300px popup (U3/N4). */
+.label {
+  margin: 16px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
 }
-label {
+.trough {
   display: block;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 2px;
+  background: var(--sunken);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-  color: #48484f;
-  margin: 8px 0 4px;
+  line-height: 1.45;
+  color: var(--ink);
+  overflow-wrap: anywhere;
 }
-input {
+
+/* Pairing field. Label in monospace uppercase, input in the system's inset
+ * well. */
+.field-label {
+  display: block;
+  margin: 16px 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+input[type="text"],
+input[type="number"] {
   width: 100%;
-  box-sizing: border-box;
-  padding: 7px 8px;
-  border: 1px solid #d4d4d8;
-  border-radius: 6px;
-  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+  letter-spacing: 0.14em;
 }
-button {
-  padding: 7px 12px;
-  border: 1px solid #d4d4d8;
-  background: #fff;
+input:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* Buttons follow the token ramp, not a flat black. Primary = ink fill, the
+ * system's strongest affordance; secondary = surface with a hairline; danger =
+ * the semantic red, spent only on Deny/Unpair. */
+.btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+  border: 1px solid var(--hairline-strong);
   border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
   font: inherit;
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
-  color: #17171c;
 }
-button:hover {
-  background: #f4f4f5;
+.btn:hover {
+  background: var(--sunken);
 }
-button.primary,
-#pair-form button {
-  background: #17171c;
-  border-color: #17171c;
-  color: #fff;
+.btn:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
 }
-button.primary:hover,
-#pair-form button:hover {
-  background: #2e2e35;
+.btn.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
 }
-button.deny {
-  width: 100%;
-  margin-top: 8px;
-  border-color: #d0463040;
-  color: #a62c1a;
+.btn.primary:hover {
+  background: var(--ink-muted);
+  border-color: var(--ink-muted);
 }
-button.deny:hover {
-  background: #fdf3f1;
+.btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
 }
-/* The three consent choices read as one decision: Allow once / Always allow on
- * a row, Deny full-width beneath. No checkbox to overflow the flex row
- * (finding D1); the three labels are explicit (findings D5/N3). */
+.btn.danger:hover {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+}
+
+.actions {
+  margin-top: 16px;
+}
+/* The three consent choices as one decision: Allow once / Always allow on a
+ * row, Deny full-width beneath. min-width:0 keeps the pair inside 300px (D1). */
 .row {
   display: flex;
   gap: 8px;
 }
-.row button {
+.row .btn {
   flex: 1;
   min-width: 0;
 }
+.btn.block {
+  display: flex;
+  width: 100%;
+  margin-top: 8px;
+}
+
 .error {
-  color: #a62c1a;
+  margin: 12px 0 0;
   font-size: 12px;
-  margin: 8px 0 0;
+  line-height: 1.5;
+  color: var(--danger);
 }
-footer {
-  border-top: 1px solid #ececf0;
-  padding: 8px 16px;
+
+/* Footer link in the muted-dim register, above a hairline. */
+.foot {
+  padding: 10px 16px;
+  border-top: 1px solid var(--hairline);
 }
-footer a {
-  color: #56565d;
+.foot a {
   font-size: 12px;
+  color: var(--ink-dim);
   text-decoration: none;
 }
+.foot a:hover {
+  color: var(--ink-muted);
+  text-decoration: underline;
+}
+
 .hidden {
   display: none !important;
 }

@@ -30,6 +30,7 @@ let socket: WebSocket | undefined;
 let paired = false;
 let attempt = 0;
 let connected = false;
+let connecting = false;
 let alive = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 // The request id currently being handled, so an origin pause can tell the
@@ -98,13 +99,24 @@ function codeFor(code: string): ErrorCode {
 }
 
 async function connect(): Promise<void> {
-  if (connected || !alive) return;
+  // `connecting` guards the window between `new WebSocket()` and `onopen`, when
+  // `connected` is still false: without it, a `chrome.alarms` tick (or a wake
+  // event) firing in that window starts a SECOND socket, the daemon's
+  // "later-connection-wins" rule closes the first, and the resulting
+  // teardown→reconnect cascades into a tight reconnect storm. The flag is set
+  // SYNCHRONOUSLY, before the first `await` below: two `connect()` calls that
+  // both reached the first await before either set it would each open a socket,
+  // so the guard has to close that window too. One in-flight dial at a time
+  // makes reconnection converge on a single stable socket.
+  if (connected || connecting || !alive) return;
+  connecting = true;
   const { token } = await getLocal();
   const port = await daemonPort();
   const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
   socket = wire;
   wire.onopen = () => {
     connected = true;
+    connecting = false;
     attempt = 0;
     const hello: ExtensionEvent = { event: "hello", proto: 1, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent };
     wire.send(JSON.stringify(hello));
@@ -120,6 +132,7 @@ async function connect(): Promise<void> {
   };
   const teardown = (event?: CloseEvent) => {
     connected = false;
+    connecting = false;
     paired = false;
     socket = undefined;
     // Preserve the close code so the popup can distinguish a protocol mismatch
@@ -131,7 +144,13 @@ async function connect(): Promise<void> {
     scheduleReconnect();
   };
   wire.onclose = (event) => teardown(event);
-  wire.onerror = () => wire.close();
+  wire.onerror = () => {
+    // onerror without a prior onopen still needs the connecting guard cleared,
+    // else a failed dial wedges the worker as permanently "connecting". close()
+    // triggers onclose→teardown which clears it.
+    connecting = false;
+    wire.close();
+  };
 }
 
 function scheduleReconnect(): void {
