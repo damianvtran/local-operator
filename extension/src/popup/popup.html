@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header><img src="../icons/icon-32.png" alt="" /><h1>Local Operator</h1></header>
+    <section id="connected" class="state hidden">
+      <p class="title">Connected.</p>
+      <p class="sub">Local Operator can use this browser.</p>
+      <p class="detail" id="connected-detail"></p>
+    </section>
+    <section id="pairing" class="state hidden">
+      <p class="title">Waiting to pair.</p>
+      <p class="sub">Enter the code shown in Local Operator.</p>
+      <form id="pair-form">
+        <label for="pair-code">Pairing code</label>
+        <input id="pair-code" inputmode="numeric" maxlength="6" autocomplete="off" />
+        <button type="submit">Pair</button>
+      </form>
+      <p class="error hidden" id="pair-error"></p>
+    </section>
+    <section id="disconnected" class="state hidden">
+      <p class="title">Not connected.</p>
+      <p class="sub">Open Local Operator to reconnect.</p>
+      <button id="retry">Retry</button>
+    </section>
+    <section id="origin" class="state hidden">
+      <p class="title" id="origin-title"></p>
+      <p class="sub">The agent wants to open a page on this site. It will use your current login. You can take this back any time in Settings.</p>
+      <div class="row">
+        <button id="origin-deny">Not this site</button>
+        <button id="origin-allow">Allow</button>
+      </div>
+      <label class="check"><input type="checkbox" id="origin-always" /> Always allow this site</label>
+    </section>
+    <footer><a href="../options/options.html" target="_blank">Settings</a></footer>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

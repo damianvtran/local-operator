@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Local Operator settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Local Operator</h1>
+      <section>
+        <h2>Connection</h2>
+        <label for="port">Daemon port</label>
+        <input id="port" type="number" min="1024" max="65535" />
+        <p class="hint">Change this only if you changed the port in Local Operator.</p>
+        <button id="unpair" class="danger">Unpair this browser</button>
+      </section>
+      <section>
+        <h2>Allowed sites</h2>
+        <p class="hint">The agent can open a site only after you allow it, and you can take that back any time here.</p>
+        <ul id="sites"></ul>
+      </section>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

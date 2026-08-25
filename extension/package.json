@@ -1,0 +1,17 @@
+{
+  "name": "local-operator-browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:zip": "node build.mjs --zip",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.1.24",
+    "esbuild": "0.27.4",
+    "typescript": "5.9.3"
+  }
+}
