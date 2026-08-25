@@ -572,9 +572,20 @@ async def test_bash_emit_tick_cost_does_not_grow_with_total_output() -> None:
             data, self._data = self._data, b""
             return data
 
+    import subprocess
+
+    # A REAL process in its own session backs the fake pid: execute_bash's
+    # cancellation path runs ``os.killpg(os.getpgid(pid), SIGKILL)``, and a
+    # sentinel pid like 1 aims that at init's process group — on Linux the
+    # kill SUCCEEDS and takes down the test runner itself (this killed the
+    # GitHub Actions runner agent mid-suite; macOS only survived because
+    # non-root killpg(1) raises EPERM). A throwaway ``sleep`` gives the kill
+    # a target with the exact semantics the tool expects, harmlessly.
+    doomed = subprocess.Popen(["sleep", "300"], start_new_session=True)
+
     class _FakeProc:
         def __init__(self, data: bytes) -> None:
-            self.pid = 1
+            self.pid = doomed.pid
             self.returncode = None
             self.stdout = _FakeReader(data)
             self.stderr = _FakeReader(b"")
@@ -629,8 +640,16 @@ async def test_bash_emit_tick_cost_does_not_grow_with_total_output() -> None:
             with contextlib.suppress(BaseException):
                 await task
 
-    small = await time_one_emit(1.0)
-    large = await time_one_emit(16.0)
+    try:
+        small = await time_one_emit(1.0)
+        large = await time_one_emit(16.0)
+    finally:
+        # The cancel path SIGKILLed the sleep's group; reap it so no zombie
+        # outlives the test.
+        with contextlib.suppress(Exception):
+            doomed.kill()
+        with contextlib.suppress(Exception):
+            doomed.wait(timeout=5)
     # The snapshot the card receives is bounded: 16x the output must not be
     # 16x the payload. (Timing the tick itself is flaky on CI; the payload
     # bound is the deterministic proxy for the same invariant — a bounded
