@@ -152,6 +152,26 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # an ordinary "no longer queued" error, never a crash.
         if not isinstance(frame.get("command_id"), str) or not frame["command_id"]:
             raise ValueError("command_id must be a non-empty string")
+    elif op == "peer_message":
+        # Cross-session hand-off from another local lop process (`lop send`).
+        # Only the body is load-bearing; the sender identity is advisory (it
+        # feeds the cross-session indicator) so an older/leaner sender that
+        # omits it still delivers, just less labelled. Do NOT bump
+        # PROTOCOL_VERSION for this op: it is purely additive, and an OLD
+        # registrant that predates it answers "unknown op" gracefully (see the
+        # PROTOCOL_VERSION note above) — the bump is only load-bearing when an
+        # old client must refuse a new registrant, which is the opposite risk.
+        text = frame.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        mode = frame.get("mode", "mailbox")
+        if mode not in ("mailbox", "steer"):
+            raise ValueError("mode must be 'mailbox' or 'steer'")
+        if "wake" in frame and not isinstance(frame.get("wake"), bool):
+            raise ValueError("wake must be a boolean")
+        sender = frame.get("sender", {})
+        if not isinstance(sender, dict):
+            raise ValueError("sender must be an object")
 
 
 #: Bumped on any breaking change to control frames or web payloads. The
@@ -274,6 +294,10 @@ ControlOp = Literal[
     # Follower Esc-recall parity — the TUI matches queue contents by the
     # Message id it queued, and the owner recalls exactly that entry.
     "recall_steer",  # {command_id}
+    # Peer-to-peer session messaging (`lop send`): a short-lived sender process
+    # from ANOTHER local lop session hands a message to this one. Additive; no
+    # PROTOCOL_VERSION bump (see validate_control_frame + the version note).
+    "peer_message",  # {text, mode: mailbox|steer, wake?, sender?}
 ]
 
 # Events the registrant streams to the daemon.
@@ -311,6 +335,9 @@ EntryKind = Literal[
     "compaction",
     "parent_message",
     "subagent_message",
+    # An inbound message from another local lop session (`lop send`). Rendered
+    # as a distinct cross-session card, never as the user's own turn.
+    "peer_message",
 ]
 
 ToolState = Literal["composing", "running", "done", "failed", "interrupted"]

@@ -87,6 +87,7 @@ from local_operator.harness.types import (
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
+    PeerMessageDeliveredEvent,
     StaleAside,
     SteeringDeliveredEvent,
     StreamEvent,
@@ -123,6 +124,7 @@ from local_operator.session.naming import (
     MAX_TITLE_CHARS,
     ConversationName,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import (
@@ -415,12 +417,16 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             WAKE_PROMPT_MESSAGE_TYPE,
             HUB_MESSAGE_TYPE,
             JOB_RESULT_MESSAGE_TYPE,
+            PEER_MESSAGE_MESSAGE_TYPE,
         ):
             # A hub message renders exactly like a wake delivery: the sender
             # already formatted ``details["text"]``, and it must reach the
             # model as a user turn or the agent it was addressed to never
-            # sees it. Unlisted custom types are dropped (bookkeeping), which
-            # is precisely the trap a new aside type falls into.
+            # sees it. A peer message (`lop send` from another local session)
+            # rides the same path: it MUST be listed here or the human sees the
+            # cross-session transcript row but the model never does. Unlisted
+            # custom types are dropped (bookkeeping), which is precisely the
+            # trap a new aside type falls into.
             out.append(
                 Message(
                     role="user",
@@ -2876,6 +2882,114 @@ class Session:
         for item in remaining:
             self._steering_queue.put_nowait(item)
         return found
+
+    def _peer_custom_message(self, text: str, sender: dict[str, Any]) -> CustomMessage:
+        """Build the transcript entry for one inbound cross-session message.
+
+        ``details["text"]`` is what the MODEL reads: it is wrapped in a
+        provenance envelope (mirroring the subagent-message envelope in
+        ``comms.py``) so the model knows the message came from another session
+        and who sent it, rather than mistaking it for the user's own turn.
+        ``details["body"]`` is the raw text the UIs (TUI/phone) render, and
+        ``details["sender"]`` carries the advisory identity for the indicator
+        label. ``attribution="user"`` routes it through the same allow-listed
+        user-turn path as a wake/hub delivery (see ``build_llm_history``).
+        """
+        pid = sender.get("pid")
+        conversation = sender.get("conversation_name", "")
+        model_label = sender.get("model_label", "")
+        wrapped = (
+            f"<peer-session-message "
+            f"from_pid={pid!r} "
+            f"conversation={conversation!r} "
+            f"model={model_label!r}>\n"
+            f"{text}\n"
+            "</peer-session-message>"
+        )
+        return CustomMessage(
+            custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": wrapped, "body": text, "sender": sender},
+        )
+
+    async def receive_peer_message(
+        self,
+        text: str,
+        *,
+        mode: str = "mailbox",
+        wake: bool = False,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        """Deliver a message from ANOTHER local lop session into this one.
+
+        This is the receive half of ``lop send``. No existing method both
+        persists a message durably to the transcript AND makes it visible to
+        the model without driving a turn, which is why record-only needs its
+        own branch here rather than reusing ``queue_aside`` (materializes only
+        at a turn boundary — a genuinely idle session has no boundary) or
+        ``seed_history`` (pre-first-turn only).
+
+        Delivery modes:
+        - ``mailbox`` (default), no wake: record-only. Persist the row now so
+          the human sees it immediately and a crash cannot lose it, and append
+          to live context so the model reads it on its next turn. The idle
+          session stays idle — non-interrupting by design.
+        - ``mailbox`` + ``wake`` while idle: drive a turn now via the prompt
+          pipeline (which persists the row once — do NOT also append).
+        - ``steer`` while busy: inject mid-turn through the existing steer
+          path (which persists its own steering row — do NOT also append).
+        - ``steer`` while idle: nothing to steer into, so degrade to a driven
+          turn exactly like mailbox+wake idle (dropping it would violate the
+          guarantee that the message MUST appear in history).
+
+        Returns a short human-readable detail string for the sender's ack.
+        """
+        sender = sender or {}
+        message = self._peer_custom_message(text, sender)
+        busy = self._is_streaming
+        if mode == "steer":
+            if busy:
+                # steer() persists its own transcript row when the queue
+                # drains; appending here too would double-write.
+                self.steer(str(message.details["body"]), message_id=message.id)
+                await self._emit_peer_receipt(message, sender)
+                return "delivered mid-turn (steered)"
+            # Idle steer has nothing to interrupt: open a turn so the message is
+            # still delivered and read. _prompt_messages persists the row once.
+            await self._emit_peer_receipt(message, sender)
+            self._spawn_background(self._prompt_messages([message]))
+            return "delivered (opened a turn)"
+        # mode == "mailbox"
+        if wake and not busy:
+            # _prompt_messages persists the row through the pipeline — a
+            # separate transcript/context append here would double-write.
+            await self._emit_peer_receipt(message, sender)
+            self._spawn_background(self._prompt_messages([message]))
+            return "delivered and woke the session"
+        # Record-only (idle without wake, or busy): persist durably NOW so the
+        # human sees it and a crash cannot lose it, and append to live context
+        # so the model reads it on its next turn. This is the ONE branch that
+        # appends directly; the wake/steer branches must not (see above).
+        await self._transcript.append_message(message)
+        self._context.messages.append(message)
+        await self._emit_peer_receipt(message, sender)
+        return "delivered to the mailbox (will be read on the next turn)"
+
+    async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
+        """Fire the live receipt so the owner TUI paints the indicator now.
+
+        Mirrors ``WakeDeliveredEvent`` firing before/around the turn spawn:
+        even for the record-only idle case the front end must be told the
+        instant the message lands, and ``message_id`` lets it dedup this live
+        receipt against the persisted row on a later history replay.
+        """
+        await self._emit(
+            PeerMessageDeliveredEvent(
+                body=str(message.details.get("body", "")),
+                sender=sender,
+                message_id=message.id,
+            )
+        )
 
     def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
         """Install the host's tool-approval gate (see SessionProtocol).

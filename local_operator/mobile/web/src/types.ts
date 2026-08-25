@@ -15,7 +15,10 @@ export type EntryKind =
 	| "steer"
 	| "compaction"
 	| "parent_message"
-	| "subagent_message";
+	| "subagent_message"
+	// An inbound message from another local lop session (`lop send`). Rendered
+	// as a distinct cross-session card, never as the user's own turn.
+	| "peer_message";
 
 export type ToolState =
 	| "composing"
@@ -43,6 +46,18 @@ export interface TranscriptEntryDetails {
 	output?: string;
 	diff?: string | string[];
 	partial?: string;
+	/* Sender identity on a `peer_message` entry (`lop send`): pid /
+	   conversation_name / model_label / session_id / cwd, all advisory. Rides
+	   through the fold's `details` so the card can label who reached in. */
+	sender?: PeerSender;
+}
+
+export interface PeerSender {
+	pid?: number;
+	session_id?: string;
+	conversation_name?: string;
+	model_label?: string;
+	cwd?: string;
 }
 
 export interface TranscriptEntry {
