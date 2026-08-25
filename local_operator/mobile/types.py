@@ -174,7 +174,10 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
 #: client that omits the flag gets exactly the v3 behaviour (projection
 #: frames only), and daemon connections never see the new frames, so the
 #: phone path is byte-identical across the bump.
-PROTOCOL_VERSION = 4
+# v5 adds an attach-only canonical frontend state channel. Phone/daemon
+# connections still receive projection frames only; the new capability is
+# negotiated explicitly by full TUI clients.
+PROTOCOL_VERSION = 5
 
 #: Which side of the owner relationship a control connection speaks for.
 #: ``daemon`` (the default when the auth frame omits ``client``) may rebind
@@ -230,6 +233,7 @@ class SessionRecord:
     protocol: int = PROTOCOL_VERSION
     started_at: float = field(default_factory=time.time)
     heartbeat_at: float = field(default_factory=time.time)
+    capabilities: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -291,6 +295,8 @@ EventOp = Literal[
     # event clients, so a mid-turn join can rebuild the in-flight bubble and
     # running tool cards (see LiveTurnSeed).
     "attach_sync",  # {data: <LiveTurnSeed>}
+    "frontend_sync",  # v5 attach-only atomic FrontendSessionState snapshot
+    "frontend_update",  # v5 attach-only ordered state replacement
 ]
 
 

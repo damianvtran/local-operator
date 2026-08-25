@@ -55,6 +55,7 @@ from local_operator.mobile.types import (
     SessionProjection,
     SessionRecord,
 )
+from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,10 @@ class _ClientConn:
     # frame. Daemon connections never set it; a v3 attach client that omitted
     # the flag keeps projection-only behaviour.
     wants_events: bool = False
+    # v5 canonical state is attach-only and independently negotiated so daemon
+    # projection bytes never gain frontend frames.
+    wants_frontend: bool = False
+    frontend_ready: bool = False
     # Flipped only AFTER the welcome projection and the attach_sync seed have
     # been queued on this connection's ordered stream. Event fan-out snapshots
     # recipients synchronously against the tracker fold, so this flag is what
@@ -133,6 +138,7 @@ class _ClientConn:
     # Exactly one writer drains the queue, so delivery stays ordered without a
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
+    frontend_unsubscribe: Callable[[], None] | None = None
 
 
 class SessionHandle(Protocol):
@@ -167,6 +173,7 @@ class SessionHandle(Protocol):
     async def abort(self) -> str: ...
     async def set_model(self, provider: str, model_id: str) -> str: ...
     async def set_effort(self, effort: str) -> str: ...
+
     async def slash(self, command: str, args: str) -> str: ...
     async def new_conversation(self) -> str: ...
     async def resume_session(self, session_id: str) -> str: ...
@@ -209,6 +216,7 @@ class Registrant:
             model_label=seed.model_label,
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
+            capabilities=([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else []),
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
@@ -496,6 +504,10 @@ class Registrant:
         # daemon's projection path must stay byte-identical, so a daemon auth
         # carrying the flag (there is none today) is deliberately ignored.
         wants_events = kind == "attach" and bool(frame.get("events"))
+        wants_frontend = kind == "attach" and bool(frame.get("frontend_state"))
+        if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
+            writer.close()
+            return
 
         if kind == "daemon":
             # At most ONE daemon connection — a new dial evicts the old, which
@@ -516,9 +528,37 @@ class Registrant:
                 logger.info("mobile control: evicting attach client %s (cap)", peer)
                 self._drop_client(victim)
 
-        conn = _ClientConn(writer=writer, kind=kind, wants_events=wants_events)
+        conn = _ClientConn(
+            writer=writer,
+            kind=kind,
+            wants_events=wants_events,
+            wants_frontend=wants_frontend,
+        )
         self._clients[id(writer)] = conn
         await self._push_to(conn)  # the welcome: a full projection, unprompted
+        if conn.wants_frontend:
+            subscribe_frontend = getattr(self._handle, "subscribe_frontend", None)
+            if not callable(subscribe_frontend):
+                self._drop_client(conn)
+                return
+
+            def on_update(update: Any) -> None:
+                payload = (
+                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
+                )
+                self._relay_frontend_to(conn, payload)
+
+            from local_operator.session.frontend_state import FrontendSubscription
+
+            subscription = cast(FrontendSubscription, subscribe_frontend(on_update))
+            sync = subscription.sync
+            sync_payload = sync.model_dump(mode="json")
+            conn.frontend_unsubscribe = subscription.unsubscribe
+            # Registration and snapshot capture happened synchronously on the
+            # authoritative loop. Mark ready only after queuing that snapshot;
+            # later updates therefore cannot overtake it.
+            await self._send_to(conn, {"op": "frontend_sync", "data": sync_payload})
+            conn.frontend_ready = True
         if conn.wants_events:
             # The live-turn seed, once, right after the welcome. The snapshot
             # and the ready flag are set in ONE synchronous block: any event
@@ -564,6 +604,13 @@ class Registrant:
             # await and leave the stream close only half-observed.
             if task is not asyncio.current_task():
                 task.cancel()
+        frontend_unsubscribe = conn.frontend_unsubscribe
+        conn.frontend_unsubscribe = None
+        if frontend_unsubscribe is not None:
+            try:
+                frontend_unsubscribe()
+            except Exception:  # noqa: BLE001 — connection cleanup must finish
+                logger.debug("frontend client unsubscribe failed", exc_info=True)
         try:
             conn.writer.close()
         except Exception:  # noqa: BLE001
@@ -639,6 +686,22 @@ class Registrant:
         if op == "set_effort":
             return await h.set_effort(str(frame.get("effort", "")))
         if op == "slash":
+            images = frame.get("images")
+            if images:
+                slash_images = getattr(h, "slash_images", None)
+                if not callable(slash_images):
+                    raise ValueError("this owner cannot route slash-command images")
+                typed_slash_images = cast(
+                    Callable[[str, str, list[dict[str, str]]], Awaitable[str]],
+                    slash_images,
+                )
+                return await typed_slash_images(
+                    str(frame.get("command", "")),
+                    str(frame.get("args", "")),
+                    images,
+                )
+            # Old daemon/reduced handles predate attachment-bearing slash ops;
+            # preserve their two-argument call shape when no pixels ride the frame.
             return await h.slash(str(frame.get("command", "")), str(frame.get("args", "")))
         if op == "new_conversation":
             return await h.new_conversation()
@@ -673,6 +736,32 @@ class Registrant:
                 question_index=question_index,
             )
         raise ValueError(f"unknown op: {op!r}")
+
+    # -- v5 frontend state relay ----------------------------------------------
+
+    def _relay_frontend_to(self, conn: _ClientConn, data: dict[str, Any]) -> None:
+        loop = self._loop
+        if loop is None or self._closed.is_set():
+            return
+        try:
+            loop.call_soon_threadsafe(self._relay_frontend_to_on_loop, conn, data)
+        except RuntimeError:
+            pass
+
+    def _relay_frontend_to_on_loop(self, conn: _ClientConn, data: dict[str, Any]) -> None:
+        if id(conn.writer) not in self._clients or not conn.frontend_ready:
+            return
+        frame = {"op": "frontend_update", "data": data}
+        try:
+            conn.event_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            self._drop_client(conn)
+            return
+        if conn.event_writer_task is None:
+            task = asyncio.create_task(self._drain_event_queue(conn))
+            conn.event_writer_task = task
+            self._event_sends.add(task)
+            task.add_done_callback(self._event_sends.discard)
 
     # -- v4 event relay --------------------------------------------------------
 

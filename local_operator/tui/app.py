@@ -27,7 +27,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
@@ -1953,6 +1953,20 @@ class OperatorApp(App[None]):
         """
         self._session = session
         self._mobile_adopted(session)
+        # Every production session supplies the same frontend contract. Install
+        # it before reading status/panel fields so owner and follower take one
+        # renderer path rather than parallel interpretations.
+        self._unsubscribe_frontend = None
+        subscribe_frontend = getattr(session, "subscribe_frontend", None)
+        if callable(subscribe_frontend):
+            from local_operator.session.frontend_state import FrontendSubscription
+
+            subscription = cast(
+                FrontendSubscription,
+                subscribe_frontend(self._on_frontend_update),
+            )
+            self._unsubscribe_frontend = subscription.unsubscribe
+            self._apply_frontend_state(subscription.sync.snapshot)
         # A remote follower must never publish a second discovery record for
         # the shared session, and it must be ready to replace this facade with
         # the lease-winning real Session after owner death. The callback uses
@@ -2038,6 +2052,56 @@ class OperatorApp(App[None]):
         # worker, so which one won would depend on scheduling.
         self._restore_reported_usage(session)
         self._measure_preloaded_context(session)
+
+    def _on_frontend_update(self, update: Any) -> None:
+        state = getattr(update, "snapshot", update)
+        # Socket and local callbacks share this seam. Deferring widget access to
+        # Textual's pump keeps transport threading out of rendering semantics.
+        self.call_later(self._apply_frontend_state, state)
+
+    def _apply_frontend_state(self, state: Any) -> None:
+        if self._status is None or state is None:
+            return
+        cost = getattr(state, "cumulative_cost", None)
+        knowledge = str(getattr(state, "cost_knowledge", "unknown"))
+        if cost is not None:
+            self._total_cost = float(getattr(state, "cumulative_parent_cost", 0.0) or 0.0)
+            self._subagent_costs = dict(getattr(state, "child_costs", {}) or {})
+            self._spend_is_floor = knowledge.endswith("floor") or knowledge.endswith("partial")
+        mcp_servers = list(getattr(state, "mcp_servers", []) or [])
+        task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
+        bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
+        self._status.update(
+            model_label=getattr(state, "effective_model_label", "")
+            or getattr(state, "model_label", ""),
+            model_name=str(
+                getattr(getattr(state, "effective_model", None), "display_name", "") or ""
+            ),
+            effort=str(
+                getattr(getattr(state, "effective_model", None), "reasoning_effort", "") or ""
+            ),
+            agent_profile=str(getattr(state, "active_agent", "") or ""),
+            team=str(getattr(state, "active_team", "") or ""),
+            cwd=str(getattr(state, "cwd", "") or ""),
+            context_tokens=getattr(state, "context_tokens", None),
+            context_is_estimate=getattr(state, "context_is_estimate", None),
+            context_window=getattr(state, "context_window", None),
+            cost=(self._spend_text(cost) if cost is not None else None),
+            conversation_name=str(getattr(state, "conversation_title", "") or ""),
+            streaming=bool(getattr(state, "streaming", False)),
+            subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
+            jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
+            mcp=McpStatus(
+                configured=len(mcp_servers),
+                connected=sum(1 for server in mcp_servers if server.status == "connected"),
+                failed=any(server.status == "failed" for server in mcp_servers),
+            ),
+        )
+        self._status.seed_duration(
+            active_seconds=float(getattr(state, "active_duration_s", 0.0) or 0.0),
+            activity_started_at=getattr(state, "activity_started_at", None),
+        )
+        self._refresh_band()
 
     async def _adopt_takeover_session(self, session: Any) -> None:
         """Become the owner after the remote facade wins the transcript lease.
@@ -7115,6 +7179,10 @@ class OperatorApp(App[None]):
             self._status.dispose()
         if self._controller is not None:
             self._controller.dispose()
+        unsubscribe_frontend = getattr(self, "_unsubscribe_frontend", None)
+        if callable(unsubscribe_frontend):
+            unsubscribe_frontend()
+            self._unsubscribe_frontend = None
         if self._session is not None:
             await self._session.dispose()
 
@@ -8820,12 +8888,26 @@ class OperatorApp(App[None]):
         # /goal, /rename and /compact already route through SessionProtocol's
         # ordinary mutation methods and stay on their existing full UI paths.
         remote_route = getattr(self._session, "route_shared_slash", None)
-        if callable(remote_route) and command in {"/agent", "/team", "/loop"}:
+        remote_capabilities = {
+            f"/{cap.command}": cap
+            for cap in getattr(
+                getattr(self._session, "frontend_state", None), "slash_capabilities", []
+            )
+        }
+        remote_capability = remote_capabilities.get(command)
+        if (
+            callable(remote_route)
+            and remote_capability is not None
+            and str(remote_capability.scope).endswith("authoritative_session")
+        ):
 
             async def run_remote_slash() -> None:
                 try:
-                    typed_route = cast(Callable[[str, str], Awaitable[str]], remote_route)
-                    detail = await typed_route(command.removeprefix("/"), arg)
+                    typed_route = cast(
+                        Callable[[str, str, Sequence[ImageContent]], Awaitable[str]], remote_route
+                    )
+                    images = resolve_markers(arg, attachments or {})
+                    detail = await typed_route(command.removeprefix("/"), arg, images)
                 except Exception as error:
                     self._system_notice(str(error), "warning")
                 else:
@@ -12863,6 +12945,7 @@ class OperatorApp(App[None]):
         if self._consume_user_echo(message.prompt):
             return  # our own echo — the row is already painted
         self._append_block(UserBlock(message.prompt, message.image_count))
+        self._append_image_blocks(list(message.images))
 
     def _consume_user_echo(self, text: str) -> bool:
         """Take one pending echo entry for ``text``; True if there was one.

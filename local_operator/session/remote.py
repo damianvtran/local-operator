@@ -68,6 +68,16 @@ from local_operator.mobile.types import (
     SessionProjection,
     SessionRecord,
 )
+from local_operator.session.frontend_state import (
+    FRONTEND_CAPABILITY,
+    FrontendSessionState,
+    FrontendStateStore,
+    FrontendSync,
+    FrontendUpdate,
+    SnapshotJobs,
+    SnapshotMcpManager,
+    SnapshotWakeScheduler,
+)
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
@@ -131,8 +141,16 @@ class RemoteSession:
         self._session_id = session_id
         self._takeover_factory = takeover_factory
         self._client: AttachClient | None = None
-        self._projection: SessionProjection | None = None
+        self._projection: SessionProjection | None = (
+            None  # identity welcome only; never TUI semantics
+        )
         self._sync_future: asyncio.Future[LiveTurnSeed] | None = None
+        self._frontend_future: asyncio.Future[FrontendSync] | None = None
+        self._frontend_store: FrontendStateStore | None = None
+        self.jobs = SnapshotJobs()
+        self.wake_scheduler = SnapshotWakeScheduler()
+        self.mcp_manager = SnapshotMcpManager()
+        self.mcp_startup: Any | None = None
         self._history: list[Any] = []
         self._history_ids: set[str] = set()
         self._handlers: list[EventHandler] = []
@@ -163,7 +181,7 @@ class RemoteSession:
         self._generation = 0
         self._queued_steers: list[Message] = []
         self._name_state = ConversationName()
-        self._model = ModelSpec(provider="unknown", model_id="unknown")
+        self._model: ModelSpec | None = None
 
     @classmethod
     async def connect(
@@ -174,9 +192,9 @@ class RemoteSession:
         config_dir: Path,
         takeover_factory: Callable[[], Any],
     ) -> "RemoteSession":
-        if record.protocol < 4:
+        if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
             raise ConnectionError(
-                f"owner runs protocol v{record.protocol}; full-TUI attach needs >= 4"
+                f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs protocol >= 5"
             )
         self = cls(
             config_dir=config_dir,
@@ -185,7 +203,8 @@ class RemoteSession:
         )
         await self._dial(record)
         self._load_history()
-        seed = await self._await_seed()
+        seed, frontend = await asyncio.gather(self._await_seed(), self._await_frontend())
+        self._install_frontend(frontend.snapshot)
         self._finish_sync(seed)
         return self
 
@@ -196,12 +215,16 @@ class RemoteSession:
         self._ready_for_events = False
         loop = asyncio.get_running_loop()
         self._sync_future = loop.create_future()
+        self._frontend_future = loop.create_future()
         client = AttachClient(
             self._on_projection,
             self._on_disconnected,
             events=True,
             on_event=self._on_wire_event,
             on_attach_sync=self._on_attach_sync,
+            frontend_state=True,
+            on_frontend_sync=self._on_frontend_sync,
+            on_frontend_update=self._on_frontend_update,
         )
         await client.connect(record, self._session_id)
         self._client = client
@@ -215,6 +238,15 @@ class RemoteSession:
         except TimeoutError as exc:
             raise ConnectionError("owner did not send attach synchronization") from exc
 
+    async def _await_frontend(self) -> FrontendSync:
+        future = self._frontend_future
+        if future is None:
+            raise ConnectionError("owner did not start frontend synchronization")
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=15.0)
+        except TimeoutError as exc:
+            raise ConnectionError("owner did not send frontend synchronization") from exc
+
     def _load_history(self) -> None:
         """Read model-facing durable history without acquiring the writer lease."""
         transcript = Transcript(self._config_dir / "sessions" / self._session_id)
@@ -222,15 +254,6 @@ class RemoteSession:
         self._history_ids = {
             str(message.id) for message in self._history if getattr(message, "id", None)
         }
-        details = transcript.latest_custom("todo_snapshot")
-        if details and details.get("items"):
-            # The standard TUI todo panel reads a process-local store. Restore
-            # the newest durable snapshot so a follower's panel starts where
-            # the owner did; relayed todo tool-end events trigger its normal
-            # 1 Hz refresh afterward.
-            from local_operator.tools.builtin import restore_todos
-
-            restore_todos(self._session_id, list(details["items"]))
 
     def _finish_sync(self, seed: LiveTurnSeed) -> None:
         """Install seed events before post-sync frames and resume delivery.
@@ -267,6 +290,51 @@ class RemoteSession:
         for event in buffered:
             self._emit_or_buffer(event)
 
+    def _on_frontend_sync(self, data: dict[str, Any]) -> None:
+        future = self._frontend_future
+        if future is not None and not future.done():
+            future.set_result(FrontendSync.model_validate(data))
+
+    def _on_frontend_update(self, data: dict[str, Any]) -> None:
+        update = FrontendUpdate.model_validate(data)
+        self._install_frontend(update.snapshot, publish=True)
+
+    def _install_frontend(self, state: FrontendSessionState, *, publish: bool = False) -> None:
+        if state.session_id != self._session_id:
+            raise ConnectionError("frontend state belongs to another session")
+        if self._frontend_store is None:
+            self._frontend_store = FrontendStateStore(state)
+        elif publish:
+            # AttachClient already proved epoch/sequence continuity. Replace
+            # atomically, then notify the one canonical local subscriber set.
+            current = self._frontend_store
+            current.replace(state)
+            for subscriber in list(current._subscribers):
+                subscriber(
+                    FrontendUpdate(epoch=state.epoch, sequence=state.sequence, snapshot=state)
+                )
+        else:
+            self._frontend_store.replace(state)
+        self._streaming = state.streaming
+        self._generation = state.generation
+        self._model = state.selected_model
+        self.jobs.replace(state.jobs)
+        self.wake_scheduler.replace(state.wakes)
+        self.mcp_manager.replace(state.mcp_servers)
+        startup = state.mcp_startup
+        if isinstance(startup, dict):
+            from local_operator.session.mcp_status import McpStartupOutcome
+
+            startup = McpStartupOutcome(
+                configured=tuple(startup.get("configured", ()) or ()),
+                connected=tuple(startup.get("connected", ()) or ()),
+                failures=dict(startup.get("failures", {}) or {}),
+                tool_count=int(startup.get("tool_count", 0) or 0),
+                settling=bool(startup.get("settling", False)),
+            )
+        self.mcp_startup = startup
+        self._name_state.set(state.conversation_title, user_set=state.conversation_title_user_set)
+
     def _on_attach_sync(self, data: dict[str, Any]) -> None:
         future = self._sync_future
         if future is not None and not future.done():
@@ -298,23 +366,11 @@ class RemoteSession:
                 asyncio.create_task(_await_handler(result))
 
     def _on_projection(self, projection: SessionProjection) -> None:
+        # Welcome projection authenticates identity. Pending remains a v4
+        # transition overlay until the owner gate publishers write it directly
+        # into FrontendSessionState; no status/model/todo semantics are read here.
         self._projection = projection
-        self._streaming = projection.streaming
-        self._refresh_model(projection)
         self._sync_gate(projection.pending)
-
-    def _refresh_model(self, projection: SessionProjection) -> None:
-        selector = projection.model_selector or projection.model_label
-        provider, _, model_id = selector.partition("/")
-        if not model_id:
-            provider, model_id = "unknown", selector or "unknown"
-        effort = projection.effort or None
-        self._model = ModelSpec(
-            provider=provider,
-            model_id=model_id,
-            reasoning_effort=effort,
-            reasoning_efforts=tuple(projection.effort_ladder),
-        )
 
     # -- gate bridging ------------------------------------------------------
 
@@ -477,24 +533,40 @@ class RemoteSession:
         return self._streaming
 
     @property
+    def frontend_state(self) -> FrontendSessionState:
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.state
+
+    def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.subscribe(handler)
+
+    @property
     def model_label(self) -> str:
-        return self._projection.model_label if self._projection else "unknown/unknown"
+        return self.frontend_state.model_label
 
     @property
     def model(self) -> ModelSpec:
-        return self._model
+        model = self.frontend_state.selected_model
+        if model is None:
+            raise RuntimeError("owner has no selected model spec")
+        return model
 
     @property
     def effective_model(self) -> ModelSpec:
-        return self._model
+        model = self.frontend_state.effective_model or self.frontend_state.selected_model
+        if model is None:
+            raise RuntimeError("owner has no effective model spec")
+        return model
 
     @property
     def effective_model_label(self) -> str:
-        return self.model_label
+        return self.frontend_state.effective_model_label
 
     def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
-        old = self._model
-        self._model = model
+        old = self.model
         client = self._client
         if client is None:
             return
@@ -507,7 +579,7 @@ class RemoteSession:
 
     @property
     def goal(self) -> str:
-        return ""
+        return self.frontend_state.goal
 
     def set_goal(self, text: str) -> str:
         client = self._client
@@ -517,11 +589,10 @@ class RemoteSession:
 
     @property
     def conversation_name(self) -> str:
-        return self._projection.conversation_name if self._projection else ""
+        return self.frontend_state.conversation_title
 
     @property
     def conversation_name_state(self) -> ConversationName:
-        self._name_state.set(self.conversation_name, user_set=False)
         return self._name_state
 
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
@@ -550,7 +621,12 @@ class RemoteSession:
     async def adopt_aside(self, messages: list[Message]) -> None:
         raise RuntimeError("aside adoption is unavailable while another process owns the session")
 
-    async def route_shared_slash(self, command: str, args: str) -> str:
+    async def route_shared_slash(
+        self,
+        command: str,
+        args: str,
+        images: Sequence[ImageContent] | None = None,
+    ) -> str:
         """Run a conversation-mutating slash command on the authoritative host.
 
         OperatorApp handles process-local navigation/config itself. This seam is
@@ -561,7 +637,11 @@ class RemoteSession:
         client = self._client
         if client is None:
             raise ConnectionError("session owner is reconnecting")
-        return await client.slash(command, args)
+        return await client.slash(
+            command,
+            args,
+            [_image_to_wire(image) for image in (images or [])],
+        )
 
     async def compact_now(self) -> CompactionOutcome:
         client = self._client
@@ -643,11 +723,23 @@ class RemoteSession:
             asyncio.create_task(self._client.slash("stop", ""))
         return 0
 
+    @property
+    def active_agent(self) -> str:
+        return self.frontend_state.active_agent
+
+    @property
+    def active_team_name(self) -> str:
+        return self.frontend_state.active_team
+
+    def restored_usage(self) -> Usage | None:
+        return self.frontend_state.last_usage
+
     def running_subagents(self) -> int:
-        projection = self._projection
-        if projection is None:
-            return 0
-        return sum(1 for row in projection.subagents if row.status == "running")
+        return sum(
+            1
+            for row in self.frontend_state.jobs
+            if row.type == "task" and row.status == "running" and not row.queued
+        )
 
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         self._approval_handler = handler

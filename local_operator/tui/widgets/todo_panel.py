@@ -447,8 +447,15 @@ class TodoPanel(Container):
         Never raises: a status surface must not be able to take the app down.
         """
         try:
-            session_id = getattr(session, "session_id", "") or ""
-            phases = todo_items(session_id)
+            frontend = getattr(session, "frontend_state", None)
+            if frontend is not None:
+                phases = [phase.model_dump(mode="json") for phase in frontend.todos]
+            else:
+                # Reduced/embedder hosts without the canonical contract retain
+                # the legacy store read; production Session and RemoteSession
+                # both arrive through the state above.
+                session_id = getattr(session, "session_id", "") or ""
+                phases = todo_items(session_id)
             # The phase name and the reason both ride IN the fingerprint: a
             # phase rename, an item moving between phases, or a re-block with a
             # new reason all change what the panel says, and a guard blind to

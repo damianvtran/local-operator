@@ -196,6 +196,15 @@ class TuiSessionHandle(SessionHandle):
         self._unsubscribe = unsubscribe
         return unsubscribe
 
+    @property
+    def frontend_state_seed(self):  # type: ignore[no-untyped-def]
+        """Canonical state seed for full-TUI attach clients only."""
+        return self._session().frontend_state
+
+    def subscribe_frontend(self, on_update):  # type: ignore[no-untyped-def]
+        """Subscribe at the session store's atomic snapshot boundary."""
+        return self._session().subscribe_frontend(on_update)
+
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the registrant's v4 relay.
 
@@ -341,10 +350,25 @@ class TuiSessionHandle(SessionHandle):
         return f"effort: {effort}"
 
     async def slash(self, command: str, args: str) -> str:
+        return await self.slash_images(command, args, None)
+
+    async def slash_images(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None,
+    ) -> str:
         line = f"/{command}" + (f" {args}" if args else "")
 
         def apply() -> None:
-            self._app._run_slash_command(line)
+            from local_operator.tui.widgets.editor import Attachment
+
+            decoded = _image_blocks(images)
+            attachments = {
+                index: Attachment(image=image, marker=f"[Image #{index}]")
+                for index, image in enumerate(decoded, start=1)
+            }
+            self._app._run_slash_command(line, attachments)
 
         await self._on_app(apply)
         self._refresh_state()

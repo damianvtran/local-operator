@@ -1331,6 +1331,12 @@ class Session:
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
+        # The session, not an OperatorApp, owns state that must survive a second
+        # frontend joining. Constructed after every durable source above has
+        # restored so the first snapshot is already authoritative.
+        from local_operator.session.frontend_state import FrontendStateStore
+
+        self._frontend_state_store = FrontendStateStore.from_session(self)
 
     def _render_history(
         self, messages: list[AgentMessage], *, keep_images: bool = False
@@ -3035,6 +3041,19 @@ class Session:
 
     # -- events ---------------------------------------------------------------
 
+    @property
+    def frontend_state(self):  # type: ignore[no-untyped-def]
+        """Current canonical state for any full terminal frontend."""
+        return self._frontend_state_store.state
+
+    def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
+        """Atomically snapshot and subscribe at one session-loop boundary."""
+        return self._frontend_state_store.subscribe(handler)
+
+    def refresh_frontend_state(self) -> None:
+        """Publish non-event source changes through the canonical contract."""
+        self._frontend_state_store.refresh_from_session(self)
+
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable. Sync or
         async handlers are called in registration order; one raising never
@@ -3142,6 +3161,11 @@ class Session:
             return None
 
     async def _emit(self, event: AgentEvent) -> None:
+        # Fold before fan-out: a client joining from an event handler observes a
+        # snapshot that already contains this event, never an off-by-one view.
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.observe_event(self, event)
         for handler in list(self._handlers):
             try:
                 outcome = handler(event)
@@ -3399,6 +3423,10 @@ class Session:
             # resume. Placed on the normal path (a turn that raised past here
             # still has last turn's snapshot; the next clean turn re-writes it).
             await self._maybe_persist_todos()
+            # Spend must survive owner death at the same durability boundary as
+            # the messages it describes. The checkpoint is replacement state,
+            # never an additive delta, so takeover cannot double it.
+            await self._frontend_state_store.checkpoint(self._transcript)
 
             pending_incident = self._pending_incident
             self._pending_incident = None

@@ -156,10 +156,14 @@ class UserMessageStart(Message):
     its UserBlock optimistically, so the app de-dupes on arrival. The field is
     ``prompt``, not ``text``: Textual's ``Message`` reserves ``text``."""
 
-    def __init__(self, prompt: str, image_count: int) -> None:
+    def __init__(self, prompt: str, images: list[ImageContent] | int) -> None:
         super().__init__()
         self.prompt = prompt
-        self.image_count = image_count
+        # Integer remains accepted for older synthetic tests and reduced event
+        # producers. Production carries immutable blocks; only that path can
+        # render thumbnails, while the compatibility path preserves its receipt.
+        self.images = tuple(images) if not isinstance(images, int) else ()
+        self.image_count = images if isinstance(images, int) else len(images)
 
 
 class AssistantMessageEnd(Message):
@@ -528,7 +532,7 @@ class EventController:
         # is the AgentMessage union, so pyright needs the isinstance.
         if isinstance(message, HarnessMessage) and message.role == "user":
             images = [b for b in message.content if isinstance(b, ImageContent)]
-            self._post(UserMessageStart(message.text, len(images)))
+            self._post(UserMessageStart(message.text, images))
             return
         self._assistant_buffer = ""
         self._assistant_seen = ""

@@ -117,6 +117,9 @@ class AttachClient:
         events: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         on_attach_sync: Callable[[dict[str, Any]], None] | None = None,
+        frontend_state: bool = False,
+        on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
+        on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._on_projection = on_projection
         self._on_disconnected = on_disconnected
@@ -127,6 +130,11 @@ class AttachClient:
         self._events = events
         self._on_event = on_event
         self._on_attach_sync = on_attach_sync
+        self._frontend_state = frontend_state
+        self._on_frontend_sync = on_frontend_sync
+        self._on_frontend_update = on_frontend_update
+        self._frontend_epoch: str | None = None
+        self._frontend_sequence: int | None = None
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -164,6 +172,8 @@ class AttachClient:
             # simply never sends event frames — the caller gates on
             # ``record.protocol >= 4`` before relying on the relay.
             auth["events"] = True
+        if self._frontend_state:
+            auth["frontend_state"] = True
         writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         # The welcome projection doubles as the identity check: it names the
@@ -243,6 +253,36 @@ class AttachClient:
                             self._on_attach_sync(frame.get("data") or {})
                         except Exception:  # noqa: BLE001
                             continue
+                elif op == "frontend_sync":
+                    data = frame.get("data") or {}
+                    epoch = data.get("epoch")
+                    sequence = data.get("sequence")
+                    if not isinstance(epoch, str) or not isinstance(sequence, int):
+                        raise ConnectionError("malformed frontend sync")
+                    self._frontend_epoch = epoch
+                    self._frontend_sequence = sequence
+                    if self._on_frontend_sync is not None:
+                        self._on_frontend_sync(data)
+                elif op == "frontend_update":
+                    data = frame.get("data") or {}
+                    epoch = data.get("epoch")
+                    sequence = data.get("sequence")
+                    expected = (
+                        (self._frontend_sequence + 1)
+                        if self._frontend_sequence is not None
+                        else None
+                    )
+                    if epoch != self._frontend_epoch or sequence != expected:
+                        # State streams are replacement-safe only when every
+                        # sequence arrives. Closing forces an atomic resync; a
+                        # silent skip would recreate the drift this protocol exists to prevent.
+                        raise ConnectionError(
+                            f"frontend state gap: expected {self._frontend_epoch}/{expected}, "
+                            f"got {epoch}/{sequence}"
+                        )
+                    self._frontend_sequence = sequence
+                    if self._on_frontend_update is not None:
+                        self._on_frontend_update(data)
                 elif op in ("ack", "error"):
                     future = self._pending.pop(frame.get("req"), None)
                     if future is not None and not future.done():
@@ -342,8 +382,13 @@ class AttachClient:
     async def abort(self) -> str:
         return await self._request("abort")
 
-    async def slash(self, command: str, args: str) -> str:
-        return await self._request("slash", command=command, args=args)
+    async def slash(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None = None,
+    ) -> str:
+        return await self._request("slash", command=command, args=args, images=images or [])
 
     async def set_model(self, provider: str, model_id: str) -> str:
         return await self._request("set_model", provider=provider, model_id=model_id)

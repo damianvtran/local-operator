@@ -42,6 +42,27 @@ class FakeHandle:
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
         self._event_handler = None
         self.event_pending: PendingRequest | None = None
+        from local_operator.session.frontend_state import (
+            FrontendModelSpec,
+            FrontendSessionState,
+            FrontendStateStore,
+        )
+
+        self._frontend = FrontendStateStore(
+            FrontendSessionState(
+                session_id="s1",
+                epoch="fake-owner",
+                cwd="/tmp",
+                conversation_title="fake",
+                selected_model=FrontendModelSpec(
+                    provider="test", model_id="model", context_window=1_000_000
+                ),
+                effective_model=FrontendModelSpec(
+                    provider="test", model_id="model", context_window=1_000_000
+                ),
+                context_window=1_000_000,
+            )
+        )
 
     @property
     def session_projection_seed(self) -> SessionProjection:
@@ -49,6 +70,13 @@ class FakeHandle:
 
     def subscribe(self, on_projection):  # noqa: ANN001, ANN202
         return lambda: None
+
+    @property
+    def frontend_state_seed(self):  # noqa: ANN202
+        return self._frontend.state
+
+    def subscribe_frontend(self, on_update):  # noqa: ANN001, ANN202
+        return self._frontend.subscribe(on_update)
 
     def subscribe_events(self, on_event):  # noqa: ANN001, ANN202
         self._event_handler = on_event
@@ -82,6 +110,9 @@ class FakeHandle:
 
     async def slash(self, command, args):  # noqa: ANN001, ANN202
         return await self._record("slash", command, args)
+
+    async def slash_images(self, command, args, images):  # noqa: ANN001, ANN202
+        return await self._record("slash", command, args, images)
 
     async def new_conversation(self):  # noqa: ANN202
         return await self._record("new_conversation")
@@ -173,8 +204,8 @@ async def _until(
 
 
 @pytest.mark.asyncio
-async def test_protocol_version_is_four_and_cap_constant() -> None:
-    assert PROTOCOL_VERSION == 4
+async def test_protocol_version_is_five_and_cap_constant() -> None:
+    assert PROTOCOL_VERSION == 5
     assert ATTACH_MAX_CLIENTS == 4
 
 
