@@ -1,0 +1,49 @@
+Round 4 source head: 053fd9da66bf6a540932f226658fe3aab3fe6571
+Fixture: LO_MOBILE_FIXTURE_PORT=4180 .venv/bin/python docs/evidence/mobile-subagent-fullscreen/fixture.py
+Browser: real cmux browser surface, exact logical mobile viewport; no headless browser.
+
+Authenticated API:
+- unauthenticated GET /api/sessions/fixture-root/agents/child -> 401
+- POST /login -> 303
+- authenticated detail -> 200, version=41, status=running, child=[grandchild]
+- fixture transient detail sentinel -> 503 {"error":"temporary detail failure"}
+
+Navigation:
+- direct great-grandchild Header Back -> grandchild -> child -> root, history state remained unmarked/null
+- in-app child -> grandchild followed by native Back -> child and Forward -> grandchild
+
+Detail recovery:
+- deterministic coordinator test covers fail(41) -> request(41) -> accept detail(41)
+- live unavailable state exposes Retry and keeps the route; fixture can fail and restore the same version
+
+Modal:
+- initial focus: BUTTON aria-label="close sheet", inside dialog=true
+- Shift+Tab from first -> last agent row (responsive-hierarchy-audit...), inside dialog=true
+- Tab from last -> close sheet, inside dialog=true
+- Escape -> dialog absent; BUTTON aria-label="open agent navigation" restored
+- background header/transcript/footer each inert=true and aria-hidden=true while open; all restored on close
+
+360x780 geometry (rendered page viewport is 360x782 because cmux screenshot output reserves 2 device pixels):
+- screenshot PNG: exactly 360x780
+- document: 360 wide, no horizontal overflow
+- Back: 44x44; Agents: 58.27x44
+- tool disclosure: 324x44; tasks disclosure: 336x44; child agents disclosure: 312x44
+
+390x844 geometry:
+- screenshot PNG: exactly 390x844
+- document: 390 wide, no horizontal overflow
+
+Visual matrix inspected:
+- round-4-before and round-4-after each contain exact-size 360x780 and 390x844 PNGs for running, completed long Markdown outcome, failed recovery, grandchild, Agents dialog, tasks/diff, disconnected, reconnected, and unavailable.
+- before confirms Handoff vocabulary, 32px disclosure rows, stale unavailable Loading activity, and missing modal.
+- after confirms Result vocabulary, 44px targets, Unavailable subtitle + Retry, accessible Agents dialog, and current fixture content.
+
+Browser diagnostics:
+- console: no entries
+- errors: none
+
+Automated validation:
+- frontend: 18 passed; pnpm check; pnpm check-themes; pnpm build; pnpm audit --audit-level high
+- mobile backend: pytest tests/unit/mobile -q
+- source gates: flake8, Black 26.1.0, isort, pyright
+- full unit suite: pytest tests/unit -q

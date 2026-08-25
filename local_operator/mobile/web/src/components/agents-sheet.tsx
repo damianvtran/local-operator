@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type RefObject } from "react";
 import { navigate } from "../router";
 import type { SubagentDetail, SubagentRow } from "../types";
 import { AgentRow } from "./subagents-panel";
@@ -81,16 +81,18 @@ export function AgentsSheet({
 	sessionId,
 	detail,
 	roster,
+	returnFocusRef,
 }: {
 	open: boolean;
 	onClose: () => void;
+	returnFocusRef?: RefObject<HTMLElement | null>;
 	sessionId: string;
 	detail: SubagentDetail;
 	roster: SubagentRow[];
 }) {
 	const groups = useMemo(() => groupAgents(detail, roster), [detail, roster]);
 	return (
-		<Sheet open={open} onClose={onClose} title="Agents">
+		<Sheet open={open} onClose={onClose} title="Agents" returnFocusRef={returnFocusRef}>
 			<section className="px-3 pb-2">
 				<h3 className="mb-1 text-meta font-medium text-ink-dim">Path</h3>
 				<RootRow sessionId={sessionId} onNavigate={onClose} />

@@ -25,22 +25,39 @@ describe("parseHash", () => {
 });
 
 describe("navigateUp", () => {
-	it("replaces a direct deep link with its hierarchy fallback", () => {
-		const replaceState = vi.fn();
-		vi.stubGlobal("history", { state: null, replaceState, back: vi.fn() });
+	it("keeps repeated direct-link fallback inside the hierarchy", () => {
+		let state: Record<string, unknown> | null = null;
+		const replaceState = vi.fn((next: Record<string, unknown>) => { state = next; });
+		const back = vi.fn();
+		vi.stubGlobal("history", {
+			get state() { return state; },
+			replaceState,
+			back,
+		});
 		vi.stubGlobal("window", { dispatchEvent: vi.fn() });
 		vi.stubGlobal("PopStateEvent", class { constructor(..._args: unknown[]) {} });
+
 		navigateUp("/s/root/a/parent");
-		expect(replaceState).toHaveBeenCalledWith(
-			expect.objectContaining({ loMobileRoute: true }),
+		navigateUp("/s/root");
+
+		expect(replaceState).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({ loMobileHasInAppPredecessor: false }),
 			"",
 			"#/s/root/a/parent",
 		);
+		expect(replaceState).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({ loMobileHasInAppPredecessor: false }),
+			"",
+			"#/s/root",
+		);
+		expect(back).not.toHaveBeenCalled();
 	});
 
 	it("uses chronological Back for an in-app route", () => {
 		const back = vi.fn();
-		vi.stubGlobal("history", { state: { loMobileRoute: true }, back });
+		vi.stubGlobal("history", { state: { loMobileHasInAppPredecessor: true }, back });
 		navigateUp("/s/root");
 		expect(back).toHaveBeenCalledOnce();
 	});

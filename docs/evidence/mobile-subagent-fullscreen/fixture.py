@@ -1,9 +1,14 @@
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/tmp/lop-mobile-subagent-fullscreen")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
+PORT = int(os.environ.get("LO_MOBILE_FIXTURE_PORT", "4179"))
+DISCONNECT_SENTINEL = Path(f"/tmp/lop-fixture-disconnect-{PORT}")
+DETAIL_FAILURE_SENTINEL = Path(f"/tmp/lop-fixture-detail-failure-{PORT}")
 
 from local_operator.mobile.daemon import (  # noqa: E402
     MobileDaemon,
@@ -36,7 +41,7 @@ projection = SessionProjection(
     version=41,
     transcript=[entry("root-1", "user", "Review the full-screen mobile agent flow.")],
 )
-long_result = """## Completed handoff
+long_result = """## Completed result
 
 **PR #298** now preserves selected detail through rapid projection updates and
 exposes reconnecting state without discarding cached content.
@@ -175,7 +180,7 @@ projection.subagents = [
     ),
 ]
 
-daemon = MobileDaemon(port=4179, password="fixture-review")
+daemon = MobileDaemon(port=PORT, password="fixture-review")
 daemon.capture_subagent_details(projection)
 daemon.session_projections[SESSION] = projection
 record = SessionRecord(
@@ -194,13 +199,28 @@ daemon.table.entries[record.pid] = entry_state
 base_app = build_app(daemon)
 
 
-class FixtureDisconnect:
-    """Close only the SSE response while leaving cached detail endpoints live."""
+class FixtureRecovery:
+    """Expose deterministic relay and detail failures without changing fixture data."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] == "http"
+            and scope["path"] == f"/api/sessions/{SESSION}/agents/child"
+            and DETAIL_FAILURE_SENTINEL.exists()
+        ):
+            body = b'{"error":"temporary detail failure"}'
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 503,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
         if scope["type"] == "http" and scope["path"] == f"/api/sessions/{SESSION}/events":
             await send(
                 {
@@ -214,16 +234,16 @@ class FixtureDisconnect:
             )
             body = f"event: projection\ndata: {json.dumps(projection.to_json())}\n\n".encode()
             await send({"type": "http.response.body", "body": body, "more_body": True})
-            while not Path("/tmp/lop-fixture-disconnect").exists():
+            while not DISCONNECT_SENTINEL.exists():
                 await asyncio.sleep(0.1)
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
         await self.app(scope, receive, send)
 
 
-app = FixtureDisconnect(base_app)
+app = FixtureRecovery(base_app)
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=4179, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")

@@ -29,14 +29,18 @@ export function parseHash(hash: string): Route {
 	return { name: "list" };
 }
 
-const ROUTE_STATE_KEY = "loMobileRoute";
+const ROUTE_STATE_KEY = "loMobileHasInAppPredecessor";
 
-export function navigate(to: string, options: { replace?: boolean } = {}): void {
+export function navigate(
+	to: string,
+	options: { replace?: boolean; hasInAppPredecessor?: boolean } = {},
+): void {
 	const method = options.replace ? "replaceState" : "pushState";
-	/* Mark entries created inside the SPA. The detail header can then use true
-	   chronological Back for an in-app visit without sending a direct/deep-link
-	   visit to an unrelated page that happened to precede Local Operator. */
-	history[method]({ ...history.state, [ROUTE_STATE_KEY]: true }, "", `#${to}`);
+	/* A pushed route has a chronological in-app predecessor. A replacement must
+	   opt into that claim: hierarchy fallback replaces an untrusted external
+	   predecessor and therefore must remain false at every recursive level. */
+	const hasInAppPredecessor = options.hasInAppPredecessor ?? !options.replace;
+	history[method]({ ...history.state, [ROUTE_STATE_KEY]: hasInAppPredecessor }, "", `#${to}`);
 	window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
 }
 
@@ -45,9 +49,10 @@ export function navigateUp(fallback: string): void {
 		history.back();
 		return;
 	}
-	/* A direct route has no trustworthy in-app predecessor. Replace it with its
-	   hierarchy parent so the primary Back control always stays in the app. */
-	navigate(fallback, { replace: true });
+	/* A direct route has no trustworthy in-app predecessor. Replacing it with a
+	   hierarchy parent preserves that fact so repeated Back keeps climbing to
+	   root instead of eventually escaping Local Operator. */
+	navigate(fallback, { replace: true, hasInAppPredecessor: false });
 }
 
 export function useRoute(): Route {

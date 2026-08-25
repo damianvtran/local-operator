@@ -9,7 +9,8 @@ import type { SubagentDetail } from "./types";
  */
 export class DetailRequestCoordinator {
 	private inFlight = false;
-	private requestedVersion = -1;
+	private completedVersion = -1;
+	private activeVersion = -1;
 	private pendingVersion = -1;
 	private disposed = false;
 
@@ -20,9 +21,11 @@ export class DetailRequestCoordinator {
 	) {}
 
 	request(version: number): void {
-		if (this.disposed || version <= this.requestedVersion && !this.inFlight) return;
+		if (this.disposed || version <= this.completedVersion && !this.inFlight) return;
 		if (this.inFlight) {
-			this.pendingVersion = Math.max(this.pendingVersion, version);
+			if (version > this.activeVersion) {
+				this.pendingVersion = Math.max(this.pendingVersion, version);
+			}
 			return;
 		}
 		this.start(version);
@@ -34,9 +37,12 @@ export class DetailRequestCoordinator {
 
 	private start(version: number): void {
 		this.inFlight = true;
-		this.requestedVersion = Math.max(this.requestedVersion, version);
+		this.activeVersion = version;
 		void this.load()
 			.then((detail) => {
+				/* Only a successful response satisfies a version. A transient failure
+				   must remain retryable when the stream reconnects without advancing. */
+				this.completedVersion = Math.max(this.completedVersion, version);
 				if (!this.disposed) this.accept(detail);
 			})
 			.catch((reason: unknown) => {
@@ -47,7 +53,7 @@ export class DetailRequestCoordinator {
 				if (this.disposed) return;
 				const followUp = this.pendingVersion;
 				this.pendingVersion = -1;
-				if (followUp > this.requestedVersion) this.start(followUp);
+				if (followUp > this.completedVersion) this.start(followUp);
 			});
 	}
 }

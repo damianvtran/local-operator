@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { getSubagentDetail } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
 import {
@@ -65,12 +65,12 @@ function Outcome({ detail }: { detail: SubagentDetail }) {
 		return (
 			<section aria-live="polite" className="mt-2 border-l-2 border-success pl-3">
 				<p className="mb-1 text-meta font-medium text-success">
-					✓ Handoff from {detail.label}
+					✓ Result from {detail.label}
 				</p>
 				{detail.result_text ? (
 					<Markdown text={detail.result_text} />
 				) : (
-					<p className="text-body-sm text-ink-muted">Agent completed without a handoff.</p>
+					<p className="text-body-sm text-ink-muted">Agent completed without a result.</p>
 				)}
 			</section>
 		);
@@ -142,10 +142,14 @@ function AgentHeader({
 	detail,
 	parentPath,
 	onOpenAgents,
+	agentsButtonRef,
+	fallbackSubtitle = "Loading activity",
 }: {
 	detail: SubagentDetail | null;
 	parentPath: string;
 	onOpenAgents?: () => void;
+	agentsButtonRef?: RefObject<HTMLButtonElement | null>;
+	fallbackSubtitle?: string;
 }) {
 	return (
 		<header className="flex min-h-[52px] items-center gap-1 border-b border-hairline bg-surface px-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
@@ -160,7 +164,7 @@ function AgentHeader({
 			<div className="min-w-0 flex-1">
 				<p className="truncate text-body-sm font-medium">{detail?.label || "Agent"}</p>
 				<p className="truncate text-meta text-ink-dim">
-					{detail ? `${detail.agent}${detail.effort ? ` · ${detail.effort}` : ""}` : "Loading activity"}
+					{detail ? `${detail.agent}${detail.effort ? ` · ${detail.effort}` : ""}` : fallbackSubtitle}
 				</p>
 			</div>
 			{detail ? (
@@ -171,6 +175,7 @@ function AgentHeader({
 			) : null}
 			{detail && onOpenAgents ? (
 				<button
+					ref={agentsButtonRef}
 					type="button"
 					onClick={onOpenAgents}
 					aria-label="open agent navigation"
@@ -187,15 +192,16 @@ function InlineState({ children }: { children: ReactNode }) {
 	return <main className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-4">{children}</main>;
 }
 
-export function AgentUnavailable({ sessionId }: { sessionId: string }) {
+export function AgentUnavailable({ sessionId, onRetry }: { sessionId: string; onRetry?: () => void }) {
 	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
 	return (
 		<>
-			<AgentHeader detail={null} parentPath={rootPath} />
+			<AgentHeader detail={null} parentPath={rootPath} fallbackSubtitle="Unavailable" />
 			<InlineState>
 				<p role="alert" className="text-body-sm font-medium text-ink">This agent is no longer available.</p>
 				<p className="text-body-sm text-ink-dim">It may have expired or been removed.</p>
 				<div className="mt-2 flex flex-wrap gap-2">
+					{onRetry ? <button type="button" onClick={onRetry} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Retry</button> : null}
 					<button type="button" onClick={() => navigateUp(rootPath)} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Back to parent</button>
 					<button type="button" onClick={() => navigate(rootPath)} className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated">View root</button>
 				</div>
@@ -239,6 +245,7 @@ export function AgentConversation({
 	initialAgentsOpen?: boolean;
 }) {
 	const [agentsOpen, setAgentsOpen] = useState(initialAgentsOpen);
+	const agentsButtonRef = useRef<HTMLButtonElement>(null);
 	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
 	const parentPath = detail.parent_job_id
 		? agentPath(sessionId, detail.parent_job_id)
@@ -246,7 +253,12 @@ export function AgentConversation({
 	const entries = useMemo(() => agentConversationEntries(detail), [detail]);
 	return (
 		<>
-			<AgentHeader detail={detail} parentPath={parentPath} onOpenAgents={() => setAgentsOpen(true)} />
+			<AgentHeader
+				detail={detail}
+				parentPath={parentPath}
+				onOpenAgents={() => setAgentsOpen(true)}
+				agentsButtonRef={agentsButtonRef}
+			/>
 			{!connected ? (
 				<div role="status" className="border-b border-warning-border bg-warning-wash px-3 py-2 text-meta text-warning">
 					Reconnecting. Showing saved agent activity.
@@ -265,7 +277,14 @@ export function AgentConversation({
 					<button type="button" onClick={() => navigate(parentPath)} className="min-h-11 rounded-sm px-2 text-info active:bg-elevated">Open parent to steer</button>
 				</footer>
 			) : null}
-			<AgentsSheet open={agentsOpen} onClose={() => setAgentsOpen(false)} sessionId={sessionId} detail={detail} roster={projection.subagents} />
+			<AgentsSheet
+				open={agentsOpen}
+				onClose={() => setAgentsOpen(false)}
+				returnFocusRef={agentsButtonRef}
+				sessionId={sessionId}
+				detail={detail}
+				roster={projection.subagents}
+			/>
 		</>
 	);
 }
@@ -305,10 +324,23 @@ export function AgentScreen({
 		};
 	}, [jobId, key, sessionId]);
 	useEffect(() => {
-		loaderRef.current?.request(projection.version);
-	}, [projection.version]);
+		/* Reconnection can restore a transiently unavailable detail endpoint while
+		   the retained projection version stays unchanged, so connectivity is an
+		   explicit retry signal rather than waiting for another projection frame. */
+		if (connected) loaderRef.current?.request(projection.version);
+	}, [connected, projection.version]);
 
-	if (error && !detail) return <AgentUnavailable sessionId={sessionId} />;
+	if (error && !detail) {
+		return (
+			<AgentUnavailable
+				sessionId={sessionId}
+				onRetry={() => {
+					setError("");
+					loaderRef.current?.request(projection.version);
+				}}
+			/>
+		);
+	}
 	if (!detail) return <AgentLoading sessionId={sessionId} connected={connected} />;
 
 	return (

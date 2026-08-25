@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentConversation } from "./screens/agent-view";
+import { AgentConversation, AgentUnavailable } from "./screens/agent-view";
 import type { SessionProjection, SubagentDetail, SubagentRow, TranscriptEntry } from "./types";
 
 vi.mock("./api", () => ({
@@ -48,8 +48,8 @@ function fixture(): { detail: SubagentDetail; projection: SessionProjection } {
 }
 
 afterEach(() => {
+	cleanup();
 	vi.restoreAllMocks();
-	document.body.innerHTML = "";
 });
 
 describe("AgentConversation", () => {
@@ -65,6 +65,80 @@ describe("AgentConversation", () => {
 		fireEvent.click(screen.getByRole("button", { name: /peer/ }));
 		expect(pushState).toHaveBeenCalledWith(expect.anything(), "", "#/s/root/a/peer");
 		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+
+	it("contains dialog focus, hides the background, and restores the opener", async () => {
+		const { detail, projection } = fixture();
+		const { container } = render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={detail} />,
+		);
+		const opener = screen.getByRole("button", { name: "open agent navigation" });
+		opener.focus();
+		fireEvent.click(opener);
+
+		const dialog = screen.getByRole("dialog");
+		const close = screen.getByRole("button", { name: "close sheet" });
+		await waitFor(() => expect(document.activeElement).toBe(close));
+		expect(dialog.getAttribute("aria-modal")).toBe("true");
+		for (const sibling of Array.from(dialog.parentElement!.children)) {
+			if (sibling !== dialog) {
+				expect(sibling.hasAttribute("inert")).toBe(true);
+				expect(sibling.getAttribute("aria-hidden")).toBe("true");
+			}
+		}
+
+		fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /child/ })));
+		fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+		await waitFor(() => expect(document.activeElement).toBe(close));
+		fireEvent.keyDown(dialog, { key: "Escape" });
+
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+		expect(document.activeElement).toBe(opener);
+		expect(container.querySelector("[inert]")).toBeNull();
+		expect(opener.closest("header")?.getAttribute("aria-hidden")).toBeNull();
+	});
+
+	it("uses result vocabulary and state-specific unavailable copy", () => {
+		const { detail, projection } = fixture();
+		const completed = { ...detail, status: "completed" as const, result_text: "Completed result" };
+		const { rerender } = render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={completed} />,
+		);
+		expect(screen.getByText("✓ Result from current-agent")).toBeTruthy();
+		expect(screen.queryByText(/handoff/i)).toBeNull();
+
+		const retry = vi.fn();
+		rerender(<AgentUnavailable sessionId="root" onRetry={retry} />);
+		expect(screen.getByText("Unavailable")).toBeTruthy();
+		expect(screen.queryByText("Loading activity")).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+		expect(retry).toHaveBeenCalledOnce();
+	});
+
+	it("gives tool, task, and child disclosures the shared mobile target floor", () => {
+		const { detail, projection } = fixture();
+		const tool = {
+			...entry("tool", "tool", ""),
+			tool_name: "edit",
+			summary: "agent-view.tsx",
+			intent: "Fixing mobile controls",
+		};
+		const withDisclosures = {
+			...detail,
+			transcript: [...detail.transcript, tool],
+			todos: [{ name: "Remediation", items: [{ text: "Validate targets", status: "pending" as const, reason: "" }] }],
+		};
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={withDisclosures} />,
+		);
+		for (const control of [
+			screen.getByRole("button", { name: /edit agent-view/ }),
+			screen.getByRole("button", { name: /tasks 0\/1/ }),
+			screen.getByRole("button", { name: /child agents 1\/1 running/ }),
+		]) {
+			expect(control.className).toContain("min-h-11");
+		}
 	});
 
 	it("keeps the delegated request singular and removes dominant legacy chrome", () => {

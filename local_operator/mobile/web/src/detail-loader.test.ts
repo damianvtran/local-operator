@@ -4,8 +4,9 @@ import type { SubagentDetail } from "./types";
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
-	const promise = new Promise<T>((done) => { resolve = done; });
-	return { promise, resolve };
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+	return { promise, resolve, reject };
 }
 
 function detail(version: number): SubagentDetail {
@@ -37,6 +38,28 @@ describe("DetailRequestCoordinator", () => {
 		second.resolve(detail(3));
 		await second.promise;
 		await vi.waitFor(() => expect(accepted).toEqual([1, 3]));
+	});
+
+	it("retries a failed version after reconnect without a version advance", async () => {
+		const first = deferred<SubagentDetail>();
+		const second = deferred<SubagentDetail>();
+		const load = vi.fn()
+			.mockReturnValueOnce(first.promise)
+			.mockReturnValueOnce(second.promise);
+		const accept = vi.fn();
+		const reject = vi.fn();
+		const loader = new DetailRequestCoordinator(load, accept, reject);
+
+		loader.request(41);
+		first.reject(new Error("relay unavailable"));
+		await expect(first.promise).rejects.toThrow("relay unavailable");
+		await vi.waitFor(() => expect(reject).toHaveBeenCalledOnce());
+
+		loader.request(41);
+		expect(load).toHaveBeenCalledTimes(2);
+		second.resolve(detail(41));
+		await second.promise;
+		await vi.waitFor(() => expect(accept).toHaveBeenCalledWith(detail(41)));
 	});
 
 	it("ignores completion after route disposal", async () => {
