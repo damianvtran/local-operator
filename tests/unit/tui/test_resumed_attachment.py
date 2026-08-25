@@ -86,9 +86,36 @@ def _session(root: Path, agents: Any, teams: Any) -> Session:
     )
 
 
-async def _adopted(app: OperatorApp, pilot: Any) -> None:
-    """Let the boot worker adopt the session and the band settle."""
-    for _ in range(10):
+async def _adopted(app: OperatorApp, pilot: Any, session: Any) -> None:
+    """Wait until ``session`` has actually been adopted, then let layout settle.
+
+    Polls for the EVENT rather than spending a fixed pause budget, which is the
+    file's house idiom (``test_app_pilot.py`` waits ``if app._session is
+    session: break`` with a bound of 50). The session is built by an async boot
+    worker, so how many pauses the adopt takes is a function of machine load,
+    not of the code under test: measured latency for these tests ranged from 1
+    to 23 pauses across runs. A fixed budget of 10 therefore sat mid
+    distribution and failed roughly half of all runs — and the assertions it
+    failed were this file's own guard for the feature, including the D1 notice
+    check. Raising the budget would only lengthen the fuse; waiting on the
+    condition removes it.
+
+    Identity, not ``is not None``: these tests hand the factory one specific
+    session and every assertion below is about THAT session's restored state,
+    so waking on any adopt would reintroduce a race with a different shape.
+
+    The trailing pauses are for LAYOUT, not for the adopt: ``_adopt_session`` is
+    synchronous end to end, so once it has run the blocks are mounted, but
+    ``test_the_stale_notice_is_on_screen_on_a_session_with_history`` asserts on
+    ``region``, which is only meaningful after a layout pass has placed them.
+    Bounded and load-independent, unlike waiting for the adopt itself.
+    """
+    for _ in range(50):
+        await pilot.pause()
+        if app._session is session:
+            break
+    assert app._session is session, "the boot worker never adopted the session"
+    for _ in range(2):
         await pilot.pause()
 
 
@@ -149,7 +176,7 @@ async def test_the_band_names_the_team_and_agent_a_resume_restored(tmp_path) -> 
 
     app = OperatorApp(factory)
     async with app.run_test(size=(120, 24)) as pilot:
-        await _adopted(app, pilot)
+        await _adopted(app, pilot, resumed)
         assert app._status is not None
         assert app._status._team == "lopdev"
         assert app._status._agent_profile == "auditor"
@@ -171,7 +198,7 @@ async def test_a_stale_team_leaves_the_segment_blank_and_says_why(tmp_path) -> N
 
     app = OperatorApp(factory)
     async with app.run_test(size=(120, 24)) as pilot:
-        await _adopted(app, pilot)
+        await _adopted(app, pilot, resumed)
         assert app._status is not None
         assert app._status._team == ""
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
@@ -202,7 +229,7 @@ async def test_the_stale_notice_is_on_screen_on_a_session_with_history(tmp_path)
 
     app = OperatorApp(factory)
     async with app.run_test(size=(100, 26)) as pilot:
-        await _adopted(app, pilot)
+        await _adopted(app, pilot, resumed)
         notice = _restore_notice(app)
         assert notice is not None, "the stale-attachment notice was never mounted"
         assert _is_on_screen(
@@ -232,7 +259,7 @@ async def test_a_restored_goal_is_reported(tmp_path) -> None:
 
     app = OperatorApp(factory)
     async with app.run_test(size=(120, 24)) as pilot:
-        await _adopted(app, pilot)
+        await _adopted(app, pilot, resumed)
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
         assert any(
             "goal restored" in text and "cut the release" in text for text in notices
@@ -264,7 +291,7 @@ async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> No
 
     app = OperatorApp(factory)
     async with app.run_test(size=(120, 24)) as pilot:
-        await _adopted(app, pilot)
+        await _adopted(app, pilot, bare)
         assert app._status is not None
         assert app._status._team == ""
 
@@ -289,7 +316,7 @@ async def test_a_clean_resume_raises_no_notice(tmp_path) -> None:
 
     app = OperatorApp(factory)
     async with app.run_test(size=(120, 24)) as pilot:
-        await _adopted(app, pilot)
+        await _adopted(app, pilot, resumed)
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
         assert not any("could not restore" in text for text in notices), notices
 
@@ -310,7 +337,7 @@ async def test_the_stale_notice_does_not_end_the_empty_state(tmp_path) -> None:
 
     app = OperatorApp(factory)
     async with app.run_test(size=(120, 24)) as pilot:
-        await _adopted(app, pilot)
+        await _adopted(app, pilot, resumed)
         # The notice IS on screen; what must not happen is the splash retiring
         # for it. ``_welcome_visible`` is the authoritative "the conversation
         # has started" edge both boot layouts hang off.
