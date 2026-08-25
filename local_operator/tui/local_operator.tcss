@@ -1231,6 +1231,10 @@ Screen.subagent SubagentRow.current {
     height: 1;
 }
 
+.subagent-view-breadcrumb {
+    height: 1;
+}
+
 .subagent-view-rule {
     height: 1;
 }

@@ -96,10 +96,12 @@ def test_tool_row_lifecycle_one_line_with_diff_counts() -> None:
         ToolExecutionEndEvent(
             tool_call_id="t1",
             tool_name="write",
+            duration_s=1.25,
             result=ToolResult(
                 tool_call_id="t1",
                 content=[TextContent(text="wrote 10 lines")],
                 details={"added": 8, "removed": 2, "diff": "@@"},
+                duration_s=1.25,
             ),
         )
     )
@@ -108,6 +110,7 @@ def test_tool_row_lifecycle_one_line_with_diff_counts() -> None:
     assert row.details["output"] == "wrote 10 lines"
     assert row.details["diff"] == "@@"
     assert row.details["args"]["path"] == "/a/b/c.py"
+    assert row.elapsed_s == 1.2
 
 
 def test_failed_tool_row_carries_the_error() -> None:

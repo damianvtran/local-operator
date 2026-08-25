@@ -13,7 +13,9 @@ export type EntryKind =
 	| "tool"
 	| "notice"
 	| "steer"
-	| "compaction";
+	| "compaction"
+	| "parent_message"
+	| "subagent_message";
 
 export type ToolState =
 	| "composing"
@@ -102,6 +104,16 @@ export interface SubagentRow {
 	/** Settled outcome, one line. */
 	result_text: string;
 	error_text: string;
+	parent_job_id: string | null;
+	session_id: string | null;
+	prompt: string;
+	effort: string;
+	ancestors: string[];
+	child_ids: string[];
+	peer_ids: string[];
+	transcript: TranscriptEntry[];
+	todos: TodoPhase[];
+	activity: string;
 }
 
 /** One selectable answer on an ask question. Carries the consequence line the

@@ -208,6 +208,20 @@ class ChildInfo:
     session_id: str | None = None
 
 
+@dataclass(frozen=True)
+class SubagentNode:
+    """Immutable presentation identity for one node in the shared lineage."""
+
+    job_id: str
+    label: str
+    parent_job_id: str | None
+    session_id: str | None
+    session_dir: Path | None
+    prompt: str = ""
+    agent_role: str = ""
+    effort: str = ""
+
+
 class ChildSession(Protocol):
     """The three things this module needs from a live child.
 
@@ -232,6 +246,12 @@ class _ChildRecord:
 
     job_id: str
     label: str
+    # The shared registry stays flat; this edge supplies lineage without moving
+    # execution ownership out of each session's own job manager.
+    parent_job_id: str | None = None
+    prompt: str = ""
+    agent_role: str = ""
+    effort: str = ""
     #: The child's transcript directory. Set at attach; the whole basis of
     #: resume, and the reason a record outlives the job row.
     session_dir: Path | None = None
@@ -309,7 +329,16 @@ class SubagentComms:
 
     # -- launch bookkeeping ---------------------------------------------------
 
-    def record_launch(self, job_id: str, label: str) -> None:
+    def record_launch(
+        self,
+        job_id: str,
+        label: str,
+        *,
+        parent_job_id: str | None = None,
+        prompt: str = "",
+        agent_role: str = "",
+        effort: str = "",
+    ) -> None:
         """Note a child that has been registered but may not have started.
 
         Called by :func:`~local_operator.harness.subagent.run_subagent` the
@@ -340,8 +369,19 @@ class SubagentComms:
             # the live child, the flushed asides and the reply watcher; the
             # only fact this call adds is the label run_subagent chose.
             existing.label = label
+            existing.parent_job_id = parent_job_id
+            existing.prompt = prompt
+            existing.agent_role = agent_role
+            existing.effort = effort
             return
-        self._records[job_id] = _ChildRecord(job_id=job_id, label=label)
+        self._records[job_id] = _ChildRecord(
+            job_id=job_id,
+            label=label,
+            parent_job_id=parent_job_id,
+            prompt=prompt,
+            agent_role=agent_role,
+            effort=effort,
+        )
         self._evict_overflow()
 
     def attach(self, job_id: str, child: ChildSession, session_dir: Path) -> None:
@@ -409,6 +449,75 @@ class SubagentComms:
         child-shaped tool.
         """
         return job_id is not None and job_id in self._records
+
+    # -- lineage --------------------------------------------------------------
+
+    def node(self, job_id: str) -> SubagentNode | None:
+        record = self._records.get(job_id)
+        if record is None:
+            return None
+        session_id = record.session_dir.name if record.session_dir is not None else None
+        child_session_id = getattr(record.child, "session_id", None)
+        if child_session_id:
+            session_id = str(child_session_id)
+        return SubagentNode(
+            job_id=record.job_id,
+            label=record.label,
+            parent_job_id=record.parent_job_id,
+            session_id=session_id,
+            session_dir=record.session_dir,
+            prompt=record.prompt,
+            agent_role=record.agent_role,
+            effort=record.effort,
+        )
+
+    def job(self, job_id: str) -> Any | None:
+        """Find a node's job without centralizing its execution manager."""
+        sessions: list[Any] = [self._session]
+        sessions.extend(
+            record.child for record in self._records.values() if record.child is not None
+        )
+        for session in sessions:
+            manager = getattr(session, "jobs", None)
+            try:
+                job = manager.get(job_id) if manager is not None else None
+            except Exception:
+                job = None
+            if job is not None:
+                return job
+        return None
+
+    def parent(self, job_id: str) -> SubagentNode | None:
+        node = self.node(job_id)
+        return self.node(node.parent_job_id) if node is not None and node.parent_job_id else None
+
+    def children(self, job_id: str | None) -> list[SubagentNode]:
+        rows: list[SubagentNode] = []
+        for record in self._records.values():
+            if record.parent_job_id != job_id:
+                continue
+            node = self.node(record.job_id)
+            if node is not None:
+                rows.append(node)
+        return rows
+
+    def peers(self, job_id: str) -> list[SubagentNode]:
+        node = self.node(job_id)
+        if node is None:
+            return []
+        return [peer for peer in self.children(node.parent_job_id) if peer.job_id != job_id]
+
+    def ancestors(self, job_id: str) -> list[SubagentNode]:
+        """Root-to-parent lineage, cycle-safe for malformed legacy snapshots."""
+        rows: list[SubagentNode] = []
+        seen = {job_id}
+        current = self.parent(job_id)
+        while current is not None and current.job_id not in seen:
+            seen.add(current.job_id)
+            rows.append(current)
+            current = self.parent(current.job_id)
+        rows.reverse()
+        return rows
 
     # -- addressing -----------------------------------------------------------
 
@@ -507,6 +616,10 @@ class SubagentComms:
                 {
                     "job_id": record.job_id,
                     "label": record.label,
+                    "parent_job_id": record.parent_job_id,
+                    "prompt": record.prompt,
+                    "agent_role": record.agent_role,
+                    "effort": record.effort,
                     "session_dir": str(record.session_dir),
                     "outcome": record.outcome,
                     "error_text": record.error_text,
@@ -542,6 +655,10 @@ class SubagentComms:
             record = _ChildRecord(
                 job_id=job_id,
                 label=str(row.get("label") or job_id),
+                parent_job_id=(str(row["parent_job_id"]) if row.get("parent_job_id") else None),
+                prompt=str(row.get("prompt") or ""),
+                agent_role=str(row.get("agent_role") or ""),
+                effort=str(row.get("effort") or ""),
                 session_dir=session_dir,
                 settled=True,
                 settled_at=row.get("settled_at"),

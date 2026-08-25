@@ -26,6 +26,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from local_operator.harness.comms import HUB_MESSAGE_TYPE
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -169,6 +170,20 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
     tool_args: dict[str, dict[str, Any]] = {}
     for message in history:
         if isinstance(message, CustomMessage):
+            if message.custom_type == HUB_MESSAGE_TYPE:
+                body = str(message.details.get("body") or "").strip()
+                direction = message.details.get("direction")
+                if body:
+                    entries.append(
+                        TranscriptEntry(
+                            id=message.id,
+                            kind=(
+                                "parent_message" if direction == "to_child" else "subagent_message"
+                            ),
+                            text=body,
+                        )
+                    )
+                continue
             text = _message_text(message)
             if text:
                 entries.append(
@@ -205,7 +220,11 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 entry.tool_state = "failed" if message.is_error else "done"
                 if message.is_error:
                     entry.error = _compact(message.text, 200)
-                result_details = (message.provider_payload or {}).get("details")
+                payload = message.provider_payload or {}
+                result_details = payload.get("details")
+                duration = payload.get("duration_s")
+                if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                    entry.elapsed_s = float(duration)
                 entry.diff_added, entry.diff_removed = _diff_counts(result_details)
                 details: dict[str, Any] = {}
                 args = tool_args.get(message.tool_call_id or "", {})
@@ -308,10 +327,18 @@ class ProjectionFold:
                     entry.tool_state = "failed" if message.is_error else "done"
                     if message.is_error:
                         entry.error = _compact(message.text, 200)
+                    payload = message.provider_payload or {}
+                    result_details = payload.get("details")
+                    entry.diff_added, entry.diff_removed = _diff_counts(
+                        result_details if isinstance(result_details, dict) else None
+                    )
+                    duration = payload.get("duration_s")
+                    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                        entry.elapsed_s = float(duration)
                     entry.details = self._tool_details(
                         self._tool_args.get(message.tool_call_id or "", {}),
                         message.text,
-                        None,
+                        result_details if isinstance(result_details, dict) else None,
                     )
         # A resumed fold starts clean: no streaming row, no half-run tools.
         self._open_message_id = None
@@ -415,8 +442,11 @@ class ProjectionFold:
             row = self._tool_row(event.tool_call_id, event.tool_name)
             result = event.result
             row.tool_state = "failed" if result.is_error else "done"
+            measured = time.monotonic() - self._tool_started_at.pop(
+                event.tool_call_id, time.monotonic()
+            )
             row.elapsed_s = round(
-                time.monotonic() - self._tool_started_at.pop(event.tool_call_id, time.monotonic()),
+                event.duration_s if event.duration_s is not None else measured,
                 1,
             )
             row.diff_added, row.diff_removed = _diff_counts(result.details)
@@ -613,6 +643,66 @@ class ProjectionFold:
 
     # -- todos / pending / state -------------------------------------------
 
+    def set_subagent_details(self, comms: Any) -> None:
+        """Enrich roster rows from the shared lineage and durable transcripts."""
+        for node in (comms.node(row.job_id) for row in self._subagents.values()):
+            if node is None:
+                continue
+            row = self._subagents[node.job_id]
+            row.parent_job_id = node.parent_job_id
+            row.session_id = node.session_id
+            row.prompt = node.prompt
+            row.effort = node.effort
+            row.ancestors = [ancestor.label for ancestor in comms.ancestors(node.job_id)]
+            row.child_ids = [child.job_id for child in comms.children(node.job_id)]
+            row.peer_ids = [peer.job_id for peer in comms.peers(node.job_id)]
+            job = comms.job(node.job_id)
+            if job is not None:
+                row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
+                row.progress = str(
+                    (getattr(job, "latest_details", None) or {}).get("progress") or row.progress
+                )
+                row.activity = row.progress or ("thinking" if row.status == "running" else "")
+            try:
+                if node.session_dir is not None:
+                    from local_operator.session.transcript import Transcript
+                    from local_operator.tools.builtin import todo_snapshot
+
+                    transcript = Transcript(node.session_dir)
+                    row.transcript = fold_messages_to_entries(transcript.build_llm_history())
+                    if node.session_id:
+                        raw_todos = todo_snapshot(node.session_id)
+                    else:
+                        raw_todos = []
+                    if not raw_todos:
+                        raw_todos = (transcript.latest_custom("todo_snapshot") or {}).get(
+                            "items"
+                        ) or []
+                    row.todos = self._todo_phases(raw_todos)
+            except Exception:
+                continue
+        self._sync_subagents()
+        self._bump()
+
+    @staticmethod
+    def _todo_phases(phases: list[dict[str, Any]]) -> list[TodoPhase]:
+        from local_operator.tools.builtin import _as_phases
+
+        return [
+            TodoPhase(
+                name=str(phase.get("name", "")),
+                items=[
+                    TodoItem(
+                        text=item.get("text", ""),
+                        status=item.get("status", "pending"),  # type: ignore[arg-type]
+                        reason=item.get("reason", ""),
+                    )
+                    for item in phase.get("items", [])
+                ],
+            )
+            for phase in _as_phases(phases)
+        ]
+
     def set_todos(self, phases: list[dict[str, Any]]) -> None:
         """Refresh the todo list from the tool store. Called by the owner
         after every event batch: the store is the only writer, so re-reading
@@ -630,20 +720,7 @@ class ProjectionFold:
         # registrant startup path deliberately avoids paying for.
         from local_operator.tools.builtin import _as_phases
 
-        self.projection.todos = [
-            TodoPhase(
-                name=str(phase.get("name", "")),
-                items=[
-                    TodoItem(
-                        text=item.get("text", ""),
-                        status=item.get("status", "pending"),  # type: ignore[arg-type]
-                        reason=item.get("reason", ""),
-                    )
-                    for item in phase.get("items", [])
-                ],
-            )
-            for phase in _as_phases(phases)
-        ]
+        self.projection.todos = self._todo_phases(_as_phases(phases))
         self._bump()
 
     def set_pending(self, pending: PendingRequest | None) -> None:

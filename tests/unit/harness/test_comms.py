@@ -204,6 +204,35 @@ def assistant(text: str, *, tool_calls: list[ToolCall] | None = None) -> Message
     )
 
 
+def test_lineage_queries_are_recursive_cycle_safe_and_snapshot_durable(tmp_path) -> None:
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    for job_id in ("a", "b", "c", "d"):
+        jobs.add(job_id)
+    comms.record_launch("a", "architect", prompt="root", agent_role="architect")
+    comms.record_launch("b", "coder", parent_job_id="a", effort="hi")
+    comms.record_launch("c", "reviewer", parent_job_id="a")
+    comms.record_launch("d", "scout", parent_job_id="b")
+    for job_id in ("a", "b", "c", "d"):
+        comms._records[job_id].session_dir = tmp_path / job_id
+
+    assert [node.job_id for node in comms.ancestors("d")] == ["a", "b"]
+    assert [node.job_id for node in comms.children("a")] == ["b", "c"]
+    assert [node.job_id for node in comms.peers("b")] == ["c"]
+    assert comms.parent("a") is None
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(comms.snapshot())
+    assert [node.label for node in restored.ancestors("d")] == ["architect", "coder"]
+    restored_a = restored.node("a")
+    restored_b = restored.node("b")
+    assert restored_a is not None and restored_a.prompt == "root"
+    assert restored_b is not None and restored_b.effort == "hi"
+
+    restored._records["a"].parent_job_id = "d"
+    assert len(restored.ancestors("d")) <= 4
+
+
 def wire(*, attach: bool = True) -> tuple[SubagentComms, FakeJobs, FakeChild, FakeParent]:
     jobs = FakeJobs()
     parent = FakeParent(jobs)

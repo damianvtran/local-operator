@@ -266,7 +266,14 @@ def run_subagent(
     # comms record exists from the moment the id does.
     comms = getattr(parent_session, "subagent_comms", None)
     if comms is not None:
-        comms.record_launch(job_id, label)
+        comms.record_launch(
+            job_id,
+            label,
+            parent_job_id=getattr(parent_session, "_job_id", None),
+            prompt=prompt,
+            agent_role=agent,
+            effort=effort or "",
+        )
     if queued:
         logger.info("subagent job %s (%s) queued: manager at capacity", job_id, label)
     return job_id
