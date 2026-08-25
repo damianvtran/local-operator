@@ -217,6 +217,7 @@ from local_operator.tui.widgets.welcome import (
 )
 
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
+    from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
@@ -1262,6 +1263,14 @@ class OperatorApp(App[None]):
         #: which owns the terminal, and lent to the band, which owns the state
         #: it displays — see :meth:`_start_terminal_title`.
         self._terminal_title: TerminalTitle | None = None
+        #: Publishes "this pane holds session <id>" to the host multiplexer, so
+        #: a crash that takes the multiplexer down can bring the conversation
+        #: back instead of opening a fresh shell (see
+        #: :mod:`local_operator.multiplexer`). ``None`` when there is no
+        #: multiplexer, the session is a subagent's, or the kill switch is set
+        #: — all ordinary, none an error. Rebound on every session swap, since
+        #: the pane's binding must name the conversation currently in it.
+        self._multiplexer_broadcast: SessionBroadcast | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,
@@ -1973,6 +1982,10 @@ class OperatorApp(App[None]):
         """
         self._session = session
         self._mobile_adopted(session)
+        # Straight after the session is adopted: the pane's resume binding has
+        # to name the conversation now in it, and a swap (`/new`, `/resume`)
+        # is exactly when the old one becomes wrong.
+        self._start_multiplexer_broadcast()
         # A remote follower must never publish a second discovery record for
         # the shared session, and it must be ready to replace this facade with
         # the lease-winning real Session after owner death. The callback uses
@@ -6963,6 +6976,77 @@ class OperatorApp(App[None]):
             self._status.set_terminal_title(title)
         title.start()
 
+    def _start_multiplexer_broadcast(self) -> None:
+        """Tell the host multiplexer which session this pane is holding.
+
+        Called on every session adoption rather than once at mount, because
+        the fact being published is "this PANE holds THIS conversation" and a
+        ``/new`` or ``/resume`` changes the second half of that. The previous
+        binding is retired first so a swap cannot leave the pane advertising
+        the conversation the user just moved away from.
+
+        Everything below is best-effort and returns ``None`` on the ordinary
+        paths — no multiplexer, a subagent's session, a session whose first
+        turn has not persisted yet, the kill switch — see
+        :mod:`local_operator.multiplexer`. Nothing here can raise into the
+        boot path, and no subprocess runs on this thread: the broadcast owns a
+        daemon timer thread of its own precisely so the event loop never waits
+        on a multiplexer socket.
+        """
+        # Retire the outgoing binding BEFORE publishing the new one: both name
+        # the same pane, so the reverse order would clear the fresh binding.
+        self._stop_multiplexer_broadcast()
+        # Headless means no pane to bind, and this gate is what keeps the test
+        # suite off the developer's own multiplexer. The suite runs INSIDE cmux
+        # and its conftest does not clear `CMUX_*` (it isolates HOME and the
+        # provider keys), so every pilot test would otherwise publish a binding
+        # against the real surface the developer is sitting in front of —
+        # rewriting the resume binding of the session running the tests. The
+        # same hazard is documented on `Notifier._env` in `tui/notify.py`.
+        if self.is_headless:
+            return
+        session = self._session
+        if session is None:
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return
+        # Guarded even though `broadcast_session` guards itself: the IMPORT is
+        # part of this path too, and the whole point of the feature is that it
+        # can never be the reason a session fails to open.
+        try:
+            from local_operator.multiplexer import broadcast_session
+
+            self._multiplexer_broadcast = broadcast_session(session_id, cwd=os.getcwd())
+        except Exception:  # noqa: BLE001 — bookkeeping must not break a session
+            logger.debug("multiplexer broadcast failed to start", exc_info=True)
+            self._multiplexer_broadcast = None
+
+    def _stop_multiplexer_broadcast(self, *, retire: bool = True) -> None:
+        """Withdraw this pane's binding (idempotent).
+
+        ``retire=False`` deliberately LEAVES the binding in place, which is
+        what a crash path wants: an abandoned binding is how the session comes
+        back, and clearing it would delete the feature. The default withdraws,
+        because a user who quit on purpose must not have that session replayed
+        into their next shell in this pane.
+        """
+        broadcast = self._multiplexer_broadcast
+        if broadcast is None:
+            return
+        # Cleared FIRST, so a failure below cannot leave the app holding a
+        # handle it believes is still publishing.
+        self._multiplexer_broadcast = None
+        try:
+            if retire:
+                from local_operator.multiplexer import retire_session
+
+                retire_session(broadcast)
+                return
+            broadcast.stop(retire=False)
+        except Exception:  # noqa: BLE001 — never block an exit path
+            logger.debug("multiplexer broadcast failed to stop", exc_info=True)
+
     def _stop_terminal_title(self) -> None:
         """Give the terminal its own title back (idempotent).
 
@@ -7253,6 +7337,11 @@ class OperatorApp(App[None]):
         # the common case so the phone list drops the session immediately
         # rather than at the next scan.
         self._mobile_teardown()
+        # Alongside the mobile record and for the same reason: this is a clean
+        # exit, so the pane must stop advertising a session the user has just
+        # closed. A crash never reaches this line, which is what leaves the
+        # binding standing for the restore to find.
+        self._stop_multiplexer_broadcast()
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()
