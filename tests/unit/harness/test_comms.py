@@ -1368,8 +1368,26 @@ def test_the_roster_still_lists_a_child_whose_job_row_was_swept(tmp_path):
     [row] = comms.roster()
 
     assert row.status == "failed"
+    assert row.error_text == "provider 500"
+    assert row.result_text is None
     assert row.resumable is True
     assert "provider 500" in (row.detail or "")
+
+
+def test_completed_payload_survives_snapshot_restore_and_job_sweep(tmp_path):
+    comms, _jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), tmp_path)
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "completed", result_text="finished report")
+    comms.detach("job-1")
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(comms.snapshot())
+    [row] = restored.roster()
+
+    assert row.status == "completed"
+    assert row.result_text == "finished report"
+    assert row.error_text is None
 
 
 def test_the_roster_reports_a_never_started_child_as_unresumable():

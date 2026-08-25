@@ -651,8 +651,10 @@ class ProjectionFold:
         rows from that authoritative registry so each ``child_ids`` edge has a
         corresponding phone-addressable record.
         """
+        roster = {item.job_id: item for item in comms.roster()}
         for node in comms.nodes():
             job = comms.job(node.job_id)
+            lifecycle = roster.get(node.job_id)
             row = self._subagents.get(node.job_id)
             if row is None:
                 row = SubagentRow(job_id=node.job_id, label=node.label)
@@ -666,23 +668,29 @@ class ProjectionFold:
             row.ancestors = [ancestor.label for ancestor in comms.ancestors(node.job_id)]
             row.child_ids = [child.job_id for child in comms.children(node.job_id)]
             row.peer_ids = [peer.job_id for peer in comms.peers(node.job_id)]
-            if job is not None:
-                row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
-                row.model_label = str(getattr(job, "model_label", None) or "")
-                status = str(getattr(job, "status", "running") or "running")
-                # ``interrupted`` is the job manager's terminal spelling for an
-                # externally stopped run; the mobile roster's equivalent is
-                # ``cancelled``. Refresh every field even when empty because a
-                # resumed or settled descendant must erase its previous terminal
-                # text or live progress without receiving a root lifecycle event.
-                row.status = (
-                    "cancelled" if status == "interrupted" else status
-                )  # type: ignore[assignment] -- normalized job/mobile literals
-                row.result_text = _compact(str(getattr(job, "result_text", None) or ""), 200)
-                row.error_text = _compact(str(getattr(job, "error_text", None) or ""), 200)
-                progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
-                row.progress = progress if row.status == "running" else ""
-                row.activity = row.progress or ("thinking" if row.status == "running" else "")
+            row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
+            row.model_label = str(getattr(job, "model_label", None) or "")
+            if lifecycle is not None:
+                # SubagentComms owns the merge between the live manager row and
+                # its durable record. Consuming that resolved view here prevents
+                # a swept/reconnected child from falling back to SubagentRow's
+                # running default, and prevents stale live rows from reopening a
+                # terminal outcome during the runner/manager settle window.
+                status = lifecycle.status
+                if status in ("running", "queued", "starting"):
+                    mobile_status = "running"
+                elif status in ("paused", "pausing"):
+                    mobile_status = "parked"
+                elif status in ("interrupted", "gone"):
+                    mobile_status = "cancelled"
+                else:
+                    mobile_status = status
+                row.status = mobile_status  # type: ignore[assignment] -- normalized literals
+                row.result_text = _compact(str(lifecycle.result_text or ""), 200)
+                row.error_text = _compact(str(lifecycle.error_text or ""), 200)
+            progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
+            row.progress = progress if row.status == "running" else ""
+            row.activity = row.progress or ("thinking" if row.status == "running" else "")
             try:
                 if node.session_dir is not None:
                     from local_operator.session.transcript import Transcript

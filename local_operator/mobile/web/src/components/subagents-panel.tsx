@@ -38,6 +38,8 @@ export function SubagentsPanel({ subagents, pid = "" }: { subagents: SubagentRow
 				<div className="border-b border-hairline px-4 py-2">
 					<p className="truncate text-meta text-ink-dim">Conversation {selected.ancestors.map((label) => `› ${label} `)}› {selected.label}</p>
 					<div className="mt-1 flex items-center gap-2"><span className={cn("font-mono text-mono-sm", statusClass(selected.status))}>{GLYPH[selected.status]} {selected.status}</span><span className="font-mono text-mono-sm text-ink-dim">{selected.agent}{selected.effort ? ` · ${selected.effort}` : ""}</span></div>
+					{selected.status === "failed" && selected.error_text ? <div role="alert" aria-live="assertive" className="mt-2 rounded-sm border border-danger-border bg-danger-wash px-3 py-2"><p className="text-meta text-danger">Failure</p><p className="whitespace-pre-wrap text-body-sm text-danger">{selected.error_text}</p></div> : null}
+					{selected.status === "completed" && selected.result_text ? <div aria-live="polite" className="mt-2 rounded-sm border border-hairline bg-elevated px-3 py-2"><p className="text-meta text-success">Result</p><p className="whitespace-pre-wrap text-body-sm text-ink">{selected.result_text}</p></div> : null}
 					<div className="mt-3 flex flex-wrap gap-2">
 						<button type="button" className={hierarchyControl} onClick={() => setSelectedId(null)}>root</button>
 						{selected.parent_job_id && byId.get(selected.parent_job_id) ? <button type="button" className={hierarchyControl} onClick={() => setSelectedId(selected.parent_job_id)}>parent</button> : null}

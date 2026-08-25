@@ -413,7 +413,10 @@ def _make_runner(
             # this the roster (``hub op='list'``) could not say whether a
             # swept child finished or crashed.
             if comms is not None:
-                comms.record_outcome(job_id, "completed")
+                # The manager writes the same text to its job row only after
+                # this runner returns. Persist it here with the outcome so a
+                # sweep or reconnect cannot leave the completed detail empty.
+                comms.record_outcome(job_id, "completed", result_text=result_text)
             await emit(
                 SubagentEndEvent(
                     job_id=job_id,

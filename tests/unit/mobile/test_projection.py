@@ -7,6 +7,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -276,6 +278,84 @@ def test_nested_subagent_completion_refreshes_selected_detail() -> None:
     assert selected["error_text"] == ""
     assert selected["progress"] == ""
     assert selected["activity"] == ""
+
+
+@pytest.mark.parametrize(
+    ("status", "result_text", "error_text"),
+    [
+        ("completed", "durable completed result", None),
+        ("failed", None, "provider failed; retry from the parent"),
+    ],
+)
+def test_swept_nested_outcome_survives_fresh_projection_and_reconnect(
+    status: str, result_text: str | None, error_text: str | None
+) -> None:
+    """The comms record is the only lifecycle source after manager retention."""
+
+    class Jobs:
+        def __init__(self) -> None:
+            self.rows = {
+                "nested": SimpleNamespace(
+                    status="running",
+                    agent_role="coder",
+                    model_label="test/model",
+                    latest_details={"progress": "stale progress"},
+                    result_text=None,
+                    error_text=None,
+                )
+            }
+
+        def get(self, job_id: str):
+            return self.rows.get(job_id)
+
+    session = SimpleNamespace(jobs=Jobs())
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("parent", "parent")
+    comms.record_launch("nested", "nested", parent_job_id="parent")
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    assert {row.job_id: row for row in fold.projection.subagents}["nested"].activity == (
+        "stale progress"
+    )
+
+    comms.record_outcome("nested", status, error_text=error_text, result_text=result_text)
+    del session.jobs.rows["nested"]
+
+    # Refreshing the selected projection must clear stale live activity, and a
+    # brand-new fold models the first SSE snapshot after a reconnect.
+    fold.set_subagent_details(comms)
+    reconnect = make_fold()
+    reconnect.set_subagent_details(comms)
+    for projection in (fold.projection, reconnect.projection):
+        selected = {row.job_id: row for row in projection.subagents}["nested"]
+        assert selected.status == status
+        assert selected.result_text == (result_text or "")
+        assert selected.error_text == (error_text or "")
+        assert selected.progress == ""
+        assert selected.activity == ""
+
+
+def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
+    """The runner records terminal state before the manager stamps its row."""
+
+    job = SimpleNamespace(
+        status="running",
+        agent_role="coder",
+        model_label="test/model",
+        latest_details={"progress": "stale progress"},
+        result_text=None,
+        error_text=None,
+    )
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: job))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("nested", "nested")
+    comms.record_outcome("nested", "completed", result_text="settled result")
+
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    selected = fold.projection.subagents[0]
+    assert (selected.status, selected.result_text) == ("completed", "settled result")
+    assert (selected.progress, selected.activity) == ("", "")
 
 
 def test_nested_subagent_failure_refreshes_error_and_clears_progress() -> None:

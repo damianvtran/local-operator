@@ -197,6 +197,11 @@ class ChildInfo:
     age_s: float | None = None
     #: Why ``resumable`` is False, when it is False for an interesting reason.
     detail: str | None = None
+    #: Terminal payloads resolved with the same lifecycle precedence as
+    #: ``status``. These survive the job-manager sweep so reconnecting readers
+    #: do not have to merge an ephemeral row with durable comms state again.
+    result_text: str | None = None
+    error_text: str | None = None
     #: The child's TRANSCRIPT directory name — the id ``--resume`` takes, which
     #: is not the ``job_id`` above. Carried because this roster is now the only
     #: surface that can show it: children were dropped from the ``/resume``
@@ -309,9 +314,9 @@ class _ChildRecord:
     #: finished cleanly from one that crashed, which is exactly the question
     #: "which of my subagents failed?" needs answered.
     outcome: str | None = None
-    #: The child's error text when ``outcome == "failed"``. Kept so the roster
-    #: can say WHY a child failed after its job row (which held ``error_text``)
-    #: has been swept.
+    #: The child's terminal payload. Kept with the outcome because status and
+    #: content are one durable fact after the ephemeral job row is swept.
+    result_text: str | None = None
     error_text: str | None = None
 
 
@@ -568,7 +573,13 @@ class SubagentComms:
             return matches, None
         return [], f"unknown subagent {target!r}"
 
-    def record_outcome(self, job_id: str, status: str, error_text: str | None = None) -> None:
+    def record_outcome(
+        self,
+        job_id: str,
+        status: str,
+        error_text: str | None = None,
+        result_text: str | None = None,
+    ) -> None:
         """Remember how a child settled, before its job row is swept.
 
         Called from the subagent runner's settle paths. The job manager drops
@@ -587,6 +598,7 @@ class SubagentComms:
         if record is None:
             return
         record.outcome = status
+        record.result_text = result_text
         record.error_text = error_text
 
     def roster(self) -> list[ChildInfo]:
@@ -632,6 +644,7 @@ class SubagentComms:
                     "effort": record.effort,
                     "session_dir": str(record.session_dir),
                     "outcome": record.outcome,
+                    "result_text": record.result_text,
                     "error_text": record.error_text,
                     "paused": record.paused,
                     "settled_at": record.settled_at,
@@ -674,6 +687,9 @@ class SubagentComms:
                 settled_at=row.get("settled_at"),
                 paused=bool(row.get("paused")),
                 outcome=(str(row["outcome"]) if row.get("outcome") is not None else None),
+                result_text=(
+                    str(row["result_text"]) if row.get("result_text") is not None else None
+                ),
                 error_text=(str(row["error_text"]) if row.get("error_text") is not None else None),
             )
             self._records[job_id] = record
@@ -788,6 +804,8 @@ class SubagentComms:
         job = jobs.get(record.job_id) if jobs is not None else None
         age: float | None = None
         detail: str | None = None
+        result_text: str | None = None
+        error_text: str | None = None
 
         if record.paused:
             # DEFENSIVE, not a window anyone can currently observe.
@@ -814,7 +832,18 @@ class SubagentComms:
                 )
             status = "paused"
         elif record.outcome is not None:
+            # ``record_outcome`` lands inside the runner before the manager can
+            # stamp its still-running row. Once terminal, a job id is never
+            # reused, so accepting that stale live status would resurrect work.
+            # A terminal live row may carry the richer final payload; otherwise
+            # the durable record is the post-sweep/reconnect source of truth.
             status = record.outcome
+            if job is not None and job.status != "running":
+                result_text = getattr(job, "result_text", None)
+                error_text = getattr(job, "error_text", None)
+            else:
+                result_text = record.result_text
+                error_text = record.error_text
         elif job is not None and job.status == "running":
             status = "queued" if getattr(job, "queued", False) else "running"
             if record.child is None and status == "running":
@@ -825,6 +854,8 @@ class SubagentComms:
                 status = "starting"
         elif job is not None:
             status = job.status
+            result_text = getattr(job, "result_text", None)
+            error_text = getattr(job, "error_text", None)
         elif record.settled:
             status = "cancelled" if record.session_dir is not None else "gone"
         else:
@@ -899,6 +930,8 @@ class SubagentComms:
             resumable=resumable,
             age_s=age,
             detail=detail,
+            result_text=result_text,
+            error_text=error_text,
             session_id=record.session_dir.name if record.session_dir is not None else None,
         )
 
