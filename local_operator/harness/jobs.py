@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AbortSignal, Usage
 
@@ -73,6 +73,46 @@ DeliverySink = Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None]
 #: message). Lives here because the job manager owns the lifecycle.
 JOB_RESULT_MESSAGE_TYPE = "job_result"
 ProgressFn = Callable[[str], None]
+
+
+def _usage_components(usage: Usage | None, model_label: str | None) -> list[Usage]:
+    """Detach priceable calls from one direct usage aggregate."""
+    if usage is None:
+        return []
+    provider, _, model_id = (model_label or "").partition("/")
+    source = usage.cost_components or [usage]
+    components: list[Usage] = []
+    for item in source:
+        component = item.model_copy(deep=True)
+        component.cost_components = []
+        component.provider = component.provider or provider or None
+        component.model_id = component.model_id or model_id or None
+        components.append(component)
+    return components
+
+
+def _merge_accounting_component(
+    grouped: dict[tuple[str | None, str | None, bool], Usage], component: Usage
+) -> None:
+    """Bound a subtree summary without erasing receipt-vs-estimate provenance."""
+    has_receipt = component.usd_cost is not None
+    key = (component.provider, component.model_id, has_receipt)
+    total = grouped.get(key)
+    if total is None:
+        total = component.model_copy(deep=True)
+        total.cost_components = []
+        grouped[key] = total
+        return
+    total.input_tokens += component.input_tokens
+    total.output_tokens += component.output_tokens
+    total.cache_read_tokens += component.cache_read_tokens
+    total.cache_write_tokens += component.cache_write_tokens
+    total.reasoning_tokens += component.reasoning_tokens
+    if component.context_tokens is not None:
+        total.context_tokens = component.context_tokens
+    if has_receipt:
+        # The key prevents a receipt-backed call from absorbing estimated calls.
+        total.usd_cost = (total.usd_cost or 0.0) + (component.usd_cost or 0.0)
 
 
 class AsyncJob(BaseModel):
@@ -164,6 +204,19 @@ class AsyncJob(BaseModel):
     # run. ``context_tokens`` is point-in-time (the LAST reported value) and
     # is therefore replaced rather than summed.
     usage: Usage | None = None
+    # Settled descendants, collapsed by serving identity and accounting mode.
+    # ``usage`` remains SELF-only so row surfaces never mistake subtree tokens
+    # for this child's context. Components are copied here at the ownership
+    # boundary because the child manager is disposable and its local job ids are
+    # not globally unique. Grouping receipt-backed calls separately from table-
+    # priced calls preserves exact provider bills without letting one receipt
+    # suppress estimates for its siblings.
+    descendant_usage: list[Usage] = Field(default_factory=list)
+    # A live edge exists only while the child can still mutate its own ledger.
+    # It is runtime-only and deliberately cleared after the final settlement
+    # snapshot, otherwise one retained observability row pins the disposed child
+    # Session through its manager's bound completion callback.
+    child_jobs: Any | None = Field(default=None, exclude=True)
     # The CHILD model's context window, so a reader can render usage as a
     # PERCENTAGE of what the child actually has. Captured at launch beside
     # ``model_label``, off the spec the child was already built with — never
@@ -232,6 +285,10 @@ class AsyncJobManager:
         # single call site guards it.
         self._on_roster_change = on_roster_change
         self._jobs: dict[str, AsyncJob] = {}
+        # Terminal rows hand their subtree into this bounded accumulator before
+        # retention can remove them. The owning parent runner later copies this
+        # snapshot onto its AsyncJob; polling never participates in durability.
+        self._settled_accounting: dict[tuple[str | None, str | None, bool], Usage] = {}
         self._signals: dict[str, AbortSignal] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._sinks: dict[str, DeliverySink] = {}
@@ -271,6 +328,39 @@ class AsyncJobManager:
             1 for job in self._jobs.values() if job.status == "running" and not job.queued
         )
         return running >= self._max_running
+
+    def accounting_components(self) -> list[Usage]:
+        """A detached, provenance-preserving snapshot of this whole ledger.
+
+        Job ids are manager-local, so accounting never flattens rows by id.
+        Components instead collapse by the facts that control pricing: serving
+        provider/model and whether an authoritative receipt exists. This keeps
+        the summary proportional to distinct billing routes rather than child
+        fan-out or model-call count, while retaining every token and dollar.
+        """
+        return self._accounting_components(set())
+
+    def _accounting_components(self, seen: set[int]) -> list[Usage]:
+        identity = id(self)
+        if identity in seen:
+            return []
+        seen.add(identity)
+        grouped = {
+            key: component.model_copy(deep=True)
+            for key, component in self._settled_accounting.items()
+        }
+        for job in self._jobs.values():
+            # Terminal rows are already in ``_settled_accounting``. Counting
+            # retained rows again would make totals depend on retention length.
+            if job.type != "task" or job.status != "running":
+                continue
+            components = [*_usage_components(job.usage, job.model_label), *job.descendant_usage]
+            child_manager = job.child_jobs
+            if isinstance(child_manager, AsyncJobManager):
+                components.extend(child_manager._accounting_components(seen))
+            for component in components:
+                _merge_accounting_component(grouped, component)
+        return [component.model_copy(deep=True) for component in grouped.values()]
 
     def _notify_roster_change(self) -> None:
         """Signal the owner that the task roster moved (add / settle / status).
@@ -336,6 +426,8 @@ class AsyncJobManager:
                 row.status = "interrupted"
             row.restored = True
             self._jobs[row.id] = row
+            if row.status != "running":
+                self._record_settled_accounting(row)
 
     # -- registration -------------------------------------------------------
 
@@ -745,9 +837,21 @@ class AsyncJobManager:
         """
         if job.settled_at is None:
             job.settled_at = time.time()
+            # Same transition as the settle stamp: after this line retention may
+            # erase the row immediately without erasing its financial history.
+            self._record_settled_accounting(job)
         event = self._settled_events.get(job.id)
         if event is not None:
             event.set()
+
+    def _record_settled_accounting(self, job: AsyncJob) -> None:
+        """Transfer one terminal subtree exactly once into manager ownership."""
+        components = [*_usage_components(job.usage, job.model_label), *job.descendant_usage]
+        child_manager = job.child_jobs
+        if isinstance(child_manager, AsyncJobManager):
+            components.extend(child_manager.accounting_components())
+        for component in components:
+            _merge_accounting_component(self._settled_accounting, component)
 
     def _sweep_due(self) -> None:
         """Drop settled jobs older than the retention window.
