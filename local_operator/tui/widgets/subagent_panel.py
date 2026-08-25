@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -432,8 +432,10 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #:    the page, where a state or a number is not. The two surfaces are read in
 #:    one glance and must not rank the same field differently. It is also the
 #:    only rung whose acceptance is CONDITIONAL: :func:`_row_rung` rejects it
-#:    whenever keeping the role would shorten the activity, so the rule below
-#:    stays true of the role too and the role costs only what is free.
+#:    whenever keeping the shared column would shorten ANY row's activity,
+#:    including a roleless row that reserves blank cells for alignment. Thus
+#:    the rule below stays true for the whole mixed roster, not only the rows
+#:    that render a role.
 #: 1. COST sheds next — it is monotonic and slow, and nothing an operator
 #:    acts on inside a second.
 #: 2. CONTEXT then SHORTENS before it drops: ``5%`` keeps the segment for two
@@ -464,14 +466,44 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #: it is beneath any width this dock is read at, and the alternative — freezing
 #: the budget once it stops shrinking — buys monotonicity by holding cells the
 #: narrowest rows most need.
-_RUNGS: tuple[tuple[str, bool, bool, int | None], ...] = (
-    ("full", True, True, None),
-    ("full", True, False, None),
-    ("full", False, False, None),
-    ("nodec", False, False, None),
-    ("short", False, False, None),
-    ("none", False, False, None),
-    ("none", False, False, LABEL_FLOOR),
+class _Rung(NamedTuple):
+    """One monotone reduction step, named so its policy is not positional.
+
+    This table is read in the painter, both measurement passes and the shared
+    role-column gate. Positional ``[2]`` meant ``keep_role`` only to a reader
+    who counted four unlike tuple fields correctly every time; a named row
+    makes adding or reordering a field a type-checked change instead of a
+    silent policy swap (agent review round 2, N1).
+    """
+
+    context_spelling: str
+    keep_cost: bool
+    keep_role: bool
+    label_budget: int | None
+
+
+_RUNGS: tuple[_Rung, ...] = (
+    _Rung("full", True, True, None),
+    _Rung("full", True, False, None),
+    _Rung("full", False, False, None),
+    _Rung("nodec", False, False, None),
+    _Rung("short", False, False, None),
+    _Rung("none", False, False, None),
+    _Rung("none", False, False, LABEL_FLOOR),
+)
+
+#: The first counterpart of the role-bearing rung that keeps every OTHER
+#: field unchanged. Derived from the table instead of assumed to be
+#: ``index + 1``: the D3 guard compares exactly these two candidates, and a
+#: future rung inserted between them must not silently change what "without
+#: role" means (agent review round 2, N2).
+_NO_ROLE_RUNG = next(
+    index
+    for index, rung in enumerate(_RUNGS)
+    if not rung.keep_role
+    and rung.context_spelling == _RUNGS[0].context_spelling
+    and rung.keep_cost == _RUNGS[0].keep_cost
+    and rung.label_budget == _RUNGS[0].label_budget
 )
 
 
@@ -491,17 +523,18 @@ def _row_rung(
     numbers and the label budget are non-increasing in the index, so
     acceptance is monotone and the first hit is the answer.
 
-    The ROLE rung is additionally rejected when keeping the role would cost the
-    row a shorter ACTIVITY than dropping it would (D3). The ladder's stated
-    principle is that the activity is never traded for a number — it is the
-    row's only statement of what the child is DOING, where the role is
-    identity sugar the label already half-carries and is re-derivable by
-    opening the page. Charging the role against the activity's budget inverted
-    that: between 82 and 84 cells the operator lost words of the activity to
-    keep a word they could infer, and narrowing from 82 to 81 then made the
-    activity spring back LONGER, a new non-monotonic jump in the band this
-    column created. Comparing the two candidate layouts directly is what keeps
-    the code honest to the docstring; the role now costs only where it is free.
+    The ROLE rung is additionally rejected when keeping the shared role COLUMN
+    would cost ANY row a shorter ACTIVITY than dropping it would (D3/R4). The
+    ladder's stated principle is that activity is never traded for a number —
+    it is the row's only statement of what the child is DOING, where the role
+    is identity sugar the label already half-carries and is re-derivable by
+    opening the page. The column is roster-wide, so this comparison must be
+    symmetric: a roleless row still reserves the blank column to preserve D1's
+    alignment, and checking only rows whose own ``role`` was non-empty merely
+    moved the 82/81 springback onto the plain-task row (agent review round 2,
+    R4). Comparing every row against the table-derived no-role counterpart
+    keeps alignment where the activity can afford it and sheds the whole
+    column where any row cannot.
     """
     for index in range(len(_RUNGS)):
         label, role, context, cost, activity = _lay_out(
@@ -515,11 +548,12 @@ def _row_rung(
             + _role_cells(index, role, role_column)
         )
         numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (context, cost) if part)
-        if role and facts.activity:
-            # What this row's activity would be one rung down, i.e. with the
-            # role shed and nothing else changed. Only rung 0 carries a role,
-            # so index + 1 is exactly the no-role counterpart of this layout.
-            without = _lay_out(facts, stats, width, index + 1, column, clock, role_column)[4]
+        if role_column and _RUNGS[index].keep_role and facts.activity:
+            # Compare with the table-derived counterpart that changes ONLY
+            # ``keep_role``. Crucially this runs for a roleless row too: it
+            # renders whitespace rather than a role, but pays the same shared
+            # column so the measurements beneath the roster remain aligned.
+            without = _lay_out(facts, stats, width, _NO_ROLE_RUNG, column, clock, role_column)[4]
             if cell_len(activity) < cell_len(without):
                 continue
         if not facts.activity:
@@ -576,7 +610,7 @@ def _role_width(rung: int, role: str, role_column: int) -> int:
     below the role's own rung and the ladder would hand the activity fewer
     cells than it had before this field existed.
     """
-    if not _RUNGS[min(rung, len(_RUNGS) - 1)][2]:
+    if not _RUNGS[min(rung, len(_RUNGS) - 1)].keep_role:
         return 0
     return max(role_column, cell_len(role))
 
@@ -607,7 +641,11 @@ def _lay_out(
     being shoved sideways by each row's own role length. Zero means "lay this
     row out alone", which is what a caller measuring a single row wants.
     """
-    spelling, keep_cost, keep_role, budget = _RUNGS[min(rung, len(_RUNGS) - 1)]
+    policy = _RUNGS[min(rung, len(_RUNGS) - 1)]
+    spelling = policy.context_spelling
+    keep_cost = policy.keep_cost
+    keep_role = policy.keep_role
+    budget = policy.label_budget
     # The last rungs carry no reading at all; every other spelling is one the
     # band names too (`status_line.CONTEXT_FORMS`), so the same child's
     # occupancy cannot be written two ways four rows apart.
@@ -686,14 +724,14 @@ def panel_layout(
     )
     while rung < len(_RUNGS) - 1:
         column = _label_column(rows, width, rung, clock)
-        role_column = _role_column(rows) if _RUNGS[rung][2] else 0
+        role_column = _role_column(rows) if _RUNGS[rung].keep_role else 0
         if all(
             _row_rung(facts, stats, width, column, clock, role_column) <= rung
             for facts, stats in rows
         ):
             return rung, column, clock, role_column
         rung += 1
-    role_column = _role_column(rows) if _RUNGS[rung][2] else 0
+    role_column = _role_column(rows) if _RUNGS[rung].keep_role else 0
     return rung, _label_column(rows, width, rung, clock), clock, role_column
 
 

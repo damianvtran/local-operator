@@ -37,6 +37,7 @@ from local_operator.tui.widgets.subagent_panel import (
     SubagentPanel,
     SubagentRow,
     _glyph_cells,
+    _lay_out,
     compose_row,
     job_elapsed,
     job_stats,
@@ -587,35 +588,87 @@ def test_one_long_role_does_not_evict_its_peers_roles() -> None:
     rows = _column(jobs, 100)
     assert "reviewer" in rows[0], rows
     assert long_name not in rows[1], "the role is rendered untruncated"
-    assert cell_len(_plain(jobs[1], 200).split("·")[1].strip()) <= ROLE_CEILING
+    # Assert the renderer's role field directly. Splitting on a bare `·` can
+    # silently select the wrong segment when an operator-authored label or the
+    # model's activity contains that character (agent review round 2, M1).
+    facts = row_facts(jobs[1], fallback_id=jobs[1].id, current=False)
+    stats = job_stats(jobs[1], default_model_label=PARENT_MODEL)
+    rung, column, clock, role_column = panel_layout([(facts, stats)], 200)
+    role = _lay_out(facts, stats, 200, rung, column, clock, role_column)[1]
+    assert cell_len(role) <= ROLE_CEILING
+    assert role.endswith("…")
 
 
-def test_the_role_never_costs_the_activity_a_single_cell() -> None:
-    """The ladder's stated rule, applied to the field that was breaking it.
+def test_the_role_column_never_costs_any_rows_activity_a_single_cell() -> None:
+    """The D3 guarantee on the MIXED roster a real dock actually lays out.
 
     The role is "the most disposable field"; the activity is "never traded for
-    a number". Charging the role against the activity's budget inverted both at
-    once, and made narrowing the terminal LENGTHEN the activity. A role is now
-    offered only where it is free (design review round 1, D3).
+    a number". The shared column is paid by every row to preserve alignment,
+    including a plain task that renders no role of its own. The guard must
+    therefore compare every row — not only a row whose own role is non-empty —
+    against the identical roster with the role column removed (agent review
+    round 2, R4). A single-row `_plain` probe cannot observe this defect because
+    its role column collapses to that row's own role.
     """
-    with_role = Job(label="review-301-r2", progress="auditing merged MRs", agent_role="reviewer")
-    without = Job(label="review-301-r2", progress="auditing merged MRs")
-    for job in (with_role, without):
-        job.usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
-    for width in range(200, 39, -1):
-        shown = _plain(with_role, width).split("    ")[-1]
-        bare = _plain(without, width).split("    ")[-1]
-        assert cell_len(shown) >= cell_len(bare), f"role shortened the activity at {width}"
+
+    def roster(*, with_roles: bool) -> list[Job]:
+        roles = ("", "reviewer", "ux-reviewer") if with_roles else ("", "", "")
+        jobs = [
+            Job(
+                "plain",
+                "sweep-notes",
+                progress="collecting notes from everywhere and checking every source",
+                agent_role=roles[0],
+            ),
+            Job("review", "review-303", progress="auditing merged MRs", agent_role=roles[1]),
+            Job("ux", "ux-303", progress="walking the flow", agent_role=roles[2]),
+        ]
+        for job in jobs:
+            job.usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
+        return jobs
+
+    def activities(jobs: list[Job], width: int) -> list[str]:
+        measured = [
+            (
+                row_facts(job, fallback_id=job.id, current=False),
+                job_stats(job, default_model_label=PARENT_MODEL),
+            )
+            for job in jobs
+        ]
+        rung, column, clock, role_column = panel_layout(measured, width)
+        return [
+            _lay_out(facts, stats, width, rung, column, clock, role_column)[4]
+            for facts, stats in measured
+        ]
+
+    mixed = roster(with_roles=True)
+    baseline = roster(with_roles=False)
+    for width in range(200, 11, -1):
+        shown = activities(mixed, width)
+        bare = activities(baseline, width)
+        assert [cell_len(value) for value in shown] == [
+            cell_len(value) for value in bare
+        ], f"the shared role column shortened an activity at {width}: {shown!r} vs {bare!r}"
 
 
-def test_a_plain_task_row_is_unchanged_by_the_role_column() -> None:
-    """A child with no role pays nothing for the column at any width. The
-    segment is per-ROW (unlike cost, which sheds for the whole list at once),
-    so an ordinary fan-out is laid out exactly as before."""
+def test_a_plain_task_roster_is_unchanged_by_the_role_column() -> None:
+    """A roster with NO roles pays nothing for the column at any width.
+
+    This is intentionally a multi-row assertion. Comparing a lone roleless row
+    to a lone `agent_role="task"` row is vacuous because :func:`row_facts` maps
+    `"task"` to `""` before layout; it says nothing about the mixed-roster
+    column that R4 concerned.
+    """
+    plain = [
+        Job("j1", "docs", progress="auditing merged MRs"),
+        Job("j2", "tests", progress="running 3 tools"),
+    ]
+    default_task = [
+        Job("j1", "docs", progress="auditing merged MRs", agent_role="task"),
+        Job("j2", "tests", progress="running 3 tools", agent_role="task"),
+    ]
     for width in range(120, 39, -1):
-        assert _plain(Job(progress="auditing merged MRs"), width) == _plain(
-            Job(progress="auditing merged MRs", agent_role="task"), width
-        )
+        assert _column(plain, width) == _column(default_task, width)
 
 
 # -- the band under the page -------------------------------------------------
