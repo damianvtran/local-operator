@@ -117,6 +117,13 @@ $ uvx isort==5.13.2 --check .
 $ .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 0 errors, 0 warnings, 0 informations
 $ env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit -q
+6755 passed, 2 failed, 7 skipped
 ```
 
-The final unit-suite count is recorded in the PR after the run completes.
+Both failures were existing timing-sensitive tests under the full xdist load,
+not browser-bridge paths: conversation-name persistence and mobile registrant
+discovery. Re-running those exact two node IDs immediately in isolation passed
+`2 passed`. A focused final regression suite covering the bridge, all existing
+browser-tool tests, CLI style, and import boundaries passed `145 passed`.
+A serial full-suite rerun was started to remove xdist scheduling pressure; its
+final result is recorded in the PR.
