@@ -9,7 +9,45 @@
  * reopen ourselves.
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
-import type { SessionProjection, SessionSummary } from "./types";
+import type {
+	SessionProjection,
+	SubagentRow,
+	TodoPhase,
+	TranscriptEntry,
+	SessionSummary,
+} from "./types";
+
+function list<T>(value: T[] | undefined | null): T[] {
+	return Array.isArray(value) ? value : [];
+}
+
+function normalizeTodoPhase(phase: TodoPhase): TodoPhase {
+	return { ...phase, items: list(phase.items) };
+}
+
+function normalizeSubagent(row: SubagentRow): SubagentRow {
+	/* The daemon fills these defaults for rolling upgrades, but SSE is the last
+	   trust boundary before React. Preserve the repaint if a hand-built relay or
+	   mixed-version proxy omits a newly introduced nested collection: one absent
+	   peer list must not unmount the entire phone session. */
+	return {
+		...row,
+		ancestors: list(row.ancestors),
+		child_ids: list(row.child_ids),
+		peer_ids: list(row.peer_ids),
+		transcript: list<TranscriptEntry>(row.transcript),
+		todos: list(row.todos).map(normalizeTodoPhase),
+	};
+}
+
+export function normalizeProjection(incoming: SessionProjection): SessionProjection {
+	return {
+		...incoming,
+		transcript: list(incoming.transcript),
+		todos: list(incoming.todos).map(normalizeTodoPhase),
+		subagents: list(incoming.subagents).map(normalizeSubagent),
+	};
+}
 
 export interface ProjectionSlot {
 	projection: SessionProjection | null;
@@ -165,7 +203,7 @@ export function retainProjectionStream(sessionId: string): () => void {
 			(data) => {
 				let incoming: SessionProjection;
 				try {
-					incoming = JSON.parse(data) as SessionProjection;
+					incoming = normalizeProjection(JSON.parse(data) as SessionProjection);
 				} catch {
 					return;
 				}

@@ -1223,7 +1223,17 @@ class AgentLoop:
         # synthetic results correctly.
         aborting = False
 
-        def park(slot: int, item: _PlannedCall, result: ToolResult) -> None:
+        def park(
+            slot: int,
+            item: _PlannedCall,
+            result: ToolResult,
+            *,
+            duration_s: float | None = None,
+        ) -> None:
+            # This executor owns the real start/end boundary. Persisting that
+            # fact here keeps every later presenter from timing its own paint.
+            if duration_s is not None:
+                result.duration_s = max(0.0, duration_s)
             results_by_slot[slot] = result
             # A call that never STARTED never gets an end. Planning failures —
             # an unknown tool, or a duplicate id whose twin won the slot — are
@@ -1247,6 +1257,7 @@ class AgentLoop:
                         tool_call_id=item.call.id,
                         tool_name=item.tool.name if item.tool is not None else item.call.name,
                         result=result,
+                        duration_s=result.duration_s,
                         is_error=result.is_error,
                     )
                 )
@@ -1254,6 +1265,7 @@ class AgentLoop:
 
         async def runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
+            started_at = time.monotonic()
             await queue.put(
                 # `item.args`, not `item.call.arguments`: the event must show
                 # what the tool is actually being run with, and those two now
@@ -1274,12 +1286,18 @@ class AgentLoop:
                 # Cancelled (abort/GeneratorExit): pair the call with a
                 # synthetic aborted result so tool_use/tool_result pairing
                 # stays legal, then propagate the cancellation.
-                park(slot, item, self._synthetic_result(item.call, ABORTED_RESULT_TEXT))
+                park(
+                    slot,
+                    item,
+                    self._synthetic_result(item.call, ABORTED_RESULT_TEXT),
+                    duration_s=time.monotonic() - started_at,
+                )
                 raise
-            park(slot, item, result)
+            park(slot, item, result, duration_s=time.monotonic() - started_at)
 
         async def interruptible_runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
+            started_at = time.monotonic()
             await queue.put(
                 ToolExecutionStartEvent(
                     tool_call_id=item.call.id,
@@ -1317,7 +1335,7 @@ class AgentLoop:
                         else ABORTED_RESULT_TEXT
                     )
                     result = self._synthetic_result(item.call, text)
-                park(slot, item, result)
+                park(slot, item, result, duration_s=time.monotonic() - started_at)
             except asyncio.CancelledError:
                 # THIS coroutine was cancelled from outside — which is what the
                 # batch-wide abort watcher does. Without this the cancellation
@@ -1332,7 +1350,12 @@ class AgentLoop:
                 # It matters far more here than for the plain ``runner``:
                 # ``interruptible`` covers bash, eval, wait, hub, ask, web
                 # search and EVERY MCP tool, i.e. most of a real batch.
-                park(slot, item, self._synthetic_result(item.call, ABORTED_RESULT_TEXT))
+                park(
+                    slot,
+                    item,
+                    self._synthetic_result(item.call, ABORTED_RESULT_TEXT),
+                    duration_s=time.monotonic() - started_at,
+                )
                 raise
 
         async def abort_watcher() -> None:
@@ -1718,10 +1741,14 @@ class AgentLoop:
                 tool_name=result.tool_name,
                 is_error=result.is_error,
             )
-            # Compaction reads tool details (paths, useless flag) from here and
-            # writes {"pruned": True, ...} back; wire clients ignore this key.
-            if result.details is not None or result.useless:
-                message.provider_payload = {"details": result.details, "useless": result.useless}
+            # Compaction and transcript presenters read tool-only metadata from
+            # here; wire clients deliberately ignore these harness keys.
+            if result.details is not None or result.useless or result.duration_s is not None:
+                message.provider_payload = {
+                    "details": result.details,
+                    "useless": result.useless,
+                    "duration_s": result.duration_s,
+                }
             context.messages.append(message)
             new_messages.append(message)
 

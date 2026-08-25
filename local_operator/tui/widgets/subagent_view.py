@@ -87,6 +87,7 @@ from local_operator.tui.widgets.transcript import (
     TranscriptBlock,
     TranscriptView,
     UserBlock,
+    WorkingBlock,
 )
 
 #: Events read per fold. The engine caps the retained list at the same number
@@ -214,7 +215,7 @@ class SubagentEntry:
     """
 
     key: str
-    kind: Literal["prompt", "user", "text", "tool", "notice"]
+    kind: Literal["prompt", "user", "text", "tool", "notice", "parent_message", "subagent_message"]
     text: str = ""
     notice_kind: NoticeKind = "info"
     tool_name: str = ""
@@ -224,6 +225,7 @@ class SubagentEntry:
     outcome: Literal["success", "error", "interrupted"] | None = None
     result_text: str = ""
     details: dict[str, Any] | None = None
+    duration_s: float | None = None
     #: Rows that belong ABOVE the transcript rather than in it. Exactly one
     #: exists (the truncation note); the view mounts it once, outside the
     #: diffed sequence, so its arrival at the cap appends a row instead of
@@ -306,12 +308,17 @@ def fold_transcript_entries(
                 continue
             kind = str(details.get("kind") or "")
             if direction == "to_child":
-                lead = {"ask": "Parent asked", "steer": "Parent redirected"}.get(
-                    kind, "Parent sent"
+                label = {"ask": "Parent · asked", "steer": "Parent · redirected"}.get(
+                    kind, "Parent"
+                )
+                folded.append(
+                    SubagentEntry(f"comm:{entry.id}", "parent_message", text=f"{label}\n{body}")
                 )
             else:
-                lead = "Subagent replied" if details.get("reply_to") else "Subagent sent"
-            folded.append(_notice(f"comm:{entry.id}", f"{lead}: {body}", "info"))
+                label = "Subagent · replied" if details.get("reply_to") else "Subagent"
+                folded.append(
+                    SubagentEntry(f"comm:{entry.id}", "subagent_message", text=f"{label}\n\n{body}")
+                )
             continue
         if entry.type != ENTRY_MESSAGE:
             continue
@@ -321,8 +328,8 @@ def fold_transcript_entries(
             details = payload.get("details") or {}
             body = strip_control_sequences(str(details.get("body") or "")).strip()
             if body:
-                lead = "Parent asked" if details.get("expects_reply") else "Parent sent"
-                folded.append(_notice(entry.id, f"{lead}: {body}", "info"))
+                lead = "Parent · asked" if details.get("expects_reply") else "Parent"
+                folded.append(SubagentEntry(entry.id, "parent_message", text=f"{lead}\n{body}"))
             continue
         role = payload.get("role")
         text = strip_control_sequences(_content_text(payload)).strip()
@@ -459,6 +466,15 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 outcome="error" if (event.get("is_error") or result.get("is_error")) else "success",
                 result_text=_content_text(result),
                 details=details if isinstance(details, dict) else None,
+                duration_s=(
+                    float(event["duration_s"])
+                    if isinstance(event.get("duration_s"), (int, float))
+                    else (
+                        float(result["duration_s"])
+                        if isinstance(result.get("duration_s"), (int, float))
+                        else None
+                    )
+                ),
             )
         elif etype == "notice":
             kind = str(event.get("kind") or "info")
@@ -668,14 +684,17 @@ def entry_block(entry: SubagentEntry) -> TranscriptBlock:
     """
     if entry.kind == "prompt":
         return InstructionBlock(entry.text)
-    if entry.kind == "user":
+    if entry.kind in ("user", "parent_message"):
         return UserBlock(entry.text)
-    if entry.kind == "text":
+    if entry.kind in ("text", "subagent_message"):
         block = AssistantBlock()
         block.update_text(entry.text)
         block.finalize_text()
         return block
     if entry.kind == "notice":
+        if entry.key == "__working__":
+            activity = entry.text or "thinking"
+            return WorkingBlock(activity, activity)
         return NoticeBlock(entry.text, entry.notice_kind)
     card = ToolCard("", entry.tool_name, entry.tool_args, entry.intent)
     if entry.outcome == "error":
@@ -684,11 +703,17 @@ def entry_block(entry: SubagentEntry) -> TranscriptBlock:
             result_text=entry.result_text,
             details=entry.details,
             error=_first_line(entry.result_text),
+            duration_s=entry.duration_s,
         )
     elif entry.outcome == "interrupted":
         card.restore(state="interrupted")
     elif entry.outcome == "success":
-        card.restore(state="success", result_text=entry.result_text, details=entry.details)
+        card.restore(
+            state="success",
+            result_text=entry.result_text,
+            details=entry.details,
+            duration_s=entry.duration_s,
+        )
     else:
         # No outcome yet: the child's call is STILL GOING, so the card stays
         # live. It is restored rather than left as constructed for the same
@@ -895,6 +920,7 @@ class SubagentView(Vertical):
         super().__init__(classes="subagent-view")
         self._job_id = job_id
         self._title = Static(classes="subagent-view-title")
+        self._breadcrumb = Static(classes="subagent-view-breadcrumb")
         self._rule = Static(classes="subagent-view-rule")
         self._body = SubagentTranscriptView(classes="subagent-view-body")
         # One widget per hint so each can be hovered and clicked. The row
@@ -910,6 +936,10 @@ class SubagentView(Vertical):
         # nobody that clicking the word paged downward, and lit only half the
         # `↑↓ scroll` token on hover — which reads as a rendering glitch.
         self._scroll_label = HintButton("")
+        self._parent_hint = HintButton("p", lambda: self._navigate("parent"))
+        self._peer_hint = HintButton("[ ]", lambda: self._navigate("peer"))
+        self._child_hint = HintButton("c", lambda: self._navigate("child"))
+        self._root_hint = HintButton("r", lambda: self._navigate("root"))
         self._exit_hint = HintButton("esc", self._leave)
         # The note rides the KEY span, not the label span. Through the label it
         # painted `faint` — the seam ink — which made the mode's one
@@ -966,6 +996,7 @@ class SubagentView(Vertical):
         #: ``_title_row``).
         self._agent_role = ""
         self._effort = ""
+        self._ancestors: list[str] = []
         #: The job's settled ``result_text``, verbatim. Read for ONE fact the
         #: page cannot otherwise know: a job cancelled while still parked never
         #: ran, so its duration is parked time and the bare word ``cancelled``
@@ -999,9 +1030,14 @@ class SubagentView(Vertical):
 
     def compose(self):  # type: ignore[override]
         yield self._title
+        yield self._breadcrumb
         yield self._rule
         yield self._body
         with self._hints:
+            yield self._parent_hint
+            yield self._peer_hint
+            yield self._child_hint
+            yield self._root_hint
             yield self._up_hint
             yield self._down_hint
             yield self._scroll_label
@@ -1053,6 +1089,7 @@ class SubagentView(Vertical):
         progress: str = "",
         agent_role: str = "",
         effort: str = "",
+        ancestors: Sequence[str] = (),
         transcript_directory: str | None = None,
     ) -> None:
         """Point the page at a job's current state and reconcile the body.
@@ -1087,6 +1124,7 @@ class SubagentView(Vertical):
         # the job was fully registered picks them up on the next poll.
         self._agent_role = strip_control_sequences(agent_role or "").strip()
         self._effort = strip_control_sequences(effort or "").strip()
+        self._ancestors = [strip_control_sequences(item).strip() for item in ancestors if item]
         self._running = status == "running" and not queued
         gone = status == "gone"
 
@@ -1368,10 +1406,11 @@ class SubagentView(Vertical):
             return None
         if not self._running and not self._queued:
             return None if activity else _notice("__empty__", self._empty_state(), "info")
-        if not activity:
-            return _notice("__working__", self._empty_state(), "info")
         detail = " ".join(strip_control_sequences(progress).split())
-        return _notice("__working__", f"working — {detail}" if detail else "working…", "info")
+        # The parent transcript's aggregate progress block owns animation,
+        # duration, and compact activity grammar. The child supplies only the
+        # observed activity, never a parallel notice vocabulary.
+        return _notice("__working__", detail or "thinking", "info")
 
     def focus_body(self) -> None:
         """Give the scrolling body focus so ↑↓ do what the hint says."""
@@ -1392,6 +1431,7 @@ class SubagentView(Vertical):
             text = getattr(block, "text", None)
             rows.append(text() if callable(text) else getattr(block, "renderable", ""))
         rows.append(self._hint_text)
+        rows.insert(1, getattr(self._breadcrumb, "renderable", ""))
         return [_plain(row) for row in rows]
 
     def _sync_body(self, entries: list[SubagentEntry], head: SubagentEntry | None) -> None:
@@ -1482,6 +1522,13 @@ class SubagentView(Vertical):
         # three-second idle windows, two rounds: 4.4%/4.2% of a core with the
         # default against 3.5%/3.6% with this.
         self._title.update(self._title_text, layout=False)
+        breadcrumb = "Conversation"
+        if self._ancestors:
+            breadcrumb += " > " + " > ".join(self._ancestors)
+        breadcrumb += " > " + self._label
+        self._breadcrumb.update(
+            Text(breadcrumb, style=Style(color=theme_mod.semantic_color("dim")))
+        )
         self._rule.update(self._rule_text, layout=False)
 
     def _title_row(self, width: int, spinner: str, tools: int) -> Text:
@@ -1670,6 +1717,11 @@ class SubagentView(Vertical):
         else:
             self._body.scroll_page_up()
 
+    def _navigate(self, relation: str) -> None:
+        action = getattr(self.app, f"action_subagent_{relation}", None)
+        if callable(action):
+            action()
+
     def _leave(self) -> None:
         self.post_message(SubagentViewDismissed())
 
@@ -1699,8 +1751,11 @@ class SubagentView(Vertical):
         """
         # (visible hints, esc label, state label) per rung, widest first.
         arrows = (self._up_hint, self._down_hint, self._scroll_label)
+        relations = (self._parent_hint, self._peer_hint, self._child_hint, self._root_hint)
         rungs: tuple[tuple[tuple[HintButton, ...], str], ...] = (
+            ((*relations, *arrows, self._exit_hint, self._state_hint), "back to conversation"),
             ((*arrows, self._exit_hint, self._state_hint), "back to conversation"),
+            ((*relations, *arrows, self._exit_hint), "back to conversation"),
             ((*arrows, self._exit_hint), "back to conversation"),
             ((*arrows, self._exit_hint), "back"),
             ((self._exit_hint,), "back"),
@@ -1712,7 +1767,7 @@ class SubagentView(Vertical):
                 visible, esc_label = candidate
                 break
         self._paint_hints(visible, esc_label)
-        for hint in (*arrows, self._exit_hint, self._state_hint):
+        for hint in (*relations, *arrows, self._exit_hint, self._state_hint):
             hint.display = hint in visible
         return self._hints_text(visible, esc_label)
 
@@ -1727,7 +1782,14 @@ class SubagentView(Vertical):
         # The caption carries its own leading space. It is the one hint with no
         # key in front of it, so without it the row read `↑↓scroll` while every
         # other hint — and every hint on the aside overlay — reads `key label`.
-        labels = {self._scroll_label: " scroll", self._exit_hint: esc_label}
+        labels = {
+            self._parent_hint: "parent",
+            self._peer_hint: "peer",
+            self._child_hint: "child",
+            self._root_hint: "root",
+            self._scroll_label: " scroll",
+            self._exit_hint: esc_label,
+        }
         plan: list[tuple[HintButton, str, bool]] = []
         for position, hint in enumerate(visible):
             # `↓` follows `↑` with no seam, so the pair still reads as one
