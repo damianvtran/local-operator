@@ -3657,7 +3657,6 @@ def test_append_auth_recovery_generic_without_provider() -> None:
         "[Errno 8] nodename nor servname provided, or not known",
         "[Errno 51] Network is unreachable",
         "[Errno 65] No route to host",
-        "[Errno 61] Connection refused",
         "Temporary failure in name resolution",
         "Name or service not known",
         "getaddrinfo failed",
@@ -3681,6 +3680,14 @@ def test_ordinary_transient_5xx_is_not_connectivity_loss() -> None:
     assert not is_connectivity_loss(ProviderError(500, "boom", retryable=True))
     # A bare timeout is transient/timeout but not a connectivity loss either.
     assert not is_connectivity_loss(wrap_transport_error(httpx.ReadTimeout("timed out")))
+    # ECONNREFUSED is a TCP RST from the destination, so the host WAS reachable
+    # — the opposite of an offline machine. It must classify as an ordinary
+    # transient (fast retry + fallback walk), never connectivity loss, so a
+    # down local provider (ollama/LM Studio) is routed around rather than given
+    # the 8-minute patient wait. See the exclusion note on the marker tuple.
+    refused = wrap_transport_error(httpx.ConnectError("[Errno 61] Connection refused"))
+    assert not is_connectivity_loss(refused)
+    assert refused.kind == "transient"
 
 
 def test_connectivity_backoff_is_patient_not_the_8s_cap() -> None:
@@ -3745,6 +3752,63 @@ async def test_connectivity_loss_recovers_within_patient_budget(monkeypatch) -> 
     # The delays climbed past the 8s fast cap toward the patient 60s ceiling.
     assert max(sleeps) > BACKOFF_CAP_MS
     assert max(sleeps) <= CONNECTIVITY_BACKOFF_CAP_MS
+
+
+async def test_connectivity_loss_does_not_walk_fallback_chain(monkeypatch) -> None:
+    """The patient path retries the PRIMARY in place and never walks the chain.
+
+    When the machine is offline every fallback provider is equally unreachable,
+    so walking the chain just multiplies the same failure across providers. This
+    asserts the invariant directly: with a configured second target, an Errno 8
+    connectivity error on the primary must never cause the fallback's client to
+    be constructed. (The recovery test above uses a single-provider store, which
+    proves no credential rotation but not this cross-provider invariant.)
+    """
+    sleeps: list[int] = []
+    specs_seen: list[str] = []
+    attempts = {"n": 0}
+    offline_failures = 4
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    def offline_then_ok(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts["n"] += 1
+        if attempts["n"] <= offline_failures:
+            raise httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")
+
+        async def ok() -> AsyncIterator[Any]:
+            yield StreamEndEvent(stop_reason="stop")
+
+        return ok()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        return _FnClient(offline_then_ok)
+
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+    settings = {
+        "retry": {
+            "maxRetries": 10,
+            "baseDelayMs": 500,
+            "fallbackChains": {
+                "default": [{"provider": "anthropic", "model": "claude-opus-5", "effort": "high"}]
+            },
+        }
+    }
+    events = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert any(isinstance(e, StreamEndEvent) for e in events)
+    # The ONLY client ever built is the primary's: the fallback target's client
+    # was never constructed, so the chain was not walked.
+    assert set(specs_seen) == {"openai/gpt-4o"}
+    # It rode out the offline window in place — no rotation to the sibling either.
+    assert attempts["n"] == offline_failures + 1
+    assert auth.rotations == []
 
 
 async def test_ordinary_transient_5xx_still_uses_fast_budget(monkeypatch) -> None:
@@ -3825,3 +3889,13 @@ def test_connectivity_config_keys_parse_camel_and_snake() -> None:
     default = RetrySettings.from_settings(None)
     assert default.connectivity_max_retries == CONNECTIVITY_MAX_RETRIES
     assert default.connectivity_backoff_cap_ms == CONNECTIVITY_BACKOFF_CAP_MS
+
+
+def test_connectivity_config_bad_value_falls_back_to_default() -> None:
+    """A non-numeric budget must degrade to the default, not crash from_settings
+    (which re-parses on every model call). Mirrors usageReservePercent."""
+    bad = RetrySettings.from_settings(
+        {"retry": {"connectivityMaxRetries": "lots", "connectivityBackoffCapMs": None}}
+    )
+    assert bad.connectivity_max_retries == CONNECTIVITY_MAX_RETRIES
+    assert bad.connectivity_backoff_cap_ms == CONNECTIVITY_BACKOFF_CAP_MS

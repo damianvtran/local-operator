@@ -127,13 +127,16 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 #:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113).
 #:   - "network is down" / "errno 50": ``ENETDOWN`` — the interface is still
 #:     coming up.
-#:   - "connection refused" / "errno 61": ``ECONNREFUSED`` (macOS 61, Linux
-#:     111). Included because during a reconnect a captive portal or the local
-#:     stack refuses at the socket layer before any HTTP response exists. This
-#:     one CAN also mean a genuinely-down endpoint rather than an offline
-#:     machine, but the patient path is safe either way: the backoff is
-#:     abortable, and once the (minutes-long) budget is spent the diagnostic
-#:     error still surfaces, so a real outage is not hidden, only waited out.
+#:
+#: DELIBERATELY EXCLUDED — do not re-add: ``ECONNREFUSED`` ("connection refused"
+#: / errno 61 on macOS, 111 on Linux). A refused connection is a TCP RST from the
+#: destination, which PROVES the host was reachable — the exact opposite of the
+#: offline machine this path exists for. An offline machine cannot even resolve
+#: or route to a host, so it yields the DNS/route/net-unreachable failures above,
+#: never a refusal. Treating a refusal as connectivity loss would give a
+#: genuinely-down LOCAL provider (ollama, LM Studio, a localhost proxy) the
+#: 8-minute patient wait AND suppress the fallback-chain walk that otherwise
+#: routes around it — a regression. A refusal stays an ordinary transient error.
 _CONNECTIVITY_LOSS_MARKERS = (
     "nodename nor servname",
     "errno 8",
@@ -146,8 +149,6 @@ _CONNECTIVITY_LOSS_MARKERS = (
     "errno 65",
     "network is down",
     "errno 50",
-    "connection refused",
-    "errno 61",
 )
 
 
@@ -1196,6 +1197,22 @@ def _normalize_chains(chains: Mapping[str, Any]) -> dict[str, list[Any]]:
     return normalized
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    """A config integer that degrades to ``default`` on junk input.
+
+    ``from_settings`` re-parses on every model call and must never raise, so a
+    non-numeric or missing value (``None`` when the key is absent) falls back to
+    the shipped default rather than killing the turn. Mirrors the ``float()``
+    guard the ``usageReservePercent`` path already uses at this same boundary.
+    """
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclasses.dataclass(frozen=True)
 class RetrySettings:
     """The ``values.retry.*`` config surface."""
@@ -1229,22 +1246,24 @@ class RetrySettings:
             reserve_percent = min(100.0, max(0.0, float(reserve)))
         except (TypeError, ValueError):
             reserve_percent = 10.0
+        # A malformed connectivity budget must degrade to the shipped default,
+        # not crash from_settings on EVERY turn (it re-parses per model call).
+        # Same contract as usageReservePercent above: a bad value in the retry
+        # block is a preference the harness can safely ignore, never a fatal.
+        connectivity_max_retries = _coerce_int(
+            retry.get("connectivityMaxRetries", retry.get("connectivity_max_retries")),
+            CONNECTIVITY_MAX_RETRIES,
+        )
+        connectivity_backoff_cap_ms = _coerce_int(
+            retry.get("connectivityBackoffCapMs", retry.get("connectivity_backoff_cap_ms")),
+            CONNECTIVITY_BACKOFF_CAP_MS,
+        )
         return RetrySettings(
             enabled=bool(retry.get("enabled", True)),
             max_retries=int(retry.get("maxRetries", retry.get("max_retries", 10))),
             base_delay_ms=int(retry.get("baseDelayMs", retry.get("base_delay_ms", 500))),
-            connectivity_max_retries=int(
-                retry.get(
-                    "connectivityMaxRetries",
-                    retry.get("connectivity_max_retries", CONNECTIVITY_MAX_RETRIES),
-                )
-            ),
-            connectivity_backoff_cap_ms=int(
-                retry.get(
-                    "connectivityBackoffCapMs",
-                    retry.get("connectivity_backoff_cap_ms", CONNECTIVITY_BACKOFF_CAP_MS),
-                )
-            ),
+            connectivity_max_retries=connectivity_max_retries,
+            connectivity_backoff_cap_ms=connectivity_backoff_cap_ms,
             model_fallback=bool(retry.get("modelFallback", retry.get("model_fallback", True))),
             usage_aware_fallback=bool(
                 retry.get("usageAwareFallback", retry.get("usage_aware_fallback", False))
@@ -2052,7 +2071,7 @@ async def stream_with_failover(
                     # Patient budget spent while still offline: surface the most
                     # diagnostic failure of the walk, same as any other
                     # exhaustion, so the reported-error semantics stay intact.
-                    raise reported if reported is not None else exc
+                    raise (reported if reported is not None else exc) from exc
                 if is_server_side_failure(exc):
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
