@@ -111,13 +111,11 @@ def main() -> int:
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
-        print(
-            f"model-visible tokens: {result.baseline_model_tokens:,} -> {result.compact_model_tokens:,}"
-        )
+        tokens = f"{result.baseline_model_tokens:,} -> {result.compact_model_tokens:,}"
+        print(f"model-visible tokens: {tokens}")
         print(f"model-token reduction: {result.model_token_reduction_percent:.2f}%")
-        print(
-            f"transcript metadata: {result.baseline_metadata_bytes:,} -> {result.compact_metadata_bytes:,} bytes"
-        )
+        metadata = f"{result.baseline_metadata_bytes:,} -> {result.compact_metadata_bytes:,} bytes"
+        print(f"transcript metadata: {metadata}")
         print(f"metadata reduction: {result.metadata_reduction_percent:.2f}%")
         print(f"spill: {result.spill_bytes:,} bytes, complete={result.spill_complete}")
         print(f"recovery matches: {result.recovery_matches}")
