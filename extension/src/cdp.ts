@@ -34,9 +34,32 @@ export async function attach(tabId: number): Promise<void> {
   } catch (error) {
     const message = String(error);
     if (message.includes("Another debugger") || message.includes("already attached")) {
+      // The module-global `attached` set does not survive service-worker death,
+      // so after MV3 churn a tab OUR debugger is still attached to throws here
+      // on the first post-restart command. That is the exact reconnect path the
+      // bridge claims to handle, and mapping it to debugger_conflict told the
+      // user to "close DevTools" that was never open (finding A8). Reconcile:
+      // if the still-attached debugger is ours, adopt it silently; only a
+      // FOREIGN attachment (DevTools) is a real conflict.
+      if (await ownAttachment(tabId)) {
+        attached.add(tabId);
+        return;
+      }
       throw new BridgeCommandError("debugger_conflict", message);
     }
     throw new BridgeCommandError("internal", message);
+  }
+}
+
+async function ownAttachment(tabId: number): Promise<boolean> {
+  // A tab we can still drive answers a trivial CDP command; a tab held by a
+  // foreign debugger rejects it. This distinguishes our surviving attachment
+  // from DevTools without a fragile string match on Chrome's error text.
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: "1" });
+    return true;
+  } catch {
+    return false;
   }
 }
 

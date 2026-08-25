@@ -3,7 +3,7 @@
   "name": "Local Operator",
   "version": "0.1.0",
   "description": "Connect Local Operator to the browser you already use, entirely on your machine.",
-  "permissions": ["debugger", "tabs", "scripting", "storage", "alarms", "webNavigation"],
+  "permissions": ["debugger", "tabs", "scripting", "storage", "alarms", "webNavigation", "notifications"],
   "host_permissions": ["<all_urls>"],
   "background": {"service_worker": "worker.js", "type": "module"},
   "action": {

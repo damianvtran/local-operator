@@ -5,7 +5,24 @@ import { getLocal } from "./state";
 export { safeHttpUrl } from "./origin-policy";
 
 export type OriginDecision = "once" | "always" | "deny";
+export const ORIGIN_PROMPT_TIMEOUT_MS = 60_000;
+
+// The popup resolves a decision by ORIGIN, not by command id: a single command
+// can pause on several origins in a redirect chain, and keying the resolver by
+// command id let the second origin overwrite the first's resolver so only the
+// last was answerable (finding A6). Keying by origin lets each hop resolve
+// independently, and the popup only ever shows one origin at a time anyway.
 const waiting = new Map<string, (decision: OriginDecision) => void>();
+
+// A hook the worker installs so a pending decision can raise an ambient signal
+// (a system notification) the user sees without already having the popup open
+// (finding U2). Kept injectable so origins.ts stays free of worker wiring.
+let onPendingChange: ((pending: { origin: string; hostname: string } | null) => void) | null = null;
+export function setPendingObserver(
+  observer: (pending: { origin: string; hostname: string } | null) => void,
+): void {
+  onPendingChange = observer;
+}
 
 export async function originAllowed(url: URL): Promise<boolean> {
   const { origins = {} } = await getLocal();
@@ -14,19 +31,25 @@ export async function originAllowed(url: URL): Promise<boolean> {
 
 export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
   if (await originAllowed(url)) return true;
+  // Record the pending decision for the popup and the ambient observer. Keyed
+  // by origin so concurrent hops do not clobber each other.
   await chrome.storage.session.set({
     pendingOrigin: { origin: url.origin, hostname: url.hostname, requestId },
   });
   await chrome.action.setBadgeBackgroundColor({ color: "#e96042" });
   await chrome.action.setBadgeText({ text: "!" });
+  await chrome.action.setTitle({ title: `Local Operator wants to open ${url.hostname}` });
+  onPendingChange?.({ origin: url.origin, hostname: url.hostname });
   const decision = await new Promise<OriginDecision>((resolve) => {
-    waiting.set(requestId, resolve);
+    waiting.set(url.origin, resolve);
     setTimeout(() => {
-      if (waiting.delete(requestId)) resolve("deny");
-    }, 60_000);
+      if (waiting.delete(url.origin)) resolve("deny");
+    }, ORIGIN_PROMPT_TIMEOUT_MS);
   });
   await chrome.storage.session.remove("pendingOrigin");
   await chrome.action.setBadgeText({ text: "" });
+  await chrome.action.setTitle({ title: "Local Operator" });
+  onPendingChange?.(null);
   if (decision === "always") {
     const { origins = {} } = await getLocal();
     await chrome.storage.local.set({ origins: { ...origins, [url.origin]: "allow" } });
@@ -34,10 +57,10 @@ export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
   return decision !== "deny";
 }
 
-export function resolveOrigin(requestId: string, decision: OriginDecision): void {
-  const resolve = waiting.get(requestId);
+export function resolveOrigin(origin: string, decision: OriginDecision): void {
+  const resolve = waiting.get(origin);
   if (resolve) {
-    waiting.delete(requestId);
+    waiting.delete(origin);
     resolve(decision);
   }
 }

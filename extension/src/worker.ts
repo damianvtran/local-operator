@@ -4,7 +4,7 @@ import { readPage } from "./commands/read";
 import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { BridgeCommandError } from "./cdp";
-import { resolveOrigin } from "./origins";
+import { resolveOrigin, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
 import { ErrorCode, type DaemonMessage, type ExtensionEvent, type Response } from "./protocol.gen";
 
@@ -32,6 +32,32 @@ let attempt = 0;
 let connected = false;
 let alive = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+// The request id currently being handled, so an origin pause can tell the
+// daemon WHICH command to keep alive past the base timeout (finding A3).
+let activeRequestId = "";
+
+function send(frame: object): void {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
+}
+
+// Raise a system notification when a site decision is pending, so a user who
+// does not already have the popup open still sees that the agent is blocked on
+// them rather than the command silently stalling toward a deny (finding U2).
+const PENDING_NOTIFICATION_ID = "lop-origin-pending";
+setPendingObserver((pending) => {
+  if (pending) {
+    send({ event: "awaiting_origin", id: activeRequestId, origin: pending.origin });
+    chrome.notifications?.create(PENDING_NOTIFICATION_ID, {
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
+      title: "Local Operator needs your OK",
+      message: `Allow the agent to open ${pending.hostname}? Click the extension to decide.`,
+      priority: 2,
+    });
+  } else {
+    chrome.notifications?.clear(PENDING_NOTIFICATION_ID);
+  }
+});
 
 async function daemonPort(): Promise<number> {
   const { port } = await getLocal();
@@ -48,8 +74,14 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: `unknown method ${request.method}`, data: {} } });
     return;
   }
+  activeRequestId = request.id;
   try {
     const result = await handler(request.params, request.id);
+    // Push the driven page so the daemon (and the Connected popup) can show
+    // the human what the agent is on (finding U3).
+    if (typeof result.url === "string" && result.url) {
+      send({ event: "tab_update", url: result.url, title: String(result.title ?? "") });
+    }
     await respond({ id: request.id, ok: true, result });
   } catch (error) {
     if (error instanceof BridgeCommandError) {
@@ -81,16 +113,24 @@ async function connect(): Promise<void> {
     const frame = JSON.parse(String(message.data)) as DaemonMessage;
     if ("method" in frame) void dispatch(frame);
     else if (frame.event === "ping") wire.send(JSON.stringify({ event: "pong" }));
-    else if (frame.event === "hello_ack") paired = frame.paired;
-    else if (frame.event === "pair_result" && frame.ok) chrome.storage.local.set({ token: frame.token });
+    else if (frame.event === "hello_ack") {
+      paired = frame.paired;
+      void chrome.storage.session.set({ connState: frame.paired ? "connected" : "pairing" });
+    } else if (frame.event === "pair_result" && frame.ok) chrome.storage.local.set({ token: frame.token });
   };
-  const teardown = () => {
+  const teardown = (event?: CloseEvent) => {
     connected = false;
     paired = false;
     socket = undefined;
+    // Preserve the close code so the popup can distinguish a protocol mismatch
+    // (4001 — "update needed", which pairing cannot fix) from an ordinary
+    // disconnect (finding D2). 4003 is an unpair/revoke.
+    if (event?.code === 4001) void chrome.storage.session.set({ connState: "incompatible" });
+    else if (event?.code === 4003) void chrome.storage.session.set({ connState: "pairing" });
+    else void chrome.storage.session.set({ connState: "disconnected" });
     scheduleReconnect();
   };
-  wire.onclose = teardown;
+  wire.onclose = (event) => teardown(event);
   wire.onerror = () => wire.close();
 }
 
@@ -123,5 +163,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.pendingOrigin) void chrome.runtime.sendMessage({ event: "origin_prompt", pending: changes.pendingOrigin.newValue });
 });
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.event === "origin_decision") resolveOrigin(String(message.requestId), message.decision);
+  // Decisions are keyed by ORIGIN now (finding A6): one command can pause on
+  // several origins in a redirect chain, and each resolves independently.
+  if (message?.event === "origin_decision") resolveOrigin(String(message.origin), message.decision);
 });
