@@ -116,7 +116,6 @@ class AttachClient:
         *,
         events: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
-        on_attach_sync: Callable[[dict[str, Any]], None] | None = None,
         frontend_state: bool = False,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
@@ -129,7 +128,6 @@ class AttachClient:
         # pydantic-free and cheap to import (module docstring contract).
         self._events = events
         self._on_event = on_event
-        self._on_attach_sync = on_attach_sync
         self._frontend_state = frontend_state
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
@@ -247,12 +245,6 @@ class AttachClient:
                             self._on_event(frame.get("data") or {})
                         except Exception:  # noqa: BLE001
                             continue
-                elif op == "attach_sync":
-                    if self._on_attach_sync is not None:
-                        try:
-                            self._on_attach_sync(frame.get("data") or {})
-                        except Exception:  # noqa: BLE001
-                            continue
                 elif op == "frontend_sync":
                     data = frame.get("data") or {}
                     epoch = data.get("epoch")
@@ -273,9 +265,9 @@ class AttachClient:
                         else None
                     )
                     if epoch != self._frontend_epoch or sequence != expected:
-                        # State streams are replacement-safe only when every
-                        # sequence arrives. Closing forces an atomic resync; a
-                        # silent skip would recreate the drift this protocol exists to prevent.
+                        # Deltas are not replacement-safe: every sequence must
+                        # arrive. Closing forces a fresh v5 snapshot rather than
+                        # continuing with silently incomplete canonical state.
                         raise ConnectionError(
                             f"frontend state gap: expected {self._frontend_epoch}/{expected}, "
                             f"got {epoch}/{sequence}"
@@ -389,6 +381,9 @@ class AttachClient:
         images: list[dict[str, str]] | None = None,
     ) -> str:
         return await self._request("slash", command=command, args=args, images=images or [])
+
+    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+        return await self._request("complete_aside", turns=turns)
 
     async def set_model(self, provider: str, model_id: str) -> str:
         return await self._request("set_model", provider=provider, model_id=model_id)

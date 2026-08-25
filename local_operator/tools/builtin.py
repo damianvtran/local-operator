@@ -4121,6 +4121,11 @@ async def execute_todo(
         return _validation_error(tool_call_id, "todo", exc)
     store, key = _todo_store_and_key(context)
 
+    def changed() -> None:
+        callback = context.on_todos_changed if context is not None else None
+        if callback is not None:
+            callback()
+
     if params.op == "init":
         # ``phases`` and flat ``items`` are two spellings of the same list, so
         # accepting both is ambiguous about which wins — reject it loudly.
@@ -4143,6 +4148,7 @@ async def execute_todo(
                 }
                 for phase in params.phases
             ]
+            changed()
             return _text(
                 tool_call_id,
                 "todo",
@@ -4159,6 +4165,7 @@ async def execute_todo(
                 "items": [{"text": item, "status": "pending"} for item in params.items],
             }
         ]
+        changed()
         return _text(
             tool_call_id,
             "todo",
@@ -4199,6 +4206,7 @@ async def execute_todo(
                 "todo",
                 f"Already tracked, nothing added ({_todo_progress(current)} resolved).",
             )
+        changed()
         return _text(
             tool_call_id,
             "todo",
@@ -4256,6 +4264,7 @@ async def execute_todo(
             text = f"{verb}: {', '.join(item['text'] for item in matched)}"
             if target == "blocked":
                 text += f" — reason: {reason}"
+            changed()
             return _text(tool_call_id, "todo", f"{text} ({_todo_progress(current)} resolved).")
 
         # Text form: search across ALL phases (the flat ``current`` view), so a
@@ -4269,6 +4278,8 @@ async def execute_todo(
                 # A resolved item keeps no stale blocker: the reason described
                 # a wait that is over, and the panel would still render it.
                 item.pop("reason", None)
+        if matched:
+            changed()
         if missing:
             return _todo_miss_error(tool_call_id, params.op, matched, missing, current)
         text = f"{verb}: {', '.join(item['text'] for item in matched)}"

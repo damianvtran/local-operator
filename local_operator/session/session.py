@@ -1238,12 +1238,26 @@ class Session:
         # concurrent children than a hosted one. An unset or unusable config
         # contributes NO kwarg, so the manager's own default stands and the
         # behaviour is exactly what it was before this was configurable.
+        def on_job_change() -> None:
+            store = getattr(self, "_frontend_state_store", None)
+            if store is None or getattr(self, "_frontend_jobs_refresh_scheduled", False):
+                return
+            self._frontend_jobs_refresh_scheduled = True
+            try:
+                # Child trajectory events arrive in bursts. A 50 ms coalesce
+                # keeps progress perceptibly live without serializing six full
+                # rosters on every shared-loop event.
+                asyncio.get_running_loop().call_later(0.05, self._flush_frontend_jobs)
+            except RuntimeError:
+                self._frontend_jobs_refresh_scheduled = False
+                store.refresh_jobs(self)
+
         self.jobs = AsyncJobManager(
             on_job_complete=self._on_job_completed,
-            # The manager signals every task-roster move here; the session folds
-            # both halves (job rows + comms records) into ONE persisted snapshot
-            # so a resume can rebuild the subagent panel and the resume basis.
+            # One mutation seam persists resumability and publishes the live
+            # canonical roster, including progress/cost/status changes.
             on_roster_change=self._schedule_subagent_persist,
+            on_job_change=on_job_change,
             **_configured_max_running(),
         )
         self._wake = WakeScheduler(
@@ -1253,6 +1267,9 @@ class Session:
             # fires into one aggregated prompt (see _handle_missed_wakes).
             deliver=lambda due: self._wake_deliver_via_hook(due),
             persist=self._persist_wake_schedules,
+            on_change=lambda: (
+                self.refresh_frontend_state() if hasattr(self, "_frontend_state_store") else None
+            ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
         # Catch-up state for the wake deliveries the process was DOWN for:
@@ -1912,6 +1929,7 @@ class Session:
                 if callable(withdraw):
                     withdraw()
                 self._journal_effort_if_selection_in_force(previous, model)
+                self.refresh_frontend_state()
                 return
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
@@ -1938,6 +1956,7 @@ class Session:
                 if refreshed is not None:
                     self._active_fallback = refreshed
             self._journal_effort_if_selection_in_force(previous, model)
+            self.refresh_frontend_state()
             return
         # A genuine model change is a SELECTION, and selections outlive the
         # process: journal it so `--resume` comes back on this model instead
@@ -1967,6 +1986,7 @@ class Session:
         # turn (see journal_model_switch). No ``reason``: the head already reads
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
+        self.refresh_frontend_state()
         self._spawn_background(
             self.journal_model_switch(
                 f"{model.provider}/{model.model_id}",
@@ -2071,7 +2091,9 @@ class Session:
         goal rides the system prompt's volatile tail, so it applies from the
         next turn and only invalidates that tail — never the cached prefix.
         """
-        return self._goal_state.set(text)
+        stored = self._goal_state.set(text)
+        self.refresh_frontend_state()
+        return stored
 
     @property
     def active_team_name(self) -> str:
@@ -2100,6 +2122,7 @@ class Session:
         self.active_team = team
         if team is None:
             self._goal_state.team_brief = ""
+            self.refresh_frontend_state()
             return
         preamble = getattr(team, "manager_preamble", lambda: "")()
         # The manager's own profile instructions (the reusable BASE) sit in
@@ -2130,6 +2153,7 @@ class Session:
                     + (preamble or "")
                 )
         self._goal_state.team_brief = preamble or ""
+        self.refresh_frontend_state()
 
     def _resolve_profile_or_specialist(self, name: str) -> tuple[str | None, Any, str, str]:
         """Resolve a NAME to an attachable profile, priority order fixed here.
@@ -2226,6 +2250,7 @@ class Session:
         # contradicting each other. Both fields are stamped together in
         # ``_stamp_agent_brief``; they must be cleared together too.
         self._goal_state.agent_name = ""
+        self.refresh_frontend_state()
 
     def _stamp_agent_brief(self, body: str, display_name: str) -> str:
         """Store the resolved brief on the volatile tail and report success.
@@ -2241,6 +2266,7 @@ class Session:
         # case): the profile IS attached and the band must name it, so the
         # segment tracks "which profile is in force", not "did it layer text".
         self._goal_state.agent_name = display_name
+        self.refresh_frontend_state()
         return display_name
 
     @property
@@ -2297,6 +2323,7 @@ class Session:
                     get_recorder().note_session_name(self.session_id, stored)
                 except Exception:  # noqa: BLE001 — analytics is best-effort
                     logger.debug("analytics: note_session_name failed", exc_info=True)
+        self.refresh_frontend_state()
         return stored
 
     def _spawn_conversation_name_write(self) -> None:
@@ -2654,6 +2681,7 @@ class Session:
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
+        self.refresh_frontend_state()
 
     def queued_steering(self) -> list[AgentMessage]:
         """A FIFO snapshot of the steering queue, without draining it.
@@ -2692,6 +2720,7 @@ class Session:
         so no reference the host could match on ever leaves this method.
         """
         self._steering_queue.put_nowait(message)
+        self.refresh_frontend_state()
 
     def recall_steering(self, message: AgentMessage) -> bool:
         """Remove ONE specific message from the steering queue, if present.
@@ -2726,6 +2755,8 @@ class Session:
             remaining.append(item)
         for item in remaining:
             self._steering_queue.put_nowait(item)
+        if found:
+            self.refresh_frontend_state()
         return found
 
     def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
@@ -2891,6 +2922,8 @@ class Session:
         """
         self._tools = list(tools)
         self._context.tools = self._tools
+        if hasattr(self, "_frontend_state_store"):
+            self.refresh_frontend_state()
 
     def set_fallback_tool_resolver(
         self, resolver: Callable[[str], AgentTool | None] | None
@@ -3040,6 +3073,13 @@ class Session:
         return await asyncio.to_thread(count)
 
     # -- events ---------------------------------------------------------------
+
+    def _flush_frontend_jobs(self) -> None:
+        """Coalesce a burst of child trajectory/progress mutations per loop tick."""
+        self._frontend_jobs_refresh_scheduled = False
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_jobs(self)
 
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
@@ -3557,6 +3597,7 @@ class Session:
             request_approval=None if self._yolo else self._request_approval,
             ask_user=self._ask_user,
             wake_scheduler=self._wake,
+            on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
             subagent_launcher=self._launch_subagent,
             jobs=self.jobs,
@@ -3853,6 +3894,7 @@ class Session:
             for message in messages:
                 if isinstance(message, Message) and message.role == "user":
                     await self._emit(MessageStartEvent(message=message))
+            self.refresh_frontend_state()
         return messages
 
     def _has_urgent_steering(self) -> bool:

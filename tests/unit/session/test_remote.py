@@ -47,7 +47,7 @@ async def test_remote_session_rehydrates_seed_then_streams_concrete_events(
     try:
         record = await _wait_record(tmp_path)
         # Join in the middle of a live tool: these events precede the socket,
-        # so only attach_sync can rebuild them on the follower.
+        # so only the canonical v5 snapshot can rebuild them on the follower.
         handle.emit_event(AgentStartEvent(generation=6))
         handle.emit_event(
             ToolExecutionStartEvent(
@@ -168,6 +168,36 @@ async def test_multi_question_ask_advances_same_request_across_two_followers(
             await first_remote.dispose()
         if second_remote is not None:
             await second_remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_aside_runs_on_owner_without_joining_transcript(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        deltas: list[str] = []
+        answer = await remote.complete_aside(
+            [Message.user("Why this approach?")],
+            on_delta=deltas.append,
+        )
+        assert answer == "aside answer"
+        assert deltas == ["aside answer"]
+        assert handle.calls[-1][0] == "complete_aside"
+        assert remote.history() == []
+    finally:
+        if remote is not None:
+            await remote.dispose()
         registrant.close()
 
 

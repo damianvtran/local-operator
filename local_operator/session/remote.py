@@ -63,9 +63,7 @@ from local_operator.harness.types import (
 from local_operator.mobile.attach_client import AttachClient, find_owner_record
 from local_operator.mobile.types import (
     ContinuationCommand,
-    LiveTurnSeed,
     PendingRequest,
-    SessionProjection,
     SessionRecord,
 )
 from local_operator.session.frontend_state import (
@@ -141,10 +139,8 @@ class RemoteSession:
         self._session_id = session_id
         self._takeover_factory = takeover_factory
         self._client: AttachClient | None = None
-        self._projection: SessionProjection | None = (
-            None  # identity welcome only; never TUI semantics
-        )
-        self._sync_future: asyncio.Future[LiveTurnSeed] | None = None
+        # The projection callback authenticates the welcome identity only. Full
+        # TUI semantics come exclusively from the canonical v5 state stream.
         self._frontend_future: asyncio.Future[FrontendSync] | None = None
         self._frontend_store: FrontendStateStore | None = None
         self.jobs = SnapshotJobs()
@@ -179,7 +175,6 @@ class RemoteSession:
         self._takeover_target: Any | None = None
         self._streaming = False
         self._generation = 0
-        self._queued_steers: list[Message] = []
         self._name_state = ConversationName()
         self._model: ModelSpec | None = None
 
@@ -202,41 +197,29 @@ class RemoteSession:
             takeover_factory=takeover_factory,
         )
         await self._dial(record)
-        self._load_history()
-        seed, frontend = await asyncio.gather(self._await_seed(), self._await_frontend())
+        frontend = await self._await_frontend()
         self._install_frontend(frontend.snapshot)
-        self._finish_sync(seed)
+        self._load_history()
+        self._finish_sync()
         return self
 
     async def _dial(self, record: SessionRecord) -> None:
-        # Freeze relay delivery until attach_sync is installed ahead of any
-        # event frames that follow it on the socket. The pump may process both
-        # before the coroutine awaiting the future resumes.
+        # Freeze relay delivery until the canonical sync is installed ahead of
+        # raw event frames that follow it on the same socket.
         self._ready_for_events = False
         loop = asyncio.get_running_loop()
-        self._sync_future = loop.create_future()
         self._frontend_future = loop.create_future()
         client = AttachClient(
-            self._on_projection,
+            lambda _projection: None,
             self._on_disconnected,
             events=True,
             on_event=self._on_wire_event,
-            on_attach_sync=self._on_attach_sync,
             frontend_state=True,
             on_frontend_sync=self._on_frontend_sync,
             on_frontend_update=self._on_frontend_update,
         )
         await client.connect(record, self._session_id)
         self._client = client
-
-    async def _await_seed(self) -> LiveTurnSeed:
-        future = self._sync_future
-        if future is None:
-            raise ConnectionError("owner did not start attach synchronization")
-        try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=15.0)
-        except TimeoutError as exc:
-            raise ConnectionError("owner did not send attach synchronization") from exc
 
     async def _await_frontend(self) -> FrontendSync:
         future = self._frontend_future
@@ -255,28 +238,15 @@ class RemoteSession:
             str(message.id) for message in self._history if getattr(message, "id", None)
         }
 
-    def _finish_sync(self, seed: LiveTurnSeed) -> None:
-        """Install seed events before post-sync frames and resume delivery.
+    def _finish_sync(self) -> None:
+        """Install the canonical in-flight seed before post-sync events.
 
-        ``AttachClient._pump`` processes attach_sync and the next event in one
-        loop turn. The future wakeup runs later, so the next event may already
-        be buffered here. PREPENDING the seed is therefore load-bearing; an
-        append would paint a tool result before the running card it settles.
+        The seed shares the snapshot boundary with every other frontend field,
+        so there is no second live-turn reducer whose cursor can race state.
         """
-        seeded: list[AgentEvent[Any]] = []
-        if not seed.streaming:
-            self._streaming = False
-        else:
-            self._streaming = True
-            self._generation = seed.generation
-            seeded.append(AgentStartEvent(generation=seed.generation))
-            if seed.assistant_open:
-                identity = {"id": seed.assistant_message_id} if seed.assistant_message_id else {}
-                message = Message.assistant(seed.assistant_text, **identity)
-                seeded.append(MessageStartEvent(message=message))
-                if seed.assistant_text:
-                    seeded.append(MessageUpdateEvent(message=message, delta=seed.assistant_text))
-            seeded.extend(deserialize_event(data) for data in seed.open_tools)
+        seeded = [deserialize_event(data) for data in self.frontend_state.live_events]
+        if self.frontend_state.streaming:
+            seeded.insert(0, AgentStartEvent(generation=self.frontend_state.generation))
         self._buffered_events[0:0] = seeded
         self._ready_for_events = True
         self._owner_ready.set()
@@ -297,7 +267,10 @@ class RemoteSession:
 
     def _on_frontend_update(self, data: dict[str, Any]) -> None:
         update = FrontendUpdate.model_validate(data)
-        self._install_frontend(update.snapshot, publish=True)
+        if self._frontend_store is None:
+            raise ConnectionError("frontend update arrived before synchronization")
+        state = self._frontend_store.apply_update(update)
+        self._apply_frontend_facades(state)
 
     def _install_frontend(self, state: FrontendSessionState, *, publish: bool = False) -> None:
         if state.session_id != self._session_id:
@@ -305,16 +278,13 @@ class RemoteSession:
         if self._frontend_store is None:
             self._frontend_store = FrontendStateStore(state)
         elif publish:
-            # AttachClient already proved epoch/sequence continuity. Replace
-            # atomically, then notify the one canonical local subscriber set.
-            current = self._frontend_store
-            current.replace(state)
-            for subscriber in list(current._subscribers):
-                subscriber(
-                    FrontendUpdate(epoch=state.epoch, sequence=state.sequence, snapshot=state)
-                )
+            self._frontend_store.replace_and_notify(state)
         else:
             self._frontend_store.replace(state)
+        self._apply_frontend_facades(state)
+
+    def _apply_frontend_facades(self, state: FrontendSessionState) -> None:
+        """Refresh compatibility facades after one canonical install."""
         self._streaming = state.streaming
         self._generation = state.generation
         self._model = state.selected_model
@@ -334,11 +304,7 @@ class RemoteSession:
             )
         self.mcp_startup = startup
         self._name_state.set(state.conversation_title, user_set=state.conversation_title_user_set)
-
-    def _on_attach_sync(self, data: dict[str, Any]) -> None:
-        future = self._sync_future
-        if future is not None and not future.done():
-            future.set_result(LiveTurnSeed.from_json(data))
+        self._apply_pending_gate(_pending_request(state.pending_gate))
 
     def _on_wire_event(self, data: dict[str, Any]) -> None:
         event = deserialize_event(data)
@@ -365,13 +331,6 @@ class RemoteSession:
             if inspect.isawaitable(result):
                 asyncio.create_task(_await_handler(result))
 
-    def _on_projection(self, projection: SessionProjection) -> None:
-        # Welcome projection authenticates identity. Pending remains a v4
-        # transition overlay until the owner gate publishers write it directly
-        # into FrontendSessionState; no status/model/todo semantics are read here.
-        self._projection = projection
-        self._sync_gate(projection.pending)
-
     # -- gate bridging ------------------------------------------------------
 
     @staticmethod
@@ -384,7 +343,7 @@ class RemoteSession:
         question_index = pending.question_index if pending.kind == "ask" else 0
         return (pending.kind, pending.request_id, question_index)
 
-    def _sync_gate(self, pending: PendingRequest | None) -> None:
+    def _apply_pending_gate(self, pending: PendingRequest | None) -> None:
         key = self._gate_identity(pending)
         if key == self._gate_key:
             return
@@ -397,8 +356,7 @@ class RemoteSession:
 
     def _maybe_start_gate(self, pending: PendingRequest | None = None) -> None:
         if pending is None:
-            projection = self._projection
-            pending = projection.pending if projection else None
+            pending = _pending_request(self.frontend_state.pending_gate)
         if pending is None or self._gate_task is not None:
             return
         if pending.kind == "approval" and self._approval_handler is not None:
@@ -431,7 +389,14 @@ class RemoteSession:
             if handler is None or client is None:
                 return
             options = [
-                AskOption(label=option.label, description=option.description)
+                AskOption(
+                    label=(option.get("label", "") if isinstance(option, dict) else option.label),
+                    description=(
+                        option.get("description", "")
+                        if isinstance(option, dict)
+                        else option.description
+                    ),
+                )
                 for option in pending.options
             ]
             question = AskQuestion(
@@ -479,11 +444,16 @@ class RemoteSession:
                 record, _ = await asyncio.to_thread(
                     find_owner_record, self._config_dir, self._session_id
                 )
-                if record is not None and record.protocol >= 4:
+                if (
+                    record is not None
+                    and record.protocol >= 5
+                    and FRONTEND_CAPABILITY in record.capabilities
+                ):
                     try:
                         await self._dial(record)
-                        seed = await self._await_seed()
-                        self._finish_sync(seed)
+                        frontend = await self._await_frontend()
+                        self._install_frontend(frontend.snapshot, publish=True)
+                        self._finish_sync()
                         return
                     except (ConnectionError, OSError, TimeoutError):
                         pass
@@ -606,6 +576,9 @@ class RemoteSession:
     def history(self) -> list[Any]:
         return list(self._history)
 
+    def context_breakdown(self) -> dict[str, int]:
+        return dict(self.frontend_state.context_breakdown or {})
+
     async def complete_once(self, system: str, prompt: str) -> str:
         raise RuntimeError("provider errands run on the session owner")
 
@@ -616,7 +589,18 @@ class RemoteSession:
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
-        raise RuntimeError("/btw is unavailable while another process owns the session")
+        client = self._client
+        if client is None:
+            raise ConnectionError("session owner is reconnecting")
+        # The authoritative request currently returns a settled answer. Feed it
+        # through the normal delta callback once so the existing aside widget
+        # uses the same rendering path without inventing remote-only UI state.
+        answer = await client.complete_aside(
+            [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+        )
+        if answer and on_delta is not None:
+            on_delta(answer)
+        return answer
 
     async def adopt_aside(self, messages: list[Message]) -> None:
         raise RuntimeError("aside adoption is unavailable while another process owns the session")
@@ -677,7 +661,6 @@ class RemoteSession:
         self.steer_message(Message.user(text, images))
 
     def steer_message(self, message: Message) -> None:
-        self._queued_steers.append(message)
         asyncio.create_task(self._send_steer_when_ready(message))
 
     async def _send_steer_when_ready(self, message: Message) -> None:
@@ -703,12 +686,18 @@ class RemoteSession:
         await client.send_command(command, streaming=True)
 
     def queued_steering(self) -> list[Any]:
-        return list(self._queued_steers)
+        return [
+            Message.user(
+                str(item.get("text", "") or ""),
+                id=str(item.get("id", "") or "remote-steer"),
+            )
+            for item in self.frontend_state.queued_steering
+        ]
 
     def recall_steering(self, message: Any) -> bool:
-        if message not in self._queued_steers:
+        ids = {str(item.get("id", "") or "") for item in self.frontend_state.queued_steering}
+        if str(getattr(message, "id", "") or "") not in ids:
             return False
-        self._queued_steers.remove(message)
         client = self._client
         if client is not None:
             asyncio.create_task(client.recall_steer(str(message.id)))
@@ -782,6 +771,21 @@ async def _await_handler(result: Any) -> None:
     sync-or-async handler contract without weakening types at the call site.
     """
     await result
+
+
+def _pending_request(state: Any) -> PendingRequest | None:
+    if state is None:
+        return None
+    return PendingRequest(
+        request_id=state.request_id,
+        kind=state.kind,
+        title=state.title,
+        detail=state.detail,
+        options=state.options,
+        secret=state.secret,
+        question_index=state.question_index,
+        question_total=state.question_total,
+    )
 
 
 def _image_to_wire(image: ImageContent) -> dict[str, str]:

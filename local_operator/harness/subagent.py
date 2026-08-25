@@ -261,6 +261,7 @@ def run_subagent(
         # never starts still shows both in the page title and the status band.
         job.agent_role = agent
         job.effort = effort
+        jobs_manager._notify_roster_change()
     # Same reason: the parent must be able to address a child that is parked
     # behind the capacity gate (messages to it buffer until it starts), so the
     # comms record exists from the moment the id does.
@@ -361,6 +362,7 @@ def _make_runner(
                     )
                     or child.model.context_window
                 )
+                jobs_manager._notify_roster_change()
             if comms is not None:
                 # Before the prompt runs: the parent may already have a
                 # question queued for this child, and attach is what flushes
@@ -385,7 +387,7 @@ def _make_runner(
                         logger.warning("could not persist roster after attach", exc_info=True)
             await emit(SubagentStartEvent(job_id=job_id, label=label, agent_id=child.agent_id))
             unsubscribe = child.subscribe(
-                _make_relay(job_id, label, job, emit, report_progress, final)
+                _make_relay(job_id, label, job, jobs_manager, emit, report_progress, final)
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
             try:
@@ -573,6 +575,7 @@ def _make_relay(
     job_id: str,
     label: str,
     job: Any,
+    jobs_manager: "AsyncJobManager",
     emit: Callable[[AgentEvent], Awaitable[None]],
     report_progress: Callable[[str], None],
     final: dict[str, Any],
@@ -623,6 +626,7 @@ def _make_relay(
                 # Capture the last assistant text as the job's result.
                 final["text"] = message.text
                 _accumulate_usage(job, message.usage)
+                jobs_manager._notify_roster_change()
                 progress = ACTIVITY_THINKING
         elif isinstance(event, ModelChangeEvent):
             # Keep the job row's label truthful about which model is doing the
@@ -633,6 +637,7 @@ def _make_relay(
                 job.model_label = f"{event.provider}/{event.model_id}"
                 if event.context_window > 0:
                     job.context_window = event.context_window
+                jobs_manager._notify_roster_change()
         elif isinstance(event, AgentEndEvent):
             if event.error:
                 final["error"] = event.error

@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +24,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
     AgentStartEvent,
+    CompactionEndEvent,
     MessageEndEvent,
     ModelSpec,
     Usage,
@@ -56,11 +57,18 @@ _FRONTEND_LOCAL_SLASHES = {
     "login",
     "logout",
     "credential",
+    # These render canonical data or a local widget. Their owner-dependent work
+    # is exposed through SessionProtocol operations rather than opening UI in a
+    # different process.
+    "mcp",
+    # The overlay is local UI; its provider request crosses the authoritative
+    # complete_aside operation on RemoteSession.
+    "btw",
 }
 _IMAGE_SLASHES = {"agent", "team"}
 
 
-class CommandScope(str, Enum):
+class CommandScope(StrEnum):
     """Where one advertised slash command executes."""
 
     FRONTEND_LOCAL = "frontend_local"
@@ -68,7 +76,7 @@ class CommandScope(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
-class CostKnowledge(str, Enum):
+class CostKnowledge(StrEnum):
     """How confidently the cumulative dollar amount is known."""
 
     UNKNOWN = "unknown"
@@ -152,24 +160,36 @@ class JobState(BaseModel):
     label: str = ""
     agent: str = ""
     intent: str = ""
-    latest_details: str | None = None
+    latest_details: dict[str, Any] | str | None = None
     error_text: str = ""
     result_text: str = ""
     model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
     start_time: float = 0.0
+    started_at: float | None = None
     settled_at: float | None = None
-    events: list[dict[str, Any]] = Field(default_factory=list)
+    trajectory: list[dict[str, Any]] = Field(default_factory=list)
+    prompt: str | None = None
+    agent_role: str | None = None
+    effort: str | None = None
+    output_tail: str = ""
+    output_seq: int = 0
+    restored: bool = False
 
     @classmethod
     def from_job(cls, job: Any) -> "JobState":
-        events = []
-        for event in list(getattr(job, "events", None) or []):
+        trajectory = []
+        for event in list(getattr(job, "trajectory", None) or []):
             if hasattr(event, "model_dump"):
-                events.append(event.model_dump(mode="json"))
+                trajectory.append(event.model_dump(mode="json"))
             elif isinstance(event, dict):
-                events.append(copy.deepcopy(event))
+                trajectory.append(copy.deepcopy(event))
+        details = getattr(job, "latest_details", None)
+        if isinstance(details, dict):
+            details = copy.deepcopy(details)
+        elif details is not None and not isinstance(details, str):
+            details = {"progress": str(details)}
         usage = getattr(job, "usage", None)
         if isinstance(usage, dict):
             usage = Usage.model_validate(usage)
@@ -181,7 +201,7 @@ class JobState(BaseModel):
             label=str(getattr(job, "label", "") or getattr(job, "agent", "") or ""),
             agent=str(getattr(job, "agent", "") or ""),
             intent=str(getattr(job, "intent", "") or ""),
-            latest_details=getattr(job, "latest_details", None),
+            latest_details=details,
             error_text=str(getattr(job, "error_text", "") or getattr(job, "error", "") or ""),
             result_text=str(getattr(job, "result_text", "") or getattr(job, "result", "") or ""),
             model_label=getattr(job, "model_label", None),
@@ -193,8 +213,15 @@ class JobState(BaseModel):
                 or getattr(job, "created_at", 0.0)
                 or 0.0
             ),
+            started_at=getattr(job, "started_at", None),
             settled_at=getattr(job, "settled_at", None) or getattr(job, "finished_at", None),
-            events=events,
+            trajectory=trajectory,
+            prompt=getattr(job, "prompt", None),
+            agent_role=getattr(job, "agent_role", None),
+            effort=getattr(job, "effort", None),
+            output_tail=str(getattr(job, "output_tail", "") or ""),
+            output_seq=int(getattr(job, "output_seq", 0) or 0),
+            restored=bool(getattr(job, "restored", False)),
         )
 
 
@@ -233,6 +260,7 @@ class FrontendSessionState(BaseModel):
     context_tokens: int | None = None
     context_is_estimate: bool | None = None
     context_window: int | None = None
+    context_breakdown: dict[str, int] | None = None
     cumulative_parent_cost: float | None = None
     child_costs: dict[str, float] = Field(default_factory=dict)
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
@@ -240,7 +268,11 @@ class FrontendSessionState(BaseModel):
     generation: int = 0
     activity_started_at: float | None = None
     active_duration_s: float = 0.0
+    current_turn_accrued_cost: float = 0.0
     queued_steering: list[dict[str, Any]] = Field(default_factory=list)
+    # Bounded transient seed for a frontend that joins mid-turn. Existing
+    # frontends consume raw events; only the atomic snapshot needs this fold.
+    live_events: list[dict[str, Any]] = Field(default_factory=list)
     jobs: list[JobState] = Field(default_factory=list)
     todos: list[TodoPhaseState] = Field(default_factory=list)
     wakes: list[WakeState] = Field(default_factory=list)
@@ -297,11 +329,20 @@ class FrontendSync(BaseModel):
 
 
 class FrontendUpdate(BaseModel):
+    """One typed field delta in the canonical stream.
+
+    Deltas and raw events share one ordered transport queue. A sequence is
+    consumed only when canonical fields actually change, so any missing number
+    is a real transport gap and forces a fresh snapshot rather than being
+    mistaken for intentional coalescing.
+    """
+
     model_config = ConfigDict(extra="allow")
 
     epoch: str
     sequence: int
-    snapshot: FrontendSessionState
+    changes: dict[str, Any]
+    job_trajectory_appends: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +395,7 @@ class SnapshotMcpManager:
 
     def get_connection_status(self, name: str) -> str:
         match = next((value for value in self._values if value.name == name), None)
-        return match.status if match is not None else "unknown"
+        return match.status if match is not None else "disconnected"
 
     def set_on_tools_changed(self, callback: Callable[..., Any]) -> None:
         self._callback = callback
@@ -367,10 +408,9 @@ class SnapshotMcpManager:
 class FrontendStateStore:
     """Atomic snapshot/update store shared by local and remote sessions.
 
-    Subscribers receive whole immutable snapshots. Full snapshots are deliberate:
-    the state is bounded and replacing one object makes a join at every sequence
-    trivially atomic, while JSON-patch style deltas would add another reducer and
-    another opportunity for owner/follower drift.
+    Initial joins receive one immutable snapshot. Later mutations publish only
+    typed field deltas, keeping high-frequency transport bounded while preserving
+    one reducer and a strict sequence suitable for gap detection.
     """
 
     def __init__(self, state: FrontendSessionState) -> None:
@@ -384,15 +424,82 @@ class FrontendStateStore:
     def replace(self, state: FrontendSessionState) -> None:
         self._state = state.model_copy(deep=True)
 
-    def mutate(self, **changes: Any) -> FrontendUpdate:
+    def replace_and_notify(self, state: FrontendSessionState) -> None:
+        """Install a proven wire snapshot without reaching into subscribers."""
+        self._state = state.model_copy(deep=True)
+        update = FrontendUpdate(
+            epoch=state.epoch,
+            sequence=state.sequence,
+            changes=state.model_dump(mode="json"),
+        )
+        for subscriber in list(self._subscribers):
+            subscriber(update.model_copy(deep=True))
+
+    def apply_update(self, update: FrontendUpdate) -> FrontendSessionState:
+        """Apply one already-validated ordered delta from an owner."""
+        if update.epoch != self._state.epoch or update.sequence != self._state.sequence + 1:
+            raise ValueError("frontend update is not the next state sequence")
+        changes = copy.deepcopy(update.changes)
+        if "jobs" in changes:
+            previous = {job.id: job for job in self._state.jobs}
+            rebuilt = []
+            for raw in changes["jobs"]:
+                job_id = str(raw.get("id", ""))
+                prior = previous.get(job_id)
+                trajectory = list(prior.trajectory if prior is not None else [])
+                trajectory.extend(update.job_trajectory_appends.get(job_id, []))
+                raw["trajectory"] = trajectory
+                rebuilt.append(raw)
+            changes["jobs"] = rebuilt
         payload = self._state.model_dump()
         payload.update(changes)
+        payload["epoch"] = update.epoch
+        payload["sequence"] = update.sequence
+        self._state = FrontendSessionState.model_validate(payload)
+        for subscriber in list(self._subscribers):
+            subscriber(update.model_copy(deep=True))
+        return self.state
+
+    def mutate(self, **changes: Any) -> FrontendUpdate | None:
+        normalized: dict[str, Any] = {}
+        wire_changes: dict[str, Any] = {}
+        trajectory_appends: dict[str, list[dict[str, Any]]] = {}
+        current = self._state.model_dump(mode="json")
+        for key, value in changes.items():
+            candidate = _json_value(value)
+            if current.get(key) != candidate:
+                normalized[key] = candidate
+                wire_changes[key] = candidate
+        if "jobs" in wire_changes:
+            previous = {str(job.get("id", "")): job for job in current.get("jobs", [])}
+            summaries = []
+            for job in wire_changes["jobs"]:
+                if hasattr(job, "model_dump"):
+                    job = job.model_dump(mode="json")
+                else:
+                    job = copy.deepcopy(job)
+                job_id = str(job.get("id", ""))
+                trajectory = list(job.pop("trajectory", []) or [])
+                old = list(previous.get(job_id, {}).get("trajectory", []) or [])
+                if trajectory[: len(old)] == old:
+                    appended = trajectory[len(old) :]
+                else:
+                    appended = trajectory
+                if appended:
+                    trajectory_appends[job_id] = appended
+                summaries.append(job)
+            wire_changes["jobs"] = summaries
+        if not normalized:
+            return None
+        payload = self._state.model_dump()
+        payload.update(normalized)
         payload["sequence"] = self._state.sequence + 1
         self._state = FrontendSessionState.model_validate(payload)
         update = FrontendUpdate(
             epoch=self._state.epoch,
             sequence=self._state.sequence,
-            snapshot=self._state,
+            changes=wire_changes,
+            job_trajectory_appends=trajectory_appends,
         )
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
@@ -462,7 +569,7 @@ class FrontendStateStore:
                 child_costs[job.id] = cost
         parent_cost = current.cumulative_parent_cost
         knowledge = current.cost_knowledge
-        if initial and parent_cost is None and last_usage is not None:
+        if parent_cost is None and last_usage is not None:
             cost = turn_cost(_label(effective), last_usage)
             if cost is not None:
                 parent_cost = cost
@@ -478,8 +585,16 @@ class FrontendStateStore:
         queued = []
         try:
             for message in session.queued_steering():
+                content = list(getattr(message, "content", ()) or ())
                 queued.append(
-                    message.model_dump(mode="json") if hasattr(message, "model_dump") else {}
+                    {
+                        "id": str(getattr(message, "id", "") or ""),
+                        "text": str(getattr(message, "text", "") or ""),
+                        "image_count": sum(
+                            1 for block in content if block.__class__.__name__ == "ImageContent"
+                        ),
+                        "status": "queued",
+                    }
                 )
         except Exception:
             pass
@@ -491,6 +606,10 @@ class FrontendStateStore:
                 history_cursor = entries[-1].id if entries else None
             except Exception:
                 pass
+        # `/context` remains an on-demand operation. Computing its schema
+        # breakdown on every unrelated mutation would serialize the unbounded
+        # tool inventory on the session loop.
+        context_breakdown = current.context_breakdown
         changes = dict(
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
             conversation_title=title,
@@ -520,11 +639,17 @@ class FrontendStateStore:
             context_window=(
                 getattr(effective, "context_window", None) if effective is not None else None
             ),
+            context_breakdown=context_breakdown,
             cumulative_parent_cost=parent_cost,
             child_costs=child_costs,
             cost_knowledge=knowledge,
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
+            activity_started_at=(
+                current.activity_started_at
+                if bool(getattr(session, "is_streaming", False))
+                else None
+            ),
             queued_steering=queued,
             jobs=jobs,
             todos=todos,
@@ -543,10 +668,46 @@ class FrontendStateStore:
             self.mutate(**changes)
         return self.state
 
-    def observe_event(self, session: Any, event: AgentEvent[Any]) -> None:
+    def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
+        """Accrue a provider call outside the ordinary agent event stream."""
+        state = self._state
+        cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
+        changes: dict[str, Any] = {
+            "last_usage": usage.model_dump(mode="json"),
+            "context_tokens": usage.context_tokens or usage.input_tokens or state.context_tokens,
+            "context_is_estimate": False,
+        }
+        if cost is not None:
+            changes.update(
+                cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + cost,
+                cost_knowledge=(
+                    CostKnowledge.EXACT
+                    if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
+                    else state.cost_knowledge
+                ),
+                usage_components=list(state.usage_components)
+                + list(usage.cost_components or [usage]),
+            )
+        elif usage.input_tokens or usage.output_tokens:
+            changes["cost_knowledge"] = CostKnowledge.PARTIAL
+        return self.mutate(**changes)
+
+    def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
+        """Publish the job roster without rescanning unrelated session state."""
+        jobs = self._jobs(session)
+        child_costs = dict(self._state.child_costs)
+        selected = getattr(session, "model", None)
+        for job in jobs:
+            cost = job_cost(job, default_model_label=_label(selected))
+            if cost is not None:
+                child_costs[job.id] = cost
+        return self.mutate(jobs=jobs, child_costs=child_costs)
+
+    def observe_event(self, session: Any, event: AgentEvent[Any]) -> FrontendUpdate | None:
         now = time.time()
         state = self._state
         changes: dict[str, Any] = {}
+        self._fold_live_event(event)
         if isinstance(event, AgentStartEvent):
             changes.update(
                 streaming=True,
@@ -569,17 +730,25 @@ class FrontendStateStore:
                 aggregate = _aggregate_usage(usages)
                 total = turn_cost(_label(getattr(session, "effective_model", None)), aggregate)
                 if total is not None:
+                    remainder = max(0.0, total - state.current_turn_accrued_cost)
                     previous = state.cumulative_parent_cost or 0.0
                     changes.update(
-                        cumulative_parent_cost=previous + total,
+                        cumulative_parent_cost=previous + remainder,
+                        current_turn_accrued_cost=0.0,
+                        usage_components=(
+                            list(state.usage_components)
+                            if state.current_turn_accrued_cost > 0
+                            else list(state.usage_components) + list(aggregate.cost_components)
+                        ),
                         cost_knowledge=(
                             CostKnowledge.EXACT
                             if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
                             else state.cost_knowledge
                         ),
-                        usage_components=list(state.usage_components)
-                        + list(aggregate.cost_components),
                     )
+                elif any(u.input_tokens or u.output_tokens for u in usages):
+                    changes["cost_knowledge"] = CostKnowledge.PARTIAL
+                    changes["current_turn_accrued_cost"] = 0.0
                 changes.update(
                     last_usage=aggregate.model_dump(mode="json"),
                     context_tokens=aggregate.context_tokens,
@@ -593,19 +762,87 @@ class FrontendStateStore:
             usage = getattr(event.message, "usage", None)
             if not isinstance(usage, Usage):
                 return
-            # Occupancy is a level. Cost is accrued only at AgentEnd above, so a
-            # follower joining after this frame cannot count the call twice.
+            # Occupancy is a level. Cost accrues per call so arbitrary joins see
+            # the same lifetime figure; AgentEnd adds only the final remainder.
+            call_cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
             changes.update(
                 last_usage=usage.model_dump(mode="json"),
                 context_tokens=usage.context_tokens or usage.input_tokens or state.context_tokens,
                 context_is_estimate=False,
             )
-        if changes:
-            self.mutate(**changes)
-        # Non-event stores can change at the same tool boundary. Refresh them on
-        # every public event; equality is cheap and keeps TODO/MCP/wake/job state
-        # on the same sequence stream as the transcript animation that caused it.
-        self.refresh_from_session(session)
+            if call_cost is not None:
+                changes.update(
+                    cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + call_cost,
+                    current_turn_accrued_cost=state.current_turn_accrued_cost + call_cost,
+                    cost_knowledge=(
+                        CostKnowledge.EXACT
+                        if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
+                        else state.cost_knowledge
+                    ),
+                    usage_components=list(state.usage_components)
+                    + list(usage.cost_components or [usage]),
+                )
+            elif usage.input_tokens or usage.output_tokens:
+                changes["cost_knowledge"] = CostKnowledge.PARTIAL
+        elif isinstance(event, CompactionEndEvent) and event.success:
+            changes.update(
+                context_tokens=event.tokens_after or None,
+                context_is_estimate=True,
+            )
+        update = self.mutate(**changes) if changes else None
+        # Expensive source snapshots are explicit mutation hooks. Turn edges and
+        # tool/result boundaries are the defensive fallback; token deltas never
+        # rescan transcript/jobs or publish replacement state.
+        kind = str(getattr(event, "type", ""))
+        if isinstance(event, (AgentEndEvent, MessageEndEvent)) or kind in {
+            "tool_execution_end",
+            "subagent_progress",
+            "subagent_end",
+            "model_change",
+        }:
+            before = self._state.sequence
+            self.refresh_from_session(session)
+            if self._state.sequence != before:
+                update = None
+        return update
+
+    def _fold_live_event(self, event: AgentEvent[Any]) -> None:
+        """Maintain only the bounded in-flight seed, without publishing deltas.
+
+        Connected frontends already receive the raw event. Updating this local
+        snapshot before event fan-out makes a join at that exact boundary see
+        the accumulated assistant/tool state without flooding every peer with a
+        second frame for every token.
+        """
+        data = event.model_dump(mode="json")
+        kind = str(data.get("type", ""))
+        live = list(self._state.live_events)
+        if kind in {"agent_start", "agent_end"}:
+            live = []
+        elif kind == "message_start":
+            message = data.get("message") or {}
+            if message.get("role") != "user":
+                live = [
+                    item
+                    for item in live
+                    if item.get("type") not in {"message_start", "message_update"}
+                ]
+                live.append(data)
+        elif kind == "message_update":
+            live = [item for item in live if item.get("type") != "message_update"]
+            live.append(data)
+        elif kind == "message_end":
+            live = [
+                item for item in live if item.get("type") not in {"message_start", "message_update"}
+            ]
+        elif kind in {"tool_call_compose", "tool_execution_start"}:
+            call_id = str(data.get("tool_call_id") or "")
+            live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
+            live.append(data)
+        elif kind == "tool_execution_end":
+            call_id = str(data.get("tool_call_id") or "")
+            live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
+        self._state = self._state.model_copy(update={"live_events": live}, deep=True)
 
     async def checkpoint(self, transcript: Any) -> None:
         state = self.state
@@ -619,16 +856,24 @@ class FrontendStateStore:
 
     @staticmethod
     def _jobs(session: Any) -> list[JobState]:
+        manager = getattr(session, "jobs", None)
         try:
-            manager = getattr(session, "jobs", None)
-            return [JobState.from_job(job) for job in (manager.list() if manager else [])]
+            rows = manager.list() if manager else []
         except Exception:
             return []
+        values: list[JobState] = []
+        for job in rows:
+            try:
+                values.append(JobState.from_job(job))
+            except Exception:
+                # One malformed extension row cannot erase unrelated jobs.
+                continue
+        return values
 
 
 def _slash_capabilities() -> list[SlashCapability]:
-    # Imported lazily to keep the session module free of TUI import cost until a
-    # frontend store is actually constructed.
+    # Imported lazily so module import remains headless-safe; a full frontend
+    # store needs the authoritative registry rather than a duplicated name list.
     from local_operator.tui.app import SLASH_COMMANDS
 
     values = []
@@ -656,8 +901,8 @@ def _label(spec: Any) -> str:
 
 
 def _json_value(value: Any) -> Any:
-    if value is None:
-        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     if hasattr(value, "__dict__"):

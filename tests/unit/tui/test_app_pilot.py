@@ -824,6 +824,71 @@ def test_exit_quit_collapsed_to_one_command() -> None:
 
 
 @pytest.mark.asyncio
+async def test_every_authoritative_slash_routes_to_owner_with_supported_images() -> None:
+    from local_operator.harness.types import ImageContent
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+    )
+    from local_operator.tui.widgets.editor import Attachment
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append((command, args, len(images)))
+            return "routed"
+
+    routed: list[tuple[str, str, int]] = []
+    session = RoutedSession()
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command=command,
+                scope=CommandScope.AUTHORITATIVE_SESSION,
+                operation="slash",
+                supports_images=command in {"agent", "team"},
+            )
+            for command in (
+                "agent",
+                "team",
+                "loop",
+                "compact",
+                "goal",
+                "model",
+                "effort",
+                "rename",
+                "approvals",
+                "btw",
+            )
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        image = ImageContent(data="cG5n", mime_type="image/png")
+        attachment = Attachment(image=image, marker="[Image #1]")
+        for capability in session.frontend_state.slash_capabilities:
+            attachments = {1: attachment} if capability.supports_images else None
+            arg = "coder inspect [Image #1]" if attachments else "value"
+            app._run_slash_command(f"/{capability.command} {arg}", attachments)
+            await pilot.pause()
+    assert [name for name, _, _ in routed] == [
+        capability.command for capability in session.frontend_state.slash_capabilities
+    ]
+    assert [(name, count) for name, _, count in routed if name in {"agent", "team"}] == [
+        ("agent", 1),
+        ("team", 1),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, tmp_path) -> None:
     """A live owner becomes a RemoteSession in the existing OperatorApp.
 

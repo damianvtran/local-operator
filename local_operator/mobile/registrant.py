@@ -29,7 +29,6 @@ from the registrant's loop, serialized by the implementor".
 from __future__ import annotations
 
 import asyncio
-import copy
 import hmac
 import inspect
 import json
@@ -44,14 +43,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
 
-from local_operator.mobile.live_turn import LiveTurnTracker
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registry import RecordPublisher
 from local_operator.mobile.types import (
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
     ClientKind,
-    PendingRequest,
     SessionProjection,
     SessionRecord,
 )
@@ -96,7 +93,7 @@ _SEND_TIMEOUT_S = 1.0
 # Raw events are lossless only while a follower keeps pace. One bounded FIFO per
 # event client prevents a non-reader from retaining an unbounded stream before
 # its active drain reaches the timeout; overflow drops that client so it can
-# reconnect through history + attach_sync rather than observe a gapped stream.
+# reconnect through durable history + canonical frontend_sync instead of drift.
 _EVENT_QUEUE_MAX = 64
 
 
@@ -126,11 +123,13 @@ class _ClientConn:
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
     frontend_ready: bool = False
-    # Flipped only AFTER the welcome projection and the attach_sync seed have
-    # been queued on this connection's ordered stream. Event fan-out snapshots
-    # recipients synchronously against the tracker fold, so this flag is what
-    # guarantees a joining client never sees an event the seed already covers
-    # (welcome → seed → live events, gapless and duplicate-free).
+    # Updates can be scheduled back to this loop while the owner-loop
+    # subscription call is returning. Hold them until the sync frame is queued;
+    # dropping them creates an immediate sequence hole at every busy join.
+    frontend_pending: list[dict[str, Any]] = field(default_factory=list)
+    # Flipped only AFTER welcome + canonical frontend_sync are queued. Raw
+    # events begin behind that boundary on the same FIFO, so a joining client
+    # cannot see transcript animation ahead of the snapshot that seeded it.
     events_ready: bool = False
     event_queue: asyncio.Queue[dict[str, Any]] = field(
         default_factory=lambda: asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
@@ -220,10 +219,6 @@ class Registrant:
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
-        # v4 event relay: the live-turn tracker folds the SAME serialized
-        # frames the relay fans out, on the registrant loop, so a joining
-        # client's seed is exactly consistent with the frames already sent.
-        self._live_turn = LiveTurnTracker()
         self._unsubscribe_events: Callable[[], None] | None = None
         # Strong references to the one event writer per subscribed client. A
         # bare create_task can be collected mid-flight, which drops frames.
@@ -550,7 +545,10 @@ class Registrant:
 
             from local_operator.session.frontend_state import FrontendSubscription
 
-            subscription = cast(FrontendSubscription, subscribe_frontend(on_update))
+            outcome = subscribe_frontend(on_update)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            subscription = cast(FrontendSubscription, outcome)
             sync = subscription.sync
             sync_payload = sync.model_dump(mode="json")
             conn.frontend_unsubscribe = subscription.unsubscribe
@@ -559,19 +557,13 @@ class Registrant:
             # later updates therefore cannot overtake it.
             await self._send_to(conn, {"op": "frontend_sync", "data": sync_payload})
             conn.frontend_ready = True
+            for pending in conn.frontend_pending:
+                self._enqueue_client_frame(conn, {"op": "frontend_update", "data": pending})
+            conn.frontend_pending.clear()
         if conn.wants_events:
-            # The live-turn seed, once, right after the welcome. The snapshot
-            # and the ready flag are set in ONE synchronous block: any event
-            # folded before this instant is inside the seed and was not sent
-            # to this connection; any event folded after it is sent and is not
-            # in the seed. That single ordering fact is the mid-turn-join
-            # correctness argument — no gap, no duplicate. (The lock fast-path
-            # in ``_send_to`` acquires without yielding on an uncontended
-            # connection, so a relay callback scheduled after this block still
-            # queues its frame BEHIND the seed on the ordered stream.)
-            seed_frame = {"op": "attach_sync", "data": self._live_turn.seed().to_json()}
+            # In-flight transcript state rides the same canonical sync as every
+            # other full-TUI field. Raw events begin only after that frame.
             conn.events_ready = True
-            await self._send_to(conn, seed_frame)
         try:
             while not self._closed.is_set():
                 line = await reader.readline()
@@ -685,6 +677,14 @@ class Registrant:
             return await h.set_model(str(frame.get("provider", "")), str(frame.get("model_id", "")))
         if op == "set_effort":
             return await h.set_effort(str(frame.get("effort", "")))
+        if op == "complete_aside":
+            complete_aside = getattr(h, "complete_aside", None)
+            if not callable(complete_aside):
+                raise ValueError("this owner cannot run off-record requests")
+            result = complete_aside(list(frame.get("turns") or []))
+            if not inspect.isawaitable(result):
+                raise ValueError("owner complete_aside operation must be awaitable")
+            return await result
         if op == "slash":
             images = frame.get("images")
             if images:
@@ -749,9 +749,21 @@ class Registrant:
             pass
 
     def _relay_frontend_to_on_loop(self, conn: _ClientConn, data: dict[str, Any]) -> None:
-        if id(conn.writer) not in self._clients or not conn.frontend_ready:
+        if id(conn.writer) not in self._clients:
             return
-        frame = {"op": "frontend_update", "data": data}
+        if not conn.frontend_ready:
+            if len(conn.frontend_pending) >= _EVENT_QUEUE_MAX:
+                # A join that cannot install its boundary before this many
+                # canonical edges is already stale. Drop and let it reconnect
+                # to one fresh snapshot rather than retain an unbounded suffix.
+                self._drop_client(conn)
+                return
+            conn.frontend_pending.append(data)
+            return
+        self._enqueue_client_frame(conn, {"op": "frontend_update", "data": data})
+
+    def _enqueue_client_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
+        """Queue one state/event frame on the connection's sole ordered FIFO."""
         try:
             conn.event_queue.put_nowait(frame)
         except asyncio.QueueFull:
@@ -793,7 +805,6 @@ class Registrant:
         """
         if self._closed.is_set():
             return
-        self._live_turn.fold(data)
         recipients = [
             conn
             for conn in self._clients.values()
@@ -803,19 +814,10 @@ class Registrant:
             return
         frame = {"op": "event", "data": data}
         for conn in recipients:
-            try:
-                conn.event_queue.put_nowait(frame)
-            except asyncio.QueueFull:
-                # A raw stream cannot recover from one dropped frame. Remove the
-                # peer immediately; reconnect rebuilds from durable history and
-                # a fresh bounded live-turn seed.
-                self._drop_client(conn)
-                continue
-            if conn.event_writer_task is None:
-                task = asyncio.create_task(self._drain_event_queue(conn))
-                conn.event_writer_task = task
-                self._event_sends.add(task)
-                task.add_done_callback(self._event_sends.discard)
+            # Raw events and canonical deltas share this FIFO. Their producer
+            # callbacks are scheduled in session order, so a follower cannot
+            # observe transcript animation ahead of the state edge that caused it.
+            self._enqueue_client_frame(conn, frame)
 
     async def _drain_event_queue(self, conn: _ClientConn) -> None:
         """Drain one follower's raw event FIFO until it is dropped."""
@@ -882,17 +884,9 @@ class Registrant:
         )
 
     def _projection_frame(self, conn: _ClientConn, ordinary: dict[str, Any]) -> dict[str, Any]:
-        if not conn.wants_events:
-            return ordinary
-        pending = getattr(self._handle, "event_pending", None)
-        if pending is None:
-            return ordinary
-        overlaid = copy.deepcopy(ordinary)
-        overlaid["data"]["pending"] = pending.to_json()
-        overlaid["data"]["pending_count"] = max(
-            1, int(overlaid["data"].get("pending_count", 0) or 0)
-        )
-        return overlaid
+        # Projection is exclusively the mobile renderer. Full terminal clients
+        # authenticate with this welcome but consume no semantic overlays from it.
+        return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
         """The welcome form of a push: one full projection to one connection."""
@@ -926,6 +920,15 @@ class Registrant:
     def fold(self) -> ProjectionFold:
         return self._fold
 
-    def set_pending(self, pending: PendingRequest | None) -> None:
+    def set_pending(self, pending: Any | None) -> None:
+        """Set mobile pending state and canonical gate state for reduced hosts.
+
+        Production TUI handles publish directly when their real widget mounts;
+        this bridge keeps owned/reduced handles on the same contract.
+        """
         self._fold.set_pending(pending)
+        frontend = getattr(self._handle, "_frontend", None)
+        mutate = getattr(frontend, "mutate", None)
+        if callable(mutate):
+            mutate(pending_gate=pending.to_json() if pending is not None else None)
         self._schedule_push()

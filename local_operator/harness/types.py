@@ -643,6 +643,9 @@ class ToolContext(BaseModel):
     # todo state it can persist alongside the transcript; otherwise the tool
     # falls back to a process-local table.
     todos: dict[str, list[dict[str, str]]] | None = None
+    # Optional owner hook for canonical full-TUI state. Tools call it only after
+    # a successful mutation, never on read-only view or validation failures.
+    on_todos_changed: Callable[[], None] | None = None
     # Injected by the HOST (see BrowserSurface), not created by the tool: this
     # context is rebuilt every turn, so a tool-owned handle would not survive
     # to the next one. ``None`` degrades the browser tool to a single-call

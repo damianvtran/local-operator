@@ -1956,8 +1956,14 @@ class OperatorApp(App[None]):
         # Every production session supplies the same frontend contract. Install
         # it before reading status/panel fields so owner and follower take one
         # renderer path rather than parallel interpretations.
+        old_unsubscribe = getattr(self, "_unsubscribe_frontend", None)
+        if callable(old_unsubscribe):
+            old_unsubscribe()
         self._unsubscribe_frontend = None
         subscribe_frontend = getattr(session, "subscribe_frontend", None)
+        refresh_frontend = getattr(session, "refresh_frontend_state", None)
+        if callable(refresh_frontend):
+            refresh_frontend()
         if callable(subscribe_frontend):
             from local_operator.session.frontend_state import FrontendSubscription
 
@@ -1982,7 +1988,7 @@ class OperatorApp(App[None]):
         # choose and are no longer running.
         spec = _model_spec(session)
         if (
-            not bool(getattr(session, "is_remote", False))
+            not callable(getattr(session, "route_shared_slash", None))
             and spec is not None
             and self._effort_choice is not None
             and hasattr(session, "set_model")
@@ -1997,21 +2003,12 @@ class OperatorApp(App[None]):
         # Approvals must be answered ON SCREEN from here on: the factory's
         # default gate reads stdin, which this app has taken over, so leaving it
         # installed hangs the first write/exec tool call forever.
-        if bool(getattr(session, "is_remote", False)):
-            # The socket reader task was created before this app's Textual
-            # context existed. Calling the widget-mounting handlers directly
-            # from it leaves Textual with no active app during compose. Marshal
-            # gate entry through the message pump; the returned futures still
-            # preserve the owner's first-valid-answer-wins socket semantics.
-            session.set_approval_handler(self._request_remote_tool_approval)
-            session.set_ask_handler(self._request_remote_user_choice)
-        else:
-            session.set_approval_handler(self.request_tool_approval)
-            # And this is what makes the `ask` tool EXIST for this session: its
-            # createIf builder gates on the hook, so a front end that can draw a
-            # picker gets the tool and every host that cannot (the server, exec
-            # mode, a subagent) never advertises a question nobody could answer.
-            session.set_ask_handler(self.request_user_choice)
+        # Every session enters the same widget path through Textual's pump.
+        # Remote socket callbacks require the marshal; using it locally too
+        # removes a second gate state machine without changing arbitration.
+        session.set_approval_handler(self._request_tool_approval_on_app_loop)
+        # Installing this hook is what makes the ask tool exist for a UI host.
+        session.set_ask_handler(self._request_user_choice_on_app_loop)
         self._controller = EventController(session, self)
         self._controller.subscribe()
         assert self._status is not None
@@ -2050,24 +2047,34 @@ class OperatorApp(App[None]):
         # land first and the exact restore would then be the thing overwriting
         # it — same end state on a quiet boot, but the estimate is resolved in a
         # worker, so which one won would depend on scheduling.
-        self._restore_reported_usage(session)
-        self._measure_preloaded_context(session)
+        if not callable(subscribe_frontend):
+            self._restore_reported_usage(session)
+            self._measure_preloaded_context(session)
+        elif getattr(session.frontend_state, "context_tokens", None) is None:
+            self._measure_preloaded_context(session)
 
     def _on_frontend_update(self, update: Any) -> None:
-        state = getattr(update, "snapshot", update)
-        # Socket and local callbacks share this seam. Deferring widget access to
-        # Textual's pump keeps transport threading out of rendering semantics.
+        session = self._session
+        state = getattr(session, "frontend_state", None) if session is not None else None
+        # Socket and local callbacks share this seam. The store has already
+        # applied the typed delta; widgets always render its complete state.
         self.call_later(self._apply_frontend_state, state)
 
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
         cost = getattr(state, "cumulative_cost", None)
-        knowledge = str(getattr(state, "cost_knowledge", "unknown"))
+        knowledge = getattr(getattr(state, "cost_knowledge", "unknown"), "value", "unknown")
         if cost is not None:
             self._total_cost = float(getattr(state, "cumulative_parent_cost", 0.0) or 0.0)
             self._subagent_costs = dict(getattr(state, "child_costs", {}) or {})
-            self._spend_is_floor = knowledge.endswith("floor") or knowledge.endswith("partial")
+            self._spend_is_floor = knowledge in {"floor", "partial"}
+        usage = getattr(state, "last_usage", None)
+        billed_unknown = bool(
+            usage is not None
+            and (getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0))
+            and cost is None
+        )
         mcp_servers = list(getattr(state, "mcp_servers", []) or [])
         task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
         bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
@@ -2086,7 +2093,9 @@ class OperatorApp(App[None]):
             context_tokens=getattr(state, "context_tokens", None),
             context_is_estimate=getattr(state, "context_is_estimate", None),
             context_window=getattr(state, "context_window", None),
-            cost=(self._spend_text(cost) if cost is not None else None),
+            cost=(
+                self._spend_text(cost) if cost is not None else ("$—" if billed_unknown else None)
+            ),
             conversation_name=str(getattr(state, "conversation_title", "") or ""),
             streaming=bool(getattr(state, "streaming", False)),
             subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
@@ -2122,8 +2131,22 @@ class OperatorApp(App[None]):
                 await remote.dispose()
             except Exception:
                 pass
+        unsubscribe_frontend = getattr(self, "_unsubscribe_frontend", None)
+        if callable(unsubscribe_frontend):
+            unsubscribe_frontend()
+        self._unsubscribe_frontend = None
         self._session = session
         self._mobile_adopted(session)
+        subscribe_frontend = getattr(session, "subscribe_frontend", None)
+        if callable(subscribe_frontend):
+            from local_operator.session.frontend_state import FrontendSubscription
+
+            subscription = cast(
+                FrontendSubscription,
+                subscribe_frontend(self._on_frontend_update),
+            )
+            self._unsubscribe_frontend = subscription.unsubscribe
+            self._apply_frontend_state(subscription.sync.snapshot)
         session.set_approval_handler(self.request_tool_approval)
         session.set_ask_handler(self.request_user_choice)
         self._controller = EventController(session, self)
@@ -2139,7 +2162,7 @@ class OperatorApp(App[None]):
         )
         self._wire_mcp_status(session)
 
-    async def _request_remote_tool_approval(
+    async def _request_tool_approval_on_app_loop(
         self, tool_name: str, description: str, *, job_id: str | None = None
     ) -> bool:
         """Enter the real approval surface from a pre-Textual socket task.
@@ -2150,20 +2173,20 @@ class OperatorApp(App[None]):
         letting a late card settle a cancelled owner request.
         """
         return bool(
-            await self._run_remote_gate(
+            await self._run_gate_on_app_loop(
                 lambda: self.request_tool_approval(tool_name, description, job_id=job_id)
             )
         )
 
-    async def _request_remote_user_choice(
+    async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion]
     ) -> dict[str, list[str]] | None:
         """Enter the real ask picker through Textual's message-pump context."""
-        result = await self._run_remote_gate(lambda: self.request_user_choice(questions))
+        result = await self._run_gate_on_app_loop(lambda: self.request_user_choice(questions))
         return cast(dict[str, list[str]] | None, result)
 
-    async def _run_remote_gate(self, build: Callable[[], Awaitable[Any]]) -> Any:
-        """Run one remote gate coroutine in the app context and mirror its result."""
+    async def _run_gate_on_app_loop(self, build: Callable[[], Awaitable[Any]]) -> Any:
+        """Run one gate coroutine in the app context and mirror its result."""
         loop = asyncio.get_running_loop()
         result: asyncio.Future[Any] = loop.create_future()
         task: asyncio.Task[Any] | None = None
@@ -2455,11 +2478,19 @@ class OperatorApp(App[None]):
             if self._status.context_tokens and not self._status.context_is_estimate:
                 # A turn finished while this was in flight; the exact count wins.
                 return
-            self._status.update(
-                context_tokens=tokens,
-                context_is_estimate=True,
-                context_window=_context_window(session),
-            )
+            store = getattr(session, "_frontend_state_store", None)
+            if store is not None:
+                store.mutate(
+                    context_tokens=tokens,
+                    context_is_estimate=True,
+                    context_window=_context_window(session),
+                )
+            else:
+                self._status.update(
+                    context_tokens=tokens,
+                    context_is_estimate=True,
+                    context_window=_context_window(session),
+                )
 
         # EXCLUSIVE on its own group. `on_tools_changed` fires per server
         # connect, reconnect and list-changed, so several of these can be in
@@ -8898,7 +8929,8 @@ class OperatorApp(App[None]):
         if (
             callable(remote_route)
             and remote_capability is not None
-            and str(remote_capability.scope).endswith("authoritative_session")
+            and getattr(remote_capability.scope, "value", remote_capability.scope)
+            == "authoritative_session"
         ):
 
             async def run_remote_slash() -> None:
@@ -11090,6 +11122,11 @@ class OperatorApp(App[None]):
         its own tick; nothing is forced here, because a delta-rate repaint of
         the whole band is exactly the input lag the working line was fixed for.
         """
+        session = self._session
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is not None:
+            store.accrue_usage(session, usage)
+            return
         cost = self._cost_for(usage)
         if cost is not None:
             self._total_cost += cost
@@ -12510,8 +12547,9 @@ class OperatorApp(App[None]):
         if self._session is not None:
             context_tokens = message.context_tokens or None
         cost_text: str | None = None
+        canonical = _canonical_frontend(self._session)
         cost = self._cost_for(message.usage)
-        if cost is not None:
+        if cost is not None and not canonical:
             # Only the REMAINDER. `on_context_usage_reported` has been billing
             # this turn's calls as they landed so the segment moves while the
             # agent works; this figure prices the whole turn and supersedes the
@@ -12538,10 +12576,10 @@ class OperatorApp(App[None]):
         # back unpriceable must not leave its accrual standing to be subtracted
         # from the NEXT turn's total.
         self._turn_accrued_cost = 0.0
-        # Fold in whatever the children have spent BEFORE reading the total: a
-        # turn that delegated has almost certainly moved their figures, and the
-        # 1 Hz poll would otherwise be what first showed it.
-        self._harvest_subagent_costs()
+        # Canonical sessions already include child cost in their one ledger.
+        # Legacy/reduced hosts retain the app-owned fallback path.
+        if not canonical:
+            self._harvest_subagent_costs()
         total = self._spend_total()
         if cost is not None or (self._session is not None and self._subagent_costs):
             # A turn that priced nothing itself still has a total worth showing
@@ -13049,6 +13087,10 @@ class OperatorApp(App[None]):
                 context_is_estimate=False,
                 context_window=_context_window(self._session),
             )
+        # Canonical sessions folded this call before Textual posted the event.
+        # The app renders that ledger and does not maintain a competing total.
+        if _canonical_frontend(self._session):
+            return
         cost = self._cost_for(message.usage)
         if not cost:
             return
@@ -13666,6 +13708,16 @@ def slot_rows(slot: Any) -> int:
     # slot, so the larger is the safe one: it can only ever withhold the inset,
     # which costs a blank row, where the smaller costs a scrollable screen.
     return max(measured, predicted, 1)
+
+
+def _canonical_frontend(session: Any) -> bool:
+    """Whether this production session owns/consumes canonical frontend state.
+
+    ``Mock`` fabricates callable attributes for any probe, so concrete store
+    slots are the reliable capability marker for reduced hosts and legacy tests.
+    """
+    attributes = getattr(session, "__dict__", {})
+    return "_frontend_state_store" in attributes or "_frontend_store" in attributes
 
 
 def _model_spec(session) -> Any | None:

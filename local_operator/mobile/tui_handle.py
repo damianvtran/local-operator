@@ -106,12 +106,6 @@ class TuiSessionHandle(SessionHandle):
         # too (``ask_answer`` hops onto it before touching this), so the
         # single-winner race is decided by one owner, not by dict atomicity.
         self._ask_pending: dict[str, Any] = {}
-        # Approval pending state is follower-only. The phone path did not
-        # receive TUI approvals before protocol v4 and must stay byte-identical;
-        # Registrant overlays this field only onto event-client projection
-        # frames. Ask pending remains in the ordinary fold because phones
-        # already supported TUI asks before this change.
-        self._event_pending: PendingRequest | None = None
 
     def _session(self) -> Any:
         """The app's current session. A property method (not cached) because
@@ -144,7 +138,6 @@ class TuiSessionHandle(SessionHandle):
         self._projection.todos.clear()
         self._projection.subagents.clear()
         self._projection.pending = None
-        self._event_pending = None
         self._fold = ProjectionFold(self._projection)
         # A /new or /resume mid-ask abandons the old picker; drop its mapping
         # so a late phone answer for a question that no longer exists reports
@@ -201,9 +194,9 @@ class TuiSessionHandle(SessionHandle):
         """Canonical state seed for full-TUI attach clients only."""
         return self._session().frontend_state
 
-    def subscribe_frontend(self, on_update):  # type: ignore[no-untyped-def]
-        """Subscribe at the session store's atomic snapshot boundary."""
-        return self._session().subscribe_frontend(on_update)
+    async def subscribe_frontend(self, on_update):  # type: ignore[no-untyped-def]
+        """Capture snapshot+subscription atomically on Textual's owner loop."""
+        return await self._on_app(lambda: self._session().subscribe_frontend(on_update))
 
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the registrant's v4 relay.
@@ -351,6 +344,16 @@ class TuiSessionHandle(SessionHandle):
 
     async def slash(self, command: str, args: str) -> str:
         return await self.slash_images(command, args, None)
+
+    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+        """Run an off-record provider request on the authoritative session."""
+        from local_operator.harness.types import Message
+
+        messages = [Message.model_validate(turn) for turn in turns]
+        session = self._session()
+        owner_loop = await self._on_app(asyncio.get_running_loop)
+        future = asyncio.run_coroutine_threadsafe(session.complete_aside(messages), owner_loop)
+        return await asyncio.wrap_future(future)
 
     async def slash_images(
         self,
@@ -516,29 +519,24 @@ class TuiSessionHandle(SessionHandle):
         """
         request_id = secrets.token_hex(8)
         setattr(card, "_mobile_request_id", request_id)
-        self._event_pending = PendingRequest(
-            request_id=request_id,
-            kind="approval",
-            title=str(getattr(card, "tool_name", "") or "tool approval"),
-            detail=str(getattr(card, "description", "") or ""),
+        self._publish_pending_gate(
+            PendingRequest(
+                request_id=request_id,
+                kind="approval",
+                title=str(getattr(card, "tool_name", "") or "tool approval"),
+                detail=str(getattr(card, "description", "") or ""),
+            )
         )
-        if self._on_projection is not None:
-            self._on_projection()
 
     def note_approval_settled(self, card: Any) -> None:
         """Remove exactly this prompt's projected approval, on every exit path."""
         request_id = str(getattr(card, "_mobile_request_id", "") or "")
         if not request_id:
             return
-        if self._event_pending is not None and self._event_pending.request_id == request_id:
-            self._event_pending = None
-        if self._on_projection is not None:
-            self._on_projection()
-
-    @property
-    def event_pending(self) -> PendingRequest | None:
-        """Follower-only gate overlaid by Registrant on event clients."""
-        return self._event_pending
+        state = getattr(self._session(), "frontend_state", None)
+        pending = getattr(state, "pending_gate", None)
+        if pending is not None and pending.request_id == request_id:
+            self._publish_pending_gate(None)
 
     def note_ask_pending(self, card: Any) -> None:
         """Project a freshly mounted TUI ask picker to the phone as an
@@ -570,6 +568,7 @@ class TuiSessionHandle(SessionHandle):
         if total > 1:
             logger.info("mobile tui ask: %d questions, projecting question-by-question", total)
         self._push_current_question(request_id, card)
+        self._publish_pending_gate(self._fold.projection.pending)
         if self._on_projection is not None:
             self._on_projection()
 
@@ -599,6 +598,7 @@ class TuiSessionHandle(SessionHandle):
         snapshots the CURRENT question because the fold now holds it."""
         self._fold.pop_pending(request_id)
         self._push_current_question(request_id, card)
+        self._publish_pending_gate(self._fold.projection.pending)
         if self._on_projection is not None:
             self._on_projection()
 
@@ -656,8 +656,18 @@ class TuiSessionHandle(SessionHandle):
             return
         self._ask_pending.pop(request_id, None)
         self._fold.pop_pending(request_id)
+        self._publish_pending_gate(None)
         if self._on_projection is not None:
             self._on_projection()
+
+    def _publish_pending_gate(self, pending: PendingRequest | None) -> None:
+        """Publish the owner gate into the canonical full-TUI contract."""
+        session = self._session()
+        store = getattr(session, "_frontend_state_store", None)
+        if store is None:
+            return
+        payload = pending.to_json() if pending is not None else None
+        store.mutate(pending_gate=payload)
 
     def _request_id_for_card(self, card: Any) -> str | None:
         for request_id, pending_card in self._ask_pending.items():

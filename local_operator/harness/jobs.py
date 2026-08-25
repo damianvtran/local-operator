@@ -218,6 +218,7 @@ class AsyncJobManager:
             Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None] | None
         ) = None,
         on_roster_change: Callable[[], None] | None = None,
+        on_job_change: Callable[[], None] | None = None,
     ) -> None:
         self._max_running = max_running
         self._retention_ms = retention_ms
@@ -231,6 +232,7 @@ class AsyncJobManager:
         # persist. A raising callback must never break job bookkeeping, so the
         # single call site guards it.
         self._on_roster_change = on_roster_change
+        self._on_job_change = on_job_change
         self._jobs: dict[str, AsyncJob] = {}
         self._signals: dict[str, AbortSignal] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -273,19 +275,19 @@ class AsyncJobManager:
         return running >= self._max_running
 
     def _notify_roster_change(self) -> None:
-        """Signal the owner that the task roster moved (add / settle / status).
+        """Signal a task-roster mutation to persistence and observers."""
+        self._notify_job_change(task_roster=True)
 
-        Best-effort: a persistence hook that raises must not corrupt the job
-        table or leave a settle half-applied, so the exception is swallowed
-        with a warning. Always called AFTER the mutation it reports, never
-        before, so a listener that re-reads the roster sees the new state.
-        """
-        if self._on_roster_change is None:
-            return
-        try:
-            self._on_roster_change()
-        except Exception:  # noqa: BLE001 - a bad listener must not break jobs
-            logger.warning("roster-change listener raised", exc_info=True)
+    def _notify_job_change(self, *, task_roster: bool) -> None:
+        """Publish every job mutation while persisting only resumable tasks."""
+        callbacks = ([self._on_roster_change] if task_roster else []) + [self._on_job_change]
+        for callback in callbacks:
+            if callback is None:
+                continue
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 - observation must not break jobs
+                logger.warning("job-change listener raised", exc_info=True)
 
     def restore(self, rows: list["AsyncJob"]) -> None:
         """Rehydrate task rows from a persisted roster at resume.
@@ -397,10 +399,7 @@ class AsyncJobManager:
             # Parked behind a caller-managed gate; holds no execution slot and
             # keeps its runner for start_queued().
             self._queued_runners[job_id] = run
-        # A new row is a roster change the owner may want to persist (task rows
-        # only carry a resumable transcript, but the listener filters that).
-        if type == "task":
-            self._notify_roster_change()
+        self._notify_job_change(task_roster=type == "task")
         return job_id
 
     def start_queued(self, job_id: str) -> bool:
@@ -423,8 +422,7 @@ class AsyncJobManager:
         # like register/settle/cancel, so it notifies too: without this the flag
         # move only reaches disk at the next roster event, and a snapshot taken
         # in between would restore the row as if it were still parked.
-        if job.type == "task":
-            self._notify_roster_change()
+        self._notify_job_change(task_roster=job.type == "task")
         return True
 
     # -- delivery -----------------------------------------------------------
@@ -530,8 +528,7 @@ class AsyncJobManager:
                 logger.warning("job %s pre-start cleanup raised", job_id, exc_info=True)
         self._settle(job)
         self._sweep_due()
-        if job.type == "task":
-            self._notify_roster_change()
+        self._notify_job_change(task_roster=job.type == "task")
         return True
 
     # -- lifecycle ----------------------------------------------------------
@@ -586,6 +583,7 @@ class AsyncJobManager:
         # recent end is the informative one (the current step, the error that
         # just landed), while the opening lines have usually already been read.
         job.output_tail = combined[-OUTPUT_TAIL_CHARS:]
+        self._notify_job_change(task_roster=job.type == "task")
 
     def read_output(self, job_id: str, since: int = 0) -> tuple[str, int, bool] | None:
         """``(text, seq, gap)`` for a peek, or ``None`` when the job is unknown.
@@ -620,6 +618,7 @@ class AsyncJobManager:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.latest_details = {"progress": details}
+                self._notify_job_change(task_roster=job.type == "task")
 
         return report
 
@@ -645,8 +644,7 @@ class AsyncJobManager:
             self._settle(job)
             self._tasks.pop(job.id, None)
             self._sweep_due()
-            if job.type == "task":
-                self._notify_roster_change()
+            self._notify_job_change(task_roster=job.type == "task")
             return
         except Exception as exc:
             job.status = "failed"
@@ -658,8 +656,7 @@ class AsyncJobManager:
         # roster now sees the terminal status, and persisting here (rather than
         # only after delivery) means a crash between settle and delivery still
         # leaves the outcome on disk for the next resume.
-        if job.type == "task":
-            self._notify_roster_change()
+        self._notify_job_change(task_roster=job.type == "task")
         try:
             await self._deliver(job)
         except Exception:

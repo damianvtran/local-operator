@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from local_operator.harness.jobs import AsyncJob
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentStartEvent,
@@ -22,6 +23,7 @@ from local_operator.session.frontend_state import (
     FrontendUpdate,
     FrontendUsage,
     JobState,
+    SnapshotJobs,
     TodoItemState,
     TodoPhaseState,
     WakeState,
@@ -116,13 +118,11 @@ def test_atomic_join_at_every_sequence_has_exact_suffix() -> None:
     for join_after in range(0, 9):
         replay = FrontendStateStore(_state())
         for update in all_updates[:join_after]:
-            replay.replace(update.snapshot)
+            replay.apply_update(update)
         delivered: list[int] = []
         subscription = replay.subscribe(lambda update: delivered.append(update.sequence))
         for update in all_updates[join_after:]:
-            replay.replace(update.snapshot)
-            for callback in list(replay._subscribers):
-                callback(update)
+            replay.apply_update(update)
         assert subscription.sync.sequence == join_after
         assert delivered == list(range(join_after + 1, 9))
 
@@ -171,8 +171,8 @@ def test_slash_capabilities_classify_every_advertised_command_and_images() -> No
     assert set(capabilities) == {command.name for command in SLASH_COMMANDS}
     assert all(value.scope is not CommandScope.UNAVAILABLE for value in capabilities.values())
     assert capabilities["context"].scope is CommandScope.AUTHORITATIVE_SESSION
-    assert capabilities["mcp"].scope is CommandScope.AUTHORITATIVE_SESSION
-    assert capabilities["btw"].scope is CommandScope.AUTHORITATIVE_SESSION
+    assert capabilities["mcp"].scope is CommandScope.FRONTEND_LOCAL
+    assert capabilities["btw"].scope is CommandScope.FRONTEND_LOCAL
     assert capabilities["agent"].supports_images is True
     assert capabilities["team"].supports_images is True
 
@@ -183,3 +183,31 @@ def test_compaction_semantics_replace_context_and_preserve_lifetime_cost() -> No
     assert store.state.context_tokens == 120_000
     assert store.state.context_is_estimate is True
     assert store.state.cumulative_parent_cost == 8.5
+
+
+def test_real_async_job_roundtrips_progress_trajectory_and_accounting() -> None:
+    job = AsyncJob(
+        id="child-1",
+        type="task",
+        label="reviewer",
+        start_time=10.0,
+        started_at=11.0,
+        latest_details={"progress": "reviewing diff"},
+        trajectory=[{"type": "message_start", "message": {"role": "assistant"}}],
+        prompt="Review the change",
+        model_label="anthropic/claude-fable-5",
+        context_window=1_000_000,
+        usage=Usage(input_tokens=12, output_tokens=3, context_tokens=42_000, usd_cost=0.25),
+        agent_role="reviewer",
+        effort="hi",
+    )
+    state = JobState.from_job(job)
+    restored = JobState.model_validate_json(state.model_dump_json())
+
+    assert restored.latest_details == {"progress": "reviewing diff"}
+    assert restored.trajectory == job.trajectory
+    assert restored.prompt == "Review the change"
+    assert restored.started_at == 11.0
+    assert restored.usage is not None and restored.usage.usd_cost == 0.25
+    snapshot = SnapshotJobs([restored]).get("child-1")
+    assert snapshot is not None and snapshot.trajectory == job.trajectory
