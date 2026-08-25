@@ -71,8 +71,9 @@ lop browser install
 ```
 
 This installs and starts the loopback daemon (a LaunchAgent on macOS /
-systemd user unit on Linux, so it survives restarts) and prints the pairing
-code at the end. The daemon binds **127.0.0.1 only** — never widen it.
+systemd user unit on Linux, so it survives restarts). The daemon binds
+**127.0.0.1 only** — never widen it. Once the extension is loaded and connected
+you pair it (step 4); until then `install` just gets the daemon healthy.
 
 ### 3. Get the extension into the user's browser
 
@@ -93,24 +94,48 @@ then:
   an unpacked extension is a deliberate user action the browser requires. Give
   them the exact directory path and wait for them to confirm it loaded.
 
-### 4. Pair the extension to this machine
+### 4. Pair the extension to this machine — YOU run it and show the code
+
+Pairing is **one-time**: once it succeeds, the extension stores the token and
+the daemon stores its hash, and every later reconnect (daemon restart, browser
+restart, reboot, a brand-new lop session) happens silently with no code and no
+prompt. The user does this exactly once, ever.
+
+Run the command yourself and read the code out of its output:
 
 ```sh
 lop browser pair
 ```
 
-This **displays** a 6-digit code (2-minute TTL, five tries then a fresh code).
-Ask the user to **type it into the extension popup** (click the toolbar icon →
-enter the code). The secret flows terminal → browser on purpose, so pairing
-proves the extension is talking to *this* user's lop and nothing else.
+It prints a 6-digit code (2-minute TTL, five tries then a fresh code). **You
+MUST show that code to the user in your reply and ask them to type it into the
+extension popup** (click the toolbar icon → enter the code). Do not just tell
+them to "run `lop browser pair`": most users start from the TUI and never see
+terminal output, so if you don't surface the code in the conversation they have
+no way to get it. Showing it is correct and safe here — unlike a durable
+password, this is a single-use code with a 2-minute TTL whose entire purpose is
+to be shown to the user; it authorizes nothing on its own and expires in
+minutes. (This is the one browser secret you DO print. Contrast the mobile
+portal password, which must never enter the transcript.)
 
-Re-pairing (new browser profile, wiped token): same flow. `lop browser pair
---reset` revokes the current pairing first.
+Concretely, say something like: *"Your one-time pairing code is **NNNNNN**.
+Click the Local Operator extension icon in your browser toolbar and type it in.
+This is the only time you'll need to do this."* If the code expires before they
+enter it, just run `lop browser pair` again and show the fresh one.
+
+The code flows terminal → browser (you → the user → the popup) on purpose: that
+direction is the security property that stops a rogue local process from
+pairing itself. Do not try to script the code into the popup on the user's
+normal browser — you have no debug access to it, and that is intentional.
+
+Re-pairing (new browser profile, wiped token, uninstalled extension): same
+flow. `lop browser pair --reset` revokes the current pairing first.
 
 ### 5. Confirm and use
 
 Re-run `lop browser status`; you want `extension connected: yes` and
-`paired: yes`. The `browser` tool now appears — use it.
+`paired: yes`. The `browser` tool now appears — use it. From here on the user
+does nothing: pairing persists across restarts, so future sessions just work.
 
 ## What to ask the user for
 
@@ -186,6 +211,28 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   URL again to get a fresh surface.
 - **"another debugger is attached"** — ask the user to close DevTools on that
   tab.
+- **"The extensions gallery cannot be scripted"** — Chrome forbids the debugger
+  API on the Chrome Web Store domains (`chrome.google.com/webstore`,
+  `chromewebstore.google.com`) as a platform security rule, and once the
+  extension's tab touches that domain the whole tab is poisoned for the session.
+  This is not a bug and affects every CDP-based browser agent. You cannot
+  automate the Web Store (install other extensions, fill the developer console,
+  etc.) through the extension. Drive the user there and have them click, or use
+  a separate tab for the rest of the task.
+
+## Pages the extension cannot drive
+
+The `chrome.debugger` API is blocked on a few origins by Chrome itself, so the
+tool cannot navigate to or act on them:
+
+- **The Chrome Web Store** (`chromewebstore.google.com`,
+  `chrome.google.com/webstore`) — see the error above.
+- **`chrome://` / `edge://` / browser-internal pages**, `file://`, and other
+  non-http(s) schemes — the URL guard refuses these before they reach the
+  browser.
+
+For these, the human drives. Everything else (normal http/https sites,
+including authenticated app dashboards, Google Workspace, GitHub, etc.) works.
 
 ## Cleanup / removal
 

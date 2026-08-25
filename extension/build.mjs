@@ -7,6 +7,11 @@ import { resolve } from "node:path";
 
 const root = import.meta.dirname;
 const dist = resolve(root, "dist");
+// A store build (`--zip`) ships NO source maps: they roughly double the archive,
+// expose the original TypeScript, and are dead weight in a published artifact
+// that reviewers and the runtime never step through. The plain `dist` build
+// keeps maps so local debugging (Load unpacked + DevTools) resolves to source.
+const isStore = process.argv.includes("--zip");
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
 await build({
@@ -20,7 +25,7 @@ await build({
   format: "esm",
   target: "chrome116",
   outdir: dist,
-  sourcemap: true,
+  sourcemap: !isStore,
 });
 await cp(resolve(root, "manifest.json"), resolve(dist, "manifest.json"));
 await cp(resolve(root, "src/popup/popup.html"), resolve(dist, "popup/popup.html"));
@@ -28,10 +33,13 @@ await cp(resolve(root, "src/popup/popup.css"), resolve(dist, "popup/popup.css"))
 await cp(resolve(root, "src/options/options.html"), resolve(dist, "options/options.html"));
 await cp(resolve(root, "src/options/options.css"), resolve(dist, "options/options.css"));
 await cp(resolve(root, "icons"), resolve(dist, "icons"), { recursive: true });
-if (process.argv.includes("--zip")) {
+if (isStore) {
   const target = resolve(root, "local-operator-extension.zip");
   await rm(target, { force: true });
-  execFileSync("zip", ["-qr", target, "."], { cwd: dist });
+  // -x '*.map' is belt-and-suspenders: the store build already emits no maps,
+  // but this guarantees none slip into the published archive even if a stray
+  // map exists in dist from a prior plain build.
+  execFileSync("zip", ["-qr", target, ".", "-x", "*.map"], { cwd: dist });
   console.log(target);
 } else {
   console.log(dist);

@@ -3,6 +3,31 @@
 Run this against the final release candidate. Do not submit from a development
 build or from copy that no longer matches the manifest.
 
+## Live session status (2026-08-25) — where we actually are
+
+A first live dogfood run drove a real Chrome (piloted by our own extension) to
+the dashboard. Confirmed on the ground:
+
+- **Signed in** as `damian@gominerva.com`; the Chrome Web Store Developer
+  Dashboard opens, so a developer account exists under that address.
+- **Blocking gate:** the dashboard shows an "Action required" **trader /
+  non-trader declaration** (EEA consumer-protection law) on Settings, and full
+  **business verification** for Radient, Inc. is required before publishing.
+  That verification is a multi-day, account-owner/legal task — it is THE gate.
+- **Packed store artifact is built and ready:**
+  `extension/local-operator-extension.zip` (v0.1.0, 31 KB, **no source maps** —
+  `pnpm --dir extension build:zip` regenerates it). Manifest verified store-clean
+  (MV3, name "Local Operator", the 7 justified permissions, `<all_urls>`).
+- **Known platform limit found live:** Chrome forbids the debugger API on the
+  Web Store domains ("The extensions gallery cannot be scripted"), so the
+  extension cannot auto-fill the developer console — a human drives the console
+  pages. Documented in `guide://browser`.
+
+**Pick-up point:** once Radient's business verification + trader declaration
+clear, upload `local-operator-extension.zip`, paste the copy from `listing.md`,
+`permissions.md`, `privacy-policy.md`, and the assets in `assets/`, then walk
+the rest of this checklist. Nothing product-side is blocking.
+
 ## 0. Resolve the launch assumptions
 
 - [ ] Choose and publish a monitored support/privacy email for Radient, Inc.
