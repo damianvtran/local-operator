@@ -18,7 +18,7 @@ export enum ErrorCode {
 
 export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'scroll' | 'logs';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
-// `level` is normalized to the read/warning/info/log/error vocabulary the tool
+// `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught
 // exception ('console' | 'exception' | 'log-entry').
 export interface LogEntry {

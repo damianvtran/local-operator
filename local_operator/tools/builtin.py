@@ -4724,7 +4724,7 @@ class BrowserParams(BaseModel):
     x: float | None = Field(
         default=None,
         description="'scroll' horizontal pixel delta (positive = right). "
-        "Use with 'y' for a precise wheel scroll.",
+        "Use with 'y' for a precise scrollBy.",
     )
     y: float | None = Field(
         default=None,
