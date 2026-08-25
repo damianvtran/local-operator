@@ -58,14 +58,16 @@ _FRONTEND_LOCAL_SLASHES = {
     "login",
     "logout",
     "credential",
-    # These render canonical data or a local widget. Their owner-dependent work
-    # is exposed through SessionProtocol operations rather than opening UI in a
-    # different process.
-    "mcp",
     # The overlay is local UI; its provider request crosses the authoritative
     # complete_aside operation on RemoteSession.
     "btw",
 }
+# Bare ``/mcp`` renders the canonical server list locally, but its grant
+# subcommands mutate OAuth state that lives on the authoritative owner — the
+# follower's MCP facade is a read-only snapshot with no config accessor, so
+# routing the mutation (not faking it locally) is the only non-crashing,
+# non-divergent answer. The dispatch splits the two shapes by argument.
+_MCP_GRANT_SUBCOMMANDS = {"login", "logout", "reauth"}
 _IMAGE_SLASHES = {"agent", "team"}
 
 
@@ -94,6 +96,31 @@ class SlashCapability(BaseModel):
     operation: str | None = None
     reason: str | None = None
     supports_images: bool = False
+
+
+class SlashResult(BaseModel):
+    """The typed outcome of one slash command run on the authoritative owner.
+
+    The v5 replacement for the synthetic ``ran /…`` receipt: the owner runs a
+    shared slash command and returns WHAT happened as data, so the terminal
+    that asked renders it locally instead of the answer painting in another
+    process's transcript. Every product-facing string is produced by the
+    standard handlers, so a follower's ``/goal``, ``/rename``, ``/mcp login``
+    or ``/context`` says exactly what a local session would — there is no
+    attach-specific vocabulary anywhere in the fields.
+
+    ``kind`` is one of ``notice`` (the invoker prints ``text`` through the
+    normal notice path), ``block`` (``data`` is a renderable payload the
+    follower builds its standard block from), or ``noop`` (nothing to print —
+    e.g. a picker the invoker opens itself).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: str = "notice"
+    text: str = ""
+    style: str = "info"
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class TodoItemState(BaseModel):
@@ -181,6 +208,14 @@ class JobState(BaseModel):
     output_tail: str = ""
     output_seq: int = 0
     restored: bool = False
+    # Canonical lineage (U5): the owner's subagent-comms tree is not itself
+    # serializable, but its one fact — who launched whom — is. Stamping the
+    # parent's job id (and the child's session/role for the page header) lets
+    # a follower rebuild the full parent/peer/child graph from ``state.jobs``
+    # alone, so the hierarchy keys navigate the authoritative structure rather
+    # than silently doing nothing.
+    parent_job_id: str | None = None
+    session_id: str | None = None
 
     @classmethod
     def from_job(cls, job: Any) -> "JobState":
@@ -393,6 +428,76 @@ class SnapshotWakeScheduler:
 
     def replace(self, values: Iterable[WakeState]) -> None:
         self.schedules = [SimpleNamespace(**value.model_dump()) for value in values]
+
+
+class SnapshotSubagentComms:
+    """A follower's read-only job-graph facade, rebuilt from canonical jobs.
+
+    The owner's ``SubagentComms`` is a live registry of running children and
+    cannot cross the socket, but every navigation the full-page view needs —
+    parent/peer/child, ancestors, the node's session/role — is pure graph over
+    ``(job_id, parent_job_id, label, session_id, prompt, agent_role, effort)``,
+    all of which ``JobState`` now carries. This facade answers the SAME methods
+    the app calls on ``_subagent_comms`` from ``state.jobs``, so the hierarchy
+    keys work identically on a follower (U5) with no attach-specific code path.
+    """
+
+    def __init__(self, jobs: Iterable[JobState] = ()) -> None:
+        self.replace(jobs)
+
+    def replace(self, jobs: Iterable[JobState]) -> None:
+        self._nodes = {job.id: self._node_for(job) for job in jobs}
+
+    @staticmethod
+    def _node_for(job: JobState) -> Any:
+        return SimpleNamespace(
+            job_id=job.id,
+            label=job.label or job.agent or job.id,
+            parent_job_id=job.parent_job_id,
+            session_id=job.session_id,
+            session_dir=None,
+            prompt=job.prompt or "",
+            agent_role=job.agent_role or "",
+            effort=job.effort or "",
+        )
+
+    def node(self, job_id: str) -> Any | None:
+        return self._nodes.get(job_id)
+
+    def job(self, job_id: str) -> Any | None:
+        # The page reads live job fields from the jobs facade, not here; the
+        # comms lookup exists on the owner for a manager cross-reference the
+        # follower resolves through its own SnapshotJobs instead.
+        return None
+
+    def parent(self, job_id: str) -> Any | None:
+        node = self._nodes.get(job_id)
+        if node is None or not node.parent_job_id:
+            return None
+        return self._nodes.get(node.parent_job_id)
+
+    def children(self, job_id: str | None) -> list[Any]:
+        return [node for node in self._nodes.values() if node.parent_job_id == job_id]
+
+    def peers(self, job_id: str) -> list[Any]:
+        node = self._nodes.get(job_id)
+        if node is None:
+            return []
+        return [peer for peer in self.children(node.parent_job_id) if peer.job_id != job_id]
+
+    def ancestors(self, job_id: str) -> list[Any]:
+        rows: list[Any] = []
+        seen = {job_id}
+        current = self.parent(job_id)
+        while current is not None and current.job_id not in seen:
+            seen.add(current.job_id)
+            rows.append(current)
+            current = self.parent(current.job_id)
+        rows.reverse()
+        return rows
+
+    def session_dir_of(self, job_id: str) -> Any | None:
+        return None
 
 
 class SnapshotMcpManager:
@@ -610,6 +715,14 @@ class FrontendStateStore:
             except Exception:
                 last_usage = None
         jobs = self._jobs(session)
+        if initial:
+            # The atomic join snapshot folds canonical lineage in once so a
+            # follower's job graph is complete from its first frame; steady-
+            # state updates re-fold on the 50 ms jobs coalesce (see
+            # ``refresh_jobs``), never on the per-event session-loop refresh.
+            comms = getattr(session, "_subagent_comms", None)
+            if comms is not None:
+                jobs = [_with_lineage(job, comms) for job in jobs]
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
             cost = _job_subtree_cost(job, default_model_label=_label(selected))
@@ -762,8 +875,20 @@ class FrontendStateStore:
         return self.mutate(**changes)
 
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
-        """Publish the job roster without rescanning unrelated session state."""
+        """Publish the job roster without rescanning unrelated session state.
+
+        Canonical lineage (parent/child identity) is folded in HERE rather than
+        in ``refresh_from_session``: the comms lookup is per-job, and the
+        per-event refresh runs on the session loop for every streaming edge —
+        folding there stalled concurrent children by over a second. The jobs
+        roster is republished on a 50 ms coalesce, so lineage lands on the same
+        cadence the page that needs it already refreshes on, at a fraction of
+        the cost.
+        """
         jobs = self._jobs(session)
+        comms = getattr(session, "_subagent_comms", None)
+        if comms is not None:
+            jobs = [_with_lineage(job, comms) for job in jobs]
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
@@ -973,7 +1098,37 @@ def _slash_capabilities() -> list[SlashCapability]:
                 supports_images=command.name in _IMAGE_SLASHES,
             )
         )
+    # ``/mcp`` is advertised once but its scope is argument-dependent: bare it
+    # is a local listing, with a grant subcommand it is authoritative. The
+    # capability records the authoritative shape (the one that needs routing);
+    # the follower's dispatch keeps the bare listing local by inspecting args.
+    for capability in values:
+        if capability.command == "mcp":
+            capability.scope = CommandScope.AUTHORITATIVE_SESSION
+            capability.operation = "slash"
     return values
+
+
+def _with_lineage(job: JobState, comms: Any) -> JobState:
+    """Stamp one job's canonical parent/child identity from the comms tree.
+
+    The comms registry — not the job manager — knows who launched whom, so the
+    lineage is merged here at snapshot time rather than carried on the job
+    itself. Read defensively: a job with no comms record (a bash job, a swept
+    child) keeps ``parent_job_id=None`` and simply has no navigation targets.
+    """
+    try:
+        node = comms.node(job.id)
+    except Exception:
+        node = None
+    if node is None:
+        return job
+    return job.model_copy(
+        update={
+            "parent_job_id": getattr(node, "parent_job_id", None),
+            "session_id": getattr(node, "session_id", None),
+        }
+    )
 
 
 def _job_subtree_cost(job: Any, *, default_model_label: str) -> float | None:

@@ -74,6 +74,7 @@ from local_operator.session.frontend_state import (
     FrontendUpdate,
     SnapshotJobs,
     SnapshotMcpManager,
+    SnapshotSubagentComms,
     SnapshotWakeScheduler,
 )
 from local_operator.session.naming import ConversationName
@@ -146,9 +147,20 @@ class RemoteSession:
         self.jobs = SnapshotJobs()
         self.wake_scheduler = SnapshotWakeScheduler()
         self.mcp_manager = SnapshotMcpManager()
+        # The full-page subagent view's hierarchy keys read this facade; built
+        # from the canonical jobs so a follower's parent/peer/child navigation
+        # works on the same authoritative graph the owner's does (U5).
+        self._subagent_comms = SnapshotSubagentComms()
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
         self._history_ids: set[str] = set()
+        # Message ids whose row the follower has ALREADY painted live. The sync
+        # seed and relayed stream are filtered against this set as well as
+        # ``_history_ids``, so a turn that became durable mid-join — or a
+        # completed turn re-advertised by a fresh sync after reconnect — can
+        # never paint twice (M4). Rebuilt on each sync from durable rows +
+        # painted ids.
+        self._message_events: set[str] = set()
         self._handlers: list[EventHandler] = []
         # Events arriving before OperatorApp adopts/subscribes are retained;
         # otherwise a fast owner can stream between factory return and app
@@ -177,6 +189,11 @@ class RemoteSession:
         self._generation = 0
         self._name_state = ConversationName()
         self._model: ModelSpec | None = None
+        # Double-Esc subagent cancel: the synchronous protocol method issues
+        # the authoritative op, and the owner's confirmed count replaces the
+        # optimistic notice through this app-installed callback.
+        self._cancel_resolution: Callable[[int], None] | None = None
+        self._cancel_task: asyncio.Task[None] | None = None
 
     @classmethod
     async def connect(
@@ -199,7 +216,7 @@ class RemoteSession:
         await self._dial(record)
         frontend = await self._await_frontend()
         self._install_frontend(frontend.snapshot)
-        self._load_history()
+        self._load_history(frontend.live_cursor)
         self._finish_sync()
         return self
 
@@ -230,27 +247,98 @@ class RemoteSession:
         except TimeoutError as exc:
             raise ConnectionError("owner did not send frontend synchronization") from exc
 
-    def _load_history(self) -> None:
-        """Read model-facing durable history without acquiring the writer lease."""
+    def _load_history(self, live_cursor: str | None = None) -> None:
+        """Read durable history exactly up to the sync's advertised boundary.
+
+        ``live_cursor`` is the owner's ``history_cursor``: the id of the newest
+        transcript entry that was durable when the sync snapshot was taken. The
+        atomic sync boundary means durable rows <= cursor are already captured
+        in the snapshot's history, and events > cursor arrive as the live
+        suffix. Filtering the durable read to <= cursor (rather than reading
+        the whole transcript) is what makes the boundary EXACT: a message that
+        became durable between snapshot and this read is NOT double-loaded,
+        because its live event is what paints it.
+        """
         transcript = Transcript(self._config_dir / "sessions" / self._session_id)
-        self._history = transcript.build_llm_history()
+        entries = transcript.entries()
+        history = transcript.build_llm_history()
+        if live_cursor is not None:
+            # Keep only the message entries at or before the advertised cursor.
+            # The cursor names a transcript ENTRY id (any type); walk to it and
+            # drop the durable suffix past the boundary the sync already sealed.
+            boundary_index = None
+            for index, entry in enumerate(entries):
+                if entry.id == live_cursor:
+                    boundary_index = index
+                    break
+            if boundary_index is not None:
+                kept_ids = {entry.id for entry in entries[: boundary_index + 1]}
+                history = [
+                    message
+                    for message in history
+                    if not getattr(message, "id", None) or str(message.id) in kept_ids
+                ]
+        self._history = history
         self._history_ids = {
             str(message.id) for message in self._history if getattr(message, "id", None)
         }
+        # Anything durable is by definition already accounted for; seed the
+        # painted-id filter from it so the live seed cannot repaint those rows.
+        self._message_events |= self._history_ids
 
     def _finish_sync(self) -> None:
         """Install the canonical in-flight seed before post-sync events.
 
         The seed shares the snapshot boundary with every other frontend field,
         so there is no second live-turn reducer whose cursor can race state.
+        Each seeded event is filtered against the durable/painted id sets — a
+        turn that became durable between snapshot and history load is dropped
+        here rather than painted twice.
         """
-        seeded = [deserialize_event(data) for data in self.frontend_state.live_events]
+        seeded = []
+        for data in self.frontend_state.live_events:
+            event = deserialize_event(data)
+            if self._is_duplicate(event):
+                continue
+            self._track(event)
+            seeded.append(event)
         if self.frontend_state.streaming:
             seeded.insert(0, AgentStartEvent(generation=self.frontend_state.generation))
         self._buffered_events[0:0] = seeded
         self._ready_for_events = True
         self._owner_ready.set()
         self._drain_buffered_events()
+
+    def _replay_durable_suffix(self) -> None:
+        """Emit settled events for durable rows no live event ever painted.
+
+        Only rows whose id is absent from ``_message_events`` (the painted set)
+        are emitted, so a reconnect after a quiet gap replays nothing and a
+        reconnect across a missed turn repaints exactly that turn. Each replayed
+        id is tracked, so the follow-up sync's live seed and any later relay
+        dedupe against it rather than double-painting.
+        """
+        for message in self._history:
+            message_id = str(getattr(message, "id", "") or "")
+            if not message_id or message_id in self._message_events:
+                continue
+            self._message_events.add(message_id)
+            self._emit_or_buffer(MessageEndEvent(message=message))
+
+    def _is_duplicate(self, event: AgentEvent[Any]) -> bool:
+        """Whether this message-grade event repaints an already-known row."""
+        message = getattr(event, "message", None)
+        message_id = str(getattr(message, "id", "") or "")
+        return bool(message_id) and message_id in self._message_events
+
+    def _track(self, event: AgentEvent[Any]) -> None:
+        """Record a painted live message id so a later sync/durable row skips it."""
+        message = getattr(event, "message", None)
+        message_id = str(getattr(message, "id", "") or "")
+        if message_id and isinstance(
+            event, (MessageStartEvent, MessageUpdateEvent, MessageEndEvent)
+        ):
+            self._message_events.add(message_id)
 
     def _drain_buffered_events(self) -> None:
         """Deliver buffered sync frames once both ordering and a subscriber exist."""
@@ -289,6 +377,7 @@ class RemoteSession:
         self._generation = state.generation
         self._model = state.selected_model
         self.jobs.replace(state.jobs)
+        self._subagent_comms.replace(state.jobs)
         self.wake_scheduler.replace(state.wakes)
         self.mcp_manager.replace(state.mcp_servers)
         startup = state.mcp_startup
@@ -308,18 +397,17 @@ class RemoteSession:
 
     def _on_wire_event(self, data: dict[str, Any]) -> None:
         event = deserialize_event(data)
-        message = getattr(event, "message", None)
-        message_id = str(getattr(message, "id", "") or "")
-        # History was read after the socket began buffering. If a turn landed
-        # durably in that window, its message-grade relay events are already in
-        # history; dropping by stable message id prevents double painting.
-        if message_id and message_id in self._history_ids:
+        # A message-grade event whose row is already durable (history was read
+        # after the socket began buffering) or already painted live is dropped
+        # by stable message id — the single dedup rule for both seams.
+        if self._is_duplicate(event):
             return
         if isinstance(event, AgentStartEvent):
             self._streaming = True
             self._generation = event.generation
         elif isinstance(event, AgentEndEvent):
             self._streaming = False
+        self._track(event)
         self._emit_or_buffer(event)
 
     def _emit_or_buffer(self, event: AgentEvent[Any]) -> None:
@@ -453,7 +541,20 @@ class RemoteSession:
                         await self._dial(record)
                         frontend = await self._await_frontend()
                         self._install_frontend(frontend.snapshot, publish=True)
+                        # A message committed while this follower was
+                        # disconnected is in the NEW snapshot's durable
+                        # history but was never relayed as a raw event here.
+                        # Reconcile against the fresh cursor so the missing
+                        # durable rows are loaded and the re-seeded live
+                        # suffix dedupes against what is already painted (M4).
+                        self._load_history(frontend.live_cursor)
                         self._finish_sync()
+                        # Rows that became durable WHILE disconnected were never
+                        # relayed as raw events, so nothing painted them. Emit a
+                        # settled message event for each NEW durable id so the
+                        # existing transcript path repaints exactly the missed
+                        # suffix — never the rows already on screen.
+                        self._replay_durable_suffix()
                         return
                     except (ConnectionError, OSError, TimeoutError):
                         pass
@@ -487,6 +588,15 @@ class RemoteSession:
 
     def set_takeover_callback(self, callback: Callable[[Any], Any]) -> None:
         self._takeover_callback = callback
+
+    def set_cancel_resolution(self, resolver: Callable[[int], None] | None) -> None:
+        """Install the app's handler for an owner-confirmed subagent cancel count.
+
+        Called with the REAL number the owner stopped (or ``-1`` on a failed
+        request) so the double-Esc notice can be rewritten from the optimistic
+        count to the authoritative one. ``None`` disarms it.
+        """
+        self._cancel_resolution = resolver
 
     # -- SessionProtocol identity/state ------------------------------------
 
@@ -603,25 +713,45 @@ class RemoteSession:
         return answer
 
     async def adopt_aside(self, messages: list[Message]) -> None:
-        raise RuntimeError("aside adoption is unavailable while another process owns the session")
+        """Promote the aside exchange into the conversation through the owner.
+
+        The Ctrl+F fork is advertised on the standard aside card, so it must
+        work on a follower too. The owner appends the pair to its live context
+        and transcript (the same idle-turn guard and durable-first order as a
+        local :meth:`Session.adopt_aside`), then the canonical frontend update
+        carries the new rows to every terminal — the follower does not splice
+        anything itself.
+        """
+        client = self._client
+        if client is None:
+            raise ConnectionError("session owner is reconnecting")
+        await client.adopt_aside(
+            [
+                message.model_dump(mode="json")
+                for message in messages
+                if hasattr(message, "model_dump")
+            ]
+        )
 
     async def route_shared_slash(
         self,
         command: str,
         args: str,
         images: Sequence[ImageContent] | None = None,
-    ) -> str:
+    ) -> Any:
         """Run a conversation-mutating slash command on the authoritative host.
 
         OperatorApp handles process-local navigation/config itself. This seam
         carries every command the owner's capability list marks
         ``authoritative_session``, so the follower never maintains a second
-        copy of shared orchestration state.
+        copy of shared orchestration state. The owner returns a typed
+        :class:`SlashResult` dict the invoker renders locally — the answer
+        never paints in the owner's terminal.
         """
         client = self._client
         if client is None:
             raise ConnectionError("session owner is reconnecting")
-        return await client.slash(
+        return await client.slash_result(
             command,
             args,
             [_image_to_wire(image) for image in (images or [])],
@@ -708,9 +838,33 @@ class RemoteSession:
             asyncio.create_task(self._client.abort())
 
     def cancel_subagents(self, reason: str = "interrupted") -> int:
-        if self._client is not None:
-            asyncio.create_task(self._client.slash("stop", ""))
-        return 0
+        """Optimistic cancel: returns the running count the offer promised.
+
+        ``SessionProtocol.cancel_subagents`` is synchronous (the Esc handler
+        reads its count inline), but a follower's authoritative count lives on
+        the owner across an async socket. The follower issues the typed
+        ``cancel_subagents`` op and, when the owner confirms the REAL number,
+        replaces its optimistic notice via the ``_cancel_resolution`` callback
+        the app installs — so the completion text always reflects what actually
+        stopped, never a guessed zero. Returning the current running count
+        keeps the synchronous contract honest for the frame it is read on.
+        """
+        client = self._client
+        if client is None:
+            return 0
+        offered = self.running_subagents()
+        task = asyncio.ensure_future(self._resolve_cancel(client))
+        self._cancel_task = task
+        return offered
+
+    async def _resolve_cancel(self, client: AttachClient) -> None:
+        try:
+            stopped = await client.cancel_subagents()
+        except Exception:
+            stopped = -1
+        resolver = self._cancel_resolution
+        if resolver is not None:
+            resolver(stopped)
 
     @property
     def active_agent(self) -> str:

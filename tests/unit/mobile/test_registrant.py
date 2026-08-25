@@ -125,6 +125,20 @@ class FakeHandle:
     async def slash_images(self, command, args, images):  # noqa: ANN001, ANN202
         return await self._record("slash", command, args, images)
 
+    async def run_slash_authoritative(self, command, args, images):  # noqa: ANN001, ANN202
+        self.calls.append(("run_slash_authoritative", (command, args, images), {}))
+        # The owner returns a typed result the invoker renders locally; this
+        # reduced owner answers every routed command with a goal-shaped notice.
+        return {"kind": "notice", "text": f"owner ran /{command}", "style": "info"}
+
+    async def adopt_aside(self, messages):  # noqa: ANN001, ANN202
+        self.calls.append(("adopt_aside", (messages,), {}))
+        return "forked aside"
+
+    def cancel_subagents_count(self):  # noqa: ANN202
+        self.calls.append(("cancel_subagents_count", (), {}))
+        return 2
+
     async def new_conversation(self):  # noqa: ANN202
         return await self._record("new_conversation")
 

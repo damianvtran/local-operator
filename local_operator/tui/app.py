@@ -1992,6 +1992,14 @@ class OperatorApp(App[None]):
             set_takeover = getattr(session, "set_takeover_callback", None)
             if callable(set_takeover):
                 set_takeover(self._adopt_takeover_session)
+            # The double-Esc cancel reads the synchronous count the protocol
+            # returns, but a follower's REAL count resolves on the owner. The
+            # resolver is installed per-press by the Esc handler; arming the
+            # seam here is what lets RemoteSession reach back to rewrite the
+            # optimistic notice with the authoritative number.
+            set_cancel_resolution = getattr(session, "set_cancel_resolution", None)
+            if callable(set_cancel_resolution):
+                set_cancel_resolution(None)
         # Before the band is painted below: the freshly built spec carries the
         # MODEL's default effort, and a `/reload` or `/new` that dropped the
         # user's chosen level would repaint the band with a level they did not
@@ -5648,40 +5656,25 @@ class OperatorApp(App[None]):
             # started a follow-up turn, and the user's second press means that
             # too. It is idempotent when the parent is already stopped.
             self._interrupt()
-            if stopped:
-                text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
-                # Sparing backgrounded `bash` is deliberate (`background=true`
-                # exists so a build outlives the turn) and genuinely surprising
-                # to a user who just escalated a stop, which reads as "stop all
-                # of it". Naming the survivors here, and only when there ARE
-                # any, prevents the "I stopped everything, why is the build
-                # still running" question at the one moment the answer is
-                # wanted (D3, design round 1). Unconditional, it would be noise.
-                spared = self._job_count("bash")
-                if spared:
-                    text += (
-                        f"; {spared} background job{'s' if spared != 1 else ''} "
-                        "still running — jobs cancel to stop"
-                    )
-            elif offered:
-                # The children finished on their own between the two presses.
-                # `cancel_subagents` recounts at press time, so this is
-                # reachable in production and not a fake-session artifact.
-                #
-                # The wording matters more than it looks. Saying "no subagents
-                # were running" here REPLACES a row that just said "2 subagents
-                # still running", so the user reads a flat denial of what they
-                # were told one keypress ago — which re-raises the exact
-                # credibility problem this whole change exists to fix. What
-                # actually happened is better news than the offer implied, and
-                # the line should say so (D2, design round 1).
-                text = (
-                    f"{offered} subagent{'s' if offered != 1 else ''} "
-                    "finished before the stop landed"
+            set_resolution = getattr(session, "set_cancel_resolution", None)
+            if callable(set_resolution):
+                # A follower's count is OPTIMISTIC: the synchronous protocol
+                # method already returned the number it offered, but the
+                # authoritative count crosses the socket after this frame. Show
+                # the offered reading now, then rewrite it with the owner's
+                # confirmed number — the completion text only ever states what
+                # the owner actually stopped, never a guessed zero.
+                self._replace_stop_notice(
+                    f"stopping {offered} subagent{'s' if offered != 1 else ''}…", "note"
                 )
+
+                def resolve_cancel(confirmed: int) -> None:
+                    set_resolution(None)
+                    self._report_subagent_stop(confirmed if confirmed >= 0 else offered, offered)
+
+                set_resolution(resolve_cancel)
             else:
-                text = "no subagents were running"
-            self._replace_stop_notice(text, "note")
+                self._report_subagent_stop(stopped, offered)
             return
 
         pending = self._approval is not None and not self._approval.answered
@@ -5824,6 +5817,49 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a stop must never fail on its count
             logger.warning("counting subagents failed", exc_info=True)
             return 0
+
+    def _report_subagent_stop(self, stopped: int, offered: int) -> None:
+        """Print the stop ladder's outcome line, from one authoritative count.
+
+        Factored out of the second-Esc path so the immediate reading and the
+        owner-confirmed followup share ONE wording: a follower shows its
+        optimistic count first, then this same line once the owner's real
+        number arrives — so the two can never disagree about phrasing.
+        """
+        if stopped:
+            text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
+            # Sparing backgrounded `bash` is deliberate (`background=true`
+            # exists so a build outlives the turn) and genuinely surprising
+            # to a user who just escalated a stop, which reads as "stop all
+            # of it". Naming the survivors here, and only when there ARE
+            # any, prevents the "I stopped everything, why is the build
+            # still running" question at the one moment the answer is
+            # wanted (D3, design round 1). Unconditional, it would be noise.
+            spared = self._job_count("bash")
+            if spared:
+                text += (
+                    f"; {spared} background job{'s' if spared != 1 else ''} "
+                    "still running — jobs cancel to stop"
+                )
+        elif offered:
+            # The children finished on their own between the two presses.
+            # `cancel_subagents` recounts at press time, so this is
+            # reachable in production and not a fake-session artifact.
+            #
+            # The wording matters more than it looks. Saying "no subagents
+            # were running" here REPLACES a row that just said "2 subagents
+            # still running", so the user reads a flat denial of what they
+            # were told one keypress ago — which re-raises the exact
+            # credibility problem this whole change exists to fix. What
+            # actually happened is better news than the offer implied, and
+            # the line should say so (D2, design round 1).
+            text = (
+                f"{offered} subagent{'s' if offered != 1 else ''} "
+                "finished before the stop landed"
+            )
+        else:
+            text = "no subagents were running"
+        self._replace_stop_notice(text, "note")
 
     def _replace_stop_notice(self, text: str, kind: NoticeKind) -> None:
         """Show the stop ladder's one line, replacing any previous one.
@@ -9006,6 +9042,78 @@ class OperatorApp(App[None]):
         """The input editor. Queried rather than held: Textual owns the widget."""
         return self.query_one(Editor)
 
+    def _render_authoritative_slash(self, command: str, arg: str, outcome: Any) -> None:
+        """Render a follower's routed slash outcome in THIS terminal.
+
+        The owner ran the command and returned a :class:`SlashResult` dict
+        (``kind``/``text``/``style``/``data``); the strings are the standard
+        handler's own, so this only decides WHERE they land — the invoker's
+        transcript, not the owner's. ``block`` kinds rebuild the same widget a
+        local session would mount, so the two terminals are indistinguishable.
+        """
+        if isinstance(outcome, str):
+            # An owner that predates typed results still answers with a plain
+            # receipt string; print it as-is rather than dropping the line.
+            if outcome:
+                self._notice(outcome)
+            return
+        if not isinstance(outcome, dict):
+            return
+        kind = outcome.get("kind", "notice")
+        text = str(outcome.get("text", "") or "")
+        style = str(outcome.get("style", "info") or "info")
+        data = outcome.get("data") or {}
+        if kind == "noop":
+            # The invoker hosts the interactive surface itself (bare /model's
+            # picker is opened up-front); nothing arrives to print.
+            return
+        if kind == "block":
+            block_type = data.get("type")
+            if block_type == "context":
+                items = data.get("items") or []
+                title = str(data.get("title") or "Estimated next request")
+                self._append_block(RichBlock(_tree_listing(items, title, detail_token="muted")))
+                return
+            if block_type == "mcp":
+                block = self._mcp_block()
+                if block is not None:
+                    self._append_block(block)
+                return
+            if block_type == "team_list":
+                self._append_block(self._team_listing_block(data.get("items") or []))
+                return
+            if block_type == "agent_list":
+                self._append_block(self._agent_list_block(data.get("items") or []))
+                return
+        if text:
+            notice_kind: NoticeKind = "warning" if style == "warning" else "info"
+            if style == "error":
+                notice_kind = "error"
+            self._notice(text, notice_kind)
+
+    def _team_listing_block(self, items: list[Any]) -> RichBlock:
+        """Rebuild the bare ``/team`` roster block from wire rows.
+
+        The owner-side listing producer returns ``(name, facts, description)``
+        tuples (no live team objects cross the socket); this is the render
+        half, kept beside ``_team_list_block`` so both listings share the one
+        row layout.
+        """
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("teams", style=section)]
+        for item in items:
+            name, facts, summary = (list(item) + ["", "", ""])[:3]
+            rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
+            if facts:
+                rows.append(Padding(Text(str(facts), style=body), (0, 0, 0, 4)))
+            if summary:
+                rows.append(Padding(Text(str(summary), style=body), (0, 0, 0, 4)))
+        rows.append(Text())
+        rows.append(Text("Send: /team <name> <message>", style=body))
+        return RichBlock(Group(*rows))
+
     def _run_slash_command(
         self, text: str, attachments: Mapping[int, Attachment] | None = None
     ) -> None:
@@ -9050,25 +9158,40 @@ class OperatorApp(App[None]):
             )
         }
         remote_capability = remote_capabilities.get(command)
+        # Bare ``/mcp`` is argument-dependent: its LISTING is canonical and
+        # renders locally from the follower's own snapshot facade, while its
+        # grant subcommands mutate owner-side OAuth state and must route. The
+        # capability is advertised authoritative (the shape needing the seam),
+        # so the bare form is pulled back to local here by inspecting args.
+        if command == "/mcp" and not arg:
+            remote_capability = None
         if (
             callable(remote_route)
             and remote_capability is not None
             and getattr(remote_capability.scope, "value", remote_capability.scope)
             == "authoritative_session"
         ):
+            # Bare ``/model`` opens the INVOKING terminal's own picker — there
+            # is nothing for the owner to paint, and hosting the widget here is
+            # the whole point of the interaction (the old routing opened it in
+            # the owner's process, invisible to the user who asked). Choosing a
+            # row still routes the switch back to the owner.
+            if command == "/model" and not arg:
+                self._system_notice(self._persist_hint_notice())
+                self._open_model_picker()
+                return
 
             async def run_remote_slash() -> None:
                 try:
                     typed_route = cast(
-                        Callable[[str, str, Sequence[ImageContent]], Awaitable[str]], remote_route
+                        Callable[[str, str, Sequence[ImageContent]], Awaitable[Any]], remote_route
                     )
                     images = resolve_markers(arg, attachments or {})
-                    detail = await typed_route(command.removeprefix("/"), arg, images)
+                    outcome = await typed_route(command.removeprefix("/"), arg, images)
                 except Exception as error:
                     self._system_notice(str(error), "warning")
                 else:
-                    if detail:
-                        notice(detail)
+                    self._render_authoritative_slash(command, arg, outcome)
 
             self.run_worker(run_remote_slash(), thread=False, group="session")
             return
@@ -12235,14 +12358,10 @@ class OperatorApp(App[None]):
         want to keep next to the task that prompted it, and the whole answer
         fits in seven rows.
         """
+        data = self._context_breakdown()
+        if data is None:
+            return None
         try:
-            session = self._session
-            if session is None:
-                return None
-            breakdown = getattr(session, "context_breakdown", None)
-            if not callable(breakdown):
-                return None
-            data = cast(dict[str, int], breakdown())
             total = data["total"]
             window = max(data["context_window"], 1)
             pct = total / window * 100
@@ -12272,6 +12391,285 @@ class OperatorApp(App[None]):
             return RichBlock(_tree_listing(items, "Estimated next request", detail_token="muted"))
         except Exception:
             return None
+
+    def _context_breakdown(self) -> dict[str, int] | None:
+        """The token-category dict behind ``/context``, or ``None`` when unknown.
+
+        Factored out of :meth:`_context_block` so the owner-side slash result
+        can return the same numbers as DATA — a follower renders its own block
+        locally, and computing the breakdown on the owner (which has the real
+        session) is the whole point of routing the command there.
+        """
+        try:
+            session = self._session
+            if session is None:
+                return None
+            breakdown = getattr(session, "context_breakdown", None)
+            if not callable(breakdown):
+                return None
+            return cast(dict[str, int], breakdown())
+        except Exception:
+            return None
+
+    # -- authoritative slash results (v5) -------------------------------------
+    async def run_slash_authoritative(
+        self, command: str, args: str, images: list[Any] | None = None
+    ) -> dict[str, Any]:
+        """Run one shared slash command and return its typed outcome as data.
+
+        The owner-side backend for a follower's ``route_shared_slash``: instead
+        of running the command's UI (which would paint in the OWNER's
+        transcript and leave the invoking terminal with a transport receipt),
+        this produces a :class:`SlashResult`-shaped dict the invoker renders
+        locally. Every product string below is built by the same handler a
+        local session would run, so the follower's receipt is byte-for-byte
+        the standard vocabulary. ``kind`` is ``notice`` for a printed line,
+        ``block`` for a renderable payload, ``noop`` when the follower opens
+        its own picker. Async because the MCP grant path awaits a browser
+        round trip; every other producer is synchronous work.
+
+        Only the commands a follower routes land here; process/terminal
+        commands stay local and never reach this dispatcher.
+        """
+        result = await self._slash_result(command, args, images)
+        return result.model_dump(mode="json")
+
+    async def _slash_result(self, command: str, args: str, images: list[Any] | None) -> Any:
+        from local_operator.session.frontend_state import SlashResult
+
+        if command == "context":
+            return self._context_slash_result(SlashResult)
+        if command == "goal":
+            return self._goal_slash_result(args, SlashResult)
+        if command == "rename":
+            return self._rename_slash_result(args, SlashResult)
+        if command == "effort":
+            return self._effort_slash_result(args, SlashResult)
+        if command == "mcp":
+            return await self._mcp_slash_result(args, SlashResult)
+        if command == "team":
+            return self._team_slash_result(args, SlashResult)
+        if command == "agent":
+            return self._agent_slash_result(args, SlashResult)
+        if command == "model":
+            # Bare /model opens the invoker's OWN picker — there is nothing for
+            # the owner to paint, so the result is a noop and the follower
+            # hosts the widget. A selector is a mutation: it is applied through
+            # the routed set_model on the follower's own RemoteSession.
+            return SlashResult(kind="noop")
+        # Unknown routed commands degrade to a receipt rather than a crash:
+        # the follower's dispatch is capability-driven, so a command it does
+        # not know must still answer something.
+        return SlashResult(kind="notice", text=f"ran /{command}", style="info")
+
+    def _context_slash_result(self, SlashResult: Any) -> Any:
+        data = self._context_breakdown()
+        if data is None:
+            return SlashResult(kind="notice", text="context breakdown unavailable.", style="info")
+        total = data["total"]
+        window = max(data["context_window"], 1)
+        pct = total / window * 100
+
+        def estimated(value: int) -> str:
+            return f"~{format_context_tokens(value)}"
+
+        rows = [
+            ("Instructions", estimated(data["instructions"])),
+            ("Tool inventory", estimated(data["tool_inventory"])),
+            ("Tool schemas", estimated(data["tool_schemas"])),
+            ("Environment", estimated(data["environment"])),
+            ("Skills / MCP / goal", estimated(data["knowledge_mcp_goal"])),
+            ("Messages", estimated(data["messages"])),
+            ("Total", f"{estimated(total)} / {format_window(window)} ({pct:.1f}%)"),
+        ]
+        if data["cache_read"]:
+            rows.append(("Last cache read (exact)", format_context_tokens(data["cache_read"])))
+        return SlashResult(
+            kind="block",
+            data={"type": "context", "items": rows, "title": "Estimated next request"},
+        )
+
+    def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        session = self._session
+        if session is None or not hasattr(session, "set_goal"):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if not arg:
+            current = session.goal
+            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
+            return SlashResult(kind="notice", text=text, style="info")
+        if arg.lower() in ("clear", "none", "reset"):
+            session.set_goal("")
+            return SlashResult(kind="notice", text="goal cleared", style="info")
+        stored = session.set_goal(arg)
+        from local_operator.session.goal import MAX_GOAL_CHARS
+
+        if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"goal set — shortened to the {MAX_GOAL_CHARS}-character cap, "
+                    "applies from the next turn"
+                ),
+                style="warning",
+                data={"stored": stored},
+            )
+        return SlashResult(
+            kind="notice",
+            text="goal set — applies from the next turn",
+            style="info",
+            data={"stored": stored},
+        )
+
+    def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        session = self._session
+        if session is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if not arg:
+            current = session.conversation_name
+            text = (
+                f"conversation: {current} — /rename <title> to change it"
+                if current
+                else "unnamed — /rename <title> names this conversation"
+            )
+            return SlashResult(kind="notice", text=text, style="info")
+        stored = session.set_conversation_name(arg, user_set=True)
+        return SlashResult(
+            kind="notice",
+            text=f"renamed: {stored} — auto-naming will not override it",
+            style="info",
+            data={"stored": stored},
+        )
+
+    def _effort_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        session = self._session
+        spec = _model_spec(session)
+        if session is None or spec is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        levels = self._effort_levels()
+        label = getattr(session, "model_label", "") or "this model"
+        if not levels:
+            return SlashResult(kind="notice", text=_effort_unavailable(label), style="info")
+        current = getattr(spec, "reasoning_effort", None)
+        wanted = arg.strip().lower()
+        if not wanted:
+            return SlashResult(
+                kind="notice",
+                text=self._effort_listing(levels, current),
+                style="info",
+            )
+        if wanted == "auto":
+            restored = default_effort(getattr(spec, "model_id", "") or "")
+            if not self._apply_effort(restored, remember=False):
+                return SlashResult(
+                    kind="notice", text="session cannot change model settings", style="warning"
+                )
+            destination = restored or "the provider's default"
+            scope = "(the model's own default)" if restored else "(nothing sent)"
+            return SlashResult(
+                kind="notice",
+                text=f"reasoning effort: {current or 'auto'} → {destination} {scope}",
+                style="info",
+            )
+        if wanted not in levels:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"unknown effort level {wanted!r} — this model takes "
+                    f"{' '.join(levels)}, or auto"
+                ),
+                style="warning",
+            )
+        if wanted == current:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"reasoning effort: already {wanted} — "
+                    "/effort auto restores the model's default"
+                ),
+                style="info",
+            )
+        if not self._apply_effort(wanted):
+            return SlashResult(
+                kind="notice", text="session cannot change model settings", style="warning"
+            )
+        return SlashResult(
+            kind="notice",
+            text=f"reasoning effort: {current or 'provider default'} → {wanted} (this session)",
+            style="info",
+        )
+
+    async def _mcp_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        parts = arg.split()
+        if not parts:
+            block = self._mcp_block()
+            if block is None:
+                return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
+            # The block renders from the SAME manager state; a follower builds
+            # its own block from its mcp facade, so the owner only answers the
+            # empty case. Non-empty status is canonical — the follower's
+            # ``_mcp_block`` reads the identical rows.
+            return SlashResult(kind="block", data={"type": "mcp"})
+        sub = parts[0].lower()
+        if sub not in ("login", "logout", "reauth"):
+            return SlashResult(
+                kind="notice",
+                text=f"unknown mcp subcommand: {parts[0]} — try /mcp login|logout|reauth <name>",
+                style="warning",
+            )
+        if len(parts) < 2:
+            return SlashResult(kind="notice", text=f"usage: /mcp {sub} <name>", style="warning")
+        # The grant runs HERE, on the authoritative owner: the follower's MCP
+        # facade is read-only and the OAuth credential store is the owner's.
+        # The interactive browser round trip opens on the owner's machine (the
+        # terminal that owns the session), and the settled receipt returns to
+        # the invoker as the result — the functional outcome is identical
+        # regardless of which terminal typed the command.
+        receipt = await self._run_mcp_grant_on_owner(sub, parts[1])
+        style = "success" if receipt.startswith(("authenticated", "logged out")) else "warning"
+        return SlashResult(kind="notice", text=receipt, style=style)
+
+    def _team_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        registry = self._team_registry()
+        if registry is None or not hasattr(registry, "list_teams"):
+            return SlashResult(
+                kind="notice",
+                text="teams are unavailable in this session. Ask the agent to create one.",
+                style="warning",
+            )
+        if not arg:
+            try:
+                teams = list(registry.list_teams())
+            except Exception as exc:
+                return SlashResult(
+                    kind="notice", text=f"could not list teams: {exc}", style="warning"
+                )
+            if not teams:
+                return SlashResult(
+                    kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
+                )
+            items = [
+                (
+                    team.name,
+                    f"Led by {team.manager} · {len(team.members) + 1} "
+                    f"{'role' if len(team.members) == 0 else 'roles'}",
+                    (team.description or "").strip(),
+                )
+                for team in teams
+            ]
+            return SlashResult(kind="block", data={"type": "team_list", "items": items})
+        return SlashResult(kind="noop", data={"type": "team_mutate", "args": arg})
+
+    def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        if not arg:
+            rows = self._agent_profile_rows()
+            if not rows:
+                return SlashResult(
+                    kind="notice",
+                    text="no agents yet. Ask the agent to create one.",
+                    style="info",
+                )
+            return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+        return SlashResult(kind="noop", data={"type": "agent_mutate", "args": arg})
 
     def _cmd_mcp(self, arg: str, notice: NoticeFn) -> None:
         """``/mcp`` lists servers; its subcommands manage OAuth grants.
@@ -12306,18 +12704,11 @@ class OperatorApp(App[None]):
             self._system_notice(f"usage: /mcp {sub} <name>", "warning")
             return
         name = parts[1]
-        manager = getattr(self._session, "mcp_manager", None)
-        if manager is None:
-            self._system_notice("MCP is not available in this session.", "warning")
+        resolved = self._resolve_mcp_server(name)
+        if isinstance(resolved, str):
+            self._system_notice(resolved, "warning")
             return
-        cfg = manager.get_server_config(name)
-        if cfg is None:
-            self._system_notice(f"MCP server {name!r} is not configured — see /mcp", "warning")
-            return
-        auth = getattr(cfg, "auth", None)
-        if auth is None or getattr(auth, "type", None) != "oauth":
-            self._system_notice(f"MCP server {name!r} does not use OAuth login.", "warning")
-            return
+        manager, cfg = resolved
         if sub == "logout":
             self._mcp_logout(manager, name, cfg)
             return
@@ -12342,6 +12733,81 @@ class OperatorApp(App[None]):
             group="mcp-login",
             exclusive=True,
         )
+
+    def _resolve_mcp_server(self, name: str) -> tuple[Any, Any] | str:
+        """The authoritative ``(manager, config)`` for ``name``, or a notice body.
+
+        Shared by the local handler and the owner-side grant worker so a
+        login/logout/reauth validates against the SAME server set from every
+        terminal: when the owner has no UI this worker is the terminal's whole
+        command, and it must see the real manager rather than a facade. Returns
+        a string (the warning to print) on every unavailable path so neither
+        caller duplicates the three refusal checks.
+        """
+        manager = getattr(self._session, "mcp_manager", None)
+        if manager is None:
+            return "MCP is not available in this session."
+        get_config = getattr(manager, "get_server_config", None)
+        if not callable(get_config):
+            # A remote follower exposes a read-only MCP facade with no config
+            # accessor; it never reaches this branch because its grant path is
+            # the worker below, but a reduced host could hand one here too.
+            return "MCP is not available in this session."
+        cfg = get_config(name)
+        if cfg is None:
+            return f"MCP server {name!r} is not configured — see /mcp"
+        auth = getattr(cfg, "auth", None)
+        if auth is None or getattr(auth, "type", None) != "oauth":
+            return f"MCP server {name!r} does not use OAuth login."
+        return manager, cfg
+
+    async def _run_mcp_grant_on_owner(self, sub: str, name: str) -> str:
+        """Run one MCP grant mutation against the REAL manager; return a receipt.
+
+        The interactive browser round trip is terminal-local (it pops a tab on
+        whatever machine runs it), so a FOLLOWER that owns its own terminal runs
+        the grant against its local MCP manager via ``_cmd_mcp`` and does not
+        need this. This path is for a follower that has no local MCP manager at
+        all — its session is a facade with a read-only MCP snapshot — and is
+        also the owner-side backend when the owner is itself headless. It does
+        the entire command and returns the line the invoker prints, so the
+        invoking terminal renders the receipt regardless of which machine
+        opened the browser.
+        """
+        resolved = self._resolve_mcp_server(name)
+        if isinstance(resolved, str):
+            return resolved
+        manager, cfg = resolved
+        if sub == "logout":
+            removed = self._mcp_logout(manager, name, cfg)
+            return (
+                f"logged out of MCP server {name!r} — its credential is removed and the "
+                "server will stay disconnected until /mcp login."
+                if removed
+                else f"MCP logout failed for {name!r} — see the owner transcript."
+            )
+        # login | reauth: the SAME interactive exchange ``_mcp_login_worker``
+        # runs, awaited here so the ack carries the settled outcome.
+        if sub == "reauth":
+            removed = self._mcp_logout(manager, name, cfg, verb="reauth", disconnect=False)
+            if not removed:
+                return f"MCP reauth failed for {name!r} — could not forget the stored grant."
+        from local_operator.mcp.auth import McpLoginCancelledError
+
+        if sub == "reauth":
+            try:
+                await manager.disconnect_server(name)
+            except Exception:  # noqa: BLE001 — a stuck teardown must not block the grant
+                logger.debug("MCP disconnect before reauth failed for %s", name, exc_info=True)
+        try:
+            conn = await manager.connect_configured_server(name, timeout_ms=600_000)
+        except asyncio.CancelledError:
+            raise
+        except McpLoginCancelledError as exc:
+            return f"MCP login for {name!r} cancelled: {exc}"
+        except Exception as exc:  # noqa: BLE001 — a failed grant is a notice, not a crash
+            return f"MCP login failed for {name!r}: {exc}"
+        return f"authenticated MCP server {name!r}; {len(conn.tools)} tools available."
 
     def _mcp_logout(
         self,

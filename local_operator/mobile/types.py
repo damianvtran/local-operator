@@ -149,6 +149,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("request_id must be a non-empty string")
         if not isinstance(frame.get("value"), str):
             raise ValueError("value must be a string")
+    elif op in ("slash", "slash_result"):
+        if not isinstance(frame.get("command"), str) or not frame["command"]:
+            raise ValueError("command must be a non-empty string")
+        if not isinstance(frame.get("args"), str):
+            raise ValueError("args must be a string")
+    elif op == "adopt_aside":
+        messages = frame.get("messages")
+        if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
+            raise ValueError("messages must be a list of message objects")
     elif op == "recall_steer":
         # v4: a follower unsending a queued steer names the message identity it
         # queued (the ContinuationCommand id that became the Message id). The

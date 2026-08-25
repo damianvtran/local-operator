@@ -889,6 +889,177 @@ async def test_every_authoritative_slash_routes_to_owner_with_supported_images()
 
 
 @pytest.mark.asyncio
+async def test_follower_renders_typed_slash_results_locally() -> None:
+    """A follower's routed slash renders the owner's typed outcome HERE, not a
+    transport receipt — and bare /model opens the invoker's own picker."""
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+    )
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append(command)
+            if command == "goal":
+                return {
+                    "kind": "notice",
+                    "text": "goal set — applies from the next turn",
+                    "style": "info",
+                    "data": {"stored": args},
+                }
+            if command == "mcp":
+                return {
+                    "kind": "notice",
+                    "text": "authenticated MCP server 'linear'; 12 tools available.",
+                    "style": "success",
+                }
+            return {"kind": "noop"}
+
+    routed: list[str] = []
+    session = RoutedSession()
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command=name, scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+            )
+            for name in ("goal", "model", "mcp")
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        # /goal renders the typed notice in the INVOKING transcript.
+        app._run_slash_command("/goal ship it")
+        for _ in range(60):
+            await pilot.pause()
+            if any("goal set" in (b.text() or "") for b in app.query(NoticeBlock)):
+                break
+        assert any(
+            "goal set — applies from the next turn" in (b.text() or "")
+            for b in app.query(NoticeBlock)
+        )
+        assert "goal" in routed
+
+        # /mcp login renders the grant receipt locally; no AttributeError.
+        app._run_slash_command("/mcp login linear")
+        for _ in range(60):
+            await pilot.pause()
+            if any("authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock)):
+                break
+        assert any("authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock))
+
+        # Bare /model opens the invoker's own picker; nothing routes.
+        routed.clear()
+        app._run_slash_command("/model")
+        await pilot.pause()
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        assert editor.text.startswith("/model ")
+        assert routed == []
+
+
+@pytest.mark.asyncio
+async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager() -> None:
+    """The follower's MCP facade is read-only (no get_server_config), so a grant
+    subcommand must ROUTE to the owner rather than reach the local handler —
+    the exact AttributeError crash from review U1/BLOCKER-1."""
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+        SnapshotMcpManager,
+    )
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append((command, args))
+            return {
+                "kind": "notice",
+                "text": "authenticated MCP server 'linear'; 3 tools available.",
+                "style": "success",
+            }
+
+    routed: list[tuple[str, str]] = []
+    session = RoutedSession()
+    # The read-only facade the production RemoteSession hands the app — the one
+    # whose get_server_config absence crashed the local /mcp login handler.
+    session.mcp_manager = SnapshotMcpManager()
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command="mcp", scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+            )
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        for subcommand in ("login linear", "logout linear", "reauth linear"):
+            app._run_slash_command(f"/mcp {subcommand}")
+            await pilot.pause()
+        for _ in range(60):
+            await pilot.pause()
+            if len(routed) == 3:
+                break
+        # All three grant subcommands routed; none reached the crashing local
+        # handler. The bare listing stays local (renders, does not route).
+        assert routed == [
+            ("mcp", "login linear"),
+            ("mcp", "logout linear"),
+            ("mcp", "reauth linear"),
+        ]
+        routed.clear()
+        app._run_slash_command("/mcp")
+        await pilot.pause()
+        await pilot.pause()
+        assert routed == []
+
+
+@pytest.mark.asyncio
+async def test_owner_slash_result_producers_match_local_handler_vocabulary() -> None:
+    """The owner's typed-result producers say what the local handlers say —
+    goal, rename, context, effort — so a follower's receipt is identical."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        goal = await app.run_slash_authoritative("goal", "ship it")
+        assert goal["kind"] == "notice"
+        assert "goal set — applies from the next turn" in goal["text"]
+        assert session.goal == "ship it"
+
+        bare_goal = await app.run_slash_authoritative("goal", "")
+        assert "goal: ship it" in bare_goal["text"]
+
+        renamed = await app.run_slash_authoritative("rename", "New title")
+        assert "renamed: New title" in renamed["text"]
+        assert session.conversation_name == "New title"
+
+        unknown = await app.run_slash_authoritative("mcp", "bogus x")
+        assert "unknown mcp subcommand" in unknown["text"]
+        assert unknown["style"] == "warning"
+
+
+@pytest.mark.asyncio
 async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, tmp_path) -> None:
     """A live owner becomes a RemoteSession in the existing OperatorApp.
 

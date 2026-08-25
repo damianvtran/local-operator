@@ -172,7 +172,10 @@ def test_slash_capabilities_classify_every_advertised_command_and_images() -> No
     assert set(capabilities) == {command.name for command in SLASH_COMMANDS}
     assert all(value.scope is not CommandScope.UNAVAILABLE for value in capabilities.values())
     assert capabilities["context"].scope is CommandScope.AUTHORITATIVE_SESSION
-    assert capabilities["mcp"].scope is CommandScope.FRONTEND_LOCAL
+    # ``/mcp`` is advertised authoritative because its grant subcommands route
+    # to the owner; the follower's dispatch keeps the BARE listing local from
+    # its canonical snapshot facade (see ``_run_slash_command``).
+    assert capabilities["mcp"].scope is CommandScope.AUTHORITATIVE_SESSION
     assert capabilities["btw"].scope is CommandScope.FRONTEND_LOCAL
     assert capabilities["agent"].supports_images is True
     assert capabilities["team"].supports_images is True

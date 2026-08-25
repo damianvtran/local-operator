@@ -96,6 +96,12 @@ _SEND_TIMEOUT_S = 1.0
 # reconnect through durable history + canonical frontend_sync instead of drift.
 _EVENT_QUEUE_MAX = 64
 
+# Ops whose answer is structured data (a typed slash result, a cancel count)
+# rather than a one-line receipt: they reply with a ``result`` frame so the
+# invoker renders the outcome locally instead of the owner's transcript
+# printing it.
+_PAYLOAD_OPS = {"slash_result", "cancel_subagents"}
+
 
 @dataclass
 class _ClientConn:
@@ -638,6 +644,16 @@ class Registrant:
                 else:
                     self.phone_watchers = max(0, self.phone_watchers - 1)
                 detail = f"watchers: {self.phone_watchers}"
+            elif op in _PAYLOAD_OPS:
+                # Structured-answer ops reply with a ``result`` frame whose
+                # ``data`` the invoker renders locally (a slash command's typed
+                # outcome, a cancel's authoritative count) rather than a
+                # one-line receipt that would paint in the owner's transcript.
+                data = await self._dispatch_payload(op, frame)
+                await self._send_to(conn, {"op": "result", "req": req, "data": data})
+                await self._handle.refresh()
+                await self._push()
+                return
             else:
                 detail = await self._dispatch(op, frame)
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
@@ -735,6 +751,39 @@ class Registrant:
                 frame["value"],
                 question_index=question_index,
             )
+        if op == "adopt_aside":
+            adopt = getattr(h, "adopt_aside", None)
+            if not callable(adopt):
+                raise ValueError("this owner cannot adopt an aside")
+            result = adopt(list(frame.get("messages") or []))
+            if not inspect.isawaitable(result):
+                raise ValueError("owner adopt_aside operation must be awaitable")
+            return await result
+        raise ValueError(f"unknown op: {op!r}")
+
+    async def _dispatch_payload(self, op: str, frame: dict[str, Any]) -> Any:
+        """Structured-answer ops: the return value becomes the ``result`` data."""
+        h = self._handle
+        if op == "slash_result":
+            run = getattr(h, "run_slash_authoritative", None)
+            if not callable(run):
+                raise ValueError("this owner cannot run typed slash results")
+            result = run(
+                str(frame.get("command", "")),
+                str(frame.get("args", "")),
+                list(frame.get("images") or []),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        if op == "cancel_subagents":
+            cancel = getattr(h, "cancel_subagents_count", None)
+            if not callable(cancel):
+                raise ValueError("this owner cannot cancel subagents")
+            result = cancel()
+            if inspect.isawaitable(result):
+                result = await result
+            return result if isinstance(result, int) else 0
         raise ValueError(f"unknown op: {op!r}")
 
     # -- v5 frontend state relay ----------------------------------------------

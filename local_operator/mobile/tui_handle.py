@@ -64,6 +64,21 @@ async def _await_future(future: asyncio.Future[Any]) -> Any:
 _image_blocks = image_blocks
 
 
+def _decode_attachments(images: list[dict[str, str]] | None) -> dict[int, Any]:
+    """Rebuild the composer's index→attachment map from wire image blocks.
+
+    Shared by ``slash_images`` and the routed-slash path so both hand the
+    dispatch the same ``{1: Attachment, …}`` shape the composer would have
+    produced had the images been attached locally.
+    """
+    from local_operator.tui.widgets.editor import Attachment
+
+    return {
+        index: Attachment(image=image, marker=f"[Image #{index}]")
+        for index, image in enumerate(_image_blocks(images), start=1)
+    }
+
+
 class TuiSessionHandle(SessionHandle):
     def __init__(self, app: "OperatorApp") -> None:
         self._app = app
@@ -364,18 +379,81 @@ class TuiSessionHandle(SessionHandle):
         line = f"/{command}" + (f" {args}" if args else "")
 
         def apply() -> None:
-            from local_operator.tui.widgets.editor import Attachment
-
-            decoded = _image_blocks(images)
-            attachments = {
-                index: Attachment(image=image, marker=f"[Image #{index}]")
-                for index, image in enumerate(decoded, start=1)
-            }
-            self._app._run_slash_command(line, attachments)
+            self._app._run_slash_command(line, _decode_attachments(images))
 
         await self._on_app(apply)
         self._refresh_state()
         return f"ran {line}"
+
+    async def run_slash_authoritative(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None,
+    ) -> dict[str, Any]:
+        """Run one shared slash command and return its typed outcome.
+
+        The owner-side backend for a follower's ``route_shared_slash``. Unlike
+        ``slash_images`` — which runs the command's UI in the OWNER's terminal
+        and returns a ``ran /…`` receipt — this asks the app for a
+        :class:`SlashResult` payload the INVOKING terminal renders locally, so
+        ``/goal``/``/rename``/``/mcp``/``/context`` answer where they were
+        typed. The producer is a coroutine (the MCP grant awaits a browser
+        round trip), so it is scheduled on the app loop and its completion
+        awaited here — unbounded, because an OAuth grant legitimately outlives
+        the UI-hop timeout ``_on_app`` enforces, and a cancelled request
+        unwinds the grant cleanly through the task.
+        """
+        owner_loop = await self._on_app(asyncio.get_running_loop)
+        done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+
+        def schedule() -> None:
+            task = owner_loop.create_task(
+                self._app.run_slash_authoritative(command, args, list(images or []))
+            )
+
+            def finish(completed: asyncio.Task[Any]) -> None:
+                if completed.cancelled():
+                    done.get_loop().call_soon_threadsafe(
+                        _set_unless_done, done, None, asyncio.CancelledError()
+                    )
+                    return
+                error = completed.exception()
+                done.get_loop().call_soon_threadsafe(
+                    _set_unless_done,
+                    done,
+                    None if error else completed.result(),
+                    error,
+                )
+
+            task.add_done_callback(finish)
+
+        self._app.call_from_thread(schedule)
+        result = await done
+        return result if isinstance(result, dict) else {"kind": "notice", "text": f"ran /{command}"}
+
+    async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
+        """Fork a follower's aside exchange into the authoritative conversation."""
+        from local_operator.harness.types import Message
+
+        parsed = [Message.model_validate(message) for message in messages]
+        session = self._session()
+        owner_loop = await self._on_app(asyncio.get_running_loop)
+        future = asyncio.run_coroutine_threadsafe(session.adopt_aside(parsed), owner_loop)
+        await asyncio.wrap_future(future)
+        self._refresh_state()
+        return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+
+    def cancel_subagents_count(self) -> int:
+        """Cancel every running subagent on the owner; return the REAL count."""
+        session = self._session()
+        cancel = getattr(session, "cancel_subagents", None)
+        if not callable(cancel):
+            return 0
+        result = cancel("interrupted")
+        stopped = result if isinstance(result, int) else 0
+        self._refresh_state()
+        return stopped
 
     async def new_conversation(self) -> str:
         def apply() -> None:
