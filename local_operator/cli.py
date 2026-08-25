@@ -926,8 +926,24 @@ def browser_command(args: argparse.Namespace) -> int:
         return 0 if result["healthy"] else 1
     if command == "pair":
         if args.reset:
+            # File unlink here; the running daemon's revocation watcher (and
+            # the per-request pairing re-check) sever any LIVE socket within a
+            # few seconds, so a revoked browser loses drive authority now, not
+            # only at its next reconnect (findings A5/U1).
             reset_pairing()
-            print("revoked the paired browser; reconnect the extension to get a new code.")
+            print(
+                "revoked the paired browser; any live connection is dropped within a few seconds."
+            )
+            # A successful revoke must not report failure to a wrapping script
+            # even when no extension is currently waiting to pair (UX-N1).
+            pair = pairing_status()
+            code = pair.get("pending_code")
+            if code:
+                print(f"pairing code: {code}")
+                print("enter this 6-digit code in the Local Operator extension popup.")
+            else:
+                print("open the extension popup to pair a browser again.")
+            return 0
         pair = pairing_status()
         code = pair.get("pending_code")
         if code:

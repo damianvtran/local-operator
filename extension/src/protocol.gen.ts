@@ -31,8 +31,12 @@ export interface PairResult { event: 'pair_result'; ok: boolean; token: string; 
 export interface Ping { event: 'ping'; }
 export interface Pong { event: 'pong'; }
 export interface TabClosed { event: 'tab_closed'; tab: string; }
+export interface TabUpdate { event: 'tab_update'; url: string; title: string; }
+export interface AwaitingOrigin { event: 'awaiting_origin'; id: string; origin: string; }
+export interface Unpair { event: 'unpair'; }
 export interface OriginDecision {
   event: 'origin_decision'; origin: string; decision: 'once' | 'always' | 'deny';
 }
-export type ExtensionEvent = Hello | PairRequest | Pong | TabClosed | OriginDecision;
+export type ExtensionEvent =
+  | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | Unpair | OriginDecision;
 export type DaemonMessage = HelloAck | PairResult | Ping | Request;

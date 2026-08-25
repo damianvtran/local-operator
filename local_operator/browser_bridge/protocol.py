@@ -95,6 +95,32 @@ class TabClosed(WireModel):
     tab: str
 
 
+class TabUpdate(WireModel):
+    """Extension -> daemon: the driven tab navigated. Lets the daemon report the
+    current page to the Connected popup without an extra RPC (finding U3)."""
+
+    event: Literal["tab_update"] = "tab_update"
+    url: str = ""
+    title: str = ""
+
+
+class AwaitingOrigin(WireModel):
+    """Extension -> daemon: a command is blocked on a human origin decision, so
+    the daemon extends that command's deadline past the base timeout (A3) and
+    can surface the pending site (U2)."""
+
+    event: Literal["awaiting_origin"] = "awaiting_origin"
+    id: str
+    origin: str = ""
+
+
+class Unpair(WireModel):
+    """Extension -> daemon: the options page revoked pairing, so the daemon must
+    drop the live socket, not merely the next reconnect (findings A5/U1)."""
+
+    event: Literal["unpair"] = "unpair"
+
+
 class OriginDecision(WireModel):
     event: Literal["origin_decision"] = "origin_decision"
     origin: str
