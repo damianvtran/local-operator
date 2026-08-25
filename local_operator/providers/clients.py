@@ -112,6 +112,44 @@ def _first_text(*candidates: Any) -> str:
     return ""
 
 
+def _usage_token(raw_usage: Mapping[str, Any], *names: str) -> int:
+    """Return the first provider token counter present under ``names``.
+
+    OpenAI-compatible describes a transport, not a shared usage schema. Kimi and
+    DeepSeek put cache hits directly on ``usage`` while OpenAI, xAI, Mistral,
+    Z.AI, Alibaba, and OpenRouter use ``prompt_tokens_details.cached_tokens``.
+    Normalizing the aliases at the wire boundary keeps analytics and pricing from
+    silently charging a cache hit at the full input rate.
+    """
+    for name in names:
+        value = raw_usage.get(name)
+        if value is not None:
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                # A malformed optional detail must not abort an otherwise valid
+                # stream; treating it as absent preserves the authoritative totals.
+                continue
+    return 0
+
+
+def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int, int]:
+    """Normalize cache read/write counters across OpenAI-compatible providers."""
+    details = raw_usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, Mapping):
+        details = {}
+    if "cached_tokens" in details:
+        # Presence wins even for zero: a standard field explicitly reporting a
+        # miss is more authoritative than a stray provider compatibility alias.
+        cache_read = _usage_token(details, "cached_tokens")
+    else:
+        # Kimi's documented field is ``cached_tokens``; DeepSeek's is
+        # ``prompt_cache_hit_tokens``. Both are subsets of ``prompt_tokens``.
+        cache_read = _usage_token(raw_usage, "cached_tokens", "prompt_cache_hit_tokens")
+    cache_write = _usage_token(details, "cache_write_tokens")
+    return cache_read, cache_write
+
+
 def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
     """A provider's own precomputed dollar cost for one request, or ``None``.
 
@@ -1187,19 +1225,13 @@ class OpenAICompatClient:
                     raise _compat_stream_error(chunk)
                 if isinstance(chunk.get("usage"), Mapping):
                     raw = chunk["usage"]
-                    details = raw.get("prompt_tokens_details") or {}
+                    cache_read, cache_write = _compat_cache_usage(raw)
                     completion_details = raw.get("completion_tokens_details") or {}
                     usage = Usage(
                         input_tokens=int(raw.get("prompt_tokens", 0)),
                         output_tokens=int(raw.get("completion_tokens", 0)),
-                        cache_read_tokens=int(
-                            details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
-                        ),
-                        cache_write_tokens=int(
-                            details.get("cache_write_tokens", 0)
-                            if isinstance(details, Mapping)
-                            else 0
-                        ),
+                        cache_read_tokens=cache_read,
+                        cache_write_tokens=cache_write,
                         # The thinking slice of the completion, when the wire
                         # separates it. A SUBSET of ``completion_tokens`` (see
                         # ``Usage.reasoning_tokens``), so analytics can split
@@ -1375,15 +1407,14 @@ class OpenAICompatClient:
                     raw = response_obj.get("usage") or {}
                     if raw:
                         details = raw.get("input_tokens_details") or {}
+                        if not isinstance(details, Mapping):
+                            details = {}
                         output_details = raw.get("output_tokens_details") or {}
                         usage = Usage(
                             input_tokens=int(raw.get("input_tokens", 0)),
                             output_tokens=int(raw.get("output_tokens", 0)),
-                            cache_read_tokens=int(
-                                details.get("cached_tokens", 0)
-                                if isinstance(details, Mapping)
-                                else 0
-                            ),
+                            cache_read_tokens=_usage_token(details, "cached_tokens"),
+                            cache_write_tokens=_usage_token(details, "cache_write_tokens"),
                             # Responses breaks reasoning out under
                             # ``output_tokens_details``. A SUBSET of
                             # ``output_tokens`` (see ``Usage.reasoning_tokens``).
@@ -2130,11 +2161,22 @@ class GoogleClient:
                     refusal_marker = f"promptFeedback.blockReason={feedback['blockReason']}"
                 raw_usage = chunk.get("usageMetadata")
                 if raw_usage:
+                    # Gemini reports thinking and tool-use prompt tokens outside
+                    # the ordinary candidate/prompt counters, but includes both in
+                    # ``totalTokenCount`` and bills them at the corresponding
+                    # output/input rates. Dropping them makes a thinking or grounded
+                    # call look materially cheaper than the provider's own usage.
+                    prompt_tokens = _usage_token(raw_usage, "promptTokenCount")
+                    tool_tokens = _usage_token(raw_usage, "toolUsePromptTokenCount")
+                    candidate_tokens = _usage_token(raw_usage, "candidatesTokenCount")
+                    thought_tokens = _usage_token(raw_usage, "thoughtsTokenCount")
+                    input_tokens = prompt_tokens + tool_tokens
                     usage = Usage(
-                        input_tokens=int(raw_usage.get("promptTokenCount", 0)),
-                        output_tokens=int(raw_usage.get("candidatesTokenCount", 0)),
-                        cache_read_tokens=int(raw_usage.get("cachedContentTokenCount", 0)),
-                        context_tokens=int(raw_usage.get("promptTokenCount", 0)) or None,
+                        input_tokens=input_tokens,
+                        output_tokens=candidate_tokens + thought_tokens,
+                        cache_read_tokens=_usage_token(raw_usage, "cachedContentTokenCount"),
+                        context_tokens=input_tokens or None,
+                        reasoning_tokens=thought_tokens,
                     )
 
         if usage is not None:

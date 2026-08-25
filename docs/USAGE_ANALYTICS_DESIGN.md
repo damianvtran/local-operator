@@ -28,6 +28,26 @@ over time" — because:
 - it is grouped by provider/session, never by calendar day/month;
 - the `/analytics` screen showed totals and breakdown tables, no time series.
 
+### 1.1 Cost semantics and current billing-mode limit
+
+Provider-reported account charges take precedence over catalogue arithmetic. In
+particular, OpenRouter's final streaming `usage.cost` is persisted on the call,
+summed across tool-loop calls, and reused by analytics and the TUI instead of
+reconstructing a routed request from a flat model price. When no receipt exists,
+the displayed dollar amount remains a token-price estimate.
+
+The estimate cannot yet be labelled reliably as metered spend versus an API-rate
+equivalent for every call. Credential selection happens inside the failover
+iterator, which currently stamps only the serving `provider` and `model_id` onto
+`Usage`; it does not expose the selected credential's identity or kind. Inferring
+billing from the provider id would be wrong because one id can rotate between API
+keys and OAuth credentials, and provider variants include token-plan and local
+endpoints with different economics. Billing provenance therefore needs a new
+per-attempt field stamped beside the serving identity after credential selection,
+then preserved through transcript, subagent, analytics, and TUI aggregation.
+Until that contract exists, the implementation deliberately does not guess a
+billing mode from the session's selected provider.
+
 ## 2. The extension
 
 Two **rollup tables** maintained by the ledger's own write path, plus a

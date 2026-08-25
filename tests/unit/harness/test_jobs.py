@@ -46,10 +46,8 @@ async def quick_runner(job_id, signal, report_progress):
     return f"done:{job_id}"
 
 
-def test_accumulate_usage_sums_provider_reported_dollars() -> None:
-    """A tool-using child's money is spread across its per-message usage, and the
-    runner's accumulator must sum the provider-reported dollar the same way it
-    sums the token buckets — never take only the last message's figure."""
+def test_accumulate_usage_preserves_provider_reported_calls() -> None:
+    """A tool-using child's receipts stay attached to their original calls."""
     from local_operator.harness.subagent import _accumulate_usage
 
     class _Job:
@@ -61,30 +59,8 @@ def test_accumulate_usage_sums_provider_reported_dollars() -> None:
     _accumulate_usage(job, Usage(input_tokens=20, output_tokens=0, usd_cost=0.002))
     assert job.usage is not None
     assert job.usage.input_tokens == 30
-    assert job.usage.usd_cost == pytest.approx(0.003)
-
-
-def test_accumulate_usage_non_finite_reported_dollar_does_not_poison_total() -> None:
-    """A non-finite child figure (``inf``/``NaN``, wire-reachable via
-    ``json.loads``) must be dropped, not summed: ``inf + x == inf`` would pin the
-    child's running total at infinity for the rest of its life with no recovery."""
-    import math
-
-    from local_operator.harness.subagent import _accumulate_usage
-
-    class _Job:
-        def __init__(self) -> None:
-            self.usage = None
-
-    job = _Job()
-    _accumulate_usage(job, Usage(input_tokens=10, output_tokens=0, usd_cost=0.001))
-    _accumulate_usage(job, Usage(input_tokens=20, output_tokens=0, usd_cost=float("inf")))
-    assert job.usage is not None
-    # The poison message is dropped; only the valid one contributes, and a later
-    # valid message still folds in cleanly because the total was never poisoned.
-    _accumulate_usage(job, Usage(input_tokens=5, output_tokens=0, usd_cost=0.002))
-    assert job.usage.usd_cost == pytest.approx(0.003)
-    assert job.usage.usd_cost is not None and math.isfinite(job.usage.usd_cost)
+    assert job.usage.usd_cost is None
+    assert [component.usd_cost for component in job.usage.cost_components] == [0.001, 0.002]
 
 
 def test_accumulate_usage_leaves_reported_dollar_none_when_unreported() -> None:
@@ -103,6 +79,36 @@ def test_accumulate_usage_leaves_reported_dollar_none_when_unreported() -> None:
     assert job.usage is not None
     assert job.usage.usd_cost is None
     assert job.usage.input_tokens == 30
+    assert len(job.usage.cost_components) == 2
+
+
+def test_accumulate_usage_mixes_receipt_and_estimated_calls_without_double_counting() -> None:
+    """A receipt covers only its call; another child's call remains estimated."""
+    from local_operator.harness.subagent import _accumulate_usage
+    from local_operator.model.registry import ModelInfo
+    from local_operator.tui.costs import job_cost
+
+    class _Job:
+        def __init__(self) -> None:
+            self.usage = None
+            self.model_label = "test/model"
+
+    job = _Job()
+    _accumulate_usage(
+        job,
+        Usage(
+            input_tokens=1_000_000,
+            usd_cost=0.001,
+            provider="openrouter",
+            model_id="routed",
+        ),
+    )
+    _accumulate_usage(job, Usage(input_tokens=1_000_000, provider="test", model_id="model"))
+    priced = ModelInfo(id="model", name="model", description="", input_price=20.0)
+    from unittest.mock import patch
+
+    with patch("local_operator.model.configure.resolve_model_info", return_value=priced):
+        assert job_cost(job) == pytest.approx(20.001)
 
 
 @pytest.mark.asyncio

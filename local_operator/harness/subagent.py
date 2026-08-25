@@ -662,24 +662,27 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
         return
     total = job.usage
     if total is None:
-        job.usage = usage.model_copy()
+        first = usage.model_copy()
+        first.cost_components = [
+            component.model_copy() for component in usage.cost_components or [usage]
+        ]
+        # An aggregate receipt is meaningful only when it covers the aggregate.
+        # Components retain each call's receipt, so leave the outer field unset
+        # and force readers through the provenance-preserving path.
+        first.usd_cost = None
+        job.usage = first
         return
     total.input_tokens += usage.input_tokens
     total.output_tokens += usage.output_tokens
     total.cache_read_tokens += usage.cache_read_tokens
     total.cache_write_tokens += usage.cache_write_tokens
-    # A provider-reported dollar amount is summed the same way the token buckets
-    # are: a tool-using child's money is spread across its earlier calls, not
-    # its last one. ``None`` keeps the "not reported" meaning distinct from a
-    # real zero; a message that DID report folds its amount in, and messages
-    # that did not (mix-and-match is not a real provider today) leave it alone.
-    # Floored via the pricing helper so a malformed or negative amount cannot
-    # inflate a credit into the child's running total.
-    from local_operator.model.configure import _usage_cost
-
-    amount = _usage_cost(usage)
-    if amount is not None:
-        total.usd_cost = (total.usd_cost or 0.0) + amount
+    # Child failover can mix provider receipts and table-priced calls. Preserve
+    # every original call so the TUI can price each one independently instead of
+    # treating one receipt as authoritative for the aggregate token buckets.
+    total.cost_components.extend(
+        component.model_copy() for component in usage.cost_components or [usage]
+    )
+    total.usd_cost = None
     if usage.context_tokens is not None:
         total.context_tokens = usage.context_tokens
 

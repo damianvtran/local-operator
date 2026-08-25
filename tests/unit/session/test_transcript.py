@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.harness.types import CustomMessage, Message, ToolContext
+from local_operator.harness.types import CustomMessage, Message, ToolContext, Usage
 from local_operator.mcp.tool_bridge import format_mcp_result
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
@@ -36,6 +36,46 @@ async def test_append_message_writes_jsonl(transcript):
     assert raw["type"] == "message"
     assert raw["payload"]["role"] == "user"
     assert raw["payload"]["content"][0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_usage_cost_round_trips_and_old_rows_default_to_unreported(transcript):
+    """Provider receipts are durable, while pre-receipt transcripts still load.
+
+    ``exclude_defaults`` omits an absent cost from new rows exactly as old builds
+    did. A reported zero must remain present because it means billed-as-free, not
+    "the provider did not say".
+    """
+    charged = Message.assistant("charged")
+    charged.usage = Usage(input_tokens=12, output_tokens=3, usd_cost=0.00125)
+    free = Message.assistant("free")
+    free.usage = Usage(input_tokens=4, output_tokens=1, usd_cost=0.0)
+    await transcript.append_message(charged)
+    await transcript.append_message(free)
+
+    raw_rows = [json.loads(line) for line in transcript.path.read_text().splitlines()]
+    assert raw_rows[0]["payload"]["usage"]["usd_cost"] == pytest.approx(0.00125)
+    assert raw_rows[1]["payload"]["usage"]["usd_cost"] == 0.0
+
+    replayed = Transcript(transcript.directory).build_llm_history()
+    assert isinstance(replayed[0], Message)
+    assert replayed[0].usage is not None
+    assert replayed[0].usage.usd_cost == pytest.approx(0.00125)
+    assert isinstance(replayed[1], Message)
+    assert replayed[1].usage is not None
+    assert replayed[1].usage.usd_cost == 0.0
+
+    # This is the exact usage shape written before ``usd_cost`` existed. Pydantic
+    # must supply the default rather than rejecting the whole assistant message.
+    old = Message.model_validate(
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "old"}],
+            "usage": {"input_tokens": 9, "output_tokens": 2},
+        }
+    )
+    assert old.usage is not None
+    assert old.usage.usd_cost is None
 
 
 @pytest.mark.asyncio
