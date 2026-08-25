@@ -350,13 +350,15 @@ async def bench_parallel_boot(instances: int = 5, sessions: int = 1000) -> dict[
     store fixture, plus the first-boot migration cost once.
     """
     import concurrent.futures
-
     import tempfile as _tempfile
 
     store = _build_store(Path(_tempfile.mkdtemp()), sessions)
 
     def one_pass() -> float:
-        from local_operator.resume import backfill_session_origins, backfill_session_titles
+        from local_operator.resume import (
+            backfill_session_origins,
+            backfill_session_titles,
+        )
 
         started = time.perf_counter()
         backfill_session_origins(store)

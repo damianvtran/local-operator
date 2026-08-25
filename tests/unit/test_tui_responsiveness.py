@@ -987,14 +987,14 @@ async def test_tui_wires_mcp_status_when_deferred_wiring_lands(tmp_path: Path) -
     import os
 
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp_path)
+    from unittest.mock import patch
+
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
     from local_operator.session_factory import create_session
     from local_operator.tui.app import OperatorApp
     from tests.unit.test_session_factory import _args
-
-    from unittest.mock import patch
 
     wired = _asyncio.Event()
 
