@@ -98,7 +98,7 @@ English (`en`). Single language at launch; the app itself ships English-only.
 
 CWS has no separate keyword field — search indexes the title and
 description — so these terms are woven into the copy above (verify they
-survive edits): 
+survive edits):
 
 - AI agent, browser agent, agent for your browser
 - Local Operator, local AI, on-device, open source

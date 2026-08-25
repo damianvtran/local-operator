@@ -129,7 +129,9 @@ listing or release notes.
 
 Questions about this extension or this policy can be sent to:
 
-**Radient, Inc.**  
+**Radient, Inc.**
+
 Email: **[ASSUMPTION: insert the public privacy/support email before hosting;
-neither source document supplies one]**  
+neither source document supplies one]**
+
 Website: https://local-operator.com
