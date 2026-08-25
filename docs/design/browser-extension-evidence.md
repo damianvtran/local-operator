@@ -130,5 +130,9 @@ not browser-bridge paths: conversation-name persistence and mobile registrant
 discovery. Re-running those exact two node IDs immediately in isolation passed
 `2 passed`. A focused final regression suite covering the bridge, all existing
 browser-tool tests, CLI style, and import boundaries passed `145 passed`.
-A serial full-suite rerun was started to remove xdist scheduling pressure; its
-final result is recorded in the PR.
+A serial full-suite rerun to remove xdist scheduling pressure also finished
+`6755 passed, 2 failed, 7 skipped`, but with two different unrelated failures:
+background bash process-group cancellation and subagent-view scroll anchoring.
+Those exact two node IDs immediately passed in isolation (`2 passed`). Across
+both full runs the browser bridge tests remained green; the changing failures
+are recorded honestly as pre-existing timing-sensitive full-suite instability.
