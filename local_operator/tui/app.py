@@ -1320,6 +1320,10 @@ class OperatorApp(App[None]):
         #: the splash is never wrong, and a swap out of an empty session has to
         #: hide it before the replacement's first block mounts under it.
         self._swapping_session = False
+        # Session construction may wait on discovery or a remote owner's sync.
+        # Keep the existing composer visually unchanged, but make its submit
+        # boundary atomic so text cannot land in the conversation being left.
+        self._session_transition_pending = False
         #: A show `_set_welcome_visible` withheld during a swap. Applied by
         #: `_reload_session` once the answer is settled, which is what still
         #: puts the splash up for a swap onto a genuinely empty session.
@@ -3422,15 +3426,38 @@ class OperatorApp(App[None]):
                 # Discovery scans the filesystem; run it as a worker so the
                 # UI thread never blocks on it, and settle attach-vs-refuse
                 # when the record is in hand.
-                self.run_worker(
-                    self._attach_or_refuse(config_dir(), concrete, owner),
-                    thread=False,
-                    group="session",
-                )
+                self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
                 return
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
-        self.run_worker(self._reload_session(), thread=False, group="session")
+        self._run_session_transition(self._reload_session())
+
+    def _run_session_transition(self, operation: Awaitable[None]) -> None:
+        """Run one session replacement behind the standard composer boundary.
+
+        The guard is intentionally state-only: no banner, status segment, card,
+        or attach-specific treatment appears while a live owner synchronizes.
+        The old transcript remains visible and drafts remain editable, but Enter
+        cannot address the old session once the user has asked to leave it.
+        """
+        self._session_transition_pending = True
+        self.run_worker(
+            self._finish_session_transition(operation),
+            thread=False,
+            group="session",
+        )
+
+    async def _finish_session_transition(self, operation: Awaitable[None]) -> None:
+        try:
+            await operation
+        finally:
+            # Both success and refusal/failure reopen the same ordinary composer:
+            # either the new session is now authoritative or the old one remains.
+            self._session_transition_pending = False
+
+    def composer_submission_blocked(self) -> bool:
+        """Whether Editor must retain rather than submit its current draft."""
+        return self._session_transition_pending
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
         """Build a RemoteSession and adopt it like any ordinary resume.
@@ -3509,7 +3536,7 @@ class OperatorApp(App[None]):
             return
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
         notice("starting a new session…")
-        self.run_worker(self._reload_session(), thread=False, group="session")
+        self._run_session_transition(self._reload_session())
 
     def _team_registry(self) -> Any | None:
         """The session's team registry, or None when the host keeps none."""
@@ -4782,6 +4809,21 @@ class OperatorApp(App[None]):
     # -- input --------------------------------------------------------------
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
+        if self._session_transition_pending:
+            # Enter is normally intercepted inside Editor before it clears. Keep
+            # this second boundary for mouse/programmatic submits: the event may
+            # already have been posted, so return the draft rather than routing
+            # it to the old session or silently losing it.
+            editor = self._editor()
+            recorded = message.text
+            if message.shell and not message.text.lstrip().startswith("!"):
+                recorded = f"! {message.text}"
+            editor.forget_last_prompt(recorded)
+            if not editor.text:
+                editor.load_text(message.text)
+                editor.adopt_attachments(message.attachments)
+                editor.set_shell_mode(message.shell)
+            return
         text = message.text.strip()
         images = message.images
         # Only `text` is checked: an attachment cannot exist without its

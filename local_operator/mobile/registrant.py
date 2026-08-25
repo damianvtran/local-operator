@@ -92,6 +92,11 @@ _MAX_LINE_BYTES = 1 << 20
 # bound, dropping that peer is safer than blocking authority-bearing ACKs for
 # every healthy front end.
 _SEND_TIMEOUT_S = 1.0
+# Raw events are lossless only while a follower keeps pace. One bounded FIFO per
+# event client prevents a non-reader from retaining an unbounded stream before
+# its active drain reaches the timeout; overflow drops that client so it can
+# reconnect through history + attach_sync rather than observe a gapped stream.
+_EVENT_QUEUE_MAX = 64
 
 
 @dataclass
@@ -122,6 +127,12 @@ class _ClientConn:
     # guarantees a joining client never sees an event the seed already covers
     # (welcome → seed → live events, gapless and duplicate-free).
     events_ready: bool = False
+    event_queue: asyncio.Queue[dict[str, Any]] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
+    )
+    # Exactly one writer drains the queue, so delivery stays ordered without a
+    # task per event. Held for shutdown and slow-client eviction.
+    event_writer_task: asyncio.Task[None] | None = None
 
 
 class SessionHandle(Protocol):
@@ -206,8 +217,8 @@ class Registrant:
         # client's seed is exactly consistent with the frames already sent.
         self._live_turn = LiveTurnTracker()
         self._unsubscribe_events: Callable[[], None] | None = None
-        # Strong references to in-flight event sends: a bare create_task can
-        # be collected mid-flight, which drops frames silently.
+        # Strong references to the one event writer per subscribed client. A
+        # bare create_task can be collected mid-flight, which drops frames.
         self._event_sends: set[asyncio.Task[None]] = set()
         # N authenticated connections keyed by id(writer): one daemon (a new
         # daemon dial evicts the old — that IS its reconnect story) plus up to
@@ -544,6 +555,15 @@ class Registrant:
         and attach-cap eviction all funnel here so the registry can never
         retain an entry whose socket is closed (the reaper counts them)."""
         self._clients.pop(id(conn.writer), None)
+        task = conn.event_writer_task
+        conn.event_writer_task = None
+        if task is not None:
+            self._event_sends.discard(task)
+            # A send timeout drops its own connection from inside this task.
+            # Cancelling self here would interrupt the cleanup path at its next
+            # await and leave the stream close only half-observed.
+            if task is not asyncio.current_task():
+                task.cancel()
         try:
             conn.writer.close()
         except Exception:  # noqa: BLE001
@@ -675,9 +695,9 @@ class Registrant:
         Folding into the live-turn tracker and snapshotting the recipient set
         happen SYNCHRONOUSLY here — that, plus the seed block in
         ``_on_connection``, is what makes a mid-turn join gapless (see the
-        comment there). The actual sends are per-connection tasks so one slow
-        follower cannot delay the others; per-connection order is kept by the
-        connection's FIFO ``send_lock``.
+        comment there). Each connection owns one bounded FIFO writer: a slow
+        follower cannot delay healthy peers or accumulate tasks indefinitely,
+        while a healthy follower receives every frame in emission order.
 
         Daemon connections are never in the recipient set: the phone's
         projection path is byte-identical to v3 by construction.
@@ -694,9 +714,36 @@ class Registrant:
             return
         frame = {"op": "event", "data": data}
         for conn in recipients:
-            task = asyncio.create_task(self._send_to(conn, frame))
-            self._event_sends.add(task)
-            task.add_done_callback(self._event_sends.discard)
+            try:
+                conn.event_queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                # A raw stream cannot recover from one dropped frame. Remove the
+                # peer immediately; reconnect rebuilds from durable history and
+                # a fresh bounded live-turn seed.
+                self._drop_client(conn)
+                continue
+            if conn.event_writer_task is None:
+                task = asyncio.create_task(self._drain_event_queue(conn))
+                conn.event_writer_task = task
+                self._event_sends.add(task)
+                task.add_done_callback(self._event_sends.discard)
+
+    async def _drain_event_queue(self, conn: _ClientConn) -> None:
+        """Drain one follower's raw event FIFO until it is dropped."""
+        try:
+            while id(conn.writer) in self._clients and not self._closed.is_set():
+                frame = await conn.event_queue.get()
+                try:
+                    await self._send_to(conn, frame)
+                finally:
+                    conn.event_queue.task_done()
+                if id(conn.writer) not in self._clients:
+                    return
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if conn.event_writer_task is asyncio.current_task():
+                conn.event_writer_task = None
 
     # -- pushes ----------------------------------------------------------------
 

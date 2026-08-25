@@ -93,7 +93,7 @@ class FakeHandle:
         return await self._record("approval_answer", request_id, approved, remember)
 
     async def ask_answer(self, request_id, value, question_index=None):  # noqa: ANN001, ANN202
-        return await self._record("ask_answer", request_id, value)
+        return await self._record("ask_answer", request_id, value, question_index)
 
     async def refresh(self) -> None:
         pass
@@ -450,6 +450,81 @@ async def test_concurrent_producers_ack_once_and_converge(op: str) -> None:
             writer.close()
     finally:
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_order(
+    monkeypatch,
+) -> None:
+    """One slow writer has one bounded task; a healthy peer sees ordered events."""
+    from local_operator.harness.types import NoticeEvent
+    from local_operator.mobile import registrant as registrant_module
+
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    await registrant.start_in_process()
+    slow_reader = slow_writer = healthy_writer = None
+    blocked = asyncio.Event()
+    original_send = registrant._send_to
+    try:
+        record = registrant._record
+        slow_reader, slow_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        slow_writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await slow_writer.drain()
+        assert json.loads(await slow_reader.readline())["op"] == "projection"
+        assert json.loads(await slow_reader.readline())["op"] == "attach_sync"
+        assert len(registrant._clients) == 1
+        slow_conn = next(iter(registrant._clients.values()))
+
+        healthy_reader, healthy_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        healthy_writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await healthy_writer.drain()
+        assert json.loads(await healthy_reader.readline())["op"] == "projection"
+        assert json.loads(await healthy_reader.readline())["op"] == "attach_sync"
+
+        async def block_only_slow(conn, frame):  # noqa: ANN001, ANN202
+            if conn is slow_conn and frame.get("op") == "event":
+                await blocked.wait()
+                return
+            await original_send(conn, frame)
+
+        monkeypatch.setattr(registrant, "_send_to", block_only_slow)
+        total = registrant_module._EVENT_QUEUE_MAX * 2
+        for index in range(total):
+            handle.emit_event(NoticeEvent(text=f"event-{index}", kind="info"))
+            # Healthy writer gets scheduling opportunities while the deliberately
+            # blocked peer's one writer remains unable to consume its FIFO.
+            await asyncio.sleep(0)
+
+        # The slow client is dropped on overflow rather than retaining one task
+        # per event. The only remaining event writer belongs to the healthy peer.
+        assert id(slow_conn.writer) not in registrant._clients
+        assert len(registrant._event_sends) <= 1
+        assert slow_conn.event_queue.qsize() <= registrant_module._EVENT_QUEUE_MAX
+
+        received = []
+        deadline = asyncio.get_running_loop().time() + 2
+        while len(received) < total and asyncio.get_running_loop().time() < deadline:
+            frame = json.loads(await asyncio.wait_for(healthy_reader.readline(), timeout=1))
+            if frame.get("op") == "event":
+                received.append(frame["data"]["text"])
+        assert received == [f"event-{index}" for index in range(total)]
+    finally:
+        blocked.set()
+        for writer in (slow_writer, healthy_writer):
+            if writer is not None:
+                writer.close()
+        await registrant.aclose()
 
 
 @pytest.mark.asyncio

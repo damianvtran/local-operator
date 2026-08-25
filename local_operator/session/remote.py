@@ -144,7 +144,10 @@ class RemoteSession:
         self._approval_handler: ApprovalGate | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
-        self._gate_id = ""
+        # One ask card keeps its request id while advancing through questions.
+        # The question index is therefore part of the gate identity: request id
+        # alone made Q2 look like a duplicate of Q1 and stranded the owner gate.
+        self._gate_key: tuple[str, str, int] | None = None
         self._disposed = False
         self._recovering = False
         self._recovery_task: asyncio.Task[None] | None = None
@@ -315,14 +318,24 @@ class RemoteSession:
 
     # -- gate bridging ------------------------------------------------------
 
+    @staticmethod
+    def _gate_identity(pending: PendingRequest | None) -> tuple[str, str, int] | None:
+        if pending is None:
+            return None
+        # Approvals never advance in place, so their synthetic index stays at
+        # zero. Ask position must travel end-to-end because one request id names
+        # the whole picker rather than one question within it.
+        question_index = pending.question_index if pending.kind == "ask" else 0
+        return (pending.kind, pending.request_id, question_index)
+
     def _sync_gate(self, pending: PendingRequest | None) -> None:
-        pending_id = pending.request_id if pending else ""
-        if pending_id == self._gate_id:
+        key = self._gate_identity(pending)
+        if key == self._gate_key:
             return
         if self._gate_task is not None:
             self._gate_task.cancel()
             self._gate_task = None
-        self._gate_id = pending_id
+        self._gate_key = key
         if pending is not None:
             self._maybe_start_gate(pending)
 
@@ -352,7 +365,7 @@ class RemoteSession:
             # the card.
             pass
         finally:
-            if self._gate_id == pending.request_id:
+            if self._gate_key == self._gate_identity(pending):
                 self._gate_task = None
 
     async def _run_ask(self, pending: PendingRequest) -> None:
@@ -384,7 +397,7 @@ class RemoteSession:
         except (asyncio.CancelledError, RuntimeError):
             pass
         finally:
-            if self._gate_id == pending.request_id:
+            if self._gate_key == self._gate_identity(pending):
                 self._gate_task = None
 
     # -- owner loss ---------------------------------------------------------
