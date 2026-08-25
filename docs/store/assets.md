@@ -169,3 +169,45 @@ is safer.
 - [ ] View the 128 px icon at actual size on both light and dark backgrounds.
 - [ ] Keep editable source files and record fonts/colors used so future store
       updates are reproducible.
+
+## Produced assets (inventory complete)
+
+All shippable PNGs live in `docs/store/assets/` and are regenerated
+deterministically by `docs/store/assets/build_assets.py` (Pillow, no manual
+image-editor steps). Re-run with `.venv/bin/python docs/store/assets/build_assets.py`.
+
+| File | Size | Role | Source frame |
+|---|---:|---|---|
+| `store-icon-128.png` | 128 × 128 | Store icon | `static/local-operator-icon-2-light-clear.png` glyph on off-white plate |
+| `screenshot-1-connected.png` | 1280 × 800 | Connected / driving (hero) | `popup-connected.png` |
+| `screenshot-2-allow-site.png` | 1280 × 800 | Per-site allow prompt | `popup-origin-prompt.png` |
+| `screenshot-3-pairing.png` | 1280 × 800 | Pairing (no account) | `popup-pairing.png` |
+| `screenshot-4-agent-driving.png` | 1280 × 800 | Agent drives one tab | `action-screenshot-page2.png` + `popup-connected.png` |
+| `screenshot-5-options.png` | 1280 × 800 | Options / allowed sites | `options-populated.png` |
+| `promo-small-440x280.png` | 440 × 280 | Small promo tile | brand chip + wordline |
+| `promo-marquee-1400x560.png` | 1400 × 560 | Marquee promo tile | `action-screenshot-page2.png` + `popup-connected.png` |
+
+**Production facts (for reproducible store updates):**
+
+- Compositor: `build_assets.py`, Pillow 12.3, LANCZOS downsampling.
+- Type: Helvetica Neue (`/System/Library/Fonts/HelveticaNeue.ttc`) — Bold for
+  headlines/name, Regular for captions — matching the extension's system sans.
+- Palette: canvas `#181818`, backplate `#F7F7F9`, ink `#111113`, secondary
+  caption `#C4C4CC` on dark, accent red `#B03A2E` (the extension's own
+  deny/unpair red). Sampled from `icons-on-dark.png` and the rendered frames.
+- Store-icon treatment: the validated `icons-on-dark.png` backplate — a solid
+  off-white rounded square carrying the black glyph — verified at actual size
+  on both a white and a dark card (the plate supplies its own contrast on dark;
+  a hairline `#E2E2E6` border gives it an edge on white). Not transparent.
+- Captions are drawn from `listing.md`'s own section headings; none promise
+  multi-tab, active-tab takeover, downloads/uploads, Firefox/Safari, or remote
+  access.
+
+**Known caveat — Chrome debugger banner (checklist §"debugger notice"):** the
+supplied `action-screenshot-page2.png` capture is the page content only and
+does not include Chrome's "…is debugging this browser" info bar. Screenshot 4
+therefore conveys the agent-owns-this-tab fact through the popup's `Driving:
+Page Two` line and the connected state rather than the browser banner. Before
+final upload, re-capture the agent-driving frame with the debugger banner
+visible (design §9.5 attaches CDP to the delegated tab) and drop it in as the
+new source — `build_assets.py` will recomposite it unchanged.

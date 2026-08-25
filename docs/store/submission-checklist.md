@@ -92,18 +92,34 @@ build or from copy that no longer matches the manifest.
 
 ## 4. Produce and verify listing assets
 
-- [ ] Export a 128 × 128 store icon from the source/crop documented in
+- [x] Export a 128 × 128 store icon from the source/crop documented in
       `assets.md`; inspect it at actual size on light and dark backgrounds.
-- [ ] Capture five real 1280 × 800 release-build screenshots following the
+      → `docs/store/assets/store-icon-128.png`, verified on white and dark cards.
+- [x] Capture five real 1280 × 800 release-build screenshots following the
       `assets.md` storyboard: connected, pairing, site prompt, live
       terminal/browser work, and reconnecting.
-- [ ] Export the 440 × 280 small promo tile.
-- [ ] Export the optional 1400 × 560 marquee tile now if a designer is
+      → `docs/store/assets/screenshot-{1..5}-*.png`. **Storyboard deviation:**
+      the fifth panel ships as the options/allowed-sites view
+      (`everything stays on your machine`) rather than the reconnecting state,
+      per the task brief's requested five states (connected, allow, pairing,
+      agent-driving, options). The disconnected/reconnecting frame
+      (`popup-disconnected.png`) remains available if the reconnecting story is
+      preferred for slot 5.
+- [x] Export the 440 × 280 small promo tile.
+      → `docs/store/assets/promo-small-440x280.png`.
+- [x] Export the optional 1400 × 560 marquee tile now if a designer is
       available; it avoids a separate merchandising scramble.
-- [ ] Verify no personal data or still-valid pairing code appears in any image.
+      → `docs/store/assets/promo-marquee-1400x560.png`.
+- [x] Verify no personal data or still-valid pairing code appears in any image.
+      Sources are demo frames (`example.com` origins, empty pairing field,
+      `127.0.0.1` test page); no account avatar, email, or live code present.
 - [ ] Confirm the agent-work screenshot shows a real completed path and
-      Chrome's debugger disclosure rather than hiding it.
-- [ ] Keep original captures and editable compositions with the release record.
+      Chrome's debugger disclosure rather than hiding it. **Open:** screenshot 4
+      shows the completed path (`Page Two` reached, popup `Driving:` line) but
+      the supplied capture omits Chrome's debugger banner. Re-capture with the
+      banner visible before upload; see the caveat in `assets.md`.
+- [x] Keep original captures and editable compositions with the release record.
+      → `build_assets.py` regenerates every PNG from the committed source frames.
 
 ## 5. Create the dashboard item
 
