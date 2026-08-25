@@ -5,7 +5,12 @@ h2 { font-size: 14px; color: #5b5b60; text-transform: uppercase; letter-spacing:
 section { background: #fff; border: 1px solid #ececf0; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
 label { display: block; font-size: 12px; color: #5b5b60; margin: 8px 0 4px; }
 input { padding: 7px 8px; border: 1px solid #d4d4d8; border-radius: 6px; font: inherit; }
-.hint { color: #7a7a80; font-size: 12px; }
+/* #56565d meets WCAG AA (4.5:1) on the #fafafc page background; #7a7a80 did
+ * not (finding D6). */
+.hint { color: #56565d; font-size: 12px; }
+.status { font-size: 13px; color: #17171c; margin: 0 0 12px; }
+.confirm { font-size: 12px; color: #1f7a3d; margin: 10px 0 0; }
+.empty { color: #56565d; font-size: 13px; margin: 8px 0 0; }
 button { padding: 7px 12px; border: 1px solid #d4d4d8; background: #fff; border-radius: 6px; font: inherit; cursor: pointer; }
 button.danger { border-color: #c2331d; color: #c2331d; margin-top: 12px; }
 ul { list-style: none; padding: 0; margin: 0; }

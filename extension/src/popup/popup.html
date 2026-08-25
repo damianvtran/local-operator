@@ -6,35 +6,53 @@
   </head>
   <body>
     <header><img src="../icons/icon-32.png" alt="" /><h1>Local Operator</h1></header>
+
     <section id="connected" class="state hidden">
       <p class="title">Connected.</p>
       <p class="sub">Local Operator can use this browser.</p>
       <p class="detail" id="connected-detail"></p>
     </section>
+
     <section id="pairing" class="state hidden">
       <p class="title">Waiting to pair.</p>
       <p class="sub">Enter the code shown in Local Operator.</p>
       <form id="pair-form">
         <label for="pair-code">Pairing code</label>
-        <input id="pair-code" inputmode="numeric" maxlength="6" autocomplete="off" />
+        <input
+          id="pair-code"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          maxlength="6"
+          autocomplete="one-time-code"
+          aria-describedby="pair-error"
+        />
         <button type="submit">Pair</button>
       </form>
-      <p class="error hidden" id="pair-error"></p>
+      <p class="error hidden" id="pair-error" role="alert"></p>
     </section>
+
     <section id="disconnected" class="state">
       <p class="title">Not connected.</p>
-      <p class="sub">Open Local Operator to reconnect.</p>
+      <p class="sub">Local Operator isn't reachable on this computer. Make sure it's running (<code>lop browser status</code>).</p>
       <button id="retry">Retry</button>
     </section>
-    <section id="origin" class="state hidden">
-      <p class="title" id="origin-title"></p>
-      <p class="sub">The agent wants to open a page on this site. It will use your current login. You can take this back any time in Settings.</p>
-      <div class="row">
-        <button id="origin-deny">Not this site</button>
-        <button id="origin-allow">Allow</button>
-      </div>
-      <label class="check"><input type="checkbox" id="origin-always" /> Always allow this site</label>
+
+    <section id="incompatible" class="state hidden">
+      <p class="title">Update needed.</p>
+      <p class="sub">This extension and the Local Operator app speak different versions. Update both to the latest, then reopen this popup. Pairing won't fix a version mismatch.</p>
+      <button id="retry-incompatible">Check again</button>
     </section>
+
+    <section id="origin" class="state hidden" role="alertdialog" aria-labelledby="origin-title" aria-describedby="origin-body">
+      <p class="title" id="origin-title"></p>
+      <p class="sub" id="origin-body">The agent wants to open a page on this site with your current login. It can only use sites you allow, and you can take this back any time in Settings.</p>
+      <div class="row">
+        <button id="origin-allow" class="primary">Allow once</button>
+        <button id="origin-always">Always allow</button>
+      </div>
+      <button id="origin-deny" class="deny">Deny</button>
+    </section>
+
     <footer><a href="../options/options.html" target="_blank">Settings</a></footer>
     <script type="module" src="popup.js"></script>
   </body>

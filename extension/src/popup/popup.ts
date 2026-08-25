@@ -1,38 +1,96 @@
 import { DEFAULT_PORT, getLocal, getSession } from "../state";
 
-const sections = ["connected", "pairing", "disconnected", "origin"].map((id) => document.getElementById(id));
+type State = "connected" | "pairing" | "disconnected" | "incompatible" | "origin";
+const sections = ["connected", "pairing", "disconnected", "incompatible", "origin"].map((id) =>
+  document.getElementById(id),
+);
 
-function show(id: string): void {
-  for (const section of sections) section?.classList.toggle("hidden", section.id !== id);
+interface Health {
+  extension_connected: boolean;
+  paired: boolean;
+  browser: string;
+  current_url?: string;
+  current_title?: string;
+  pending_origin?: string;
 }
 
-async function daemonState(): Promise<{ connected: boolean; paired: boolean; browser: string } | null> {
+function show(state: State): void {
+  for (const section of sections) section?.classList.toggle("hidden", section.id !== state);
+  if (state === "pairing") {
+    const input = document.getElementById("pair-code") as HTMLInputElement | null;
+    input?.focus();
+  }
+}
+
+async function daemonHealth(): Promise<Health | null> {
   const { port = DEFAULT_PORT } = await getLocal();
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`);
     if (!response.ok) return null;
-    return (await response.json()) as { connected: boolean; paired: boolean; browser: string };
+    return (await response.json()) as Health;
   } catch {
     return null;
   }
 }
 
 async function render(): Promise<void> {
+  // A pending site decision wins the popup: it is the one thing the user must
+  // act on (findings U2/D1). The daemon reports it in /health so the popup
+  // shows it even after a worker restart.
   const { pendingOrigin } = await getSession();
-  if (pendingOrigin) {
+  const health = await daemonHealth();
+  const pendingHost = pendingOrigin?.hostname || hostnameOf(health?.pending_origin);
+  if (pendingHost) {
     const title = document.getElementById("origin-title");
-    if (title) title.textContent = `Let the agent use ${pendingOrigin.hostname}?`;
+    if (title) title.textContent = `Let the agent use ${pendingHost}?`;
     show("origin");
     return;
   }
-  const daemon = await daemonState();
-  if (!daemon) show("disconnected");
-  else if (daemon.paired) {
+
+  // The worker records the last close reason so a protocol mismatch renders
+  // "Update needed" rather than sending the user back to code entry (D2).
+  const { connState } = (await chrome.storage.session.get(["connState"])) as {
+    connState?: string;
+  };
+  if (!health) {
+    show(connState === "incompatible" ? "incompatible" : "disconnected");
+    return;
+  }
+  if (connState === "incompatible") {
+    show("incompatible");
+    return;
+  }
+  if (health.paired) {
+    // Name the site the agent is driving so the user can see it without
+    // hunting for a background tab (finding U3).
     const detail = document.getElementById("connected-detail");
-    if (detail) detail.textContent = daemon.browser || "";
+    if (detail) {
+      const url = health.current_url;
+      detail.textContent = url
+        ? `Driving: ${health.current_title ? `${health.current_title} — ` : ""}${url}`
+        : "No page open yet.";
+    }
     show("connected");
-  } else show("pairing");
+    return;
+  }
+  show("pairing");
 }
+
+function hostnameOf(origin: string | undefined): string {
+  if (!origin) return "";
+  try {
+    return new URL(origin).hostname;
+  } catch {
+    return origin;
+  }
+}
+
+// Keep the pairing field to digits so a desktop keyboard cannot enter letters
+// (finding U6); the field is also autofocused when the pairing state renders.
+const codeInput = document.getElementById("pair-code") as HTMLInputElement | null;
+codeInput?.addEventListener("input", () => {
+  codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
+});
 
 document.getElementById("pair-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -40,18 +98,29 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
   const error = document.getElementById("pair-error");
   if (!input || !error) return;
   error.classList.add("hidden");
-  const { token } = await getLocal();
-  const { port = DEFAULT_PORT } = await getLocal();
+  const { token, port = DEFAULT_PORT } = await getLocal();
   try {
     const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
     await new Promise((resolve, reject) => {
       wire.onopen = resolve;
       wire.onerror = reject;
     });
-    wire.send(JSON.stringify({ event: "hello", proto: 1, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent }));
-    await new Promise((resolve) => { wire.onmessage = resolve; });
+    wire.send(
+      JSON.stringify({
+        event: "hello",
+        proto: 1,
+        token: token ?? "",
+        extension_version: chrome.runtime.getManifest().version,
+        browser: navigator.userAgent,
+      }),
+    );
+    await new Promise((resolve) => {
+      wire.onmessage = resolve;
+    });
     wire.send(JSON.stringify({ event: "pair", code: input.value.trim() }));
-    const verdict = await new Promise<MessageEvent>((resolve) => { wire.onmessage = resolve; });
+    const verdict = await new Promise<MessageEvent>((resolve) => {
+      wire.onmessage = resolve;
+    });
     const frame = JSON.parse(String(verdict.data)) as {
       event: string;
       ok: boolean;
@@ -59,16 +128,16 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       message?: string;
     };
     if (frame.ok && frame.token) {
-      // Pairing runs on a short popup-owned socket, which deliberately replaces
-      // the worker socket. Persist before closing so the worker's reconnect can
-      // authenticate instead of returning to the unpaired state.
       await chrome.storage.local.set({ token: frame.token });
       wire.close();
       await new Promise((resolve) => setTimeout(resolve, 250));
       await render();
     } else {
-      error.textContent = frame.message ?? "That code didn't match. Codes expire after two minutes — check the app for a fresh one.";
+      error.textContent =
+        frame.message ??
+        "That code didn't match. Codes expire after two minutes — check the app for a fresh one.";
       error.classList.remove("hidden");
+      input.focus();
     }
   } catch {
     error.textContent = "Could not reach Local Operator on this machine.";
@@ -77,16 +146,21 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 });
 
 document.getElementById("retry")?.addEventListener("click", () => void render());
-document.getElementById("origin-allow")?.addEventListener("click", async () => {
-  const always = (document.getElementById("origin-always") as HTMLInputElement | null)?.checked;
-  await decide(always ? "always" : "once");
-});
+document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
+document.getElementById("origin-allow")?.addEventListener("click", () => void decide("once"));
+document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
 
 async function decide(decision: "once" | "always" | "deny"): Promise<void> {
   const { pendingOrigin } = await getSession();
   if (pendingOrigin) {
-    await chrome.runtime.sendMessage({ event: "origin_decision", requestId: pendingOrigin.requestId, decision });
+    // Decisions are keyed by ORIGIN so a redirect chain resolves each hop
+    // independently (finding A6).
+    await chrome.runtime.sendMessage({
+      event: "origin_decision",
+      origin: pendingOrigin.origin,
+      decision,
+    });
   }
   await render();
 }

@@ -10,15 +10,18 @@
       <h1>Local Operator</h1>
       <section>
         <h2>Connection</h2>
+        <p class="status" id="pair-status">Checking status…</p>
         <label for="port">Daemon port</label>
         <input id="port" type="number" min="1024" max="65535" />
         <p class="hint">Change this only if you changed the port in Local Operator.</p>
         <button id="unpair" class="danger">Unpair this browser</button>
+        <p class="confirm hidden" id="confirm" role="status" aria-live="polite"></p>
       </section>
       <section>
         <h2>Allowed sites</h2>
         <p class="hint">The agent can open a site only after you allow it, and you can take that back any time here.</p>
         <ul id="sites"></ul>
+        <p class="empty hidden" id="sites-empty">No sites allowed yet.</p>
       </section>
     </main>
     <script type="module" src="options.js"></script>

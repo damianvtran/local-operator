@@ -21,8 +21,32 @@ TARGETS = {
 }
 
 
+#: Brand-safe backplate colour. The shipped mark is a black glyph on
+#: transparency, which vanishes on dark toolbar/store chrome (finding D3). A
+#: light rounded backplate keeps the glyph legible on BOTH light and dark
+#: surfaces without inventing a new brand colour — it is the same off-white the
+#: popup header sits on.
+BACKPLATE = (247, 247, 249, 255)
+#: Corner radius and inset as fractions of the icon edge, so the rounded plate
+#: and glyph padding scale identically at 16/32/48/128.
+RADIUS_FRACTION = 0.22
+INSET_FRACTION = 0.16
+
+
+def _rounded_plate(size: int):
+    """An opaque rounded-square backplate at the target size."""
+    from PIL import Image, ImageDraw
+
+    plate = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    mask = Image.new("L", (size, size), 0)
+    radius = max(2, round(size * RADIUS_FRACTION))
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=255)
+    plate.paste(Image.new("RGBA", (size, size), BACKPLATE), (0, 0), mask)
+    return plate
+
+
 def render(*, write: bool = True) -> dict[int, bytes]:
-    """Resize the square logo mark from the oversized marketing artwork."""
+    """Composite the square logo mark onto a rounded backplate at each size."""
     from PIL import Image
 
     with Image.open(SOURCE) as opened:
@@ -44,10 +68,15 @@ def render(*, write: bool = True) -> dict[int, bytes]:
     for size, path in TARGETS.items():
         import io
 
+        plate = _rounded_plate(size)
+        # Inset the glyph so it never touches the plate edge or the rounded
+        # mask, keeping the figure clear at 16 px.
+        inset = max(1, round(size * INSET_FRACTION))
+        glyph_size = size - 2 * inset
+        glyph = source.resize((glyph_size, glyph_size), Image.Resampling.LANCZOS)
+        plate.paste(glyph, (inset, inset), glyph)
         buffer = io.BytesIO()
-        source.resize((size, size), Image.Resampling.LANCZOS).save(
-            buffer, format="PNG", optimize=True
-        )
+        plate.save(buffer, format="PNG", optimize=True)
         rendered[size] = buffer.getvalue()
         if write:
             path.write_bytes(rendered[size])

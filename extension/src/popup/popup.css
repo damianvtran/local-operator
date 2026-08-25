@@ -1,21 +1,124 @@
-body { font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; width: 300px; }
-header { display: flex; align-items: center; gap: 8px; padding: 12px 16px 4px; }
-header img { width: 24px; height: 24px; }
-h1 { font-size: 14px; margin: 0; letter-spacing: 0.01em; }
-.state { padding: 4px 16px 12px; }
-.title { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
-.sub { color: #5b5b60; margin: 0 0 10px; }
-.detail { color: #7a7a80; font-size: 12px; margin: 0 0 8px; }
-label { display: block; font-size: 12px; color: #5b5b60; margin: 8px 0 4px; }
-input { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid #d4d4d8; border-radius: 6px; font: inherit; }
-button { padding: 7px 12px; border: 1px solid #d4d4d8; background: #fff; border-radius: 6px; font: inherit; cursor: pointer; }
-button:hover { background: #f4f4f5; }
-#pair-form button, #origin-allow { background: #17171c; border-color: #17171c; color: #fff; }
-#pair-form button:hover, #origin-allow:hover { background: #2e2e35; }
-.row { display: flex; gap: 8px; }
-.row button { flex: 1; }
-.check { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
-.error { color: #c2331d; font-size: 12px; margin: 8px 0 0; }
-footer { border-top: 1px solid #ececf0; padding: 8px 16px; }
-footer a { color: #6d6d74; font-size: 12px; text-decoration: none; }
-.hidden { display: none !important; }
+/* Fixed 300px popup. Every control must stay within this width — a security
+ * decision that overflows the popup (finding D1) is a decision the user cannot
+ * read. Contrast tokens meet WCAG AA on white (finding D6). */
+body {
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  margin: 0;
+  width: 300px;
+  color: #17171c;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 4px;
+}
+header img {
+  width: 24px;
+  height: 24px;
+}
+h1 {
+  font-size: 14px;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+.state {
+  padding: 4px 16px 12px;
+}
+.title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 6px 0 2px;
+}
+.sub {
+  color: #48484f;
+  margin: 0 0 10px;
+}
+.sub code {
+  font-size: 12px;
+  background: #f2f2f5;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+/* The driven-site line. Long URLs/UA strings must wrap, never overflow the
+ * 300px popup (finding N4). */
+.detail {
+  color: #56565d;
+  font-size: 12px;
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+label {
+  display: block;
+  font-size: 12px;
+  color: #48484f;
+  margin: 8px 0 4px;
+}
+input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border: 1px solid #d4d4d8;
+  border-radius: 6px;
+  font: inherit;
+}
+button {
+  padding: 7px 12px;
+  border: 1px solid #d4d4d8;
+  background: #fff;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+  color: #17171c;
+}
+button:hover {
+  background: #f4f4f5;
+}
+button.primary,
+#pair-form button {
+  background: #17171c;
+  border-color: #17171c;
+  color: #fff;
+}
+button.primary:hover,
+#pair-form button:hover {
+  background: #2e2e35;
+}
+button.deny {
+  width: 100%;
+  margin-top: 8px;
+  border-color: #d0463040;
+  color: #a62c1a;
+}
+button.deny:hover {
+  background: #fdf3f1;
+}
+/* The three consent choices read as one decision: Allow once / Always allow on
+ * a row, Deny full-width beneath. No checkbox to overflow the flex row
+ * (finding D1); the three labels are explicit (findings D5/N3). */
+.row {
+  display: flex;
+  gap: 8px;
+}
+.row button {
+  flex: 1;
+  min-width: 0;
+}
+.error {
+  color: #a62c1a;
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+footer {
+  border-top: 1px solid #ececf0;
+  padding: 8px 16px;
+}
+footer a {
+  color: #56565d;
+  font-size: 12px;
+  text-decoration: none;
+}
+.hidden {
+  display: none !important;
+}
