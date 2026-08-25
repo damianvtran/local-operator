@@ -119,6 +119,7 @@ from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
 if TYPE_CHECKING:
     from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness.comms import SubagentComms
     from local_operator.harness.jobs import AsyncJobManager
     from local_operator.mcp.manager import McpManager
     from local_operator.session.session import Session
@@ -412,18 +413,14 @@ def _make_runner(
             # records outlive them so a child stays resumable, and without
             # this the roster (``hub op='list'``) could not say whether a
             # swept child finished or crashed.
-            if comms is not None:
-                # The manager writes the same text to its job row only after
-                # this runner returns. Persist it here with the outcome so a
-                # sweep or reconnect cannot leave the completed detail empty.
-                comms.record_outcome(job_id, "completed", result_text=result_text)
-            await emit(
-                SubagentEndEvent(
-                    job_id=job_id,
-                    label=label,
-                    status="completed",
-                    result_text=result_text,
-                )
+            await _publish_terminal_outcome(
+                comms,
+                emit,
+                job=job,
+                job_id=job_id,
+                label=label,
+                status="completed",
+                result_text=result_text,
             )
             return result_text
         except asyncio.CancelledError:
@@ -438,19 +435,14 @@ def _make_runner(
             # arrives here too (it cancels underneath); record_outcome leaves
             # the record's ``paused`` flag alone precisely so the roster can
             # still tell the two apart.
-            outcome = comms.record_outcome(job_id, "cancelled") if comms is not None else None
-            status, error_text, result_text = outcome or ("cancelled", None, None)
             with contextlib.suppress(BaseException):
-                await asyncio.shield(
-                    emit(
-                        SubagentEndEvent(
-                            job_id=job_id,
-                            label=label,
-                            status=status,
-                            error_text=error_text,
-                            result_text=result_text,
-                        )
-                    )
+                await _publish_terminal_outcome(
+                    comms,
+                    emit,
+                    job=job,
+                    job_id=job_id,
+                    label=label,
+                    status="cancelled",
                 )
             raise
         except Exception as exc:
@@ -458,10 +450,14 @@ def _make_runner(
             # is what the roster shows for a failed child once the row is
             # swept, which is the state an operator is most likely to be
             # looking at when they ask what went wrong.
-            if comms is not None:
-                comms.record_outcome(job_id, "failed", str(exc))
-            await emit(
-                SubagentEndEvent(job_id=job_id, label=label, status="failed", error_text=str(exc))
+            await _publish_terminal_outcome(
+                comms,
+                emit,
+                job=job,
+                job_id=job_id,
+                label=label,
+                status="failed",
+                error_text=str(exc),
             )
             raise
         finally:
@@ -585,6 +581,60 @@ async def _dispose_child(child: "Session") -> None:
         pass  # the shielded dispose task continues without us
     except Exception:
         logger.warning("subagent child session dispose failed", exc_info=True)
+
+
+async def _publish_terminal_outcome(
+    comms: "SubagentComms | None",
+    emit: Callable[[AgentEvent], Awaitable[None]],
+    *,
+    job: Any,
+    job_id: str,
+    label: str,
+    status: str,
+    error_text: str | None = None,
+    result_text: str | None = None,
+) -> tuple[str, str | None, str | None]:
+    """Resolve and deliver the one terminal fact owned by a child run.
+
+    A terminal outcome exists before its parent event fan-out. Cancellation in
+    that fan-out must therefore interrupt delivery, not rewrite completion or
+    failure into cancellation. Retrying the interrupted fan-out also reaches
+    subscribers skipped when an earlier subscriber was cancelled.
+    """
+    outcome = (
+        comms.record_outcome(
+            job_id,
+            status,
+            error_text=error_text,
+            result_text=result_text,
+        )
+        if comms is not None
+        else None
+    )
+    resolved_status, resolved_error, resolved_result = outcome or (
+        status,
+        error_text,
+        result_text,
+    )
+    event = SubagentEndEvent(
+        job_id=job_id,
+        label=label,
+        status=resolved_status,
+        error_text=resolved_error,
+        result_text=resolved_result,
+    )
+    try:
+        await emit(event)
+    except asyncio.CancelledError:
+        # ``jobs.cancel`` stamps cancellation before interrupting this runner.
+        # The terminal fact already won, so restore its live row before retrying
+        # delivery to handlers skipped by the interrupted fan-out.
+        if job is not None:
+            job.status = resolved_status
+            job.error_text = resolved_error
+            job.result_text = resolved_result
+        await emit(event)
+    return resolved_status, resolved_error, resolved_result
 
 
 def _make_relay(
