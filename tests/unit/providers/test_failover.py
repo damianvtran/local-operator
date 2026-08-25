@@ -29,7 +29,10 @@ from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.clients import OpenAICompatClient
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
+    BACKOFF_CAP_MS,
     CHAIN_EFFORT_LADDER,
+    CONNECTIVITY_BACKOFF_CAP_MS,
+    CONNECTIVITY_MAX_RETRIES,
     SUPPORTED_EFFORTS,
     AuthRetryKeyState,
     FailoverRouteState,
@@ -39,9 +42,11 @@ from local_operator.providers.failover import (
     _request_has_rotated,
     backoff_delay_ms,
     classify_provider_error,
+    connectivity_backoff_delay_ms,
     expand_fallback_candidates,
     expand_fallback_targets,
     is_auth_error,
+    is_connectivity_loss,
     is_direct_credential_rotation_error,
     is_image_rejection,
     is_transient_error,
@@ -3632,3 +3637,191 @@ def test_append_auth_recovery_generic_without_provider() -> None:
     rendered = "authentication failed (HTTP 401): bad key"
     out = append_auth_recovery(rendered, None)
     assert "/login <provider>" in out
+
+
+# ---------------------------------------------------------------------------
+# Connectivity loss — patient backoff for an OFFLINE machine
+# ---------------------------------------------------------------------------
+#
+# These cover the close-laptop / change-location / reconnect-wifi cycle: the
+# machine is briefly fully offline (DNS/route/socket-connect fails before any
+# HTTP), which takes minutes, so the ordinary ~80s transport budget gave up
+# while the network was still down. The patient path must ride that out WITHOUT
+# slowing an ordinary reachable-provider 5xx, and must stay abortable.
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        # The exact string the reported ConnectError carried on reconnect.
+        "[Errno 8] nodename nor servname provided, or not known",
+        "[Errno 51] Network is unreachable",
+        "[Errno 65] No route to host",
+        "[Errno 61] Connection refused",
+        "Temporary failure in name resolution",
+        "Name or service not known",
+        "getaddrinfo failed",
+    ],
+)
+def test_connectivity_markers_classify_as_connectivity_loss(detail: str) -> None:
+    """Every offline-reconnect wording classifies, wrapped and raw, and keeps
+    the user-facing "transient" frame rather than inventing a new kind."""
+    raw = httpx.ConnectError(detail)
+    wrapped = wrap_transport_error(raw)
+    assert is_connectivity_loss(raw)
+    assert is_connectivity_loss(wrapped)
+    # Frame label is unchanged: connectivity loss stays a transient error.
+    assert wrapped.kind == "transient"
+
+
+def test_ordinary_transient_5xx_is_not_connectivity_loss() -> None:
+    """A reachable provider returning 5xx must NOT take the patient path — it
+    carries an HTTP status, which proves a provider was reached."""
+    assert not is_connectivity_loss(ProviderError(503, "service unavailable", retryable=True))
+    assert not is_connectivity_loss(ProviderError(500, "boom", retryable=True))
+    # A bare timeout is transient/timeout but not a connectivity loss either.
+    assert not is_connectivity_loss(wrap_transport_error(httpx.ReadTimeout("timed out")))
+
+
+def test_connectivity_backoff_is_patient_not_the_8s_cap() -> None:
+    """The patient delays grow past the 8s fast cap toward the ~60s ceiling,
+    which is what lets the total budget span minutes."""
+    delays = [
+        connectivity_backoff_delay_ms(500, attempt, rng=random.Random(0))
+        for attempt in range(1, 12)
+    ]
+    # Early attempts match the fast schedule; later ones blow past 8s (the fast
+    # cap) up to the connectivity ceiling — the whole point of the patient path.
+    assert delays[0] <= 500
+    assert max(delays) > BACKOFF_CAP_MS
+    assert max(delays) <= CONNECTIVITY_BACKOFF_CAP_MS
+
+
+async def test_connectivity_loss_recovers_within_patient_budget(monkeypatch) -> None:
+    """Fail offline K times, then the network returns and the stream completes —
+    where the old ~80s (8s-cap x maxRetries) budget would have given up.
+
+    The sleeps are captured, not slept, so the "minutes" pass instantly. The
+    delay SEQUENCE is asserted to prove the patient cap (not the 8s one) is in
+    force, and the attempt count proves it retried far past `maxRetries`.
+    """
+    sleeps: list[int] = []
+    attempts = {"n": 0}
+    # More offline failures than an ordinary maxRetries=10 budget would tolerate,
+    # to prove the patient budget is the one in force.
+    offline_failures = 12
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    def flaky(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts["n"] += 1
+        if attempts["n"] <= offline_failures:
+            raise httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")
+
+        async def ok() -> AsyncIterator[Any]:
+            yield StreamEndEvent(stop_reason="stop")
+
+        return ok()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(flaky)
+
+    auth = FakeAuth({"openai": ["k1"]})
+    settings = {"retry": {"maxRetries": 10, "baseDelayMs": 500, "fallbackChains": {}}}
+    events = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    # The stream completed rather than dying: the reconnect was ridden out.
+    assert any(isinstance(e, StreamEndEvent) for e in events)
+    # It retried MORE than maxRetries in place — the patient budget, not the fast
+    # one — and never rotated the credential (offline is nobody's fault).
+    assert attempts["n"] == offline_failures + 1
+    assert len(sleeps) == offline_failures
+    assert auth.rotations == []
+    # The delays climbed past the 8s fast cap toward the patient 60s ceiling.
+    assert max(sleeps) > BACKOFF_CAP_MS
+    assert max(sleeps) <= CONNECTIVITY_BACKOFF_CAP_MS
+
+
+async def test_ordinary_transient_5xx_still_uses_fast_budget(monkeypatch) -> None:
+    """Regression guard: a reachable provider's 5xx must stay on the 8s cap and
+    the small server-fault budget, NOT the patient path."""
+    sleeps: list[int] = []
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    def always_500(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        raise ProviderError(503, "service unavailable", retryable=True)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(always_500)
+
+    auth = FakeAuth({"openai": ["k1"]})
+    settings = {"retry": {"maxRetries": 10, "baseDelayMs": 500, "fallbackChains": {}}}
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(_request(), auth, settings, client_for):
+            pass
+
+    assert excinfo.value.status == 503
+    # Every sleep respected the FAST 8s cap; none reached the patient ceiling.
+    assert sleeps  # it did retry
+    assert max(sleeps) <= BACKOFF_CAP_MS
+
+
+async def test_connectivity_loss_backoff_is_abortable() -> None:
+    """Ctrl-C during a patient connectivity-loss wait breaks out immediately —
+    the abort must not be swallowed by the minutes-long sleep."""
+    from local_operator.harness.types import AbortSignal
+
+    def offline(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        raise httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(offline)
+
+    signal = AbortSignal()
+    # A very long base so the FIRST patient sleep would hang the test if the
+    # abort did not win the race.
+    settings = {"retry": {"baseDelayMs": 60_000, "fallbackChains": {}}}
+
+    async def abort_soon() -> None:
+        await asyncio.sleep(0.05)
+        signal.abort("user cancelled")
+
+    task = asyncio.create_task(abort_soon())
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"]}), settings, client_for, signal=signal
+        ):
+            pass
+    assert excinfo.value.kind == "aborted"
+    await task
+
+
+def test_connectivity_config_keys_parse_camel_and_snake() -> None:
+    """Both key spellings parse; defaults survive a reconnect out of the box."""
+    camel = RetrySettings.from_settings(
+        {"retry": {"connectivityMaxRetries": 7, "connectivityBackoffCapMs": 30_000}}
+    )
+    assert camel.connectivity_max_retries == 7
+    assert camel.connectivity_backoff_cap_ms == 30_000
+    snake = RetrySettings.from_settings(
+        {"retry": {"connectivity_max_retries": 9, "connectivity_backoff_cap_ms": 45_000}}
+    )
+    assert snake.connectivity_max_retries == 9
+    assert snake.connectivity_backoff_cap_ms == 45_000
+    # No config → the shipped defaults, which give a ~9-minute offline window.
+    default = RetrySettings.from_settings(None)
+    assert default.connectivity_max_retries == CONNECTIVITY_MAX_RETRIES
+    assert default.connectivity_backoff_cap_ms == CONNECTIVITY_BACKOFF_CAP_MS

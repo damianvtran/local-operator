@@ -97,6 +97,59 @@ _WEAK_USAGE_LIMIT_MARKERS = ("usage", "insufficient")
 
 _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled")
 
+#: Substrings that mean "this MACHINE cannot reach ANY network right now" — a
+#: DNS lookup, route, or socket connect that failed before a single HTTP byte
+#: was exchanged, so no provider was actually reached. Matched against the same
+#: lowercased ``class name + detail`` haystack :func:`wrap_transport_error`
+#: builds, because the exception class and its errno text are the whole of the
+#: evidence: a connectivity loss carries no HTTP status and no provider words.
+#:
+#: This is a DIFFERENT condition from an ordinary transient 5xx even though both
+#: classify ``kind="transient"``. A 5xx means a reachable provider is unwell, so
+#: the fix is to retry FAST (8s cap) and rotate to another credential/provider.
+#: A connectivity loss means the laptop was closed, carried between office and
+#: home, and is mid-reconnect to wifi — every provider is equally unreachable,
+#: so rotating credentials and walking the fallback chain are pure waste. What
+#: that scenario needs instead is PATIENCE: a minutes-long backoff (see
+#: :func:`connectivity_backoff_delay_ms`) that keeps the interactive session
+#: alive across a normal reconnect rather than dying inside ~80s.
+#:
+#: Each marker cites the errno/wording it catches. macOS and Linux word the same
+#: failure differently, so both spellings are listed:
+#:   - "nodename nor servname" / "errno 8": macOS ``getaddrinfo`` DNS failure —
+#:     the exact string the reported ``ConnectError`` carried on reconnect.
+#:   - "temporary failure in name resolution" / "name or service not known" /
+#:     "getaddrinfo failed": Linux/glibc ``EAI_AGAIN`` / ``EAI_NONAME`` and the
+#:     generic resolver-failure wording.
+#:   - "network is unreachable" / "errno 51": no route to the network at all
+#:     (macOS ``ENETUNREACH`` 51, Linux 101) — the interface has no default
+#:     route yet after waking.
+#:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113).
+#:   - "network is down" / "errno 50": ``ENETDOWN`` — the interface is still
+#:     coming up.
+#:   - "connection refused" / "errno 61": ``ECONNREFUSED`` (macOS 61, Linux
+#:     111). Included because during a reconnect a captive portal or the local
+#:     stack refuses at the socket layer before any HTTP response exists. This
+#:     one CAN also mean a genuinely-down endpoint rather than an offline
+#:     machine, but the patient path is safe either way: the backoff is
+#:     abortable, and once the (minutes-long) budget is spent the diagnostic
+#:     error still surfaces, so a real outage is not hidden, only waited out.
+_CONNECTIVITY_LOSS_MARKERS = (
+    "nodename nor servname",
+    "errno 8",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "getaddrinfo failed",
+    "network is unreachable",
+    "errno 51",
+    "no route to host",
+    "errno 65",
+    "network is down",
+    "errno 50",
+    "connection refused",
+    "errno 61",
+)
+
 
 def _is_usage_limit(status: int | None, message: str) -> bool:
     """429, or a body that SAYS it ran out.
@@ -464,6 +517,40 @@ def is_transient_error(error: BaseException) -> bool:
     return classify_provider_error(error) in ("transient", "timeout")
 
 
+def is_connectivity_loss(error: BaseException) -> bool:
+    """The MACHINE is offline — DNS/route/socket-connect failed before any HTTP.
+
+    A narrow refinement of :func:`is_transient_error`, not a replacement: a
+    connectivity loss IS transient (it heals on its own), but it is the specific
+    transient that means *no provider was reached at all*, so unlike a 5xx the
+    right response is a patient minutes-long wait rather than a fast retry-then-
+    rotate. It exists for the close-laptop / change-location / reconnect-wifi
+    cycle, which takes several minutes — longer than the ordinary ~80s transport
+    budget — during which every provider and every credential is equally
+    unreachable and rotation buys nothing.
+
+    Read from the same lowercased ``class name + detail`` haystack
+    :func:`wrap_transport_error` builds, so it works both on the wrapped
+    :class:`ProviderError` (whose ``message`` is ``"<ClassName>: <detail>"``)
+    and on a raw exception a caller has in hand. Deliberately NOT gated on
+    ``kind``: :func:`wrap_transport_error` keeps these ``kind="transient"``
+    because "transient provider error" is the right frame for the user, so the
+    class/errno text is the only signal that separates them from a 5xx.
+    """
+    if isinstance(error, ProviderError):
+        # `message` already carries the wrapped "<ClassName>: <detail>" text
+        # (see wrap_transport_error), and the class name is the load-bearing
+        # half — httpx.ConnectError is routinely raised with an errno-only
+        # detail. status must be absent: a real HTTP response means a provider
+        # WAS reached, so it is a 5xx/timeout, never a connectivity loss.
+        if error.status is not None:
+            return False
+        haystack = error.message.lower()
+    else:
+        haystack = f"{type(error).__name__}: {error}".lower()
+    return any(marker in haystack for marker in _CONNECTIVITY_LOSS_MARKERS)
+
+
 def is_invalidated_credential_error(error: BaseException) -> bool:
     """The credential was EXPLICITLY revoked by the IdP — soft-delete worthy.
 
@@ -820,6 +907,29 @@ def expand_fallback_candidates(selector: str, chain: Sequence[Any]) -> list[str]
 
 BACKOFF_CAP_MS = 8000
 BACKOFF_JITTER_FRACTION = 0.25
+
+#: The per-sleep ceiling for a CONNECTIVITY-LOSS backoff, far larger than
+#: :data:`BACKOFF_CAP_MS`. An ordinary transient 5xx retries against a REACHABLE
+#: provider, so its 8s cap keeps an interactive turn snappy. A connectivity loss
+#: means the machine itself is offline (laptop closed, carried between office and
+#: home, mid-reconnect to wifi), which resolves on the order of minutes, not
+#: seconds — so hammering every 8s just burns the retry budget while still
+#: offline. Letting the individual sleeps grow to a minute matches the real
+#: recovery timescale: one wake-up probe per ~minute is enough to catch the
+#: reconnect, and there is nothing to be snappy for while there is no network.
+CONNECTIVITY_BACKOFF_CAP_MS = 60_000
+
+#: How many patient connectivity-loss retries one target may make before the
+#: diagnostic error is surfaced. With the default 500ms base and the 60s cap the
+#: delays grow 0.5,1,2,4,8,16,32s then sit at 60s, so 15 retries is a worst-case
+#: total wait of ~9 minutes (0.5+1+2+4+8+16+32 + 60*8 = 543.5s) before a still-
+#: offline machine gives up — comfortably past a normal close/move/reconnect
+#: cycle, while still bounded so a genuinely dead network eventually surfaces
+#: rather than hanging the session forever. Separate from ``max_retries``, which
+#: sizes the FAST transport budget against a reachable provider and must stay
+#: small; conflating them would either make 5xx retries crawl or make an offline
+#: machine give up in ~80s (the reported disruption).
+CONNECTIVITY_MAX_RETRIES = 15
 # Interactive sessions must never disappear into a provider's quota-reset
 # window. A 429 can carry Retry-After values of many minutes or hours; sleeping
 # that duration before credential rotation makes the TUI look hung and prevents
@@ -896,6 +1006,31 @@ MAX_FIRST_CREDENTIAL_SERVER_RETRIES = 3
 def backoff_delay_ms(base_delay_ms: int, attempt: int, *, rng: random.Random | None = None) -> int:
     """``min(base * 2^(attempt-1), 8000)`` with 25% downward jitter."""
     raw = min(base_delay_ms * (2 ** max(0, attempt - 1)), BACKOFF_CAP_MS)
+    jitter_source = rng or random
+    return max(0, int(raw - raw * BACKOFF_JITTER_FRACTION * jitter_source.random()))
+
+
+def connectivity_backoff_delay_ms(
+    base_delay_ms: int,
+    attempt: int,
+    *,
+    cap_ms: int = CONNECTIVITY_BACKOFF_CAP_MS,
+    rng: random.Random | None = None,
+) -> int:
+    """The patient variant of :func:`backoff_delay_ms` for a machine that is
+    OFFLINE — same exponential growth and 25% downward jitter, but capped at
+    ``cap_ms`` (defaults to :data:`CONNECTIVITY_BACKOFF_CAP_MS`, ~60s) instead of
+    the fast 8s ceiling.
+
+    A separate function rather than a parameter on ``backoff_delay_ms`` so the
+    call sites read as two distinct policies — fast for a reachable provider,
+    patient for no network — and so the fast cap can never be widened by
+    accident. With the default base and cap the delays climb 0.5,1,2,4,8,16,32s
+    and then sit at 60s, which is the cadence a reconnect actually happens on.
+    The cap is a parameter, not the constant, so ``retry.connectivityBackoffCapMs``
+    is honoured without a second code path.
+    """
+    raw = min(base_delay_ms * (2 ** max(0, attempt - 1)), cap_ms)
     jitter_source = rng or random
     return max(0, int(raw - raw * BACKOFF_JITTER_FRACTION * jitter_source.random()))
 
@@ -1068,6 +1203,14 @@ class RetrySettings:
     enabled: bool = True
     max_retries: int = 10
     base_delay_ms: int = 500
+    #: The PATIENT budget for a connectivity loss (machine offline). Distinct
+    #: from ``max_retries`` because the two size different things: ``max_retries``
+    #: is the FAST budget against a reachable provider (5xx/timeout), which must
+    #: stay small, while these keep an interactive session alive across a
+    #: minutes-long close/move/reconnect cycle. Defaults deliver that
+    #: out-of-the-box — no config required — see the two constants they mirror.
+    connectivity_max_retries: int = CONNECTIVITY_MAX_RETRIES
+    connectivity_backoff_cap_ms: int = CONNECTIVITY_BACKOFF_CAP_MS
     model_fallback: bool = True
     usage_aware_fallback: bool = False
     usage_reserve_percent: float = 10.0
@@ -1090,6 +1233,18 @@ class RetrySettings:
             enabled=bool(retry.get("enabled", True)),
             max_retries=int(retry.get("maxRetries", retry.get("max_retries", 10))),
             base_delay_ms=int(retry.get("baseDelayMs", retry.get("base_delay_ms", 500))),
+            connectivity_max_retries=int(
+                retry.get(
+                    "connectivityMaxRetries",
+                    retry.get("connectivity_max_retries", CONNECTIVITY_MAX_RETRIES),
+                )
+            ),
+            connectivity_backoff_cap_ms=int(
+                retry.get(
+                    "connectivityBackoffCapMs",
+                    retry.get("connectivity_backoff_cap_ms", CONNECTIVITY_BACKOFF_CAP_MS),
+                )
+            ),
             model_fallback=bool(retry.get("modelFallback", retry.get("model_fallback", True))),
             usage_aware_fallback=bool(
                 retry.get("usageAwareFallback", retry.get("usage_aware_fallback", False))
@@ -1643,6 +1798,16 @@ async def stream_with_failover(
         access: "OAuthAccess | None" = None  # credential record for this attempt
         current_token: str | None = None
         transport_retries = 0
+        # Patient retries spent waiting out a CONNECTIVITY LOSS (machine offline).
+        # Kept SEPARATE from `transport_retries` because the two size opposite
+        # things: the fast transport budget must stay small so a 5xx does not
+        # crawl, while this rides out a minutes-long reconnect. It also does not
+        # feed the server-fault counters or rotation — when there is no network,
+        # every credential and every fallback provider is equally unreachable,
+        # so this path retries the SAME target in place until the network comes
+        # back (or the patient budget is spent), never rotating on the strength
+        # of a failure the credential did not cause.
+        connectivity_retries = 0
         retry_same_key = False
         # Requests aimed at THIS target's provider that came back a server-side
         # fault, counted across every credential it rotates through.
@@ -1859,6 +2024,35 @@ async def stream_with_failover(
                     raise  # partial output already reached the caller
                 record(exc, primary=is_primary)
                 target_retry_after_ms = max(target_retry_after_ms, exc.retry_after_ms or 0)
+                # A pre-wrapped connectivity loss (a client that turns httpx into
+                # a ProviderError itself) takes the PATIENT path, ahead of the
+                # server-fault ledger below. An offline machine's failure is not
+                # the credential's or the provider's fault and every target is
+                # equally unreachable, so it must neither charge the per-provider
+                # fault ceiling nor rotate — it waits, in place, on a minutes-
+                # long backoff, until the network returns or the patient budget
+                # is spent. The sleep stays abortable, so Ctrl-C still wins.
+                # Gated on retry.enabled so an isolated/decorative call still
+                # makes exactly one attempt (the `not retry.enabled` raise below
+                # would otherwise be pre-empted by this patient loop).
+                if retry.enabled and is_connectivity_loss(exc):
+                    if connectivity_retries < retry.connectivity_max_retries:
+                        connectivity_retries += 1
+                        await _abortable_sleep(
+                            connectivity_backoff_delay_ms(
+                                retry.base_delay_ms,
+                                connectivity_retries,
+                                cap_ms=retry.connectivity_backoff_cap_ms,
+                                rng=rng,
+                            ),
+                            signal,
+                        )
+                        retry_same_key = True
+                        continue
+                    # Patient budget spent while still offline: surface the most
+                    # diagnostic failure of the walk, same as any other
+                    # exhaustion, so the reported-error semantics stay intact.
+                    raise reported if reported is not None else exc
                 if is_server_side_failure(exc):
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
@@ -1952,6 +2146,36 @@ async def stream_with_failover(
                     # into the log.
                     raise wrapped from exc
                 record(wrapped, primary=is_primary)
+                # This is the arm a CONNECTIVITY LOSS actually arrives on: no
+                # client in clients.py catches httpx, so a DNS/route/connect
+                # failure on a closed-then-reconnecting laptop reaches here raw
+                # and `wrap_transport_error` stamps it kind="transient". Give it
+                # the PATIENT budget BEFORE the server-fault ledger and the
+                # rotation logic below: an offline machine's failure is nobody's
+                # fault and every provider/credential is equally unreachable, so
+                # charging the fault ceiling or rotating buys nothing — the only
+                # thing that helps is waiting, in place, for the network to come
+                # back. The backoff is abortable, so Ctrl-C still breaks out.
+                # Gated on retry.enabled so an isolated/decorative call still
+                # makes exactly one attempt rather than entering the patient loop
+                # ahead of the `not retry.enabled` raise below.
+                if retry.enabled and is_connectivity_loss(wrapped):
+                    if connectivity_retries < retry.connectivity_max_retries:
+                        connectivity_retries += 1
+                        await _abortable_sleep(
+                            connectivity_backoff_delay_ms(
+                                retry.base_delay_ms,
+                                connectivity_retries,
+                                cap_ms=retry.connectivity_backoff_cap_ms,
+                                rng=rng,
+                            ),
+                            signal,
+                        )
+                        retry_same_key = True
+                        continue
+                    # Patient budget spent while still offline: surface the most
+                    # diagnostic failure, preserving the reported-error contract.
+                    raise (reported if reported is not None else wrapped) from exc
                 if is_server_side_failure(wrapped):
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
