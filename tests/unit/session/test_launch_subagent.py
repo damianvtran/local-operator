@@ -106,6 +106,12 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert job.type == "task"
     assert job.label == "sub"
 
+    # The parent row links to the child's separately owned ledger while the
+    # child is live, so recursive accounting can see grandchildren without
+    # flattening their usage into every ancestor.
+    await wait_for(lambda: job.child_jobs is not None)
+    assert job.child_jobs is not parent.jobs
+
     # Wait for the child run to settle and the parent stream to see the end.
     await wait_for(lambda: any(e.type == "subagent_end" for e in events))
 

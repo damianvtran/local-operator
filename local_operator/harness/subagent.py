@@ -369,6 +369,10 @@ def _make_runner(
                     )
                     or child.model.context_window
                 )
+                # The direct row owns this child's calls; its manager owns any
+                # grandchildren. Retain the edge rather than flattening usage
+                # upward, so one recursive reader sees each job exactly once.
+                job.child_jobs = child.jobs
             if comms is not None:
                 # Before the prompt runs: the parent may already have a
                 # question queued for this child, and attach is what flushes

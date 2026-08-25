@@ -63,6 +63,7 @@ class _TaskJob:
         self.trajectory: list[dict[str, Any]] | None = None
         self.usage = usage
         self.model_label = model_label
+        self.child_jobs: Any | None = None
 
 
 class _Session(FakeSession):
@@ -85,6 +86,14 @@ def _band_cost(app: OperatorApp) -> str:
     """What the status line is currently holding in its cost segment."""
     assert app._status is not None
     return app._status._cost
+
+
+def _harvest(session: _Session) -> OperatorApp:
+    """Exercise the production tree walk without mounting an unrelated frame."""
+    app = OperatorApp(_async_factory(session))
+    app._session = session
+    app._harvest_subagent_costs()
+    return app
 
 
 @pytest.mark.asyncio
@@ -112,6 +121,96 @@ async def test_band_total_is_own_spend_plus_children() -> None:
     assert app._subagent_costs == {"kid": pytest.approx(1.0)}
     assert app._spend_total() == pytest.approx(11.0)
     assert _band_cost(app) == "$11.00"
+
+
+def test_harvest_counts_a_hundred_direct_children_once_each() -> None:
+    session = _Session("anthropic/haiku")
+    session.jobs = _fake_jobs(
+        *(
+            _TaskJob(
+                f"kid-{index}",
+                usage=Usage(input_tokens=1_000_000),
+                model_label="anthropic/haiku",
+            )
+            for index in range(100)
+        )
+    )
+    with _resolving():
+        app = _harvest(session)
+        app._harvest_subagent_costs()
+    assert len(app._subagent_costs) == 100
+    assert app._spend_total() == pytest.approx(100.0)
+
+
+def test_harvest_walks_every_nesting_depth_without_counting_ancestors_twice() -> None:
+    leaf = _TaskJob(
+        "great-grandchild",
+        usage=Usage(input_tokens=4_000_000),
+        model_label="anthropic/haiku",
+    )
+    grandchild = _TaskJob(
+        "grandchild",
+        usage=Usage(input_tokens=3_000_000),
+        model_label="anthropic/haiku",
+    )
+    child = _TaskJob("child", usage=Usage(input_tokens=2_000_000), model_label="anthropic/haiku")
+    grandchild.child_jobs = _fake_jobs(leaf)
+    child.child_jobs = _fake_jobs(grandchild)
+    session = _Session("anthropic/opus")
+    session.jobs = _fake_jobs(child)
+    with _resolving():
+        app = _harvest(session)
+        for _ in range(10):
+            app._harvest_subagent_costs()
+    assert app._subagent_costs == {
+        "child": pytest.approx(2.0),
+        "grandchild": pytest.approx(3.0),
+        "great-grandchild": pytest.approx(4.0),
+    }
+    assert app._spend_total() == pytest.approx(9.0)
+
+
+def test_nested_harvest_preserves_provider_receipts_and_table_estimates() -> None:
+    receipt = _TaskJob(
+        "receipt",
+        usage=Usage(input_tokens=9_000_000, usd_cost=0.25),
+        model_label="openrouter/routed",
+    )
+    estimate = _TaskJob(
+        "estimate",
+        usage=Usage(input_tokens=2_000_000),
+        model_label="anthropic/haiku",
+    )
+    parent = _TaskJob("parent", usage=Usage(input_tokens=1_000_000), model_label="anthropic/haiku")
+    parent.child_jobs = _fake_jobs(receipt, estimate)
+    session = _Session("anthropic/opus")
+    session.jobs = _fake_jobs(parent)
+    with _resolving():
+        app = _harvest(session)
+    assert app._subagent_costs == {
+        "parent": pytest.approx(1.0),
+        "receipt": pytest.approx(0.25),
+        "estimate": pytest.approx(2.0),
+    }
+    assert app._spend_total() == pytest.approx(3.25)
+
+
+def test_nested_cost_survives_branch_eviction_after_it_was_harvested() -> None:
+    grandchild = _TaskJob(
+        "grandchild",
+        usage=Usage(input_tokens=2_000_000),
+        model_label="anthropic/haiku",
+        status="completed",
+    )
+    child = _TaskJob("child", usage=Usage(input_tokens=1_000_000), model_label="anthropic/haiku")
+    child.child_jobs = _fake_jobs(grandchild)
+    session = _Session("anthropic/opus")
+    session.jobs = _fake_jobs(child)
+    with _resolving():
+        app = _harvest(session)
+        child.child_jobs = _fake_jobs()
+        app._harvest_subagent_costs()
+    assert app._spend_total() == pytest.approx(3.0)
 
 
 @pytest.mark.asyncio

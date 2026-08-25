@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AbortSignal, Usage
 
@@ -164,6 +164,14 @@ class AsyncJob(BaseModel):
     # run. ``context_tokens`` is point-in-time (the LAST reported value) and
     # is therefore replaced rather than summed.
     usage: Usage | None = None
+    # Runtime-only link to the CHILD session's own ledger. A direct task row
+    # records only that child's model calls; delegated grandchildren belong to
+    # the child's manager instead. Keeping the ownership edge on the row lets a
+    # top-level observer walk the full tree without copying descendant usage
+    # into every ancestor (which would make nested spend count once per depth).
+    # Excluded from persistence because restored rows have no live child session;
+    # the parent's last-observed cost map preserves their already-harvested spend.
+    child_jobs: Any | None = Field(default=None, exclude=True)
     # The CHILD model's context window, so a reader can render usage as a
     # PERCENTAGE of what the child actually has. Captured at launch beside
     # ``model_label``, off the spec the child was already built with — never

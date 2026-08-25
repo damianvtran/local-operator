@@ -12859,10 +12859,23 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a status number never takes the app down
             return
         label = getattr(session, "model_label", "")
-        for job in jobs:
+        pending = list(jobs)
+        seen: set[int] = set()
+        while pending:
+            job = pending.pop()
+            identity = id(job)
+            if identity in seen:
+                continue
+            seen.add(identity)
             cost = job_cost(job, default_model_label=label)
             if cost is not None:
                 self._subagent_costs[job.id] = cost
+            child_manager = getattr(job, "child_jobs", None)
+            if child_manager is not None:
+                try:
+                    pending.extend(child_manager.list())
+                except Exception:  # noqa: BLE001 — one unreadable branch must not hide its siblings
+                    continue
 
     def _spend_text(self, total: float | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.
