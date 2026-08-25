@@ -190,6 +190,12 @@ def test_http_gate_and_login_flow() -> None:
     assert authed.status_code == 200
     assert authed.json() == {"sessions": []}
 
+    logout = client.get("/logout")
+    assert logout.status_code == 303
+    assert logout.headers["location"] == "/login"
+    assert logout.headers["clear-site-data"] == '"storage"'
+    assert "lop_mobile=" in logout.headers["set-cookie"]
+
 
 def test_subagent_summary_detail_and_child_history_are_isolated(tmp_path, monkeypatch) -> None:
     """Root repaints stay light while the selected child pages its own file."""
@@ -433,6 +439,71 @@ def test_terminal_fold_advances_epoch_and_blocks_late_live_frame() -> None:
     assert daemon.capture_subagent_details(live, record=record) is terminal
 
 
+def test_live_generation_epoch_survives_payload_eviction_pressure() -> None:
+    """A browser-observed epoch must outlive bounded route payload eviction."""
+    from local_operator.mobile.daemon import (
+        MAX_RETAINED_SESSION_PROJECTIONS,
+        SessionEntry,
+    )
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        cwd="/tmp",
+        model_label="old",
+        conversation_name="root",
+        heartbeat_at=10,
+        control_port=4101,
+        control_key="old-key",
+        started_at=10,
+    )
+    new_record = SessionRecord(
+        pid=102,
+        kind="tui",
+        session_id="root-session",
+        cwd="/tmp",
+        model_label="new",
+        conversation_name="root",
+        heartbeat_at=20,
+        control_port=4102,
+        control_key="new-key",
+        started_at=20,
+    )
+    daemon.table.entries[new_record.pid] = SessionEntry(new_record)
+
+    old = SessionProjection(session_id="root-session", pid=101, version=40)
+    assert daemon.capture_subagent_details(old, record=old_record).version == 40
+    replacement = SessionProjection(session_id="root-session", pid=102, version=1)
+    assert daemon.capture_subagent_details(replacement, record=new_record).version == 41
+
+    for index in range(MAX_RETAINED_SESSION_PROJECTIONS):
+        daemon.capture_subagent_details(
+            SessionProjection(session_id=f"pressure-{index:03d}", pid=200 + index, version=1)
+        )
+    assert "root-session" not in daemon.session_projections
+    assert daemon._projection_generations["root-session"].epoch == 41
+
+    next_replacement = SessionProjection(session_id="root-session", pid=102, version=2)
+    assert daemon.capture_subagent_details(next_replacement, record=new_record).version == 42
+    late_old = SessionProjection(session_id="root-session", pid=101, version=999)
+    assert (
+        daemon.capture_subagent_details(late_old, record=old_record)
+        is daemon.session_projections["root-session"]
+    )
+    assert daemon.session_projections["root-session"].version == 42
+
+    daemon.session_projections.pop("root-session")
+    from local_operator.mobile.daemon import _StaleProjection
+
+    with pytest.raises(_StaleProjection):
+        daemon.capture_subagent_details(late_old, record=old_record)
+    daemon.table.entries[new_record.pid].ended = True
+    daemon._prune_projection_generation("root-session")
+    assert "root-session" not in daemon._projection_generations
+
+
 def test_subagent_detail_merge_accepts_lifecycle_updates_and_terminal_clearing() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     first = SessionProjection(session_id="root-session", pid=9, version=2)
@@ -527,6 +598,8 @@ def test_projection_and_detail_evict_as_one_bounded_unit() -> None:
         daemon.capture_subagent_details(projection)
 
     assert len(daemon.session_projections) == MAX_RETAINED_SESSION_PROJECTIONS
+    # Unowned generation entries leave with their payload cache unit; active or
+    # subscribed routes are the only entries allowed to outlive this bound.
     assert len(daemon._projection_generations) == MAX_RETAINED_SESSION_PROJECTIONS
     assert "root-000" not in daemon.session_projections
     assert "root-000" not in daemon._projection_generations

@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCommand } from "./api";
-import { submitContinuation } from "./continuation-command";
+import {
+	clearPendingContinuationsExcept,
+	getPendingContinuation,
+	submitContinuation,
+} from "./continuation-command";
 
 vi.mock("./api", () => ({ sendCommand: vi.fn() }));
 
@@ -68,5 +72,36 @@ describe("submitContinuation", () => {
 		});
 		expect(mockedSendCommand.mock.calls[2]?.[1]).not.toBe(mockedSendCommand.mock.calls[1]?.[1]);
 		expect(localStorage.getItem("lo-mobile-command:root")).toBeNull();
+	});
+
+	it("recovers a validated envelope after reload and expires unsafe state", async () => {
+		mockedSendCommand.mockRejectedValueOnce(new TypeError("response lost"));
+		await expect(submitContinuation("root", "prompt", "Original instruction")).rejects.toThrow(
+			"response lost",
+		);
+		expect(getPendingContinuation("root")).toMatchObject({
+			op: "prompt",
+			text: "Original instruction",
+		});
+
+		const raw = localStorage.getItem("lo-mobile-command:root")!;
+		const stored = JSON.parse(raw) as { saved_at: number };
+		stored.saved_at = Date.now() - 25 * 60 * 60 * 1000;
+		localStorage.setItem("lo-mobile-command:root", JSON.stringify(stored));
+		expect(getPendingContinuation("root")).toBeNull();
+
+		localStorage.setItem("lo-mobile-command:other", raw);
+		clearPendingContinuationsExcept("root");
+		expect(localStorage.getItem("lo-mobile-command:other")).toBeNull();
+	});
+
+	it("retires a definitively rejected UUID instead of replaying it", async () => {
+		mockedSendCommand.mockRejectedValueOnce(
+			Object.assign(new Error("invalid command"), { status: 422 }),
+		);
+		await expect(submitContinuation("root", "prompt", "Rejected instruction")).rejects.toThrow(
+			"invalid command",
+		);
+		expect(getPendingContinuation("root")).toBeNull();
 	});
 });

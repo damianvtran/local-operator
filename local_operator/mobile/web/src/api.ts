@@ -6,6 +6,7 @@
  * the same way, so reload the page and let the server 303 to /login. There
  * is no client-side login form — login is server-rendered.
  */
+import { clearPrivateSessionStorage } from "./private-storage";
 import type {
 	CommandOp,
 	Directories,
@@ -17,12 +18,22 @@ import type {
 	TranscriptEntry,
 } from "./types";
 
+export class HttpError extends Error {
+	constructor(readonly status: number, message: string) {
+		super(message);
+		this.name = "HttpError";
+	}
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(path, {
 		credentials: "same-origin",
 		...init,
 	});
 	if (res.status === 401) {
+		/* A replaced/login-expired browser session must not expose drafts or
+		   retry envelopes to whoever authenticates next on this device. */
+		clearPrivateSessionStorage();
 		location.reload();
 		/* Never reached in practice; satisfies the type when reload is slow. */
 		throw new Error("unauthorized");
@@ -35,7 +46,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		} catch {
 			/* A non-JSON error body carries no more than the status did. */
 		}
-		throw new Error(detail);
+		throw new HttpError(res.status, detail);
 	}
 	return (await res.json()) as T;
 }

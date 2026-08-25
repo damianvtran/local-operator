@@ -10,7 +10,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCommands, sendCommand } from "../api";
-import { hasPendingContinuation, submitContinuation } from "../continuation-command";
+import {
+	clearPendingContinuationsExcept,
+	getPendingContinuation,
+	submitContinuation,
+} from "../continuation-command";
 import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
 import { useDraft } from "../store";
@@ -216,6 +220,8 @@ function EffortSheet({
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
+const RETAINED_RETRY_ERROR =
+	"An earlier instruction may have been delivered. Retry that saved instruction before sending your current draft.";
 const COMPOSER_PLACEHOLDER = "Message Local Operator…";
 
 export function Composer({
@@ -237,8 +243,9 @@ export function Composer({
 	const [text, setText] = useDraft(pid);
 	const [slashOpen, setSlashOpen] = useState(false);
 	const [sending, setSending] = useState(false);
-	const [retryPending, setRetryPending] = useState(() => hasPendingContinuation(pid));
-	const [error, setError] = useState("");
+	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
+	const retryPending = retryEnvelope !== null;
+	const [error, setError] = useState(() => retryPending ? RETAINED_RETRY_ERROR : "");
 	const [images, setImages] = useState<AttachedImage[]>([]);
 	const textRef = useRef(text);
 	const imagesRef = useRef(images);
@@ -262,6 +269,16 @@ export function Composer({
 	}, [text]);
 
 	const disabled = false;
+
+	useEffect(() => {
+		/* One authenticated phone user may navigate among routes, but only the
+		   selected route may retain an uncertain private envelope. This bounds
+		   content storage and prevents a later session from discovering it. */
+		clearPendingContinuationsExcept(pid);
+		const pending = getPendingContinuation(pid);
+		setRetryEnvelope(pending);
+		if (pending) setError(RETAINED_RETRY_ERROR);
+	}, [pid]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		for (const f of files) {
@@ -309,13 +326,26 @@ export function Composer({
 				const payloadImages = images.length
 					? images.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
 					: undefined;
-				const receipt = await submitContinuation(pid, chosen, trimmed, payloadImages);
-				setRetryPending(false);
+				/* A retry's operation belongs to the immutable envelope. Streaming may
+				   change between admission and acknowledgement, so neither transport nor
+				   correlation may derive prompt/steer from the current repaint. */
+				const submittedEnvelope = retryEnvelope ?? {
+					op: chosen,
+					text: trimmed,
+					images: payloadImages,
+				};
+				const receipt = await submitContinuation(
+					pid,
+					submittedEnvelope.op,
+					trimmed,
+					payloadImages,
+				);
+				setRetryEnvelope(null);
 				const currentPayloadImages = imagesRef.current.length
 					? imagesRef.current.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
 					: undefined;
 				const acknowledgedCurrentDraft =
-					receipt.envelope.op === chosen &&
+					receipt.envelope.op === submittedEnvelope.op &&
 					receipt.envelope.text === textRef.current.trim() &&
 					JSON.stringify(receipt.envelope.images) === JSON.stringify(currentPayloadImages);
 				if (acknowledgedCurrentDraft) {
@@ -332,7 +362,7 @@ export function Composer({
 			}
 			setText("");
 		} catch (e) {
-			setRetryPending(hasPendingContinuation(pid));
+			setRetryEnvelope(getPendingContinuation(pid));
 			/* Previous conversations can fail at every layer between fetch and
 			   provider construction. Those mechanics are intentionally invisible:
 			   retain the exact draft, images, and command id for a safe retry while
@@ -405,7 +435,7 @@ export function Composer({
 						<button
 							type="button"
 							onClick={() => void send(text)}
-							className="mt-2 min-h-8 rounded-sm border border-danger-border px-3"
+							className="mt-2 min-h-11 rounded-sm border border-danger-border px-3"
 						>
 							Retry earlier instruction
 						</button>

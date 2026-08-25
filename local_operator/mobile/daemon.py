@@ -76,6 +76,10 @@ DEFAULT_PORT = 4098
 MAX_RETAINED_SESSION_PROJECTIONS = 64
 
 
+class _StaleProjection(Exception):
+    """A fenced owner frame with no retained payload to republish."""
+
+
 @dataclass
 class _ProjectionGeneration:
     """Daemon-local ordering for one registrant generation's projection epochs."""
@@ -383,16 +387,22 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
             if op in ("projection", "welcome"):
                 try:
                     data = frame.get("data") or {}
-                    entry.projection = _projection_from_json(data, record)
+                    incoming = _projection_from_json(data, record)
                 except (TypeError, ValueError, KeyError):
                     # A malformed push (mid-upgrade registrant, renamed field)
                     # must not tear the dial loop down to the reconnect path —
                     # the NEXT push is a full repaint that repairs the view.
                     logger.debug("mobile daemon: dropping malformed projection", exc_info=True)
                     continue
-                entry.projection.degraded = False
-                entry.projection.ended = False
-                entry.projection = daemon.capture_subagent_details(entry.projection, record=record)
+                incoming.degraded = False
+                incoming.ended = False
+                try:
+                    captured = daemon.capture_subagent_details(incoming, record=record)
+                except _StaleProjection:
+                    # A predecessor frame can arrive after its payload cache entry
+                    # was evicted. Its identity remains fenced by the epoch ledger.
+                    continue
+                entry.projection = captured
                 daemon.table.provisional_active.discard(entry.record.session_id)
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
@@ -650,11 +660,26 @@ class MobileDaemon:
         # A session route outlives every process generation. Retain its latest
         # repaint so an open phone remains a normal conversation while idle.
         self.session_projections: dict[str, SessionProjection] = {}
-        # ProjectionFold versions restart at zero with every owner. Keep the
-        # registration identity beside the cache unit so a replacement owner can
-        # advance the phone epoch while late frames from its predecessor cannot.
+        # ProjectionFold versions restart at zero with every owner. Ordering is
+        # deliberately NOT part of the bounded payload cache: an open route or
+        # live registrant may outlive cache pressure, and its browser has already
+        # observed this epoch. The ledger is retired only after payload, process,
+        # and subscriber ownership are all gone.
         self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def _projection_route_owned(self, session_id: str) -> bool:
+        """Whether an epoch can still be observed by a process or browser."""
+        return bool(self.table.session_subscribers.get(session_id)) or any(
+            entry.record.session_id == session_id and not entry.ended
+            for entry in self.table.entries.values()
+        )
+
+    def _prune_projection_generation(self, session_id: str) -> None:
+        """Retire ordering only when no durable in-memory route can emit again."""
+        if session_id in self.session_projections or self._projection_route_owned(session_id):
+            return
+        self._projection_generations.pop(session_id, None)
 
     def capture_subagent_details(
         self,
@@ -694,9 +719,10 @@ class MobileDaemon:
                 and started_at < state.started_at
             ):
                 # A predecessor socket may still have a decoded frame queued when
-                # its replacement registers. Its high local counter has no claim
-                # over the newer process birth.
-                assert previous_projection is not None
+                # its replacement registers. Payload eviction must not make that
+                # stale identity publishable; its caller drops the fenced frame.
+                if previous_projection is None:
+                    raise _StaleProjection
                 self.session_projections.pop(session_id)
                 self.session_projections[session_id] = previous_projection
                 return previous_projection
@@ -707,18 +733,14 @@ class MobileDaemon:
             generation_changed = True
 
         if state is not None and not generation_changed:
-            if state.terminal and not terminal:
-                assert previous_projection is not None
-                self.session_projections.pop(session_id)
-                self.session_projections[session_id] = previous_projection
-                return previous_projection
-            if terminal and state.terminal and projection.version <= state.local_version:
-                assert previous_projection is not None
-                self.session_projections.pop(session_id)
-                self.session_projections[session_id] = previous_projection
-                return previous_projection
-            if not terminal and projection.version < state.local_version:
-                assert previous_projection is not None
+            stale = (
+                (state.terminal and not terminal)
+                or (terminal and state.terminal and projection.version <= state.local_version)
+                or (not terminal and projection.version < state.local_version)
+            )
+            if stale:
+                if previous_projection is None:
+                    raise _StaleProjection
                 self.session_projections.pop(session_id)
                 self.session_projections[session_id] = previous_projection
                 return previous_projection
@@ -761,9 +783,9 @@ class MobileDaemon:
         while len(self.session_projections) > MAX_RETAINED_SESSION_PROJECTIONS:
             expired = next(iter(self.session_projections))
             self.session_projections.pop(expired, None)
-            self._projection_generations.pop(expired, None)
             for key in [key for key in self.subagent_details if key[0] == expired]:
                 self.subagent_details.pop(key, None)
+            self._prune_projection_generation(expired)
         # Every summary published in the roster must resolve through the detail
         # route. The process already bounds concurrent jobs; settled lineage is
         # intentionally durable, so a second arbitrary 256-row cache bound made
@@ -886,6 +908,7 @@ class MobileDaemon:
                                 queue.put_nowait(projection.to_json())
                             except asyncio.QueueEmpty:
                                 pass
+                self._prune_projection_generation(record.session_id)
             elif state == "wedged":
                 entry.degraded = True
             # Degraded is precisely "we owe this session a redial" — the only
@@ -920,6 +943,7 @@ class MobileDaemon:
                                     queue.put_nowait(projection.to_json())
                                 except asyncio.QueueEmpty:
                                     pass
+                    self._prune_projection_generation(session_id)
         if changed:
             self.table.notify_list_changed()
 
@@ -1156,6 +1180,10 @@ def build_app(daemon: MobileDaemon):
     async def logout(request: Request) -> Response:
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie(COOKIE_NAME)
+        # Drafts and uncertain command bodies are private authenticated state.
+        # The browser, not JavaScript lifecycle guesses, owns complete cleanup
+        # when this cookie's user signs out.
+        response.headers["Clear-Site-Data"] = '"storage"'
         return response
 
     async def mark_png(request: Request) -> Response:
@@ -1237,6 +1265,7 @@ def build_app(daemon: MobileDaemon):
                         live = _entry_for_session(daemon, session_id)
                         if live is not None:
                             daemon.notify_watch_transition(live.record.pid, watching=False)
+                        daemon._prune_projection_generation(session_id)
 
         return StreamingResponse(
             stream(),

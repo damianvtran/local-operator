@@ -243,6 +243,58 @@ describe("AgentConversation", () => {
 		await waitFor(() => expect(composer.value).toBe(""));
 	});
 
+	it("restores a lost prompt for touch retry after streaming reload", async () => {
+		const { projection } = fixture();
+		const idle = { ...projection, streaming: false };
+		let rejectFirst!: (reason: Error) => void;
+		const firstResponse = new Promise<never>((_resolve, reject) => { rejectFirst = reject; });
+		vi.mocked(api.sendCommand)
+			.mockReturnValueOnce(firstResponse)
+			.mockResolvedValueOnce({ ok: true, detail: "already admitted" })
+			.mockResolvedValueOnce({ ok: true, detail: "steering queued" });
+		const randomUUID = vi.fn()
+			.mockReturnValueOnce("12345678-1234-4678-9234-567812345678")
+			.mockReturnValueOnce("87654321-4321-4678-9234-567812345678");
+		vi.stubGlobal("crypto", { randomUUID });
+		const projectionSpy = vi.spyOn(store, "useProjection").mockReturnValue({ projection: idle, connected: true });
+		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		history.replaceState({}, "", "#/s/root");
+		const mounted = render(<App />);
+		const composer = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+		fireEvent.change(composer, { target: { value: "Original instruction" } });
+		fireEvent.click(screen.getByRole("button", { name: "send" }));
+		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(1));
+		fireEvent.change(composer, { target: { value: "Edited draft" } });
+		rejectFirst(new TypeError("response lost"));
+		await waitFor(() => expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy());
+
+		projectionSpy.mockReturnValue({ projection: { ...projection, streaming: true }, connected: true });
+		mounted.unmount();
+		render(<App />);
+		const reloadedComposer = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+		expect(reloadedComposer.value).toBe("Edited draft");
+		expect(screen.getByRole("alert").textContent).toContain("earlier instruction may have been delivered");
+		const retry = screen.getByRole("button", { name: "Retry earlier instruction" });
+		expect(retry.className).toContain("min-h-11");
+		fireEvent.click(retry);
+
+		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(2));
+		expect(vi.mocked(api.sendCommand).mock.calls[0]?.[1]).toMatchObject({ op: "prompt" });
+		expect(vi.mocked(api.sendCommand).mock.calls[1]?.[1]).toEqual(
+			vi.mocked(api.sendCommand).mock.calls[0]?.[1],
+		);
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Earlier instruction delivered. Your edited draft is ready to send.",
+		);
+		fireEvent.click(screen.getByRole("button", { name: "steer" }));
+		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(3));
+		expect(vi.mocked(api.sendCommand).mock.calls[2]?.[1]).toMatchObject({
+			op: "steer",
+			command_id: "87654321-4321-4678-9234-567812345678",
+			text: "Edited draft",
+		});
+	});
+
 	it("keeps a failed parent instruction with an actionable non-protocol error", async () => {
 		const { detail, projection } = fixture();
 		const topLevel = { ...detail, parent_job_id: null };
