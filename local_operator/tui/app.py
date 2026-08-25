@@ -1949,12 +1949,29 @@ class OperatorApp(App[None]):
         """
         self._session = session
         self._mobile_adopted(session)
+        # A remote follower must never publish a second discovery record for
+        # the shared session, and it must be ready to replace this facade with
+        # the lease-winning real Session after owner death. The callback uses
+        # the preserving swap below: ownership is backend plumbing, so takeover
+        # cannot clear/replay the transcript or flash a different screen.
+        if bool(getattr(session, "is_remote", False)):
+            set_takeover = getattr(session, "set_takeover_callback", None)
+            if callable(set_takeover):
+                set_takeover(self._adopt_takeover_session)
         # Before the band is painted below: the freshly built spec carries the
         # MODEL's default effort, and a `/reload` or `/new` that dropped the
         # user's chosen level would repaint the band with a level they did not
         # choose and are no longer running.
         spec = _model_spec(session)
-        if spec is not None and self._effort_choice is not None and hasattr(session, "set_model"):
+        if (
+            not bool(getattr(session, "is_remote", False))
+            and spec is not None
+            and self._effort_choice is not None
+            and hasattr(session, "set_model")
+        ):
+            # A follower's remembered local effort must not silently rewrite
+            # the shared owner's model. The owner projection is authoritative;
+            # explicit /effort remains routed through RemoteSession.
             session.set_model(self._spec_with_chosen_effort(spec))
         # The refusal is latched per model, and this session may be on another
         # one; a stale latch would swallow the answer on the model that needs it.
@@ -1962,12 +1979,21 @@ class OperatorApp(App[None]):
         # Approvals must be answered ON SCREEN from here on: the factory's
         # default gate reads stdin, which this app has taken over, so leaving it
         # installed hangs the first write/exec tool call forever.
-        session.set_approval_handler(self.request_tool_approval)
-        # And this is what makes the `ask` tool EXIST for this session: its
-        # createIf builder gates on the hook, so a front end that can draw a
-        # picker gets the tool and every host that cannot (the server, exec
-        # mode, a subagent) never advertises a question nobody could answer.
-        session.set_ask_handler(self.request_user_choice)
+        if bool(getattr(session, "is_remote", False)):
+            # The socket reader task was created before this app's Textual
+            # context existed. Calling the widget-mounting handlers directly
+            # from it leaves Textual with no active app during compose. Marshal
+            # gate entry through the message pump; the returned futures still
+            # preserve the owner's first-valid-answer-wins socket semantics.
+            session.set_approval_handler(self._request_remote_tool_approval)
+            session.set_ask_handler(self._request_remote_user_choice)
+        else:
+            session.set_approval_handler(self.request_tool_approval)
+            # And this is what makes the `ask` tool EXIST for this session: its
+            # createIf builder gates on the hook, so a front end that can draw a
+            # picker gets the tool and every host that cannot (the server, exec
+            # mode, a subagent) never advertises a question nobody could answer.
+            session.set_ask_handler(self.request_user_choice)
         self._controller = EventController(session, self)
         self._controller.subscribe()
         assert self._status is not None
@@ -2008,6 +2034,102 @@ class OperatorApp(App[None]):
         # worker, so which one won would depend on scheduling.
         self._restore_reported_usage(session)
         self._measure_preloaded_context(session)
+
+    async def _adopt_takeover_session(self, session: Any) -> None:
+        """Become the owner after the remote facade wins the transcript lease.
+
+        Unlike /new or /resume, this is NOT a conversation change: every block
+        already painted belongs to this exact session. Dispose only the remote
+        transport/controller, then adopt the real writer without clearing or
+        replaying history. The synthesized aborted agent_end already marked any
+        unpersisted killed-owner tail honestly; repainting durable history here
+        would duplicate everything and cause visible reflow.
+        """
+        remote = self._session
+        if self._controller is not None:
+            self._controller.dispose()
+            self._controller = None
+        if remote is not None:
+            try:
+                await remote.dispose()
+            except Exception:
+                pass
+        self._session = session
+        self._mobile_adopted(session)
+        session.set_approval_handler(self.request_tool_approval)
+        session.set_ask_handler(self.request_user_choice)
+        self._controller = EventController(session, self)
+        self._controller.subscribe()
+        assert self._status is not None
+        self._status.update(
+            model_label=_effective_label(session),
+            model_name=_model_name(session),
+            effort=_effort_label(session),
+            context_window=_context_window(session),
+            conversation_name=session.conversation_name,
+            streaming=False,
+        )
+        self._wire_mcp_status(session)
+
+    async def _request_remote_tool_approval(
+        self, tool_name: str, description: str, *, job_id: str | None = None
+    ) -> bool:
+        """Enter the real approval surface from a pre-Textual socket task.
+
+        ``call_later`` runs under Textual's active-app context; creating the
+        handler task there is what makes widget composition legal. The relay
+        future mirrors completion/cancellation back to RemoteSession without
+        letting a late card settle a cancelled owner request.
+        """
+        return bool(
+            await self._run_remote_gate(
+                lambda: self.request_tool_approval(tool_name, description, job_id=job_id)
+            )
+        )
+
+    async def _request_remote_user_choice(
+        self, questions: list[AskQuestion]
+    ) -> dict[str, list[str]] | None:
+        """Enter the real ask picker through Textual's message-pump context."""
+        result = await self._run_remote_gate(lambda: self.request_user_choice(questions))
+        return cast(dict[str, list[str]] | None, result)
+
+    async def _run_remote_gate(self, build: Callable[[], Awaitable[Any]]) -> Any:
+        """Run one remote gate coroutine in the app context and mirror its result."""
+        loop = asyncio.get_running_loop()
+        result: asyncio.Future[Any] = loop.create_future()
+        task: asyncio.Task[Any] | None = None
+
+        async def run_gate() -> Any:
+            return await build()
+
+        def start() -> None:
+            nonlocal task
+            if result.cancelled():
+                return
+            task = asyncio.create_task(run_gate())
+
+            def settle(done: asyncio.Task[Any]) -> None:
+                if result.done():
+                    return
+                if done.cancelled():
+                    result.cancel()
+                    return
+                error = done.exception()
+                if error is not None:
+                    result.set_exception(error)
+                else:
+                    result.set_result(done.result())
+
+            task.add_done_callback(settle)
+
+        self.call_later(start)
+        try:
+            return await result
+        except asyncio.CancelledError:
+            if task is not None:
+                task.cancel()
+            raise
 
     async def _preflight_usage(self, session: Any) -> None:
         """Warm the provider's quota reading once the app is already painted.
@@ -3271,15 +3393,11 @@ class OperatorApp(App[None]):
         identically. Failures inside the new factory surface through
         ``_on_boot_failed`` exactly as a bad ``--resume`` does.
 
-        A session that is ALREADY live in another process (a phone-started
-        child, another TUI) is not reopened here — it is ATTACHED to when the
-        owner is reachable over the mobile control socket (see
-        ``_attach_or_refuse``), and refused with today's copy otherwise. Two
-        writers on one transcript is how a resume of a mobile session painted
-        the splash: the second process claimed the directory, replayed a
-        mid-write journal, and left the first process as the only one still
-        appending. The live process already publishes to the phone; this TUI
-        follows and steers that process instead of racing it.
+        A session already live elsewhere is represented by RemoteSession and
+        adopted through this SAME full-app path. The owner remains the sole
+        transcript writer; this TUI consumes durable history plus relayed
+        AgentEvents and sends mutations over the authenticated loopback socket.
+        There is no attach screen or visible mode.
         """
         if self._resume_factory is None:
             self._system_notice("resume unavailable: no resume-capable launcher", "warning")
@@ -3314,33 +3432,60 @@ class OperatorApp(App[None]):
         notice(f"resuming session {resume_id}…")
         self.run_worker(self._reload_session(), thread=False, group="session")
 
-    async def _attach_or_refuse(self, config_dir, concrete: str, owner: int) -> None:
-        """Settle the owned-session branch of ``_resume_session``.
+    async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
+        """Build a RemoteSession and adopt it like any ordinary resume.
 
-        ATTACH when the owner is reachable over the control socket (record
-        found, protocol >= 2, pid match): push the AttachScreen and toast the
-        new state. Otherwise degrade to TODAY's refusal message verbatim —
-        graceful degradation for old binaries, registrant-start failures, and
-        rebind races. Runs as a worker: ``find_owner_record`` is filesystem
-        I/O.
+        Protocol <4 has no full event stream. The degraded projection view was
+        deliberately deleted, so a mixed-version owner gets a precise upgrade
+        refusal rather than silently falling back to a divergent UI.
         """
         from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.session.remote import RemoteSession
 
-        record, found_owner = await asyncio.to_thread(find_owner_record, config_dir, concrete)
-        if record is not None and found_owner == owner:
-            from local_operator.tui.attach_screen import AttachScreen
-
-            self.push_screen(AttachScreen(record, concrete))
+        record, found_owner = await asyncio.to_thread(find_owner_record, config_root, concrete)
+        if record is None or found_owner != owner or record.protocol < 4:
+            self._system_notice(
+                f"session {concrete} is open in an older Local Operator process "
+                f"(pid {owner}) — update or close that process, then resume again",
+                "warning",
+            )
             return
-        # A refused navigation is not conversation content: keep the
-        # splash, same as the other /resume rejections (D1). Name the
-        # owning process and the next step in user words (D2).
-        self._system_notice(
-            f"session {concrete} is already open in another process "
-            f"(pid {owner}) — watch and steer it there, or from the "
-            "phone session list",
-            "warning",
-        )
+        assert self._resume_factory is not None
+
+        async def takeover_factory() -> Any:
+            assert self._resume_factory is not None
+            return await self._resume_factory(concrete)
+
+        try:
+            remote = await RemoteSession.connect(
+                record,
+                concrete,
+                config_dir=config_root,
+                takeover_factory=takeover_factory,
+            )
+        except Exception as error:
+            self._system_notice(str(error), "warning")
+            return
+
+        # Reuse the ordinary replacement path's cleanup discipline, but the
+        # remote is already built and history-loaded. Dispose the old local
+        # session and substitute in one frame; no attach banner/emission.
+        if self._controller is not None:
+            self._controller.dispose()
+            self._controller = None
+        if self._session is not None:
+            try:
+                await self._session.dispose()
+            except Exception:
+                pass
+        self._session = None
+        self._swapping_session = True
+        try:
+            self._reset_ledger_for_swap()
+            self._adopt_session(remote)
+            await self._preflight_usage(remote)
+        finally:
+            self._swapping_session = False
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -5673,6 +5818,7 @@ class OperatorApp(App[None]):
         # transcript block that changes after later blocks were appended is the
         # one thing the transcript's finalize discipline forbids.
         self._mount_prompt(prompt)
+        self._notify_mobile_approval_pending(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
         self._refresh_working_activity()
@@ -5689,6 +5835,7 @@ class OperatorApp(App[None]):
             if self._approval is prompt:
                 self._approval = None
             self._unmount_prompt(prompt)
+            self._notify_mobile_approval_settled(prompt)
             # The decision belongs in the conversation: what was asked, and what
             # was answered. Appended after the fact so the transcript records a
             # settled fact rather than a question it would then have to revise.
@@ -5709,6 +5856,26 @@ class OperatorApp(App[None]):
             if self._approval is prompt:
                 self._approval = None
             self._refresh_working_activity()
+
+    def _notify_mobile_approval_pending(self, card: ApprovalPrompt) -> None:
+        """Project a mounted approval to other front ends, best-effort."""
+        handle = self._mobile_handle
+        if handle is None:
+            return
+        try:
+            handle.note_approval_pending(card)
+        except Exception:  # noqa: BLE001 — bridge failure never breaks the gate
+            logger.debug("mobile approval-pending notify failed", exc_info=True)
+
+    def _notify_mobile_approval_settled(self, card: ApprovalPrompt) -> None:
+        """Clear this approval's projection on every settle route."""
+        handle = self._mobile_handle
+        if handle is None:
+            return
+        try:
+            handle.note_approval_settled(card)
+        except Exception:  # noqa: BLE001 — bridge failure never breaks the gate
+            logger.debug("mobile approval-settled notify failed", exc_info=True)
 
     # -- the agent's own questions --------------------------------------------
     async def request_user_choice(
@@ -6776,6 +6943,14 @@ class OperatorApp(App[None]):
         be a startup gate for the terminal. The lazy import keeps the mobile
         package off the CLI path for every run that never mounts the app.
         """
+        # A RemoteSession is already a client of the owner's registrant. Starting
+        # another registrant here would publish a second record for the same
+        # transcript and corrupt daemon routing. If this process previously
+        # owned a local session, tear its record down while following remotely;
+        # takeover calls this again with a real Session and starts a fresh owner.
+        if bool(getattr(session, "is_remote", False)):
+            self._mobile_teardown()
+            return
         if self._mobile_handle is None:
             try:
                 from local_operator.mobile.registrant import Registrant
@@ -8595,6 +8770,28 @@ class OperatorApp(App[None]):
         command = f"/{entry.name}" if entry is not None else parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
         notice = self._notice
+
+        # A RemoteSession keeps process/terminal commands local, but commands
+        # that mutate the SHARED conversation run on the owner. These three
+        # normally inspect local-only registries/loop state before touching the
+        # session, so they need the explicit routing seam here. /model, /effort,
+        # /goal, /rename and /compact already route through SessionProtocol's
+        # ordinary mutation methods and stay on their existing full UI paths.
+        remote_route = getattr(self._session, "route_shared_slash", None)
+        if callable(remote_route) and command in {"/agent", "/team", "/loop"}:
+
+            async def run_remote_slash() -> None:
+                try:
+                    typed_route = cast(Callable[[str, str], Awaitable[str]], remote_route)
+                    detail = await typed_route(command.removeprefix("/"), arg)
+                except Exception as error:
+                    self._system_notice(str(error), "warning")
+                else:
+                    if detail:
+                        notice(detail)
+
+            self.run_worker(run_remote_slash(), thread=False, group="session")
+            return
 
         if command == "/exit":
             self.exit()

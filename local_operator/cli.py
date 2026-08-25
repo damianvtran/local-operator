@@ -1946,24 +1946,12 @@ def main() -> int:
                         )
                 return 1
 
-            # Second-writer guard, at the ONLY place the hole starts. Left to
-            # the session factory, `lop --resume <live-id>` claims the
-            # directory and silently becomes a second writer on a transcript
-            # another process is appending to — the exact corruption the
-            # in-app /resume guard exists to prevent, reachable on every cold
-            # boot. Owned by another LIVE pid: attach to that owner (a
-            # follower view over its control socket) when it is reachable,
-            # refuse with the same copy the TUI uses otherwise. The factory
-            # never runs on this path. `exec --resume` refuses outright (a
-            # headless one-shot cannot follow) — see the exec branch below.
-            if args.subcommand is None and getattr(args, "resume", None) is not None:
-                from local_operator.resume import live_session_owner
-
-                owner = live_session_owner(config_dir(), str(args.resume))
-                if owner is not None and owner != os.getpid():
-                    from local_operator.cli_attach import run_owned_resume_attach
-
-                    return run_owned_resume_attach(config_dir(), str(args.resume), owner)
+            # Cold live-session resumes now stay on the ordinary TUI launch
+            # path. ``create_session(has_ui=True)`` returns a RemoteSession when
+            # another process owns the transcript, so the STANDARD OperatorApp
+            # renders it with no standalone attach app, exit-75 relaunch, or
+            # visible mode. The shared factory still protects the sole-writer
+            # invariant; exec/headless retains its refusal below.
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
         # (CL-12) No env_config binding here: the scheduler wrapper resolves its

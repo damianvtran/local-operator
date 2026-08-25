@@ -29,6 +29,7 @@ from the registrant's loop, serialized by the implementor".
 from __future__ import annotations
 
 import asyncio
+import copy
 import hmac
 import inspect
 import json
@@ -38,11 +39,12 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
 
+from local_operator.mobile.live_turn import LiveTurnTracker
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registry import RecordPublisher
 from local_operator.mobile.types import (
@@ -110,6 +112,16 @@ class _ClientConn:
     # Frames on one TCP stream must stay ordered, while unrelated streams must
     # never queue behind its backpressure.
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # v4: this attach client asked for the raw AgentEvent relay in its auth
+    # frame. Daemon connections never set it; a v3 attach client that omitted
+    # the flag keeps projection-only behaviour.
+    wants_events: bool = False
+    # Flipped only AFTER the welcome projection and the attach_sync seed have
+    # been queued on this connection's ordered stream. Event fan-out snapshots
+    # recipients synchronously against the tracker fold, so this flag is what
+    # guarantees a joining client never sees an event the seed already covers
+    # (welcome → seed → live events, gapless and duplicate-free).
+    events_ready: bool = False
 
 
 class SessionHandle(Protocol):
@@ -157,6 +169,17 @@ class SessionHandle(Protocol):
         model change): the registrant pushes whatever changed."""
         ...
 
+    # -- v4 optional capabilities (probed with getattr, never required) -------
+    # subscribe_events(on_event) -> unsubscribe: feed the host session's raw
+    #   AgentEvent stream, serialized (``model_dump(mode="json")``) on the
+    #   host's own loop, to ``on_event`` (thread-safe). The registrant relays
+    #   the dicts to event-subscribed attach clients. Optional so old hosts
+    #   and reduced test handles keep working — without it, attach clients
+    #   simply get v3 projection-only behaviour.
+    # recall_steer(command_id) -> str: unsend the queued steering message the
+    #   follower submitted under ``command_id``; raises when it already
+    #   drained. Optional for the same reason.
+
 
 class Registrant:
     """One per interactive process. Construct, ``start()``, ``close()``."""
@@ -178,6 +201,14 @@ class Registrant:
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
+        # v4 event relay: the live-turn tracker folds the SAME serialized
+        # frames the relay fans out, on the registrant loop, so a joining
+        # client's seed is exactly consistent with the frames already sent.
+        self._live_turn = LiveTurnTracker()
+        self._unsubscribe_events: Callable[[], None] | None = None
+        # Strong references to in-flight event sends: a bare create_task can
+        # be collected mid-flight, which drops frames silently.
+        self._event_sends: set[asyncio.Task[None]] = set()
         # N authenticated connections keyed by id(writer): one daemon (a new
         # daemon dial evicts the old — that IS its reconnect story) plus up to
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
@@ -285,6 +316,12 @@ class Registrant:
             except Exception:  # noqa: BLE001 — shutdown must not raise
                 logger.debug("registrant unsubscribe failed", exc_info=True)
             self._unsubscribe = None
+        if self._unsubscribe_events is not None:
+            try:
+                self._unsubscribe_events()
+            except Exception:  # noqa: BLE001 — shutdown must not raise
+                logger.debug("registrant event unsubscribe failed", exc_info=True)
+            self._unsubscribe_events = None
 
     def _on_owner_loop(self) -> bool:
         try:
@@ -314,6 +351,19 @@ class Registrant:
         self._record.control_port = port
         self._publisher = RecordPublisher(self._record)
         self._unsubscribe = self._handle.subscribe(self._schedule_push)
+        # v4: hosts that can serialize their event stream feed the relay.
+        # Probed, not required — a handle without the capability leaves attach
+        # clients on v3 projection-only behaviour, never broken.
+        subscribe_events = getattr(self._handle, "subscribe_events", None)
+        if callable(subscribe_events):
+            try:
+                subscribe = cast(
+                    Callable[[Callable[[dict[str, Any]], None]], Callable[[], None]],
+                    subscribe_events,
+                )
+                self._unsubscribe_events = subscribe(self._relay_event)
+            except Exception:  # noqa: BLE001 — relay is additive, never a gate
+                logger.debug("event relay subscribe failed", exc_info=True)
         heartbeat = asyncio.ensure_future(self._heartbeat_loop())
         self._heartbeat_task = heartbeat
         if self._thread is not None:
@@ -345,6 +395,9 @@ class Registrant:
             self._heartbeat_task.cancel()
         if self._push_task is not None:
             self._push_task.cancel()
+        for task in list(self._event_sends):
+            task.cancel()
+        self._event_sends.clear()
         if self._server is not None:
             self._server.close()
         clients = list(self._clients.values())
@@ -428,6 +481,10 @@ class Registrant:
         # upgrade would demote the phone bridge to a follower.
         raw_kind = frame.get("client", "daemon")
         kind: ClientKind = "attach" if raw_kind == "attach" else "daemon"
+        # v4: only attach clients may subscribe to the raw event relay. The
+        # daemon's projection path must stay byte-identical, so a daemon auth
+        # carrying the flag (there is none today) is deliberately ignored.
+        wants_events = kind == "attach" and bool(frame.get("events"))
 
         if kind == "daemon":
             # At most ONE daemon connection — a new dial evicts the old, which
@@ -448,9 +505,22 @@ class Registrant:
                 logger.info("mobile control: evicting attach client %s (cap)", peer)
                 self._drop_client(victim)
 
-        conn = _ClientConn(writer=writer, kind=kind)
+        conn = _ClientConn(writer=writer, kind=kind, wants_events=wants_events)
         self._clients[id(writer)] = conn
         await self._push_to(conn)  # the welcome: a full projection, unprompted
+        if conn.wants_events:
+            # The live-turn seed, once, right after the welcome. The snapshot
+            # and the ready flag are set in ONE synchronous block: any event
+            # folded before this instant is inside the seed and was not sent
+            # to this connection; any event folded after it is sent and is not
+            # in the seed. That single ordering fact is the mid-turn-join
+            # correctness argument — no gap, no duplicate. (The lock fast-path
+            # in ``_send_to`` acquires without yielding on an uncontended
+            # connection, so a relay callback scheduled after this block still
+            # queues its frame BEHIND the seed on the ordered stream.)
+            seed_frame = {"op": "attach_sync", "data": self._live_turn.seed().to_json()}
+            conn.events_ready = True
+            await self._send_to(conn, seed_frame)
         try:
             while not self._closed.is_set():
                 line = await reader.readline()
@@ -560,6 +630,15 @@ class Registrant:
                 frame["approved"],
                 frame.get("remember", False),
             )
+        if op == "recall_steer":
+            # v4: follower Esc-recall parity. Optional capability — an owner
+            # host that predates it answers with the unknown-op error, which
+            # the follower surfaces as "cannot recall here".
+            recall = getattr(h, "recall_steer", None)
+            if not callable(recall):
+                raise ValueError("this owner cannot recall queued steering")
+            typed_recall = cast(Callable[[str], Awaitable[str]], recall)
+            return await typed_recall(str(frame.get("command_id", "")))
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
             # the user tapped (U8 guard): the handle rejects the answer if the
@@ -574,6 +653,50 @@ class Registrant:
                 question_index=question_index,
             )
         raise ValueError(f"unknown op: {op!r}")
+
+    # -- v4 event relay --------------------------------------------------------
+
+    def _relay_event(self, data: dict[str, Any]) -> None:
+        """Thread-safe relay entry: events fire on the HOST's thread (the
+        Textual loop for a TUI owner), and everything relay-ordered must run
+        on the registrant loop. ``call_soon_threadsafe`` from one producer
+        thread preserves emission order, which is the whole relay contract."""
+        loop = self._loop
+        if loop is None or self._closed.is_set():
+            return
+        try:
+            loop.call_soon_threadsafe(self._relay_on_loop, data)
+        except RuntimeError:  # loop closing
+            pass
+
+    def _relay_on_loop(self, data: dict[str, Any]) -> None:
+        """Fan one serialized AgentEvent out to event-subscribed attach clients.
+
+        Folding into the live-turn tracker and snapshotting the recipient set
+        happen SYNCHRONOUSLY here — that, plus the seed block in
+        ``_on_connection``, is what makes a mid-turn join gapless (see the
+        comment there). The actual sends are per-connection tasks so one slow
+        follower cannot delay the others; per-connection order is kept by the
+        connection's FIFO ``send_lock``.
+
+        Daemon connections are never in the recipient set: the phone's
+        projection path is byte-identical to v3 by construction.
+        """
+        if self._closed.is_set():
+            return
+        self._live_turn.fold(data)
+        recipients = [
+            conn
+            for conn in self._clients.values()
+            if conn.kind == "attach" and conn.wants_events and conn.events_ready
+        ]
+        if not recipients:
+            return
+        frame = {"op": "event", "data": data}
+        for conn in recipients:
+            task = asyncio.create_task(self._send_to(conn, frame))
+            self._event_sends.add(task)
+            task.add_done_callback(self._event_sends.discard)
 
     # -- pushes ----------------------------------------------------------------
 
@@ -607,17 +730,38 @@ class Registrant:
             self._push_scheduled = False
 
     async def _push(self) -> None:
-        """Broadcast a projection repaint to every live connection.
+        """Broadcast projection repaints, preserving daemon bytes exactly.
 
-        Projections are snapshots (no deltas), so every front end wants each
-        one — the daemon fans it to the phone, each attach terminal renders
-        it directly. Sending is per-connection: one dead socket must not
-        block or corrupt the others' frames."""
-        await self._broadcast({"op": "projection", "data": self._fold.projection.to_json()})
+        Event clients may need a follower-only gate overlay (currently a TUI
+        approval). Build the ordinary projection once for daemon and legacy
+        attach clients; only event subscribers get the overlaid copy. This is
+        the protocol-v4 promise that phone frames remain byte-identical.
+        """
+        ordinary = {"op": "projection", "data": self._fold.projection.to_json()}
+        await asyncio.gather(
+            *(
+                self._send_to(conn, self._projection_frame(conn, ordinary))
+                for conn in list(self._clients.values())
+            )
+        )
+
+    def _projection_frame(self, conn: _ClientConn, ordinary: dict[str, Any]) -> dict[str, Any]:
+        if not conn.wants_events:
+            return ordinary
+        pending = getattr(self._handle, "event_pending", None)
+        if pending is None:
+            return ordinary
+        overlaid = copy.deepcopy(ordinary)
+        overlaid["data"]["pending"] = pending.to_json()
+        overlaid["data"]["pending_count"] = max(
+            1, int(overlaid["data"].get("pending_count", 0) or 0)
+        )
+        return overlaid
 
     async def _push_to(self, conn: _ClientConn) -> None:
         """The welcome form of a push: one full projection to one connection."""
-        await self._send_to(conn, {"op": "projection", "data": self._fold.projection.to_json()})
+        ordinary = {"op": "projection", "data": self._fold.projection.to_json()}
+        await self._send_to(conn, self._projection_frame(conn, ordinary))
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating
