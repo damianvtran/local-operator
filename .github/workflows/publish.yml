@@ -57,6 +57,12 @@ jobs:
             echo "::error::mobile web bundle missing from the wheel"
             exit 1
           }
+          # The store extension has its own release line and must never inflate
+          # or couple the Python package to a browser-specific artifact.
+          if unzip -l dist/local_operator-*.whl | grep -q "extension/"; then
+            echo "::error::browser extension leaked into the Python wheel"
+            exit 1
+          fi
 
       - name: Upload distributions
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}

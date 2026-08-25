@@ -1,0 +1,48 @@
+name: Browser extension
+
+on:
+  push:
+    branches:
+      - main
+      - 'dev-*'
+    paths:
+      - 'extension/**'
+      - 'local_operator/browser_bridge/protocol.py'
+      - 'local_operator/browser_bridge/gen_ts.py'
+  pull_request:
+    paths:
+      - 'extension/**'
+      - 'local_operator/browser_bridge/protocol.py'
+      - 'local_operator/browser_bridge/gen_ts.py'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: extension/pnpm-lock.yaml
+      - name: Install extension dependencies
+        working-directory: extension
+        run: pnpm install --frozen-lockfile
+      - name: Check TypeScript
+        working-directory: extension
+        run: pnpm typecheck
+      - name: Run extension tests
+        working-directory: extension
+        run: pnpm test
+      - name: Build extension
+        working-directory: extension
+        run: pnpm build
+      - name: Verify generated protocol
+        run: python -m local_operator.browser_bridge.gen_ts --check
