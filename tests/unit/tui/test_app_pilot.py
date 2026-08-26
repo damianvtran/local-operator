@@ -54,7 +54,12 @@ from local_operator.tui.widgets.editor import (
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    RichBlock,
+    TranscriptView,
+    UserBlock,
+)
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 
@@ -977,6 +982,7 @@ async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager
         FrontendSessionState,
         SlashCapability,
         SnapshotMcpManager,
+        _slash_capabilities,
     )
 
     class RoutedSession(FakeSession):
@@ -1030,6 +1036,54 @@ async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager
         await pilot.pause()
         await pilot.pause()
         assert routed == []
+
+        # Round 5, MAJOR: against a full-capability owner the bare-/mcp
+        # pullback sets remote_capability = None, and the U10 refusal guard
+        # used to read that deliberate pullback as "unadvertised" — every
+        # production follower lost the listing behind a refusal notice. The
+        # carve-out must render the canonical LOCAL listing: no refusal, no
+        # route, and the MCP servers block actually mounted in the transcript.
+        from local_operator.mcp.config import MCPStdioServerConfig
+
+        full_capabilities = FrontendSessionState(
+            session_id=session.session_id,
+            epoch="owner",
+            slash_capabilities=_slash_capabilities(),
+        )
+        session.frontend_state = full_capabilities
+        for _ in range(20):
+            await pilot.pause()
+            if getattr(app._session, "frontend_state", None) is full_capabilities:
+                break
+        configs = {"linear": MCPStdioServerConfig(command="linear-mcp")}
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            app._run_slash_command("/mcp")
+            for _ in range(20):
+                await pilot.pause()
+                if app.query(RichBlock):
+                    break
+        listing_blocks = [b for b in app.query(RichBlock)]
+        assert listing_blocks, "bare /mcp must mount the canonical local listing block"
+        listing = "\n".join(_renderable_plain(b.renderable) for b in listing_blocks)
+        assert "MCP servers" in listing
+        assert "linear" in listing
+        assert not any(
+            "not available from this session's owner" in (b.text() or "")
+            for b in app.query(NoticeBlock)
+        )
+        assert routed == []
+
+        # The grant form still routes authoritatively under the full list.
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            app._run_slash_command("/mcp login linear")
+            for _ in range(60):
+                await pilot.pause()
+                if any(
+                    "authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock)
+                ):
+                    break
+        assert routed == [("mcp", "login linear")]
+        assert any("authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock))
 
 
 @pytest.mark.asyncio

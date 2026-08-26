@@ -9617,6 +9617,12 @@ class OperatorApp(App[None]):
             and remote_capabilities
             and entry is not None
             and entry.name not in _FOLLOWER_LOCAL_SLASHES
+            # The bare-/mcp pullback above sets remote_capability = None on
+            # purpose — the listing is canonical-local data — so the refusal
+            # below must not read that deliberate pullback as "unadvertised"
+            # (round 5, MAJOR). Only subcommand forms keep the authoritative
+            # route and therefore the refusal.
+            and not (command == "/mcp" and not arg)
         ):
             # A command the registry classifies as shared (not follower-local)
             # that the owner's capability list does NOT advertise would fall
