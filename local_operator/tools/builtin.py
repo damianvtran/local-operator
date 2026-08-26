@@ -6943,7 +6943,7 @@ class HubParams(BaseModel):
             "(becomes part of its instructions). pause: stop it now but keep it "
             "resumable. cancel: stop it for good. resume: relaunch a stopped, paused or "
             "failed subagent against its own transcript so it continues where it left "
-            "off."
+            "off; names several targets to fan one message out to a whole batch at once."
         )
     )
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
@@ -6962,8 +6962,9 @@ class HubParams(BaseModel):
         description=(
             "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
             'labels, or ["all"] for every running subagent. Several ids address '
-            "several subagents. 'ask', 'resume' and 'peek' take exactly one. Omit "
-            "for op='list', which addresses nobody."
+            "several subagents. 'ask' and 'peek' take exactly one; 'resume' fans one "
+            "message out to every target you name, so a batch of failed subagents can "
+            "be resumed in a single call. Omit for op='list', which addresses nobody."
         ),
     )
 
@@ -7118,7 +7119,8 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append("")
         lines.append(
             "Resume one with hub op='resume' and its JOB id, plus an instruction for "
-            "what to do next. The transcript id above is not a job id: it opens the "
+            "what to do next \u2014 or name several JOB ids to resume a whole batch in "
+            "one call. The transcript id above is not a job id: it opens the "
             "child's history for reading and starts no agent."
         )
     return _text(
@@ -7277,9 +7279,15 @@ async def _execute_hub_parent(
             "hub",
             "; ".join(errors) or "no subagent matched; use 'jobs' to list them.",
         )
-    # A question, a resume and a peek each have exactly one subject, so they
-    # refuse a fan-out rather than silently acting on the first match.
-    if params.op in ("ask", "resume", "peek") and len(ids) > 1:
+    # A question and a peek each have exactly one subject — one reply to read,
+    # one transcript window to render — so they refuse a fan-out rather than
+    # silently acting on the first match. Resume is deliberately NOT here: each
+    # resume spawns an INDEPENDENT new job replaying that target's own
+    # transcript, so N targets produce N separate children with no shared reply
+    # and no shared transcript to collide. Fanning one message out to a whole
+    # batch of stopped/failed children (e.g. after a provider stall) is exactly
+    # what resume should do, so it falls through to the loop below.
+    if params.op in ("ask", "peek") and len(ids) > 1:
         return _error(
             tool_call_id,
             "hub",
@@ -7312,15 +7320,59 @@ async def _execute_hub_parent(
         )
 
     if params.op == "resume":
-        new_job_id, error = comms.resume(ids[0], message)
-        if error is not None:
-            return _error(tool_call_id, "hub", error)
+        # Fan-out: resume every target in turn. Unlike ask/peek, each resume
+        # spawns an independent new job on its own transcript, so a batch of
+        # stopped/failed children can be relaunched in one call. ``comms.resume``
+        # returns a ``(new_job_id, error)`` tuple rather than a ``Delivery``, so
+        # we collect per-target receipts here and format them like the
+        # send/steer/cancel block below without borrowing the Delivery shape.
+        resumed: list[tuple[str, str | None, str | None]] = [
+            # (resumed-from id, new job id, error)
+            (job_id, *comms.resume(job_id, message))
+            for job_id in ids
+        ]
+        acted = [receipt for receipt in resumed if receipt[2] is None]
+        header = (
+            f"resume: {len(acted)}/{len(resumed)} subagent(s)"
+            if resumed
+            else "resume: nothing to do"
+        )
+        lines = [header]
+        for from_id, new_job_id, error in resumed:
+            label = comms.label_of(from_id)
+            if error is None:
+                # Each success carries the NEW job id it was resumed as; the
+                # transcript-replay guidance is stated once in the footer
+                # rather than repeated on every line.
+                lines.append(f"- {label} ({from_id}): resumed as job {new_job_id}")
+            else:
+                lines.append(f"- {label} ({from_id}): failed \u2014 {error}")
+        lines.extend(f"- {error}" for error in errors)
+        if acted:
+            # Kept from the single-target wording: a resumed child replays its
+            # own transcript before it reads this instruction, so the parent
+            # must 'wait' for it rather than assume it acted immediately.
+            lines.append(
+                "Each replays its own transcript before reading this instruction. "
+                "Await them with 'wait'."
+            )
         return _text(
             tool_call_id,
             "hub",
-            f"resumed {comms.label_of(ids[0])} as job {new_job_id}; it replays its own "
-            "transcript before reading this instruction. Await it with 'wait'.",
-            details={"op": "resume", "job_id": new_job_id, "resumed_from": ids[0]},
+            "\n".join(lines),
+            details={
+                "op": "resume",
+                "job_ids": [new_id for _from, new_id, error in resumed if error is None],
+                "resumed_from": [from_id for from_id, _new, error in resumed if error is None],
+                "acted": len(acted),
+                # Mirrored into details as well as the flag: every other useless
+                # site in this module carries the key, and compaction's pruning
+                # pass reads it from there.
+                "useless": not acted,
+            },
+            # Nothing was resumed: a receipt list of pure failures is not an
+            # observation the model should act on as if it had been heard.
+            useless=not acted,
         )
 
     deliveries = []
@@ -7392,8 +7444,9 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
             "longer shows), send a note, ask one a question and get its answer (use "
             "this to find out whether a quiet child is stuck), steer one onto a "
             "different course, pause one so it can be picked up later, cancel one, or "
-            "resume a stopped, paused or failed one against its own transcript so it "
-            'continues where it left off. Address them by job id, by label, or "all".'
+            "resume a stopped, paused or failed one (or a whole batch of them at once) "
+            "against its own transcript so it continues where it left off. Address them "
+            'by job id, by label, or "all".'
         ),
         parameters=HubParams.model_json_schema(),
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
