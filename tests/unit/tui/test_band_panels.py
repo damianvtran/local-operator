@@ -24,7 +24,7 @@ from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.widgets.subagent_panel import SubagentPanel
+from local_operator.tui.widgets.subagent_panel import MAX_SUBAGENT_ROWS, SubagentPanel
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
 
 
@@ -327,6 +327,40 @@ async def test_band_panels_hidden_when_empty_and_shown_when_populated() -> None:
         await pilot.pause()
         assert sub.display is False
         assert todo.display is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_panel_bounds_to_newest_slice_and_expands_in_start_order() -> None:
+    """The default roster preserves the relevant tail without reversing it;
+    its keyboard disclosure reveals every retained child and collapses back."""
+    session = FakeSession()
+    jobs = [_Job(f"sub-{index:02d}", f"task {index:02d}") for index in range(1, 13)]
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+
+        visible = [row.job_id for row in panel._list.children if row.display]
+        assert visible == [f"sub-{index:02d}" for index in range(7, 13)]
+        assert panel.predicted_rows() == MAX_SUBAGENT_ROWS
+        assert str(panel._affordance.content) == "+6 earlier · ctrl+g to expand"
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert [row.job_id for row in panel._list.children if row.display] == [
+            f"sub-{index:02d}" for index in range(1, 13)
+        ]
+        assert str(panel._affordance.content) == "ctrl+g to collapse"
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert [row.job_id for row in panel._list.children if row.display] == visible
 
 
 @pytest.mark.asyncio
