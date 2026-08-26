@@ -12,6 +12,15 @@ a frame is re-captured or a caption is reworded, re-running this file
 regenerates the whole package identically; nothing is edited by hand in an
 image editor and then lost.
 
+One deliberate exception to "composites of real frames": the *reached page*
+shown inside the drawn browser chrome in screenshot (d) and the marquee is
+typeset by this script (`_demo_page`) instead of pasted from the capture. The
+raw capture is the bridge's bare test HTML — default Times serif on white —
+which reads as an unstyled test file next to the site-themed composition. The
+extension frames (the product UI being sold) remain untouched captures; the
+demo page is our own local content on our own 127.0.0.1 URL, so re-typesetting
+it in the product's own design language fabricates nothing and claims nothing.
+
 DESIGN LANGUAGE — the local-operator.com system, not an ad-hoc one
 ------------------------------------------------------------------
 Every colour, face, size and radius below is lifted from the website's design
@@ -515,6 +524,58 @@ def _split_canvas(
     return cv
 
 
+def _demo_page(w: int = 620, h: int = 346) -> Image.Image:
+    """The local page the agent reached, typeset in the site's design system.
+
+    WHY DRAWN, NOT PASTED: the real capture (`action-screenshot-page2.png`) is
+    the bridge's bare test HTML — default Times serif on stark white — which
+    reads as an unstyled test file inside the otherwise site-themed
+    composition. The copy here is *verbatim* from that captured page ("Page
+    Two" / "Second page loaded.") and the URL in the chrome stays the real
+    127.0.0.1 bridge address, so nothing is fabricated — the same content is
+    simply typeset the way a Local Operator demo page actually looks: Fraunces
+    display heading on `surface`, mono eyebrow with the single accent, Figtree
+    body, hairline-ruled mono footer naming the local origin.
+
+    Rendered at 2x then LANCZOS-downsampled so Fraunces' high-contrast
+    hairlines survive at composite scale (drawing at 1x leaves the thin
+    strokes ragged next to the resampled popup captures).
+    """
+    s = 2  # supersampling factor
+    W, H = w * s, h * s
+    pg = Image.new("RGB", (W, H), SURFACE)
+    d = ImageDraw.Draw(pg)
+    mx = 52 * s  # page gutter — the site's content-column breathing room
+    y = 44 * s
+
+    # Mono eyebrow: the one accent use on the page (dot + label), mirroring
+    # the site's section-label recipe at a page-appropriate size.
+    ef = font("mono", 11 * s, 500)
+    easc = ef.getmetrics()[0]
+    cy = y + easc // 2 + 1 * s
+    d.ellipse([mx, cy - 3 * s, mx + 6 * s, cy + 3 * s], fill=ACCENT)
+    draw_tracked(d, (mx + 14 * s, y), "LOCAL DEMO PAGE", ef, ACCENT, 0.08 * 11 * s)
+    y += easc + 20 * s
+
+    # Fraunces display heading — the captured page's own H1 text, now in the
+    # brand's editorial drawing instead of default Times.
+    hf = font("display", 42 * s, 400)
+    draw_tracked(d, (mx, y), "Page Two", hf, INK, -0.024 * 42 * s)
+    y += round(42 * s * 1.1) + 16 * s
+
+    # Body line, verbatim from the capture.
+    bf = font("sans", 18 * s, 400)
+    d.text((mx, y), "Second page loaded.", font=bf, fill=INK_MUTED)
+
+    # Footer pinned to the page bottom: hairline rule + mono origin line, the
+    # quiet "this is your machine" signature. INK_DIM keeps it tertiary.
+    fy = H - 44 * s
+    d.line([mx, fy - 16 * s, W - mx, fy - 16 * s], fill=HAIRLINE, width=s)
+    ff = font("mono", 11 * s, 400)
+    d.text((mx, fy - 4 * s), "served from 127.0.0.1:8791 on your machine", font=ff, fill=INK_DIM)
+    return pg.resize((w, h), Image.LANCZOS)
+
+
 def _browser_chrome(page: Image.Image, url: str) -> Image.Image:
     """Wrap a page screenshot in a minimal browser top-bar (traffic lights +
     URL pill) so the reached page reads as 'in a real browser tab' without
@@ -551,7 +612,7 @@ def build_screenshot_connected(path: str):
         "Connected",
         "Your browser, with an agent in it.",
         "Paired and connected. Local Operator drives one tab and shows you what it "
-        "reached — here, Page Two on your own machine.",
+        "reached. Here, Page Two on your own machine.",
         frame,
     )
     cv.save(path)
@@ -565,7 +626,7 @@ def build_screenshot_allow(path: str):
         "Per-site consent",
         "You decide which sites.",
         "The first time the agent wants a new site it asks. Allow once, always "
-        "allow, or deny — reversible any time in Settings.",
+        "allow, or deny. Reversible any time in Settings.",
         frame,
     )
     cv.save(path)
@@ -602,21 +663,18 @@ def build_screenshot_action(path: str):
         MARGIN,
         56,
         "Agent at work",
-        "It drives one tab — never yours.",
+        "It drives one tab. Never yours.",
         "Ask in Local Operator; the agent opens its own tab, reaches the page, and "
         "reports the real result.",
         max_w=W - 2 * MARGIN,
     )
     top = y + 30
 
-    # The reached page (browser content) as the wide hero. The real test page
-    # is deliberately sparse ("Page Two / Second page loaded."), so crop to a
-    # page-top band that keeps the heading legible with balanced whitespace
-    # rather than a near-empty white expanse.
-    page = Image.open(evid("action-screenshot-page2.png")).convert("RGB")
-    cb = content_bbox(page, (255, 255, 255))
-    page = page.crop((0, 0, min(page.width, cb[2] + 340), min(page.height, cb[3] + 150)))
-    page = _fit(page, max_h=H - top - 64, max_w=740)
+    # The reached page (browser content) as the wide hero — the captured test
+    # page's content typeset in the site system (see _demo_page for why the
+    # raw Times-on-white capture is not pasted directly). Same 620x346 band
+    # the previous crop produced, so the composition is unchanged.
+    page = _fit(_demo_page(), max_h=H - top - 64, max_w=740)
     page_card = _browser_chrome(page, "127.0.0.1:8791/lop-page2.html")
     px = MARGIN
     py = top + ((H - top - 64) - page_card.height) // 2
@@ -721,11 +779,9 @@ def build_marquee(path: str):
     y += 26
     draw_tracked(d, (x, y), "FREE AND OPEN SOURCE", font("mono", 13, 500), ACCENT, 0.08 * 13)
 
-    # Right ~60%: the reached page in browser chrome with the connected popup.
-    page = Image.open(evid("action-screenshot-page2.png")).convert("RGB")
-    cb = content_bbox(page, (255, 255, 255))
-    page = page.crop((0, 0, min(page.width, cb[2] + 340), min(page.height, cb[3] + 150)))
-    page = _fit(page, max_h=360, max_w=600)
+    # Right ~60%: the reached page (typeset in-theme — see _demo_page) in
+    # browser chrome with the connected popup.
+    page = _fit(_demo_page(), max_h=360, max_w=600)
     page_card = _browser_chrome(page, "127.0.0.1:8791/lop-page2.html")
     px = 640
     py = (H - page_card.height) // 2
