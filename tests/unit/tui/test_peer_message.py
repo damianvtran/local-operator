@@ -23,6 +23,22 @@ def _peer_blocks(app) -> list[PeerMessageBlock]:
     return [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, PeerMessageBlock)]
 
 
+async def _settle_for_session(pilot, app) -> None:
+    """Wait until boot has resolved the session and subscribed its event bridge.
+
+    The TUI responsiveness work makes boot deliberately more asynchronous. A
+    live event emitted before ``app._session`` is set has no session handler to
+    receive it, so no amount of post-emit settling can recover that lost event.
+    Tests that inject host events must first establish the same precondition the
+    real registrant has: the session is live and addressable.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app._session is not None:
+            return
+    raise AssertionError("session did not finish booting")
+
+
 async def _settle_for_peer_block(pilot, app, *, want: int = 1) -> None:
     """Pump the event loop until ``want`` peer blocks are mounted.
 
@@ -49,7 +65,7 @@ async def test_live_peer_delivery_paints_a_cross_session_block() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _settle_for_session(pilot, app)
         session.emit(
             PeerMessageDeliveredEvent(
                 body="gates are green",
@@ -95,6 +111,7 @@ async def test_resume_replays_peer_message_without_double_paint() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
         await _settle_for_peer_block(pilot, app)
         # Boot replayed the history: exactly one peer block from the persisted row.
         assert len(_peer_blocks(app)) == 1
@@ -117,7 +134,7 @@ async def test_live_receipt_suppresses_its_replay() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _settle_for_session(pilot, app)
         # Pretend this delivery was already painted live before the replay.
         app._live_peer_receipts.add("peer-1")
         app._render_resumed_history(session)

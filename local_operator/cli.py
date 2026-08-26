@@ -1030,6 +1030,8 @@ def browser_command(args: argparse.Namespace) -> int:
         return 0 if result.get("ok") else 1
     print("usage: lop browser {install|status|start|stop|restart|pair|logs|uninstall|serve}")
     return 1
+
+
 # Peer messaging body cap. Well under the registrant's 1 MB line limit so a
 # huge paste is rejected with a clear message here rather than becoming a
 # silently dropped oversized line on the wire.
