@@ -61,11 +61,13 @@ the owner.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,6 +154,33 @@ def _owner_start_token(pid: int) -> str | None:
     return token or None
 
 
+#: Memoized start token for THIS process. The owner's own start token is
+#: immutable for the life of the process, so the ``ps -o lstart=`` fork it costs
+#: need only be paid once rather than on every register/unregister/kill of the
+#: bash hot path (a session that spawns many short commands otherwise pays a
+#: ``ps`` fork/exec per command just to re-derive a constant). ``None`` means
+#: "not yet resolved" — a transient ``ps`` failure is NOT cached, so a later
+#: call retries rather than poisoning the process with a permanent ``None``.
+_SELF_START_TOKEN: str | None = None
+
+
+def _self_start_token(pid: int) -> str | None:
+    """The current process's own start token, cached; live probe for any other.
+
+    Only ``os.getpid()``'s token is safe to memoize: it cannot change under a
+    fixed pid. Any OTHER pid could be recycled between calls, so it must always
+    be probed live (and no foreign value is ever stored here). This is the hot
+    path — register/unregister/kill all call it — which is the whole reason the
+    self case is cached rather than re-forking ``ps`` each time.
+    """
+    if pid != os.getpid():
+        return _owner_start_token(pid)
+    global _SELF_START_TOKEN
+    if _SELF_START_TOKEN is None:
+        _SELF_START_TOKEN = _owner_start_token(pid)
+    return _SELF_START_TOKEN
+
+
 def _ledger_path(config_dir: Path, owner_pid: int, owner_start: str) -> Path:
     """Path to the ledger for the owner identified by ``(pid, start)``.
 
@@ -209,7 +238,7 @@ def register_group(
     if resolved is None:
         return
     pid = os.getpid() if owner_pid is None else owner_pid
-    owner_start = _owner_start_token(pid)
+    owner_start = _self_start_token(pid)
     if owner_start is None:
         # Cannot establish our own identity -> a ledger keyed by it would be
         # un-reapable (the sweep needs the start token to disambiguate reuse).
@@ -238,9 +267,13 @@ def register_group(
         # (this line is well under 512 bytes) is atomic, so parallel bash calls
         # from the same owner interleave cleanly at line boundaries without
         # rewriting the file — which is why the ledger is JSONL, not a
-        # read-modify-write document.
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
+        # read-modify-write document. The SHARED ledger lock lets concurrent
+        # appends still run together but blocks while a compacting unregister
+        # holds the file EXCLUSIVE, so an append can never land inside (and be
+        # lost by) that read-modify-rewrite window. See ``_ledger_lock``.
+        with _ledger_lock(path, exclusive=False):
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
     except OSError as exc:
         logger.debug("group reaper: cannot register pgid %s: %s", pgid, exc)
 
@@ -267,21 +300,82 @@ def unregister_group(
     if resolved is None:
         return
     pid = os.getpid() if owner_pid is None else owner_pid
-    owner_start = _owner_start_token(pid)
+    owner_start = _self_start_token(pid)
     if owner_start is None:
         return
     path = _ledger_path(resolved, pid, owner_start)
     _rewrite_without_pgid(path, pgid)
 
 
+@contextlib.contextmanager
+def _ledger_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
+    """Advisory ``flock`` serialising ledger COMPACTION against APPENDS.
+
+    Registration is a lock-free atomic append and unregistration a
+    read-filter-truncate-rewrite. Without coordination a register append that
+    lands between an unregister's read and its truncating write is silently
+    lost, so that group never enters the ledger and a later hard owner-death
+    never reaps it. The window is real here because parallel bash + background
+    jobs from one owner is a first-class feature.
+
+    The fix is a classic readers/writer lock keyed per owner ledger (each owner
+    has its own file, so owners never contend): appends take it SHARED so they
+    still proceed concurrently with each other (a POSIX sub-``PIPE_BUF`` append
+    is already atomic between appenders and must not be serialised on the hot
+    path), while the compacting unregister takes it EXCLUSIVE so no append is
+    in flight while it truncates and rewrites.
+
+    Best-effort: if the lock itself cannot be taken (permissions, an exotic FS
+    without ``flock``) we DEGRADE to running unlocked rather than block or fail a
+    command — the worst case is the pre-existing lost-append behaviour, never a
+    wrong kill. POSIX only; reached solely after the ``_REAPING_IS_SUPPORTED``
+    guard, so ``fcntl`` (absent on Windows) is imported lazily here.
+    """
+    fd: int | None = None
+    try:
+        try:
+            import fcntl
+
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock_path = path.parent / (path.name + ".lock")
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        except (OSError, ImportError) as exc:
+            # Degrade to unlocked: never block or break a command over the lock.
+            logger.debug("group reaper: ledger lock unavailable for %s: %s", path, exc)
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError, ImportError):
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+
 def _rewrite_without_pgid(path: Path, pgid: int) -> None:
     """Rewrite ``path`` keeping every line whose ``pgid`` differs. Best-effort.
 
-    Reads the whole ledger, filters the one pgid, and writes it back. Torn or
+    Reads the whole ledger, filters the one pgid, and writes it back under an
+    EXCLUSIVE ledger lock so a concurrent register append cannot be lost between
+    this read and this truncating write (see :func:`_ledger_lock`). Torn or
     unparseable lines are KEPT verbatim (never silently dropped by a filter that
-    could not read them) so a concurrent append that is still mid-write is not
-    lost. If nothing remains, the file is unlinked so the owner's ledger
-    disappears once its last group is accounted for.
+    could not read them). If nothing remains, the file is unlinked so the
+    owner's ledger disappears once its last group is accounted for.
+    """
+    with _ledger_lock(path, exclusive=True):
+        _rewrite_without_pgid_locked(path, pgid)
+
+
+def _rewrite_without_pgid_locked(path: Path, pgid: int) -> None:
+    """The read-filter-rewrite body of :func:`_rewrite_without_pgid`.
+
+    Split out so the exclusive-lock scope in the caller stays a thin wrapper and
+    the filtering logic is testable directly. Callers MUST hold the ledger lock.
     """
     try:
         raw_lines = path.read_text(encoding="utf-8").splitlines()
@@ -320,10 +414,13 @@ def kill_own_groups(
 ) -> None:
     """SOFT-DEATH path: reap every still-live group THIS owner registered.
 
-    Wired at the TUI/headless entry via ``atexit`` + a SIGTERM/SIGINT handler +
+    Wired at the TUI/headless entry via ``atexit`` + a SIGTERM handler +
     the teardown ``finally``, so a catchable stop (the polite cmux stop, a
     launchd stop, a clean quit) reaps this process's groups precisely and
-    instantly instead of waiting for the next process's startup sweep.
+    instantly instead of waiting for the next process's startup sweep. NOT
+    wired on SIGINT: a headless-REPL Ctrl-C is a turn abort that spares live
+    ``background=true`` jobs, so reaping there would kill a live owner's groups
+    (see ``_install_group_reaper_soft_death`` in ``cli.py``).
 
     **Scope guarantee**: this reads ONLY the current process's own ledger
     (``<config_dir>/proc-groups/<self_pid>-<self_start>.jsonl``). It never scans
@@ -340,7 +437,7 @@ def kill_own_groups(
     if resolved is None:
         return
     pid = os.getpid() if owner_pid is None else owner_pid
-    owner_start = _owner_start_token(pid)
+    owner_start = _self_start_token(pid)
     if owner_start is None:
         return
     path = _ledger_path(resolved, pid, owner_start)

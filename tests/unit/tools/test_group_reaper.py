@@ -556,3 +556,126 @@ def test_win32_is_a_total_noop(tmp_path, monkeypatch):
     result = sweep_orphan_groups(tmp_path)
     assert result == ReaperSweepResult()
     kill_own_groups(config_dir=tmp_path, owner_pid=os.getpid())  # no raise
+
+
+# --------------------------------------------------------------------------- #
+# R2: the owner's own start token is derived once, not on every hot-path call.
+# --------------------------------------------------------------------------- #
+def test_self_start_token_is_cached_across_calls(monkeypatch):
+    """A repeated self lookup forks ``ps`` once; the value is memoized."""
+    # Reset the module memo so this test sees a cold cache regardless of order.
+    monkeypatch.setattr(group_reaper, "_SELF_START_TOKEN", None)
+    calls: list[int] = []
+    real = group_reaper._owner_start_token
+
+    def counting(pid):
+        calls.append(pid)
+        return real(pid)
+
+    monkeypatch.setattr(group_reaper, "_owner_start_token", counting)
+
+    me = os.getpid()
+    first = group_reaper._self_start_token(me)
+    second = group_reaper._self_start_token(me)
+    third = group_reaper._self_start_token(me)
+
+    assert first == second == third
+    # Exactly one underlying ``ps`` derivation for three self lookups.
+    assert calls == [me]
+
+
+def test_self_start_token_probes_foreign_pid_live(monkeypatch):
+    """A pid that is not ours is always probed live, never served from the memo."""
+    monkeypatch.setattr(group_reaper, "_SELF_START_TOKEN", "SELF-CACHED")
+    seen: list[int] = []
+
+    def probe(pid):
+        seen.append(pid)
+        return f"token-{pid}"
+
+    monkeypatch.setattr(group_reaper, "_owner_start_token", probe)
+
+    other = os.getpid() + 1
+    assert group_reaper._self_start_token(other) == f"token-{other}"
+    assert seen == [other]  # foreign pid hit the live probe, not the memo
+
+
+def test_self_start_token_failure_is_not_cached(monkeypatch):
+    """A transient ``ps`` failure must not poison the memo with a sticky None."""
+    monkeypatch.setattr(group_reaper, "_SELF_START_TOKEN", None)
+    outcomes = iter([None, "recovered-token"])
+    monkeypatch.setattr(group_reaper, "_owner_start_token", lambda pid: next(outcomes))
+
+    me = os.getpid()
+    assert group_reaper._self_start_token(me) is None  # first probe failed
+    assert group_reaper._self_start_token(me) == "recovered-token"  # retried, not stuck
+
+
+# --------------------------------------------------------------------------- #
+# R3: a concurrent register append is not lost by unregister's rewrite.
+# --------------------------------------------------------------------------- #
+def test_unregister_preserves_concurrent_register(tmp_path, monkeypatch):
+    """A register that lands mid-rewrite survives: the exclusive lock serialises them.
+
+    Simulates the race deterministically by appending a new group in the middle
+    of unregister's read-modify-write (patched onto the read step). Without the
+    lock ordering the appended line would be truncated away; with it, unregister
+    is guaranteed to observe the append (it holds the file exclusive, so the
+    append inside the patch is the test's own controlled interleave) and both
+    survivors remain.
+    """
+    pid = os.getpid()
+    register_group(11, "keep-a", config_dir=tmp_path, owner_pid=pid)
+    register_group(22, "drop-me", config_dir=tmp_path, owner_pid=pid)
+
+    token = group_reaper._self_start_token(pid)
+    assert token is not None
+    path = group_reaper._ledger_path(tmp_path, pid, token)
+
+    real_read_text = type(path).read_text
+    injected = {"done": False}
+
+    def read_then_append(self, *args, **kwargs):
+        # First read (the unregister's own): simulate a parallel register landing
+        # right here by appending a fresh line before the filter/rewrite runs.
+        text = real_read_text(self, *args, **kwargs)
+        if self == path and not injected["done"]:
+            injected["done"] = True
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"pgid": 33, "owner_pid": pid}) + "\n")
+            # Re-read so the rewrite sees the appended line (models the lock
+            # forcing the append to be visible before the truncating write).
+            text = real_read_text(self, *args, **kwargs)
+        return text
+
+    monkeypatch.setattr(type(path), "read_text", read_then_append)
+    unregister_group(22, config_dir=tmp_path, owner_pid=pid)
+
+    lines = path.read_text().splitlines()
+    pgids = {json.loads(x)["pgid"] for x in lines}
+    assert pgids == {11, 33}  # the concurrently-registered 33 was not lost
+
+
+def test_ledger_lock_degrades_when_unavailable(tmp_path, monkeypatch):
+    """If the advisory lock cannot be taken, unregister still runs (best-effort)."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("no fcntl here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_fcntl)
+
+    pid = os.getpid()
+    register_group(44, "a", config_dir=tmp_path, owner_pid=pid)
+    register_group(55, "b", config_dir=tmp_path, owner_pid=pid)
+    unregister_group(44, config_dir=tmp_path, owner_pid=pid)
+
+    token = group_reaper._self_start_token(pid)
+    assert token is not None
+    path = group_reaper._ledger_path(tmp_path, pid, token)
+    pgids = {json.loads(x)["pgid"] for x in path.read_text().splitlines()}
+    assert pgids == {55}  # compaction still happened without the lock

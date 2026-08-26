@@ -17,11 +17,22 @@ Run (from the worktree, with its venv on PYTHONPATH so the new source is used):
 
     PYTHONPATH=/tmp/lop-reaper .venv/bin/python tests/e2e_group_reaper_repro.py
 
+``PYTHONPATH`` here only forces the WORKTREE source to be exercised instead of
+the installed package; it is a test-harness convenience, not a production
+requirement. In production, register/sweep/kill all run in-process — there is no
+child ``python -m local_operator`` that needs ``local_operator`` on its path (the
+only children this script spawns are ``/bin/sh`` sleeps and, in scenario E, a
+``python -c`` that imports from the same interpreter the parent already resolved).
+
 A: hard death, owner DEAD  -> group survived owner, sweep REAPS it.
 B: owner ALIVE             -> sweep does NOT reap (anti-regression, live runner).
 C: PID-reuse decoys        -> alive-wrong-token and dead-pid both REAP;
    C-inverse: pgid recycled onto an innocent live group -> sweep DROPS, innocent lives.
 D: soft death              -> kill_own_groups reaps own group, spares a sibling owner.
+E: SIGINT vs SIGTERM scope -> a real child installs the soft-death hook and holds
+   a live registered group; SIGINT (the headless-REPL turn abort) leaves the
+   group ALIVE, a following SIGTERM (real termination) REAPS it. This is the R1
+   regression: reaping on SIGINT would kill a live owner's background job.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -38,6 +50,20 @@ from pathlib import Path
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.types import ToolContext
 from local_operator.tools import builtin, group_reaper
+
+
+def _token(pid: int) -> str:
+    """A start token that is statically known non-``None`` for the caller.
+
+    ``group_reaper._owner_start_token`` returns ``str | None`` (``None`` when the
+    pid is gone or ``ps`` fails), but every call site here passes a pid that is
+    demonstrably alive at the moment of the call, so a ``None`` is a genuine test
+    failure rather than an expected branch. Asserting here keeps the type checker
+    honest without scattering ``# type: ignore`` across the scenarios.
+    """
+    token = group_reaper._owner_start_token(pid)
+    assert token is not None, f"no start token for live pid {pid}"
+    return token
 
 
 def _killpg_alive(pgid: int) -> bool:
@@ -78,7 +104,7 @@ async def _spawn_via_real_bash(config_dir: Path, cmd: str) -> tuple[AsyncJobMana
     assert result.is_error is False, result
     # The ledger the reaper wrote under the REAL config dir for this process.
     my_pid = os.getpid()
-    my_start = group_reaper._owner_start_token(my_pid)
+    my_start = _token(my_pid)
     ledger = group_reaper._ledger_path(config_dir, my_pid, my_start)
     deadline = time.time() + 5
     while time.time() < deadline:
@@ -88,6 +114,7 @@ async def _spawn_via_real_bash(config_dir: Path, cmd: str) -> tuple[AsyncJobMana
     entries = group_reaper._read_ledger(ledger)
     assert entries, "no ledger line written by the real bash path"
     pgid = entries[-1]["pgid"]
+    assert isinstance(pgid, int), f"ledger pgid was not an int: {pgid!r}"
     return manager, pgid
 
 
@@ -109,7 +136,7 @@ async def scenario_a(config_dir: Path) -> None:
     # exactly what a SIGKILLed lop leaves on disk. (Our real process stays
     # alive as the test driver, so we re-key rather than kill ourselves.)
     my_pid = os.getpid()
-    my_start = group_reaper._owner_start_token(my_pid)
+    my_start = _token(my_pid)
     live_ledger = group_reaper._ledger_path(config_dir, my_pid, my_start)
     entry = group_reaper._read_ledger(live_ledger)[-1]
     live_ledger.unlink()
@@ -127,7 +154,11 @@ async def scenario_a(config_dir: Path) -> None:
         not _killpg_alive(pgid),
     )
     _check("dead owner's ledger unlinked", not dead_ledger.exists())
-    manager.shutdown() if hasattr(manager, "shutdown") else None
+    # Best-effort teardown: older AsyncJobManager builds expose ``shutdown``;
+    # getattr keeps this forward/backward compatible without a static attr error.
+    _shutdown = getattr(manager, "shutdown", None)
+    if callable(_shutdown):
+        _shutdown()
 
 
 async def scenario_b(config_dir: Path) -> None:
@@ -144,7 +175,7 @@ async def scenario_b(config_dir: Path) -> None:
         os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
-    my_start = group_reaper._owner_start_token(os.getpid())
+    my_start = _token(os.getpid())
     group_reaper._ledger_path(config_dir, os.getpid(), my_start).unlink(missing_ok=True)
 
 
@@ -154,7 +185,7 @@ async def scenario_c(config_dir: Path) -> None:
     # C1: owner_pid alive (this process) but start token WRONG -> reap (row 3).
     _, pgid1 = await _spawn_via_real_bash(config_dir, "sleep 600")
     my_pid = os.getpid()
-    my_start = group_reaper._owner_start_token(my_pid)
+    my_start = _token(my_pid)
     lg1 = group_reaper._ledger_path(config_dir, my_pid, my_start)
     e1 = group_reaper._read_ledger(lg1)[-1]
     lg1.unlink()
@@ -242,7 +273,7 @@ async def scenario_d(config_dir: Path) -> None:
     )
     time.sleep(0.1)
     sib_pgid = os.getpgid(sibling.pid)
-    sib_leader = group_reaper._owner_start_token(sib_pgid)
+    sib_leader = _token(sib_pgid)
     sib_owner = os.getpid() + 5_000_000
     sib_ledger = group_reaper._ledger_path(config_dir, sib_owner, "sib")
     sib_ledger.write_text(
@@ -264,7 +295,7 @@ async def scenario_d(config_dir: Path) -> None:
     time.sleep(0.1)
     _check("own group REAPED by soft death", not _killpg_alive(my_pgid))
     _check("sibling owner's group SURVIVES (scope proof)", _killpg_alive(sib_pgid))
-    my_start = group_reaper._owner_start_token(os.getpid())
+    my_start = _token(os.getpid())
     _check(
         "own ledger unlinked",
         not group_reaper._ledger_path(config_dir, os.getpid(), my_start).exists(),
@@ -277,10 +308,83 @@ async def scenario_d(config_dir: Path) -> None:
     sibling.wait(timeout=2)
 
 
+# A real child that installs the soft-death hook, holds one live registered
+# group, and models the headless REPL's SIGINT contract: Ctrl-C aborts the
+# "turn" (caught KeyboardInterrupt) and KEEPS running rather than exiting. The
+# parent drives real SIGINT then SIGTERM at it to prove the reaper's signal
+# scope end-to-end, not just by inspecting the handler table.
+_SIGINT_CHILD = r"""
+import json, os, signal, subprocess, sys, time
+from local_operator import cli
+from local_operator.tools import group_reaper
+
+# Own group so the grandchild is a real killable process group, exactly like a
+# background bash job the user asked to keep alive across a turn abort.
+child = subprocess.Popen(
+    ["/bin/sh", "-c", "sleep 600"],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+)
+for _ in range(200):
+    try:
+        pgid = os.getpgid(child.pid); break
+    except ProcessLookupError:
+        time.sleep(0.01)
+group_reaper.register_group(pgid, "sleep 600")
+cli._install_group_reaper_soft_death()
+# Hand the parent the pgid to watch, then flush so it is readable immediately.
+sys.stdout.write(json.dumps({"pgid": pgid}) + "\n"); sys.stdout.flush()
+# Model _run_headless_repl: SIGINT -> KeyboardInterrupt -> abort the turn, keep
+# the session (and its background jobs) alive. Only a real exit reaps.
+while True:
+    try:
+        time.sleep(3600)
+    except KeyboardInterrupt:
+        sys.stderr.write("turn aborted, session alive\n"); sys.stderr.flush()
+"""
+
+
+async def scenario_e(config_dir: Path) -> None:
+    print("E) SIGINT (turn abort) spares live group; SIGTERM (real stop) REAPS")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _SIGINT_CHILD],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env={**os.environ, "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir)},
+    )
+    assert proc.stdout is not None  # PIPE was requested above
+    line = proc.stdout.readline()  # blocks until the child registered its group
+    pgid = json.loads(line)["pgid"]
+    time.sleep(0.1)
+    _check("child's background group alive after spawn", _killpg_alive(pgid))
+
+    # SIGINT: the headless turn abort. The group MUST survive and the child live.
+    proc.send_signal(signal.SIGINT)
+    time.sleep(0.3)
+    _check("group ALIVE after SIGINT (Ctrl-C spared the background job)", _killpg_alive(pgid))
+    _check("REPL child still running after SIGINT", proc.poll() is None)
+
+    # SIGTERM: a real termination. The soft-death handler reaps, then chains.
+    proc.terminate()
+    proc.wait(timeout=5)
+    time.sleep(0.2)
+    _check("group REAPED after SIGTERM (real stop cleaned up)", not _killpg_alive(pgid))
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 async def main() -> None:
     # Real config dir override so execute_bash's register lands where the sweep
     # reads. Each scenario gets its own clean dir.
-    for name, fn in (("A", scenario_a), ("B", scenario_b), ("C", scenario_c), ("D", scenario_d)):
+    for name, fn in (
+        ("A", scenario_a),
+        ("B", scenario_b),
+        ("C", scenario_c),
+        ("D", scenario_d),
+        ("E", scenario_e),
+    ):
         with tempfile.TemporaryDirectory() as td:
             cfg = Path(td)
             os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(cfg)

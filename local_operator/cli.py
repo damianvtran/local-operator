@@ -2347,17 +2347,29 @@ def _install_group_reaper_soft_death() -> None:
     """Wire the process-group reaper's soft-death path for THIS process.
 
     Registers ``group_reaper.kill_own_groups`` as an ``atexit`` hook and as a
-    SIGTERM/SIGINT handler, so a catchable stop of the interactive TUI/headless
+    SIGTERM handler, so a catchable stop of the interactive TUI/headless
     REPL reaps this process's own still-live bash groups instead of leaking them
     to the next launch's startup sweep. The whole leak this addresses is a HARD
     (uncatchable SIGKILL) death, which no handler can cover — but a POLITE stop
-    (cmux replace, launchd stop, Ctrl+C at the REPL) IS catchable, and reaping
-    it here makes the common case instant and precise rather than deferred.
+    (cmux replace, launchd stop, Ctrl+D / quit / window close at the REPL) IS
+    catchable, and reaping it here makes the common case instant and precise
+    rather than deferred.
+
+    SIGINT is DELIBERATELY excluded. In the headless REPL, Ctrl-C is a *turn
+    abort that keeps the session alive* (``_run_headless_repl`` catches
+    ``KeyboardInterrupt`` -> ``session.abort`` -> loops), and ``session.abort``
+    deliberately spares ``background=true`` bash jobs — they exist precisely so a
+    build or deploy outlives the turn that started it. Reaping on SIGINT would
+    SIGKILL those still-live groups while the owning REPL keeps running, which is
+    exactly the never-kill-a-live-owner case this whole module forbids. Every
+    real REPL/TUI *exit* (Ctrl-D, ``quit``, window close) still reaps via the
+    ``atexit`` hook, ``session.dispose()`` and the TUI teardown ``finally``, so
+    nothing is lost by leaving SIGINT to its turn-abort semantics.
 
     Scoped to the interactive entry on purpose: ``exec``/``serve``/``mobile``
     own their own SIGTERM semantics (``exec_worker.py``, ``mobile/child.py``) and
     are dispatched before this is ever called. As a second belt, any
-    pre-existing SIGTERM/SIGINT handler is CHAINED, not clobbered — the reaper
+    pre-existing SIGTERM handler is CHAINED, not clobbered — the reaper
     runs first, then the previous handler (or the default) still fires — so this
     can never silently swallow a signal another component was relying on.
 
@@ -2396,7 +2408,10 @@ def _install_group_reaper_soft_death() -> None:
             # ValueError: not the main thread; OSError: unsupported signal.
             signal.signal(signum, _handler)
 
-    for _sig in (signal.SIGTERM, signal.SIGINT):
+    # SIGTERM only. SIGINT is a turn abort in the headless REPL and must NOT
+    # reap live background jobs (see the docstring); a Ctrl-C that actually
+    # exits reaps through atexit/dispose instead.
+    for _sig in (signal.SIGTERM,):
         _chain(_sig)
 
 
