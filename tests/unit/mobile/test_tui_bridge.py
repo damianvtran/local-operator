@@ -140,7 +140,7 @@ async def test_dirty_hydration_retries_without_later_event(monkeypatch) -> None:
         calls += 1
         if calls == 1:
             raise _DetailChangedDuringHydration
-        return (1, 1), [], []
+        return (1, 1), []
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(handle._fold, "set_subagent_hydrated_details", lambda *args: True)

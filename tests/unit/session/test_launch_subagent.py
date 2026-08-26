@@ -153,17 +153,20 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert row.result_text == "child did the work"
     assert row.transcript == []  # not hydrated synchronously on the event path
 
-    # The worker path reads the durable child transcript off-loop and publishes
-    # the SAME rendered conversation the detail endpoint serves.
+    # The worker path publishes off-loop metadata (todos), but a child
+    # transcript is NEVER placed on the projection wire: the list projection is
+    # a full repaint pushed ~30x/s and the daemon's control-socket reader caps a
+    # single frame at 1 MB, so embedding a per-subagent transcript across a deep
+    # roster overran that cap and wedged real-time updates. The transcript is
+    # served lazily instead, via ``/api/sessions/{sid}/agents/{job_id}/history``
+    # (see ``ProjectionFold.set_subagent_hydrated_details``'s own comment). The
+    # call still returns True — the row exists — and must leave the transcript
+    # empty even when handed a fully rendered conversation.
     node = parent.subagent_comms.node(job_id)
     assert node is not None and node.session_dir is not None
     hydrated = fold_messages_to_entries(Transcript(node.session_dir).build_llm_history())
     assert fold.set_subagent_hydrated_details(job_id, hydrated, [])
-    assert [(entry.kind, entry.text) for entry in row.transcript] == [
-        ("user", "go do a thing"),
-        ("assistant", "child did the work"),
-    ]
-    assert row.transcript[0].id == f"subagent-launch:{job_id}"
+    assert row.transcript == []
 
     # Item 12: once the task settles, the idle TOP-LEVEL parent re-wakes with
     # the result instead of polling `jobs`; the shared provider sees a second

@@ -294,6 +294,29 @@ html :focus-visible {
 	}
 }
 
+/* The transcript skeleton bars. Their resting tone is already lifted to
+   `bg-elevated` (sunken sat at ~1.3:1 and vanished in a still — design D2), and
+   this adds a gentle brightness pulse so the placeholder also reads as ACTIVE
+   loading rather than three static blocks. Reduced motion drops the animation
+   but keeps the now-visible resting bars. */
+@keyframes lo-shimmer-bar {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.55;
+	}
+}
+.lo-shimmer-bar {
+	animation: lo-shimmer-bar 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.lo-shimmer-bar {
+		animation: none;
+	}
+}
+
 /*
  * Sheet entrance: the only 240ms motion in the app, spent on something
  * entering the screen. The sheet rises from the bottom edge; the scrim fades.

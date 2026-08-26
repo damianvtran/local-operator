@@ -187,6 +187,56 @@ async def test_protocol_version_is_four_and_cap_constant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pushed_projection_frame_carries_no_subagent_transcript() -> None:
+    """The wire frame a registrant pushes must never embed a child transcript.
+
+    Regression guard for the real-time freeze: a full-repaint projection is
+    pushed ~30x/s and the daemon's control-socket reader caps a single frame at
+    1 MB. When each subagent row carried its (tail-capped) transcript, a deep
+    roster overran that cap, every push was dropped as oversized, and the phone
+    silently fell back to the stale durable disk fold. Subagent transcripts are
+    now fetched lazily from the child-history endpoint, so the pushed frame must
+    contain zero subagent transcript entries even after hydration ran. Todos DO
+    stay on the wire (small, and the live working line needs them).
+    """
+    from types import SimpleNamespace
+
+    from local_operator.harness.comms import SubagentComms
+    from local_operator.session.session import Session
+
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+
+    # Seed one subagent row through the same fold the registrant pushes, then
+    # hydrate it with a transcript far larger than the render tail.
+    fold = registrant.fold
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("child", "child")
+    fold.set_subagent_details(comms)
+    heavy = [TranscriptEntry(id=f"row-{i}", kind="assistant", text="x" * 4096) for i in range(200)]
+    fold.set_subagent_hydrated_details("child", heavy, [{"text": "verify", "status": "pending"}])
+
+    registrant.start()
+    daemon_writer = None
+    try:
+        record = await _wait_record()
+        daemon_reader, daemon_writer = await _dial(record)
+        # Force a repaint and read the resulting daemon-side broadcast frame.
+        registrant._schedule_push()
+        frame = await _until(daemon_reader, "projection")
+        subagents = frame["data"]["subagents"]
+        assert subagents, "expected the seeded child row on the wire"
+        assert all(sub["transcript"] == [] for sub in subagents)
+        # Todos survive: the live working line renders them without a fetch.
+        assert subagents[0]["todos"], "todos must stay on the wire"
+    finally:
+        if daemon_writer is not None:
+            daemon_writer.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
 async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() -> None:
     """Raw AgentEvents are opt-in attach frames; phone daemon stays byte-identical."""
     from local_operator.harness.types import AgentStartEvent, NoticeEvent

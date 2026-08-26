@@ -339,4 +339,186 @@ describe("AgentConversation", () => {
 		expect(screen.queryByText(/send commands from the root conversation/i)).toBeNull();
 		expect(screen.getByRole("button", { name: "Open parent to steer" })).toBeTruthy();
 	});
+
+	it("lazily fetches the child transcript when the wire carries none", async () => {
+		/* The projection no longer embeds subagent transcripts (they overran the
+		   daemon's 1 MB control-frame cap and wedged real-time updates). A modern
+		   detail arrives with an empty transcript, so the sheet must fetch its
+		   newest page from the child-history endpoint and render THAT. */
+		const { detail, projection } = fixture();
+		const empty = { ...detail, transcript: [], prompt: "", launch_message_id: "" };
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockResolvedValueOnce({
+			entries: [entry("fetched", "assistant", "Lazily loaded reply")],
+			has_more: false,
+		});
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={empty} />,
+		);
+		await waitFor(() =>
+			expect(getSubagentHistory).toHaveBeenCalledWith("root", "current", null, 80, expect.anything()),
+		);
+		await waitFor(() => expect(screen.getByText("Lazily loaded reply")).toBeTruthy());
+	});
+
+	it("does not fetch when a legacy daemon still inlines the transcript", () => {
+		/* Back-compat: a producer that still ships detail.transcript wins outright
+		   and the sheet must render it without an extra network round trip. */
+		const { detail, projection } = fixture();
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockClear();
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={detail} />,
+		);
+		expect(screen.getByText("One response")).toBeTruthy();
+		expect(getSubagentHistory).not.toHaveBeenCalled();
+	});
+
+	it("surfaces a retry when a settled child's one transcript fetch fails (U1)", async () => {
+		/* A settled child has no poll, so a single dropped fetch is terminal.
+		   The body must not be a silent blank — it shows an error + retry, and
+		   the retry re-pulls and renders the entries on success. */
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			result_text: "The result",
+			transcript: [],
+			prompt: "",
+			launch_message_id: "",
+		};
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory
+			.mockRejectedValueOnce(new Error("network down"))
+			.mockResolvedValueOnce({
+				entries: [entry("recovered", "assistant", "Recovered step")],
+				has_more: false,
+			});
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={settled} />,
+		);
+		// The failure surfaces a visible alert + retry, not a blank body.
+		await waitFor(() => expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy());
+		const retry = screen.getByRole("button", { name: "Retry" });
+		// The outcome tail still renders alongside the empty-body error.
+		expect(screen.getByText("✓ Result from current-agent")).toBeTruthy();
+		fireEvent.click(retry);
+		await waitFor(() => expect(screen.getByText("Recovered step")).toBeTruthy());
+		expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+	});
+
+	it("re-pulls a settled child's transcript when the link reconnects (U1)", async () => {
+		/* The fetch effect lists ``connected`` as a dependency, mirroring the
+		   detail loader, so a restored link re-pulls a settled child that missed
+		   its one fetch while offline — without a manual retry. */
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			transcript: [],
+			prompt: "",
+			launch_message_id: "",
+		};
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory
+			.mockRejectedValueOnce(new Error("offline"))
+			.mockResolvedValueOnce({
+				entries: [entry("afterreconnect", "assistant", "Back online reply")],
+				has_more: false,
+			});
+		const { rerender } = render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected={false} detail={settled} />,
+		);
+		await waitFor(() => expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy());
+		// Reconnect: the same detail, connected flips true → the effect re-pulls.
+		rerender(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={settled} />,
+		);
+		await waitFor(() => expect(screen.getByText("Back online reply")).toBeTruthy());
+	});
+
+	it("shows a loading affordance in the open→load gap, not a blank body (U2)", async () => {
+		/* While the first transcript fetch is in flight and no entries are on
+		   screen, the body must read as loading — a spinner + label — rather than
+		   an empty window under a fully-painted header. */
+		const { detail, projection } = fixture();
+		const empty = { ...detail, transcript: [], prompt: "", launch_message_id: "" };
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		let resolveFetch!: (value: { entries: TranscriptEntry[]; has_more: boolean }) => void;
+		getSubagentHistory.mockReturnValueOnce(
+			new Promise((resolve) => {
+				resolveFetch = resolve;
+			}),
+		);
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={empty} />,
+		);
+		expect(screen.getByText("Loading agent activity…")).toBeTruthy();
+		resolveFetch({ entries: [entry("landed", "assistant", "Landed reply")], has_more: false });
+		await waitFor(() => expect(screen.getByText("Landed reply")).toBeTruthy());
+		expect(screen.queryByText("Loading agent activity…")).toBeNull();
+	});
+
+	it("keeps the header identity stable while the detail loads (D1, D3)", async () => {
+		/* Tapping a roster row that already carried the label/agent/effort/status
+		   must not flicker the header to a generic "Agent" placeholder. The
+		   loading header paints the known identity from the projection row, with
+		   the effort tier spelled out ("hi" → "high", D3). */
+		const { detail, projection } = fixture();
+		// A fresh job id: the module-level detail cache must not already hold it,
+		// or the screen renders the full conversation instead of the loading gap.
+		const jobId = "d1-fresh-child";
+		const tapped = {
+			...row(jobId, "parent"),
+			label: "code-reviewer",
+			agent: "reviewer",
+			effort: "hi",
+		};
+		const withRow: SessionProjection = {
+			...projection,
+			subagents: [...projection.subagents, tapped],
+		};
+		void detail;
+		// Detail never lands: the header must rely on the projection identity.
+		vi.mocked(api.getSubagentDetail).mockReturnValue(new Promise(() => undefined));
+		vi.spyOn(store, "useProjection").mockReturnValue({ projection: withRow, connected: true });
+		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		history.replaceState({}, "", `#/s/root/a/${jobId}`);
+		render(<App />);
+		// The tapped row's real label shows immediately, never the placeholder.
+		await waitFor(() => expect(screen.getByText("code-reviewer")).toBeTruthy());
+		expect(screen.queryByText("Agent")).toBeNull();
+		expect(screen.queryByText("Loading activity")).toBeNull();
+		// Effort tier spelled out to match the session footer (D3): "hi" → "high".
+		expect(screen.getByText(/reviewer · high/)).toBeTruthy();
+	});
+
+	it("keeps a running child's sheet live by polling its transcript", async () => {
+		/* status===running means the sheet must re-pull the transcript on an
+		   interval so an open sheet stays real-time; a settled child fetches once. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			const running = { ...detail, status: "running" as const, transcript: [], prompt: "", launch_message_id: "" };
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockResolvedValue({ entries: [], has_more: false });
+			getSubagentHistory.mockClear();
+			const { unmount } = render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(getSubagentHistory).toHaveBeenCalledTimes(1));
+			await vi.advanceTimersByTimeAsync(1600);
+			expect(getSubagentHistory.mock.calls.length).toBeGreaterThanOrEqual(2);
+			/* Unmount must cancel the interval: no further fetches after teardown. */
+			const afterUnmount = getSubagentHistory.mock.calls.length;
+			unmount();
+			await vi.advanceTimersByTimeAsync(3200);
+			expect(getSubagentHistory.mock.calls.length).toBe(afterUnmount);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

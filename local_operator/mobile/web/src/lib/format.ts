@@ -32,6 +32,27 @@ export function formatRelative(epochSeconds: number): string {
 		.toLowerCase();
 }
 
+/** Spell out a subagent's launch tier for display.
+ *
+ * A child job records the tier it was launched at abbreviated (`lo`/`med`/`hi`
+ * — see `AsyncJob.effort`), while the session footer shows the model's resolved
+ * reasoning effort as a full word (`low`/`medium`/`high`). Rendering the raw
+ * `hi` beside a footer that says `high` is two vocabularies for one concept
+ * (design D3), so subagent surfaces spell the tier out. Any value that is not a
+ * known abbreviation (e.g. an already-resolved effort word) passes through. */
+export function formatEffort(effort: string): string {
+	switch (effort) {
+		case "lo":
+			return "low";
+		case "med":
+			return "medium";
+		case "hi":
+			return "high";
+		default:
+			return effort;
+	}
+}
+
 /** "/Users/damian/projects/foo" → "foo". Trailing slashes tolerated. */
 export function basename(path: string): string {
 	const trimmed = path.replace(/\/+$/, "");
