@@ -1845,35 +1845,55 @@ class TranscriptView(ScrollableContainer):
     def prepend_blocks(
         self, blocks: Sequence[TranscriptBlock], *, anchor_offset: float | None = None
     ) -> None:
-        """Mount older blocks above the viewport without moving its content.
+        """Mount older blocks above the viewport without moving its content."""
+        self.insert_blocks(0, blocks, anchor_offset=anchor_offset)
 
-        History paging is the only prepend path. Textual cannot preserve the
-        visual anchor automatically because mounting changes ``virtual_size``
-        before the next layout pass, so remember the old virtual height and add
-        exactly its growth to ``scroll_y`` after refresh. The optional offset is
-        captured by the caller before asynchronous I/O starts; using the later
-        value would apply the prepend to wherever the user moved meanwhile.
+    def insert_blocks(
+        self,
+        index: int,
+        blocks: Sequence[TranscriptBlock],
+        *,
+        anchor_offset: float | None = None,
+    ) -> None:
+        """Mount blocks above the viewport while preserving its visible content.
+
+        History normally inserts at zero. A subagent transcript with a synthetic
+        delegation has one fixed block above history, so its older page inserts
+        at one instead. In both cases Textual cannot preserve the anchor through
+        deferred layout itself: measure virtual-height growth after refresh and
+        add exactly that growth to the offset captured before asynchronous I/O.
         """
         additions = list(blocks)
         if not additions:
             return
-        old_height = self.virtual_size.height
+        index = max(0, min(index, len(self._blocks)))
+        old_max_scroll = self.max_scroll_y
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
-        before = self._blocks[0] if self._blocks else None
+        before = self._blocks[index] if index < len(self._blocks) else None
         if before is None:
             self.mount(*additions)
         else:
             self.mount(*additions, before=before)
-        self._blocks[0:0] = additions
+        self._blocks[index:index] = additions
         self._name_col_cache = None
 
-        def restore_anchor() -> None:
-            growth = max(0, self.virtual_size.height - old_height)
-            self.scroll_to(y=max(0, old_scroll + growth), animate=False)
+        def settle_then_restore() -> None:
+            # Gap classes can add rows after the mount's first layout. Sampling
+            # growth before they settle restored against an intermediate range,
+            # then Textual shifted the content again under xdist timing. Settle
+            # first and restore on the following refresh. The scroll RANGE, not
+            # virtual height, is the content-relative coordinate: a simultaneous
+            # viewport remeasure otherwise contributes two phantom rows.
             self._settle_gaps(additions)
             self._remeasure_empty_state()
 
-        self.call_after_refresh(restore_anchor)
+            def restore_anchor() -> None:
+                growth = max(0, self.max_scroll_y - old_max_scroll)
+                self.scroll_to(y=max(0, old_scroll + growth), animate=False)
+
+            self.call_after_refresh(restore_anchor)
+
+        self.call_after_refresh(settle_then_restore)
 
     def append_block(self, block: TranscriptBlock) -> None:
         """Mount ``block`` at the bottom.

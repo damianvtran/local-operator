@@ -1426,23 +1426,30 @@ class SubagentView(Vertical):
         tail = self._tail_entry(self._status == "gone", "")
         if tail is not None:
             entries.append(tail)
-        # Absolute prepend is valid only when history really is the first row.
-        # With a delegation above it, rebuilding preserves chronology; putting
-        # the new page before the prompt recreates the defect this composition
-        # exists to prevent.
-        if prepend and "__prompt__" not in self._known and self._body.is_mounted:
-            common_suffix = 0
-            for previous, current in zip(reversed(self._entries), reversed(entries)):
+        if prepend and self._body.is_mounted:
+            # The new history page is inserted above the old history but below
+            # the synthetic delegation. Find the unchanged prefix and suffix so
+            # the insertion uses TranscriptView's post-layout height anchor
+            # instead of rebuilding from the prompt and letting Textual shift it.
+            prefix = 0
+            for previous, current in zip(self._entries, entries):
                 if previous != current:
                     break
-                common_suffix += 1
-            count = len(entries) - common_suffix
-            if count > 0:
-                new_entries = entries[:count]
+                prefix += 1
+            suffix = 0
+            for previous, current in zip(
+                reversed(self._entries[prefix:]), reversed(entries[prefix:])
+            ):
+                if previous != current:
+                    break
+                suffix += 1
+            count = len(entries) - prefix - suffix
+            if count > 0 and len(self._entries) - prefix == suffix:
+                new_entries = entries[prefix : prefix + count]
                 new_blocks = [entry_block(entry) for entry in new_entries]
-                self._body.prepend_blocks(new_blocks, anchor_offset=anchor)
-                self._blocks[0:0] = new_blocks
-                self._entries[0:0] = new_entries
+                self._body.insert_blocks(prefix, new_blocks, anchor_offset=anchor)
+                self._blocks[prefix:prefix] = new_blocks
+                self._entries[prefix:prefix] = new_entries
                 self._pending = entries
                 return
         self._pending = entries
