@@ -1147,6 +1147,141 @@ async def test_the_tool_refuses_to_ask_several_children_at_once():
 
 
 @pytest.mark.asyncio
+async def test_the_tool_refuses_to_peek_several_children_at_once():
+    """peek renders ONE transcript window, so like ask it stays single-subject
+    even though resume beside it now fans out."""
+    comms, jobs, _child, _parent = wire()
+    jobs.add("job-2")
+    comms.record_launch("job-2", "docs")
+    comms.attach("job-2", FakeChild(), tmp_dir())
+
+    result = await execute_hub(
+        "call-1",
+        {"op": "peek", "to": ["all"]},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms),
+    )
+
+    assert result.is_error
+    assert "one subagent at a time" in body(result)
+
+
+def _stopped_resumable(comms, jobs, tmp_path, job_id: str, label: str) -> None:
+    """Bring a child into the exact state ``comms.resume`` will act on: a
+    settled job row, a session dir with a transcript on disk, and detached so
+    no live twin blocks the resume."""
+    jobs.add(job_id, status="cancelled")
+    comms.record_launch(job_id, label)
+    session_dir = tmp_path / job_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    comms.attach(job_id, FakeChild(), session_dir)
+    comms.detach(job_id)
+
+
+@pytest.mark.asyncio
+async def test_resume_fans_one_message_out_to_several_stopped_children(tmp_path, monkeypatch):
+    """The point of the fan-out: a batch that all stalled comes back in one
+    call, each as its own new job replaying its own transcript."""
+    spawned: list[str] = []
+
+    def spy(**kwargs):
+        new_id = f"resumed-{len(spawned) + 1}"
+        spawned.append(new_id)
+        return new_id
+
+    monkeypatch.setattr("local_operator.harness.subagent.run_subagent", spy)
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    _stopped_resumable(comms, jobs, tmp_path, "job-1", "parser")
+    _stopped_resumable(comms, jobs, tmp_path, "job-2", "docs")
+
+    result = await execute_hub(
+        "call-1",
+        {"op": "resume", "to": ["job-1", "job-2"], "message": "carry on"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms),
+    )
+
+    text = body(result)
+    assert "resume: 2/2 subagent(s)" in text
+    # Both targets are named beside the NEW job id they were resumed as.
+    assert "parser (job-1): resumed as job resumed-1" in text
+    assert "docs (job-2): resumed as job resumed-2" in text
+    details = payload(result)
+    assert details["job_ids"] == ["resumed-1", "resumed-2"]
+    assert details["resumed_from"] == ["job-1", "job-2"]
+    assert details["acted"] == 2
+    assert result.useless is False
+
+
+@pytest.mark.asyncio
+async def test_resume_batch_reports_success_and_failure_side_by_side(tmp_path, monkeypatch):
+    """A mixed batch must not fail the whole call: the resumable child comes
+    back and the one that refuses carries its reason on its own line."""
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.run_subagent",
+        lambda **kwargs: "resumed-1",
+    )
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    _stopped_resumable(comms, jobs, tmp_path, "job-1", "parser")
+    # A still-running child is not resumable and refuses with a reason.
+    jobs.add("job-2", status="running")
+    comms.record_launch("job-2", "docs")
+    comms.attach("job-2", FakeChild(), tmp_path / "job-2")
+
+    result = await execute_hub(
+        "call-1",
+        {"op": "resume", "to": ["job-1", "job-2"], "message": "carry on"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms),
+    )
+
+    text = body(result)
+    assert "resume: 1/2 subagent(s)" in text
+    assert "parser (job-1): resumed as job resumed-1" in text
+    assert "docs (job-2): failed" in text
+    assert "still running" in text
+    details = payload(result)
+    assert details["job_ids"] == ["resumed-1"]
+    assert details["resumed_from"] == ["job-1"]
+    assert details["acted"] == 1
+    # One child was reached, so the receipt is a real observation, not useless.
+    assert result.useless is False
+
+
+@pytest.mark.asyncio
+async def test_a_resume_batch_that_reaches_nobody_is_flagged_useless(tmp_path):
+    """Pure-failure fan-out mirrors send/steer/cancel: nothing was resumed, so
+    the receipt is flagged useless for compaction to prune."""
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    # Two running children: both refuse, so the batch reaches nobody.
+    jobs.add("job-1", status="running")
+    comms.record_launch("job-1", "parser")
+    comms.attach("job-1", FakeChild(), tmp_path / "job-1")
+    jobs.add("job-2", status="running")
+    comms.record_launch("job-2", "docs")
+    comms.attach("job-2", FakeChild(), tmp_path / "job-2")
+
+    result = await execute_hub(
+        "call-1",
+        {"op": "resume", "to": ["job-1", "job-2"], "message": "carry on"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms),
+    )
+
+    assert "resume: 0/2 subagent(s)" in body(result)
+    assert payload(result)["acted"] == 0
+    assert result.useless is True
+
+
+@pytest.mark.asyncio
 async def test_the_tool_accepts_the_string_forms_models_send_for_to():
     """Observed live (2026-08-19): a parent model retried ``op='ask'`` against
     a running reviewer and never once emitted a real array — a bare id, the
