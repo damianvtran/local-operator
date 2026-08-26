@@ -73,14 +73,46 @@ export async function consumeOnceGrant(url: URL, requester: string): Promise<boo
  * expired unseen and made sessions misread the bridge as broken. Redirect
  * hops inside a running navigation still take the synchronous askOrigin
  * prompt: the command is already in flight there, so an early fail is
- * impossible by construction. */
-export async function ensureTopLevelAccess(url: URL, requester: string): Promise<OriginAdmission> {
+ * impossible by construction.
+ *
+ * Grant consumption matches EITHER the session identity the tool attached to
+ * this command (same session that asked, normal path) OR the command-id
+ * handoff recorded on the grant at decision time (raw-RPC callers reusing
+ * the request id). A navigation carrying NEITHER is another session trying
+ * to ride a grant it did not earn — refused (fail-closed). */
+export async function ensureTopLevelAccess(
+  url: URL,
+  requestId: string,
+  sessionRequester: string = "",
+): Promise<OriginAdmission> {
   if (await originAllowed(url)) return { allowed: true, viaOnceGrant: false };
-  if (await consumeOnceGrant(url, requester)) return { allowed: true, viaOnceGrant: true };
+  if (await consumeGrantFor(url, sessionRequester, requestId)) {
+    return { allowed: true, viaOnceGrant: true };
+  }
   throw new BridgeCommandError("origin_not_allowed", `site ${url.origin} is not allowed yet`, {
     origin: url.origin,
     url: url.href,
   });
+}
+
+/** Consume a grant on behalf of a NAVIGATION command: the caller's session
+ * identity must equal the grant's requester, or the command's own id must
+ * equal the grant's handoff (see recordAccessDecision). */
+async function consumeGrantFor(
+  url: URL,
+  sessionRequester: string,
+  commandId: string,
+): Promise<boolean> {
+  const { onceGrants = {} } = await getSession();
+  const grant = onceGrants[url.origin];
+  if (!grant || Date.now() >= grant.expiresAt) return false;
+  const ownsBySession = sessionRequester !== "" && grant.requester === sessionRequester;
+  const ownsByHandoff = !!grant.handoff && grant.handoff === commandId;
+  if (!ownsBySession && !ownsByHandoff) return false;
+  const remaining = { ...onceGrants };
+  delete remaining[url.origin];
+  await chrome.storage.session.set({ onceGrants: remaining });
+  return true;
 }
 
 /** Raise the pending-approval surfaces: session record (popup prompt), badge,
@@ -143,14 +175,22 @@ async function recordAccessDecision(origin: string, decision: OriginDecision): P
   if (!live || live.origin !== origin || live.decision) return;
   await chrome.storage.session.set({ accessRequest: { ...live, decision } });
   if (decision === "once") {
-    // The grant is bound to the REQUEST's requester: "Allow once" is the
-    // user's answer to this agent's ask, so only a command carrying that
-    // requester may spend it (see access-flow.ts).
+    // The grant is bound to the REQUEST's requester AND to the command that
+    // raised the request: an async "Allow once" is earned by the flow that
+    // asked, so the handoff records BOTH identities. A navigation spends it
+    // if it carries EITHER — the session identity (normal path: the same
+    // session's next open/goto) or the exact command id (a raw-RPC caller
+    // whose navigation reuses the request_access id). A third session
+    // carries neither and is refused (fail-closed; see access-flow.ts).
     const grants = session.onceGrants ?? {};
     await chrome.storage.session.set({
       onceGrants: {
         ...grants,
-        [origin]: { expiresAt: now + ONCE_GRANT_TTL_MS, requester: live.requester },
+        [origin]: {
+          expiresAt: now + ONCE_GRANT_TTL_MS,
+          requester: live.requester,
+          handoff: session.pendingOrigin?.requestId ?? "",
+        },
       },
     });
   }

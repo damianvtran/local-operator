@@ -146,17 +146,60 @@ test("admission consumes the grant once and navigate never re-consults it (M1)",
   const bundle = await loadOrigins();
   try {
     const origins = await bundle.import();
-    await origins.raiseAccessRequest(urlOf(), "req-A");
+    await origins.raiseAccessRequest(urlOf(), "session:A");
     origins.resolveOrigin(ORIGIN, "once");
     await flush();
-    const admission = await origins.ensureTopLevelAccess(urlOf(), "req-A");
+    // Session A's own navigation (session identity matches the grant).
+    const admission = await origins.ensureTopLevelAccess(urlOf(), "cmd-nav-1", "session:A");
     assert.deepEqual(admission, { allowed: true, viaOnceGrant: true });
     // The grant is spent AT ADMISSION: a second admission for the same
-    // requester must now take the early-fail path, not find a stale grant.
+    // session must now take the early-fail path, not find a stale grant.
     await assert.rejects(
-      origins.ensureTopLevelAccess(urlOf(), "req-A"),
+      origins.ensureTopLevelAccess(urlOf(), "cmd-nav-2", "session:A"),
       (error) => error.code === "origin_not_allowed",
     );
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("a parallel session's navigation cannot spend the grant (B1a)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    origins.resolveOrigin(ORIGIN, "once");
+    await flush();
+    // Session B's open carries B's identity and its own command id: neither
+    // the grant's requester nor its handoff — refused, and the grant is NOT
+    // consumed by the attempt (fail-closed, not fail-shared).
+    await assert.rejects(
+      origins.ensureTopLevelAccess(urlOf(), "cmd-B-1", "session:B"),
+      (error) => error.code === "origin_not_allowed",
+    );
+    const admission = await origins.ensureTopLevelAccess(urlOf(), "cmd-nav-1", "session:A");
+    assert.equal(admission.allowed, true, "A's grant survives B's refused attempt");
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("a raw-RPC caller spends its grant via the command-id handoff", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    // No session identity (raw caller): requester IS the command id.
+    await origins.raiseAccessRequest(urlOf(), "r-abc123");
+    origins.resolveOrigin(ORIGIN, "once");
+    await flush();
+    // The SAME command id navigating (the handoff) is admitted; a different
+    // id with no session identity is not.
+    const admission = await origins.ensureTopLevelAccess(urlOf(), "r-abc123");
+    assert.deepEqual(admission, { allowed: true, viaOnceGrant: true });
   } finally {
     await bundle.close();
     chrome.restore();

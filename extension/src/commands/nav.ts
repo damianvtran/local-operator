@@ -41,6 +41,14 @@ async function liveSurfaces(): Promise<Record<string, StoredSurface>> {
   return live;
 }
 
+/** The session-scoped requester the tool attaches (session:<id>); absent or
+ * foreign-shaped values yield "" so admission falls back to the command-id
+ * handoff only — never trusting a caller-invented identity. */
+function sessionRequester(params: Record<string, unknown>): string {
+  const value = typeof params.requester === "string" ? params.requester.trim() : "";
+  return value.startsWith("session:") ? value : "";
+}
+
 async function page(tabId: number): Promise<{ url: string; title: string }> {
   const tab = await chrome.tabs.get(tabId);
   return { url: tab.url ?? "", title: tab.title ?? "" };
@@ -96,7 +104,7 @@ export async function open(params: Record<string, unknown>, requestId: string): 
   // even on a full browser, and admission CONSUMES the grant (see
   // ensureTopLevelAccess) so the decision cannot lapse into the old 60 s
   // prompt before navigate() runs.
-  const admission = await ensureTopLevelAccess(url, requestId);
+  const admission = await ensureTopLevelAccess(url, requestId, sessionRequester(params));
   if (params.tab !== undefined && params.tab !== null && params.tab !== "") {
     const surface = await requireSurface(params.tab);
     // Re-arm log capture on the resumed surface: after a worker restart the
@@ -156,7 +164,7 @@ export async function goto(params: Record<string, unknown>, requestId: string): 
   const url = safeHttpUrl(params.url);
   // Same early refusal as open — see the comment there. Consumption likewise
   // happens HERE, once, bound to this command's request id.
-  const admission = await ensureTopLevelAccess(url, requestId);
+  const admission = await ensureTopLevelAccess(url, requestId, sessionRequester(params));
   const result = await navigate(surface.tabId, url, requestId, admission);
   surface.epoch += 1;
   await putSurface(surface);

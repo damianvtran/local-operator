@@ -5594,6 +5594,20 @@ def bridge_browser_available() -> bool:
     return available()
 
 
+def _browser_requester(context: ToolContext | None, tool_call_id: str) -> str:
+    """The session-scoped identity the extension binds approvals to.
+
+    A once-grant earned by request_access must be spendable by the SAME
+    session's next open/goto but not by a parallel session's; per-command
+    request ids cannot express that (every command mints a fresh one), so the
+    identity is the session id. A host without one falls back to the tool
+    call id — still bound to SOMETHING rather than anonymous, and anonymous
+    would be a fail-open hole in the cross-session grant check."""
+    if context is not None and context.session_id:
+        return f"session:{context.session_id}"
+    return f"call:{tool_call_id}"
+
+
 async def _bridge_call(
     tool_call_id: str,
     action: str,
@@ -5629,13 +5643,20 @@ async def _bridge_open(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
     raw_url: str,
+    context: ToolContext | None = None,
 ) -> ToolResult:
     # The session's pinned handle decides the mode. With one, `open` RESUMES
     # that tab (extension-side it navigates exactly that surface); without one
     # the extension creates a brand-new tab. The extension never falls back to
     # reusing some other live surface — that reuse is how one session used to
     # hijack another's tab mid-task when agents ran in parallel.
-    params: dict[str, Any] = {"url": raw_url.strip()}
+    params: dict[str, Any] = {
+        "url": raw_url.strip(),
+        # The approval-binding identity — see _browser_requester. The
+        # extension uses it to decide whether a stored once-grant belongs to
+        # THIS navigation's session.
+        "requester": _browser_requester(context, tool_call_id),
+    }
     resuming = state.surface_id.startswith("bridge:")
     if resuming:
         params["tab"] = state.surface_id
@@ -5730,13 +5751,18 @@ async def _bridge_access(
     tool_call_id: str,
     action: str,
     params: BrowserParams,
+    context: ToolContext | None,
 ) -> ToolResult:
     """request_access / await_access — surface-free by design: they exist for
     the moment when 'open' has just FAILED, so requiring an open surface here
     would deadlock the recovery path."""
     url = params.url.strip()
+    # The approval-binding identity — see _browser_requester.
+    requester = _browser_requester(context, tool_call_id)
     if action == "request_access":
-        result, problem = await _bridge_call(tool_call_id, "request_access", {"url": url})
+        result, problem = await _bridge_call(
+            tool_call_id, "request_access", {"url": url, "requester": requester}
+        )
         if problem is not None:
             return problem
         assert result is not None
@@ -5766,7 +5792,11 @@ async def _bridge_access(
                 "await_access again.",
                 details={"origin": url, "state": "pending"},
             )
-        wire = {"url": url, "timeout_ms": min(remaining_ms, _BRIDGE_AWAIT_SLICE_MS)}
+        wire = {
+            "url": url,
+            "timeout_ms": min(remaining_ms, _BRIDGE_AWAIT_SLICE_MS),
+            "requester": requester,
+        }
         result, problem = await _bridge_call(tool_call_id, "await_access", wire)
         if problem is not None:
             return problem
@@ -5912,7 +5942,12 @@ async def _bridge_action(
     context: ToolContext | None,
 ) -> ToolResult:
     surface = state.surface_id
-    wire: dict[str, Any] = {"tab": surface}
+    wire: dict[str, Any] = {
+        "tab": surface,
+        # Approval-binding identity (see _browser_requester): goto's
+        # top-level admission consults it for once-grants.
+        "requester": _browser_requester(context, tool_call_id),
+    }
     if action == "goto":
         wire["url"] = params.url.strip()
     elif action in ("read", "snapshot"):
@@ -6156,7 +6191,7 @@ async def execute_browser(
                 "exists for the Local Operator browser extension ('lop browser status' / "
                 "'lop browser install').",
             )
-        return await _bridge_access(tool_call_id, action, params)
+        return await _bridge_access(tool_call_id, action, params, context)
 
     # Backend is selected only for an empty surface. A prefixed handle pins the
     # transport, so a browser opening or closing mid-session cannot silently
@@ -6176,11 +6211,11 @@ async def execute_browser(
         # or closing mid-session can never silently move the agent between
         # backends.
         if state.surface_id.startswith("bridge:"):
-            return await _bridge_open(tool_call_id, state, params.url)
+            return await _bridge_open(tool_call_id, state, params.url, context)
         if state.surface_id.startswith("surface:"):
             return await _browser_open(tool_call_id, state, params.url)
         if bridge_available:
-            return await _bridge_open(tool_call_id, state, params.url)
+            return await _bridge_open(tool_call_id, state, params.url, context)
         return await _browser_open(tool_call_id, state, params.url)
     if action == "close":
         return await _browser_close(tool_call_id, state)

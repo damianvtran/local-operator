@@ -168,7 +168,14 @@ async def test_scroll_wire_params_only_set_fields(monkeypatch) -> None:
         None,
     )
     assert captured["action"] == "scroll"
-    assert captured["params"] == {"tab": "bridge:9:nonce", "y": 400.0}
+    # Every action wire now carries the approval-binding identity too; only
+    # the scroll params themselves are asserted exactly (see the comment in
+    # fake_call above for why absent fields must stay absent).
+    assert captured["params"] == {
+        "tab": "bridge:9:nonce",
+        "requester": "call:t",
+        "y": 400.0,
+    }
     # Result reports the landing position and that more remains below.
     assert "(0, 400)" in result.text
     assert "more below" in result.text
@@ -380,7 +387,9 @@ async def test_request_access_works_without_a_surface(monkeypatch) -> None:
 
     async def fake_call(tool_call_id, action, params, *, surface=""):
         assert action == "request_access"
-        assert params == {"url": "https://example.com"}
+        # The tool binds the approval to an identity (session when the host
+        # provides one, else the tool call id — never anonymous).
+        assert params == {"url": "https://example.com", "requester": "call:t"}
         return {"origin": "https://example.com", "state": "pending"}, None
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)

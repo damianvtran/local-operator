@@ -69,10 +69,13 @@ export interface AccessRequest {
 
 /** A live "Allow once" grant, bound to the requester the user approved FOR
  * (see the multi-surface constraint at the top): only a navigation carrying
- * that requester may consume it. */
+ * that requester may consume it. `handoff` records the command id that raised
+ * the request, so a raw-RPC caller (no session identity) can still spend its
+ * own grant when its navigation reuses that id. */
 export interface OnceGrant {
   expiresAt: number;
   requester: string;
+  handoff?: string;
 }
 
 /** Origin -> grant, one per origin at most. */
