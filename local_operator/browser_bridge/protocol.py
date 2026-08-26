@@ -35,8 +35,10 @@ METHODS = (
     # tabs lists every live extension-owned surface. It exists because parallel
     # sessions now each open their OWN tab (open no longer reuses another
     # session's surface), so agents need read-only discovery of what is being
-    # driven; control of a listed tab still requires its exact nonce-bearing
-    # handle. Bridge-only, like scroll/logs: cmux has no multi-surface registry.
+    # driven. Listed handles are REDACTED (nonce truncated): the full token is
+    # the drive capability, granted only by the surface's own `open` response,
+    # so the listing is genuinely awareness-only. Bridge-only, like
+    # scroll/logs: cmux has no multi-surface registry.
     "tabs",
     "scroll",
     "logs",
@@ -111,6 +113,11 @@ class ErrorCode(StrEnum):
     # tab now, and without a bound an agent fleet could spray tabs into the
     # user's real browser. Typed so the tool can tell the agent to close one.
     TAB_LIMIT = "tab_limit"
+    # A bare `close` while several tabs are open: the request is
+    # under-specified, not a bridge fault, so it must not render as an
+    # "internal" bridge error (review finding n1). The message carries the
+    # REDACTED live handles so the caller can pick its own.
+    TAB_AMBIGUOUS = "tab_ambiguous"
     BUSY = "busy"
     PROTO_MISMATCH = "proto_mismatch"
     INTERNAL = "internal"

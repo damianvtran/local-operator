@@ -495,7 +495,15 @@ class BridgeService:
         tab_key = str(request.params.get("tab") or "__global__")
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
         async with lock:
-            return await self._dispatch_locked(request)
+            response = await self._dispatch_locked(request)
+        # Per-tab keys used to be near-singleton; with every opened tab minting
+        # a token the map would now grow for the daemon's lifetime. Evict the
+        # key once its tab is closed and nothing is waiting on the lock —
+        # unlocked-and-unwaited means a later command for the same (now dead)
+        # handle can safely mint a fresh Lock.
+        if request.method == "close" and tab_key != "__global__" and not lock.locked():
+            self._tab_locks.pop(tab_key, None)
+        return response
 
     async def _dispatch_locked(self, request: Request) -> JSONResponse:
         future: asyncio.Future[Response] = asyncio.get_running_loop().create_future()

@@ -5588,11 +5588,16 @@ async def _bridge_call(
     try:
         return await BridgeClient().call(action, params), None
     except BridgeError as exc:
-        return None, _error(
+        problem = _error(
             tool_call_id,
             "browser",
             format_error(exc, action=action, surface=surface),
         )
+        # Carry the TYPED wire code so callers can branch on it (dead-pin
+        # recovery, handle-drop) instead of substring-matching the human
+        # diagnostic, which broke silently on any rewording (finding m4).
+        problem.details = {"error_code": exc.code.value}
+        return None, problem
     except BridgeUnreachable as exc:
         return None, _error(tool_call_id, "browser", str(exc))
 
@@ -5612,7 +5617,11 @@ async def _bridge_open(
     if resuming:
         params["tab"] = state.surface_id
     result, problem = await _bridge_call(tool_call_id, "open", params, surface=state.surface_id)
-    if problem is not None and resuming and "is gone" in problem.text:
+    if (
+        problem is not None
+        and resuming
+        and (problem.details or {}).get("error_code") == "tab_closed"
+    ):
         # The pinned tab died (user closed it, browser restarted). 'open' is
         # the recovery verb — same contract as the cmux path — so drop the
         # dead handle and create a fresh tab instead of surfacing the error.
@@ -5691,23 +5700,37 @@ def _bridge_logs_result(
     )
 
 
+def _owns_redacted_tab(own_surface: str, redacted: str) -> bool:
+    """Whether the session's full pinned handle names a REDACTED listing entry.
+
+    The extension truncates listed nonces (`bridge:<tabId>:<prefix>…`) so a
+    listing cannot hand out drive capabilities (review finding M1); a session
+    recognises its own tab by prefix-matching the full token it was given at
+    open. Mirrors ownsRedacted in extension/src/state.ts.
+    """
+    if not own_surface or not redacted:
+        return False
+    if redacted.endswith("…"):
+        return own_surface.startswith(redacted[:-1])
+    return own_surface == redacted
+
+
 def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
-    """One listed tab: handle, page, recency — with the caller's own marked.
+    """One listed tab: redacted handle, page, recency — the caller's own marked.
 
     The "(yours)" marker matters because the listing shows EVERY session's
     tabs: an agent must close its own when done, and must treat the rest as
-    read-only awareness rather than handles to adopt.
+    read-only awareness. The handles are redacted by the extension and are NOT
+    driveable — driving needs the full token 'open' returned to its owner.
     """
     token = str(entry.get("tab", ""))
     title = str(entry.get("title", "")).strip() or "(untitled)"
     url = str(entry.get("url", "")).strip() or "(no URL)"
-    mine = " (yours)" if token and token == own_surface else ""
+    mine = " (yours)" if _owns_redacted_tab(own_surface, token) else ""
     when = ""
     last_used = entry.get("lastUsedAt")
     if isinstance(last_used, (int, float)) and last_used > 0:
-        from datetime import datetime, timezone
-
-        stamp = datetime.fromtimestamp(last_used / 1000, tz=timezone.utc)
+        stamp = datetime.fromtimestamp(last_used / 1000, tz=UTC)
         when = f" — last used {stamp.strftime('%H:%M:%S')} UTC"
     return f"{token}{mine}: {title} — {url}{when}"
 
@@ -5737,8 +5760,10 @@ async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> Tool
         tool_call_id,
         "browser",
         f"{len(entries)} extension-driven tab{'s' if len(entries) != 1 else ''} "
-        "(most recently used first; tabs without '(yours)' belong to other "
-        "sessions — do not drive or close them):\n\n" + "\n".join(lines),
+        "(most recently used first; handles are redacted — the listing is "
+        "awareness-only and cannot drive or close a tab. Your own tab is "
+        "marked '(yours)'; drive it with the handle your session already "
+        "holds):\n\n" + "\n".join(lines),
         details={"tab_count": len(entries), "surface_id": state.surface_id},
     )
 
@@ -5781,7 +5806,8 @@ async def _bridge_action(
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
         # retaining it would make even the recovery verb target stale state.
-        if "is gone; dropped the handle" in problem.text:
+        # Branch on the typed code, not the diagnostic's wording (finding m4).
+        if (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
         return problem
     assert result is not None
@@ -6254,7 +6280,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "sessions each drive their own tab: a fresh 'open' creates a NEW "
             "extension tab pinned to this session (later opens navigate it), "
             "'tabs' lists every extension-driven tab including other sessions' "
-            "(read-only awareness — never drive or close those), and 'close' "
+            "(handles are redacted: the listing is awareness-only and cannot "
+            "drive or close anything), and 'close' "
             "ends your own tab when you are done with it. 'scroll', 'logs' and "
             "'tabs' need the extension backend (cmux says so). Use it for every "
             "screenshot and page interaction; never install or script a browser "

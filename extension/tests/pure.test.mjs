@@ -213,3 +213,24 @@ test("surface tokens resolve only with an exact nonce-bearing handle", async () 
     assert.equal(atSurfaceCap(many), true);
   } finally { await module.close(); }
 });
+
+test("redacted handles are recognizable by their owner but not driveable", async () => {
+  const module = await load("src/state.ts");
+  try {
+    const { surfaceToken, redactToken, ownsRedacted, resolveSurfaceToken } = module.loaded;
+    const surface = { tabId: 42, nonce: "abcdef0123456789abcdef0123456789", epoch: 1, createdAt: 1, lastUsedAt: 2 };
+    const token = surfaceToken(surface);
+    const redacted = redactToken(token);
+    // Truncated to a 6-char prefix + ellipsis: enough to prefix-match, far
+    // too little to reconstruct the 32-char nonce (finding M1).
+    assert.equal(redacted, "bridge:42:abcdef…");
+    // The owner (holding the full token) recognises the listing entry...
+    assert.equal(ownsRedacted(token, redacted), true);
+    // ...another session's token does not...
+    assert.equal(ownsRedacted("bridge:42:ffffff0123456789abcdef0123456789", redacted), false);
+    // ...and the redacted form itself resolves NOTHING: it is not a handle.
+    assert.equal(resolveSurfaceToken(redacted, { [token]: surface }), undefined);
+    // Unredacted comparison still exact-matches (defensive path).
+    assert.equal(ownsRedacted(token, token), true);
+  } finally { await module.close(); }
+});

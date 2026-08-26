@@ -97,6 +97,25 @@ export function removeSurface(token: string): Promise<void> {
   });
 }
 
+/**
+ * Refresh a surface's ``lastUsedAt`` — only if it is still in the map.
+ *
+ * An unconditional put could resurrect an entry a concurrent prune (tabs /
+ * status run under a different daemon lock key) just removed, leaving a dead
+ * surface counting toward the cap until the next prune (review finding m5).
+ * The presence check runs inside the store queue, so it cannot interleave
+ * with the prune's own read-modify-write.
+ */
+export function touchSurface(token: string, at: number): Promise<void> {
+  return withStore(async () => {
+    const surfaces = await getSurfaces();
+    const surface = surfaces[token];
+    if (!surface) return;
+    surface.lastUsedAt = at;
+    await chrome.storage.session.set({ surfaces });
+  });
+}
+
 export function setRefs(token: string, forSurface: Record<string, SnapshotRef>): Promise<void> {
   return withStore(async () => {
     const { refs = {} } = (await chrome.storage.session.get(["refs"])) as SessionState;
@@ -112,6 +131,37 @@ export async function getRefs(token: string): Promise<Record<string, SnapshotRef
 
 export function surfaceToken(surface: StoredSurface): string {
   return `bridge:${surface.tabId}:${surface.nonce}`;
+}
+
+// How many nonce characters a redacted handle shows. Enough to prefix-match a
+// session's own full token against a listing entry, far too few to reconstruct
+// the 32-hex-char nonce (26 chars of entropy stay hidden).
+const REDACTED_NONCE_CHARS = 6;
+
+/**
+ * A display-safe form of a surface handle: `bridge:<tabId>:<nonce[0..6]>…`.
+ *
+ * Every surface that leaves the extension OTHER than the caller's own `open`
+ * response uses this — the `tabs` listing, the tab_limit refusal, the
+ * ambiguous-close refusal, the no-handle `status`. The full token IS the
+ * drive capability (review finding M1): listing it would hand every session
+ * control of every tab and make the "listing does not grant control" claim
+ * false. The redacted prefix still lets a caller recognise its OWN tab
+ * (prefix-match against the full token it received at open) without being
+ * able to drive anyone else's.
+ */
+export function redactToken(token: string): string {
+  const parsed = parseSurface(token);
+  if (!parsed) return token;
+  return `bridge:${parsed.tabId}:${parsed.nonce.slice(0, REDACTED_NONCE_CHARS)}…`;
+}
+
+/** Whether ``fullToken`` (a caller's own handle) names the surface a redacted
+ * listing entry describes. The trailing ellipsis marks redaction; matching is
+ * a plain prefix test on the un-ellipsised part. */
+export function ownsRedacted(fullToken: string, redacted: string): boolean {
+  if (!redacted.endsWith("…")) return fullToken === redacted;
+  return fullToken.startsWith(redacted.slice(0, -1));
 }
 
 export function parseSurface(token: unknown): { tabId: number; nonce: string } | undefined {

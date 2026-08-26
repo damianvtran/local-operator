@@ -1,4 +1,4 @@
-import { attach, BridgeCommandError, cdp, detach, requireSurface } from "../cdp";
+import { attach, BridgeCommandError, cdp, detach, pruneSurface, requireSurface } from "../cdp";
 import { dropLogCapture, startLogCapture } from "../log-capture";
 import { askOrigin, safeHttpUrl, withOriginGate } from "../origins";
 import { settle } from "../settle";
@@ -7,10 +7,33 @@ import {
   getSurfaces,
   MAX_SURFACES,
   putSurface,
+  redactToken,
   removeSurface,
   surfaceToken,
   type StoredSurface,
 } from "../state";
+
+/**
+ * The surfaces map with dead entries pruned (full cleanup via pruneSurface).
+ *
+ * Called before the cap check and by `tabs`: counting stale entries against
+ * the cap refused fresh opens after a browser restart until something else
+ * happened to prune (review finding m2), and every prune site must do the
+ * same buffer/debugger cleanup (finding m1).
+ */
+async function liveSurfaces(): Promise<Record<string, StoredSurface>> {
+  const surfaces = await getSurfaces();
+  const live: Record<string, StoredSurface> = {};
+  for (const [token, surface] of Object.entries(surfaces)) {
+    try {
+      await chrome.tabs.get(surface.tabId);
+      live[token] = surface;
+    } catch {
+      await pruneSurface(token, surface.tabId);
+    }
+  }
+  return live;
+}
 
 async function page(tabId: number): Promise<{ url: string; title: string }> {
   const tab = await chrome.tabs.get(tabId);
@@ -54,17 +77,25 @@ export async function open(params: Record<string, unknown>, requestId: string): 
     // startLogCapture is idempotent when they are already on.
     await startLogCapture(surface.tabId, cdp);
     const result = await navigate(surface.tabId, url, requestId);
+    // Same epoch bump as `goto`: resume navigates to a new document, so
+    // pre-resume snapshot refs must fail the epoch gate rather than being
+    // pushed against nodes that no longer exist (review finding m3).
+    surface.epoch += 1;
+    await putSurface(surface);
     return { tab: surfaceToken(surface), ...result };
   }
-  const surfaces = await getSurfaces();
+  const surfaces = await liveSurfaces();
   if (atSurfaceCap(surfaces)) {
     // Typed refusal, not silent reuse: each parallel session opens its own
     // tab now, so an unbounded map would let an agent fleet spray tabs into
     // the user's real browser. See MAX_SURFACES for the cap rationale.
+    // Handles are REDACTED: the full token is the drive capability, and an
+    // error surface must not hand one session control of another's tab
+    // (finding M1).
     throw new BridgeCommandError(
       "tab_limit",
       `already driving ${MAX_SURFACES} tabs — close one (action 'close' with its handle) before opening another`,
-      { limit: MAX_SURFACES, tabs: Object.keys(surfaces) },
+      { limit: MAX_SURFACES, tabs: Object.keys(surfaces).map(redactToken) },
     );
   }
   if (!(await askOrigin(url, requestId))) {
@@ -108,47 +139,48 @@ export async function status(params: Record<string, unknown>): Promise<Record<st
   }
   // No handle: report the most recently driven live surface, if any. With
   // several sessions each owning a tab there is no single "the" surface any
-  // more, so recency is the most honest one-line answer.
-  const surfaces = Object.values(await getSurfaces()).sort((a, b) => b.lastUsedAt - a.lastUsedAt);
-  for (const surface of surfaces) {
-    try {
-      return { tab: surfaceToken(surface), ...(await page(surface.tabId)), origin_mode: "default-deny" };
-    } catch {
-      await removeSurface(surfaceToken(surface));
-    }
+  // more, so recency is the most honest one-line answer. The handle is
+  // REDACTED: without a tab param the caller has not proven ownership, and a
+  // full token here would hand it control of another session's tab (M1).
+  const surfaces = Object.entries(await liveSurfaces()).sort(
+    (a, b) => b[1].lastUsedAt - a[1].lastUsedAt,
+  );
+  const first = surfaces[0];
+  if (first) {
+    return { tab: redactToken(first[0]), ...(await page(first[1].tabId)), origin_mode: "default-deny" };
   }
   return { origin_mode: "default-deny" };
 }
 
 /**
  * List every live extension-owned surface, pruning entries whose Chrome tab
- * is gone (detaching leftover debugger sessions best-effort as we go).
+ * is gone (full cleanup via pruneSurface).
  *
  * URL/title come from chrome.tabs at call time, never from storage, so the
  * listing cannot show a page the tab has since left. This is the discovery
  * verb for parallel sessions: read-only awareness of ALL surfaces, including
- * other sessions' — driving one still requires its exact token (nonce and
- * all), so listing does not grant control.
+ * other sessions'. Handles are REDACTED (nonce truncated) because the full
+ * token IS the drive capability — listing it would grant every session
+ * control of every tab (review finding M1). A caller recognises its own tab
+ * by prefix-matching the full token it received at open; driving any tab
+ * still requires that full token.
  */
 export async function tabs(_params: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const surfaces = await getSurfaces();
+  const surfaces = await liveSurfaces();
   const live: Record<string, unknown>[] = [];
   for (const [token, surface] of Object.entries(surfaces)) {
     try {
       const tab = await chrome.tabs.get(surface.tabId);
       live.push({
-        tab: token,
+        tab: redactToken(token),
         url: tab.url ?? "",
         title: tab.title ?? "",
         createdAt: surface.createdAt,
         lastUsedAt: surface.lastUsedAt,
       });
     } catch {
-      // Tab gone (user closed it, browser restarted): prune so the map cannot
-      // fill with dead entries that count toward the surface cap.
-      dropLogCapture(surface.tabId);
-      await detach(surface.tabId);
-      await removeSurface(token);
+      // Closed between the liveness pass and this read — rare; prune now.
+      await pruneSurface(token, surface.tabId);
     }
   }
   live.sort((a, b) => Number(b.lastUsedAt) - Number(a.lastUsedAt));
@@ -175,16 +207,21 @@ export async function close(params: Record<string, unknown>): Promise<Record<str
     await closeSurface(surfaceToken(surface), surface);
     return {};
   }
-  const surfaces = await getSurfaces();
+  const surfaces = await liveSurfaces();
   const entries = Object.entries(surfaces);
   if (entries.length === 0) {
     throw new BridgeCommandError("tab_closed", "no browser tab is open");
   }
   if (entries.length > 1) {
+    // Typed as tab_ambiguous (not internal — finding n1): this is the caller
+    // holding an under-specified request, not a bridge fault. Handles are
+    // redacted for the same reason as the listing: naming full tokens here
+    // would let any session close (or adopt) any tab (M1).
+    const redacted = entries.map(([token]) => redactToken(token));
     throw new BridgeCommandError(
-      "internal",
-      `several tabs are open (${entries.map(([token]) => token).join(", ")}) — pass the handle of the one to close`,
-      { tabs: entries.map(([token]) => token) },
+      "tab_ambiguous",
+      `several tabs are open (${redacted.join(", ")}) — pass the handle of the one to close`,
+      { tabs: redacted },
     );
   }
   const [token, surface] = entries[0]!;

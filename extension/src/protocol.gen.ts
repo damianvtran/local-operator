@@ -16,6 +16,7 @@ export enum ErrorCode {
   ORIGIN_PROMPT_PENDING = 'origin_prompt_pending',
   DEBUGGER_CONFLICT = 'debugger_conflict',
   TAB_LIMIT = 'tab_limit',
+  TAB_AMBIGUOUS = 'tab_ambiguous',
   BUSY = 'busy',
   PROTO_MISMATCH = 'proto_mismatch',
   INTERNAL = 'internal',

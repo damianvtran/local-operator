@@ -270,17 +270,19 @@ async def test_tabs_lists_surfaces_and_marks_own(monkeypatch) -> None:
     async def fake_call(tool_call_id, action, params, *, surface=""):
         assert action == "tabs"
         assert params == {}
+        # The extension REDACTS listed handles (finding M1): truncated nonce
+        # plus ellipsis, so the listing cannot hand out drive capabilities.
         return {
             "tabs": [
                 {
-                    "tab": "bridge:9:mine",
+                    "tab": "bridge:9:aaaaaa\u2026",
                     "url": "https://example.com/a",
                     "title": "Mine",
                     "createdAt": 1000,
                     "lastUsedAt": 2000,
                 },
                 {
-                    "tab": "bridge:12:theirs",
+                    "tab": "bridge:12:bbbbbb\u2026",
                     "url": "https://example.com/b",
                     "title": "Theirs",
                     "createdAt": 1000,
@@ -294,16 +296,29 @@ async def test_tabs_lists_surfaces_and_marks_own(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)
     surface = BrowserSurface()
-    surface.surface_id = "bridge:9:mine"
+    surface.surface_id = "bridge:9:aaaaaa0123456789aaaaaa0123456789"
     context = ToolContext(browser=surface)
     result = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
     assert not result.is_error
-    # The caller's own tab is marked; another session's is listed but flagged
-    # as not theirs to drive.
-    assert "bridge:9:mine (yours)" in result.text
-    assert "bridge:12:theirs:" in result.text
-    assert "do not drive or close them" in result.text
+    # The caller's own tab is recognised by PREFIX-matching its full pinned
+    # token against the redacted entry; the other session's is listed as
+    # awareness only.
+    assert "bridge:9:aaaaaa\u2026 (yours)" in result.text
+    assert "bridge:12:bbbbbb\u2026:" in result.text
+    assert "awareness-only" in result.text
     assert result.details is not None and result.details["tab_count"] == 2
+
+
+def test_redacted_ownership_prefix_matching() -> None:
+    own = "bridge:9:aaaaaa0123456789aaaaaa0123456789"
+    assert builtin._owns_redacted_tab(own, "bridge:9:aaaaaa\u2026")
+    # Another session's redacted entry does not match.
+    assert not builtin._owns_redacted_tab(own, "bridge:9:bbbbbb\u2026")
+    # Same tab id alone is not ownership — the nonce prefix must agree.
+    assert not builtin._owns_redacted_tab("bridge:9:cccccc\u2026", "bridge:9:aaaaaa\u2026")
+    assert not builtin._owns_redacted_tab("", "bridge:9:aaaaaa\u2026")
+    # Defensive exact-match path for an unredacted value.
+    assert builtin._owns_redacted_tab(own, own)
 
 
 @pytest.mark.asyncio
@@ -332,9 +347,11 @@ async def test_bridge_open_recovers_from_a_dead_pinned_tab(monkeypatch) -> None:
     async def fake_call(tool_call_id, action, params, *, surface=""):
         calls.append(params)
         if "tab" in params:
-            return None, builtin._error(
-                "t", "browser", "browser tab bridge:9:dead is gone; dropped the handle."
-            )
+            # Recovery keys on the TYPED wire code carried in details, not on
+            # the diagnostic's wording (finding m4).
+            problem = builtin._error("t", "browser", "browser tab bridge:9:dead is gone.")
+            problem.details = {"error_code": "tab_closed"}
+            return None, problem
         return {"tab": "bridge:33:fresh", "url": "https://example.com/", "title": "E"}, None
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)

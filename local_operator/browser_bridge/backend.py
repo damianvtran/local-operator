@@ -100,8 +100,17 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         return "the extension is waiting for the user to approve this site in its popup."
     if error.code == ErrorCode.TAB_LIMIT:
         # The extension's message already names the cap and the remedy; append
-        # the discovery verb so the agent knows how to find a tab to close.
-        return f"{error.message}. Use 'tabs' to list the open tabs and their handles."
+        # the discovery verb. A session that owns none of the capped tabs
+        # cannot close one (handles in the listing are redacted, deliberately);
+        # its remedy is asking the other sessions — or the user — to close.
+        return (
+            f"{error.message}. Use 'tabs' to see what is open; if none is yours, "
+            "another session (or the user) must close one."
+        )
+    if error.code == ErrorCode.TAB_AMBIGUOUS:
+        # Under-specified close, not a fault: relay the extension's message,
+        # which already names the (redacted) live handles.
+        return error.message
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):
         return (
             f"the browser tab crashed while {action or 'the action'} was running. "

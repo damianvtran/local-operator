@@ -1,4 +1,5 @@
-import { getSurfaces, putSurface, removeSurface, resolveSurfaceToken, type StoredSurface } from "./state";
+import { dropLogCapture } from "./log-capture";
+import { getSurfaces, removeSurface, resolveSurfaceToken, touchSurface, type StoredSurface } from "./state";
 
 const attached = new Set<number>();
 
@@ -25,17 +26,31 @@ export async function requireSurface(token: unknown): Promise<StoredSurface> {
   try {
     await chrome.tabs.get(surface.tabId);
   } catch {
-    // The Chrome tab is gone; drop the map entry so `tabs` never lists it and
-    // the map cannot fill with dead surfaces while their handles count toward
-    // the surface cap.
-    await removeSurface(String(token));
+    // The Chrome tab is gone: full prune, identical to the `tabs` prune site
+    // (review finding m1) — dropping only the map entry leaked the log ring
+    // buffer and left the dead tabId in the `attached` set for the worker's
+    // lifetime.
+    await pruneSurface(String(token), surface.tabId);
     throw new BridgeCommandError("tab_closed", "the browser tab was closed");
   }
   // Recency for the `tabs` listing; best-effort, never on the command's
-  // critical path for correctness.
+  // critical path for correctness. Conditional on the entry still existing so
+  // it cannot resurrect a concurrently-pruned surface (finding m5).
   surface.lastUsedAt = Date.now();
-  await putSurface(surface);
+  await touchSurface(String(token), surface.lastUsedAt);
   return surface;
+}
+
+/**
+ * The ONE dead-surface cleanup: map entry, log ring buffer, debugger session.
+ * Every prune site (requireSurface, status, tabs) must go through this — the
+ * three previously diverged and two of them leaked buffers/attachments
+ * (finding m1).
+ */
+export async function pruneSurface(token: string, tabId: number): Promise<void> {
+  dropLogCapture(tabId);
+  await detach(tabId);
+  await removeSurface(token);
 }
 
 export async function attach(tabId: number): Promise<void> {
