@@ -1,9 +1,52 @@
 import { DEFAULT_PORT, getLocal, getSession } from "../state";
+import { pairVerdict, viewForHealth } from "./pair-flow";
+import {
+  ackForDecision,
+  originPromptView,
+  type DecidedOrigin,
+  type OriginDecision,
+} from "./origin-flow";
 
-type State = "connected" | "pairing" | "disconnected" | "incompatible" | "origin";
-const sections = ["connected", "pairing", "disconnected", "incompatible", "origin"].map((id) =>
-  document.getElementById(id),
-);
+type State =
+  | "connected"
+  | "paired"
+  | "pairing"
+  | "disconnected"
+  | "incompatible"
+  | "origin"
+  | "origin-ack";
+const sections = [
+  "connected",
+  "paired",
+  "pairing",
+  "disconnected",
+  "incompatible",
+  "origin",
+  "origin-ack",
+].map((id) => document.getElementById(id));
+
+// True once THIS popup saw pair_result.ok. The daemon confirms pairing on the
+// popup's own socket before /health reports paired (the worker still has to
+// reconnect with the new token), so a health-driven render in that window must
+// hold the explicit success view instead of putting the form back — a re-shown
+// form invites re-submitting the consumed one-time code, which then fails with
+// a misleading "No live pairing code". See pair-flow.ts.
+let locallyPaired = false;
+
+// The origin decision THIS popup already made — the consent flow's copy of the
+// same race: `origin_decision` goes to the worker, but session storage and
+// /health keep echoing the prompt until that round-trip lands, so a render in
+// the window would resurrect the three buttons over a click that already took
+// effect. Keyed by origin so a different pending origin still prompts (A6).
+// See origin-flow.ts.
+let decidedOrigin: DecidedOrigin | null = null;
+
+// The origin the prompt is currently showing, whichever source supplied it.
+// After a worker restart session storage is empty and the prompt renders from
+// /health's pending_origin alone; a decision click must still acknowledge (and
+// key its latch) against THAT origin, or the click lands on the one branch
+// where the missing-feedback bug survives (review finding m1).
+let shownPromptOrigin: string | undefined;
 
 interface Health {
   extension_connected: boolean;
@@ -21,10 +64,14 @@ interface Health {
 // mark is never tinted — see popup.css. Mirrors callback_page.py's _TONE_VARS.
 const TONE: Record<State, string> = {
   connected: "var(--success)",
+  paired: "var(--success)",
   pairing: "var(--hairline-strong)",
   disconnected: "var(--hairline-strong)",
   incompatible: "var(--danger)",
   origin: "var(--hairline-strong)",
+  // Placeholder only: the ack's real tone is per-decision (success for allow,
+  // neutral for deny) and showOriginAck overrides it right after show().
+  "origin-ack": "var(--hairline-strong)",
 };
 
 function show(state: State): void {
@@ -53,6 +100,20 @@ async function render(): Promise<void> {
   // shows it even after a worker restart.
   const { pendingOrigin } = await getSession();
   const health = await daemonHealth();
+  // Compare by ORIGIN (not display hostname): the latch must match exactly the
+  // key the decision was sent under (A6).
+  const pendingOriginValue = pendingOrigin?.origin || health?.pending_origin;
+  const originView = originPromptView(pendingOriginValue, decidedOrigin);
+  if (originView === "none") {
+    shownPromptOrigin = undefined;
+    // Round-trip landed and the prompt is gone: clear the latch so a future
+    // prompt for the SAME origin (a retry after deny) is not swallowed.
+    decidedOrigin = null;
+  } else if (originView === "ack") {
+    // Stale echo of the decided prompt — hold the acknowledgement.
+    showOriginAck(decidedOrigin!.decision);
+    return;
+  }
   const pendingHost = pendingOrigin?.hostname || hostnameOf(health?.pending_origin);
   if (pendingHost) {
     // The heading is fixed prose; the host — the string the user must verify
@@ -61,6 +122,10 @@ async function render(): Promise<void> {
     // heading id stays constant, so no per-host text in the serif face.
     const host = document.getElementById("origin-host");
     if (host) host.textContent = pendingHost;
+    shownPromptOrigin = pendingOriginValue;
+    // A fresh prompt must arrive with live buttons even if a previous
+    // decision's lock is still set.
+    setOriginBusy(false);
     show("origin");
     return;
   }
@@ -79,6 +144,13 @@ async function render(): Promise<void> {
     return;
   }
   if (health.paired) {
+    // Handoff complete: the worker holds the new token and health confirms it,
+    // so the pairing latch has done its job. Clearing it here means a LATER
+    // unpair (daemon revoke → close 4003) renders the form again instead of a
+    // stale success view (review finding m2). A revoke landing inside the
+    // pre-confirmation window is not distinguishable from the race itself and
+    // stays covered by the latch until the popup reopens.
+    locallyPaired = false;
     // Name the site the agent is driving so the user can see it without
     // hunting for a background tab (finding U3). The URL rides in a labelled
     // trough (the callback page's treatment); when nothing is open the label
@@ -99,7 +171,9 @@ async function render(): Promise<void> {
     show("connected");
     return;
   }
-  show("pairing");
+  // Health has not confirmed the new token yet: keep the success view if this
+  // popup already paired (the race above), otherwise offer the form.
+  show(viewForHealth(false, locallyPaired));
 }
 
 function hostnameOf(origin: string | undefined): string {
@@ -118,19 +192,57 @@ codeInput?.addEventListener("input", () => {
   codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
 });
 
+// Lock the form for the duration of one submission: a second click while the
+// first is in flight would spend the same one-time code twice, and the second
+// attempt always fails confusingly. The disabled ramp in popup.css plus the
+// relabelled button are the in-progress affordance.
+function setPairBusy(busy: boolean): void {
+  const input = document.getElementById("pair-code") as HTMLInputElement | null;
+  const button = document.querySelector<HTMLButtonElement>("#pair-form button[type='submit']");
+  if (input) input.disabled = busy;
+  if (button) {
+    button.disabled = busy;
+    button.textContent = busy ? "Pairing…" : "Pair";
+  }
+}
+
 document.getElementById("pair-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = document.getElementById("pair-code") as HTMLInputElement | null;
   const error = document.getElementById("pair-error");
   if (!input || !error) return;
   error.classList.add("hidden");
+  setPairBusy(true);
   const { token, port = DEFAULT_PORT } = await getLocal();
   try {
     const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
-    await new Promise((resolve, reject) => {
-      wire.onopen = resolve;
-      wire.onerror = reject;
+    // ONE shared rejection wired to error AND close for every await below: a
+    // socket that drops after open but before pair_result must land in
+    // `catch` — a bare onmessage promise would suspend forever, and with the
+    // busy lock held that means a form disabled until the popup is reopened
+    // (review finding M1). The no-op catch keeps a post-handshake close (our
+    // own close() included, if handlers weren't detached) from surfacing as an
+    // unhandled rejection.
+    let failed: (reason: Error) => void = () => {};
+    const failure = new Promise<never>((_, reject) => {
+      failed = reject;
     });
+    void failure.catch(() => {});
+    wire.onerror = () => failed(new Error("socket error"));
+    wire.onclose = () => failed(new Error("socket closed"));
+    await Promise.race([
+      new Promise((resolve) => {
+        wire.onopen = resolve;
+      }),
+      failure,
+    ]);
+    const nextMessage = (): Promise<MessageEvent> =>
+      Promise.race([
+        new Promise<MessageEvent>((resolve) => {
+          wire.onmessage = resolve;
+        }),
+        failure,
+      ]);
     wire.send(
       JSON.stringify({
         event: "hello",
@@ -140,38 +252,46 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
         browser: navigator.userAgent,
       }),
     );
-    await new Promise((resolve) => {
-      wire.onmessage = resolve;
-    });
+    await nextMessage();
     wire.send(JSON.stringify({ event: "pair", code: input.value.trim() }));
-    const verdict = await new Promise<MessageEvent>((resolve) => {
-      wire.onmessage = resolve;
-    });
-    const frame = JSON.parse(String(verdict.data)) as {
-      event: string;
-      ok: boolean;
-      token?: string;
-      message?: string;
-    };
-    if (frame.ok && frame.token) {
-      await chrome.storage.local.set({ token: frame.token });
+    const verdict = await nextMessage();
+    const outcome = pairVerdict(JSON.parse(String(verdict.data)));
+    if (outcome.ok) {
+      await chrome.storage.local.set({ token: outcome.token });
+      // Detach before closing: this close is deliberate, not a failure.
+      wire.onerror = null;
+      wire.onclose = null;
       wire.close();
+      // Confirm SUCCESS from the pair_result frame alone, before any health
+      // round-trip: the worker has not reconnected with the new token yet, so
+      // /health still says unpaired and a render() here would re-show the form
+      // (the race documented at `locallyPaired`). The explicit success state is
+      // the user's feedback; render() below only upgrades it to the connected
+      // view once health confirms.
+      locallyPaired = true;
+      show("paired");
       await new Promise((resolve) => setTimeout(resolve, 250));
       await render();
     } else {
-      error.textContent =
-        frame.message ??
-        "That code didn't match. Codes expire after two minutes — check the app for a fresh one.";
+      error.textContent = outcome.message;
       error.classList.remove("hidden");
       // A live pairing error turns the status rule danger — the one place the
       // pairing state spends colour, and only on a real failure.
       document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
+      // Unlock BEFORE focusing: a disabled input refuses focus, and the
+      // `finally` unlock runs only after this handler returns. (The finally
+      // re-call is idempotent.)
+      setPairBusy(false);
       input.focus();
     }
   } catch {
     error.textContent = "Could not reach Local Operator on this machine.";
     error.classList.remove("hidden");
     document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
+  } finally {
+    // Always unlock, success included: if health later drops (daemon restart)
+    // the user lands back on this form, and it must not arrive pre-disabled.
+    setPairBusy(false);
   }
 });
 
@@ -181,18 +301,69 @@ document.getElementById("origin-allow")?.addEventListener("click", () => void de
 document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
 
-async function decide(decision: "once" | "always" | "deny"): Promise<void> {
+// Lock the three consent buttons the moment one is clicked: the session-storage
+// read below is async, and a second click in that window would double-send the
+// decision. render()'s prompt path unlocks for the next genuine prompt.
+function setOriginBusy(busy: boolean): void {
+  for (const id of ["origin-allow", "origin-always", "origin-deny"]) {
+    const button = document.getElementById(id) as HTMLButtonElement | null;
+    if (button) button.disabled = busy;
+  }
+}
+
+function showOriginAck(decision: OriginDecision): void {
+  const ack = ackForDecision(decision);
+  const title = document.getElementById("origin-ack-title");
+  const sub = document.getElementById("origin-ack-sub");
+  if (title) title.textContent = ack.title;
+  if (sub) sub.textContent = ack.sub;
+  document.getElementById("origin-ack-check")?.classList.toggle("hidden", !ack.check);
+  show("origin-ack");
+  // Per-decision tone override: allow is a real success (the agent proceeds),
+  // deny is a completed choice — neutral, never danger, which is reserved for
+  // states the user must recover from.
+  document
+    .getElementById("card")
+    ?.style.setProperty(
+      "--tone",
+      ack.tone === "success" ? "var(--success)" : "var(--hairline-strong)",
+    );
+}
+
+async function decide(decision: OriginDecision): Promise<void> {
+  setOriginBusy(true);
   const { pendingOrigin } = await getSession();
-  if (pendingOrigin) {
+  // Fall back to the origin the prompt actually rendered from: after a worker
+  // restart the session record is gone and only /health carried the origin
+  // (finding m1) — the click must acknowledge either way.
+  const origin = pendingOrigin?.origin ?? shownPromptOrigin;
+  if (origin) {
+    // Acknowledge from the CLICK alone, before the worker round-trip: session
+    // storage and /health keep echoing this prompt until `origin_decision`
+    // lands, and a render in that window would put the three buttons back with
+    // no sign the click worked — the same race as pairing success. The latch
+    // holds the ack through stale echoes; render() takes over to Connected
+    // once the echo clears.
+    decidedOrigin = { origin, decision };
+    showOriginAck(decision);
     // Decisions are keyed by ORIGIN so a redirect chain resolves each hop
     // independently (finding A6).
     await chrome.runtime.sendMessage({
       event: "origin_decision",
-      origin: pendingOrigin.origin,
+      origin,
       decision,
     });
   }
   await render();
 }
+
+// Re-render whenever the worker changes connection state: the worker learns a
+// new token only on its own reconnect (its retry alarm can be ~30s out), and
+// without this the "Connecting…" success view sits until the user pokes the
+// popup (review finding m3). connState flips exactly when something the popup
+// shows has changed, so this is cheaper and quieter than polling /health.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "session" && changes.connState) void render();
+});
 
 void render();

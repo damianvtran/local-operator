@@ -27,7 +27,11 @@ from local_operator.harness.comms import (
     HUB_MESSAGE_TYPE,
     SubagentComms,
 )
-from local_operator.harness.jobs import CANCELLED_BEFORE_START
+from local_operator.harness.jobs import (
+    CANCELLED_BEFORE_START,
+    AsyncJob,
+    AsyncJobManager,
+)
 from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
@@ -326,6 +330,28 @@ async def _wait_history(pilot: Any, view: SubagentView) -> None:
     raise AssertionError("history worker did not settle")
 
 
+async def _wait_geometry_settled(
+    pilot: Any, body: Any, *, cycles: int = 4, limit: int = 200
+) -> None:
+    """Pause until the body's geometry stops changing for ``cycles`` cycles.
+
+    A prepend restores the anchor across TWO layout passes: gap settlement
+    re-decides margins against real widths, and the pass that applies them
+    republishes positions. A fixed number of pauses bets on which pass wins and
+    loses that bet under parallel load, so the wait is on the observable itself.
+    """
+    last: tuple[int, float] | None = None
+    stable = 0
+    for _ in range(limit):
+        await pilot.pause()
+        current = (body.virtual_size.height, body.scroll_y)
+        stable = stable + 1 if current == last else 0
+        last = current
+        if stable >= cycles:
+            return
+    raise AssertionError("body geometry never settled")
+
+
 @pytest.mark.asyncio
 async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) -> None:
     transcript = Transcript(tmp_path / "child")
@@ -417,21 +443,21 @@ async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
         monkeypatch.setattr(view.__module__ + ".read_transcript_page", slow)
         view._initial_tail_pending = True
         view._body.scroll_home(animate=False)
-        await pilot.pause()
+        await _wait_geometry_settled(pilot, view._body)
         view._initial_tail_pending = False
+        # Preserve the actual visible block and its viewport-relative row.
         before = view._body.scroll_y
-        anchor = next(
+        anchor_block = next(
             block for block in view._body.blocks() if block.virtual_region.bottom > before
         )
-        anchor_offset = anchor.virtual_region.y - before
+        before_gap = anchor_block.virtual_region.y - before
         view.action_home()
         view.action_home()
         await _wait_history(pilot, view)
-        for _ in range(5):
-            await pilot.pause()
+        await _wait_geometry_settled(pilot, view._body)
         assert calls == 1
-        assert anchor in view._body.blocks()
-        assert abs((anchor.virtual_region.y - view._body.scroll_y) - anchor_offset) <= 1
+        assert anchor_block in view._body.blocks()
+        assert anchor_block.virtual_region.y - view._body.scroll_y == before_gap
 
 
 @pytest.mark.asyncio
@@ -858,6 +884,54 @@ async def test_the_page_renders_the_childs_messages_and_tool_calls() -> None:
         page = " ".join(view.rendered_rows())
         assert "audit the ingest path" in page  # the title names the subagent
         assert "Two tests fail on the retry budget." in page
+
+
+@pytest.mark.asyncio
+async def test_historical_attempt_opens_and_selects_the_current_visible_row() -> None:
+    session = FakeSession()
+    manager = AsyncJobManager()
+    current = AsyncJob(
+        id="current",
+        type="task",
+        status="completed",
+        start_time=1.0,
+        settled_at=2.0,
+        label="continued child",
+        logical_id="/tmp/child",
+        attempt_aliases=["historical"],
+    )
+    manager.restore([current])
+    session.jobs = manager
+    comms = SubagentComms(session)  # type: ignore[arg-type]
+    comms.restore(
+        [
+            {
+                "job_id": "current",
+                "label": "continued child",
+                "session_dir": "/tmp/child",
+                "attempt_aliases": ["historical"],
+            }
+        ]
+    )
+    session._subagent_comms = comms
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        app._open_subagent_view("historical")
+        await pilot.pause()
+
+        view = app.query_one(SubagentView)
+        panel = app._subagent_panel
+        assert view.job_id == "current"
+        assert panel is not None
+        assert list(panel._rows) == ["current"]
+        assert panel._rows["current"].current is True
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,8 @@ import contextlib
 import inspect
 import json
 import logging
+import os
+import tempfile
 import time
 from collections.abc import (
     AsyncIterator,
@@ -96,6 +98,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolCall,
     ToolContext,
+    ToolExecutionEndEvent,
     ToolResult,
     Usage,
     WakeDeliveredEvent,
@@ -184,6 +187,9 @@ SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 #: their transcripts survive on disk. Re-snapshotted (newest-wins, like every
 #: custom entry) whenever the roster moves; loaded once at construction.
 SUBAGENT_ROSTER_CUSTOM_TYPE = "subagent_roster"
+SUBAGENT_ROSTER_SIDECAR = "subagent-roster.v1.json"
+_SUBAGENT_ROSTER_VERSION = 1
+_SUBAGENT_SUMMARY_CHARS = 500
 
 #: Transcript custom-entry type holding the session's todo list. The todo tool
 #: keeps the live list in a module-level table keyed by session id (see
@@ -919,6 +925,10 @@ _ROSTER_ROW_FIELDS = frozenset(
         # count. This is the durable half of nested accounting after a child
         # manager is disposed and therefore must survive process resume.
         "descendant_usage",
+        # Folded attempts no longer have visible rows. Their bounded accounting
+        # components must travel with the winner so the sidecar can reconstruct
+        # the full logical child after a process restart.
+        "prior_attempt_usage",
         "restored",
         # Small bounded strings, stamped at registration: a restored row must
         # still say what kind of child it was ("task"/"scout") and at what
@@ -927,6 +937,10 @@ _ROSTER_ROW_FIELDS = frozenset(
         # rest of this allowlist exists to prevent for the model/usage fields.
         "agent_role",
         "effort",
+        # Resume reconciliation metadata is bounded by attempts of this one
+        # logical child and keeps legacy handles valid after process restore.
+        "logical_id",
+        "attempt_aliases",
     }
 )
 
@@ -949,6 +963,56 @@ def _subagent_job_row(job: AsyncJob) -> dict[str, Any]:
     if job.error_text:
         row["error_text"] = job.error_text[:_ROSTER_ERROR_CAP]
     return row
+
+
+def _compact_subagent_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Bound list-surface text while preserving the exact resume directory."""
+    compact = dict(record)
+    for key in ("prompt", "error_text", "result_text"):
+        value = compact.get(key)
+        if value is not None:
+            compact[key] = str(value)[:_SUBAGENT_SUMMARY_CHARS]
+    return compact
+
+
+def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
+    """Replace current roster state durably without exposing a partial JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = path.with_name(os.path.basename(raw_temp))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+
+
+def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
+    """Read a supported sidecar, falling back to the legacy transcript on error."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or payload.get("version") != _SUBAGENT_ROSTER_VERSION:
+            return None
+        generation = payload.get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            return None
+        if not isinstance(payload.get("jobs"), list) or not isinstance(
+            payload.get("records"), list
+        ):
+            return None
+        return payload
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _parsed_usage(payload: dict[str, Any]) -> Usage | None:
@@ -1387,6 +1451,9 @@ class Session:
         self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
 
         self._disposed = False
+        self._subagent_roster_generation = 0
+        self._subagent_roster_written_generation = 0
+        self._subagent_roster_writer: asyncio.Task[None] | None = None
         # Session-scoped task group (HC-11): wake deliveries and aside
         # persistence are routed through it so dispose() cancels them
         # deterministically and a delivery after dispose never raises into an
@@ -3965,7 +4032,17 @@ class Session:
                         # pipeline flushes it if no continuation is queued.
                         self._held_end = event
                     continue
+                is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
+                if is_todo_end:
+                    # The tool has already mutated its store when this event is
+                    # yielded. Persist before async subscriber fan-out so a
+                    # cancellation from a handler cannot expose live todo state
+                    # that resume cannot recover. The fingerprint guard makes
+                    # failed/view/no-op todo calls a zero-write comparison.
+                    await self._maybe_persist_todos()
                 await self._emit(event)
+                if is_todo_end and self._job_id is not None and self._subagent_comms is not None:
+                    self._subagent_comms.notify_detail_persisted(self._job_id)
 
             # Track the latest provider usage for compaction trigger math.
             for message in reversed(new_messages):
@@ -3993,6 +4070,11 @@ class Session:
             # resume. Placed on the normal path (a turn that raised past here
             # still has last turn's snapshot; the next clean turn re-writes it).
             await self._maybe_persist_todos()
+            # Child events reach the shared comms watcher before either durable
+            # append. Notify only after messages AND todos are stable, including
+            # provider-error turns that emit no later terminal event.
+            if self._job_id is not None and self._subagent_comms is not None:
+                self._subagent_comms.notify_detail_persisted(self._job_id)
 
             pending_incident = self._pending_incident
             self._pending_incident = None
@@ -5828,40 +5910,65 @@ class Session:
         """
         if self._disposed or self._job_id is not None:
             return
-        self._spawn_background(self._persist_subagent_roster())
+        self._subagent_roster_generation += 1
+        if self._subagent_roster_writer is None or self._subagent_roster_writer.done():
+            self._subagent_roster_writer = asyncio.create_task(
+                self._persist_subagent_roster(), name="persist-subagent-roster"
+            )
 
     async def _persist_subagent_roster(self) -> None:
-        """Snapshot the task job rows AND the comms records to the transcript.
-
-        Both halves are needed and neither alone suffices. The job ROWS carry
-        what the subagent panel paints (label, status, model, usage, elapsed);
-        the comms RECORDS carry what ``hub op='resume'`` needs (the
-        ``job_id \u2192 session_dir`` mapping and how each child settled). They are
-        written together, newest-wins like every custom entry, so a resume reads
-        one coherent snapshot rather than two that drifted.
-
-        Only ``task`` rows are stored: ``bash`` jobs are host-local processes
-        that cannot outlive the process that spawned them, so persisting them
-        would only invite a resume to show a job it can never touch.
-        """
+        """Coalesce current roster state into one atomically replaced sidecar."""
         try:
-            rows = [
-                _subagent_job_row(job)
-                for job in self.jobs.list()
-                if getattr(job, "type", "") == "task"
-            ]
-            records = self._subagent_comms.snapshot() if self._subagent_comms is not None else []
-            # Nothing to record means no append: a session that never delegated
-            # must not pay a transcript write (and, at teardown, a wedged-mount
-            # timeout) for an empty roster it will never read back.
-            if not rows and not records:
-                return
-            await self._transcript.append_custom(
-                SUBAGENT_ROSTER_CUSTOM_TYPE,
-                {"jobs": rows, "records": records},
-            )
+            while self._subagent_roster_written_generation < self._subagent_roster_generation:
+                generation = self._subagent_roster_generation
+                rows = [
+                    _subagent_job_row(job)
+                    for job in self.jobs.list()
+                    if getattr(job, "type", "") == "task"
+                ]
+                records = (
+                    self._subagent_comms.snapshot() if self._subagent_comms is not None else []
+                )
+                payload = {
+                    "version": _SUBAGENT_ROSTER_VERSION,
+                    "generation": generation,
+                    "jobs": rows,
+                    "records": [_compact_subagent_record(record) for record in records],
+                }
+                await asyncio.to_thread(
+                    _write_roster_sidecar,
+                    self._transcript.directory / SUBAGENT_ROSTER_SIDECAR,
+                    payload,
+                )
+                # Keep one bounded legacy entry for readers predating v0.35.2;
+                # future mutations replace only the sidecar, avoiding quadratic
+                # history while preserving a rolling-upgrade resume path.
+                if (rows or records) and self._transcript.latest_custom(
+                    SUBAGENT_ROSTER_CUSTOM_TYPE
+                ) is None:
+                    await self._transcript.append_custom(
+                        SUBAGENT_ROSTER_CUSTOM_TYPE,
+                        {"jobs": rows, "records": payload["records"]},
+                    )
+                self._subagent_roster_written_generation = generation
         except Exception:  # noqa: BLE001 - persistence must never break a turn
             logger.warning("could not persist subagent roster", exc_info=True)
+        finally:
+            if self._subagent_roster_writer is asyncio.current_task():
+                self._subagent_roster_writer = None
+
+    async def _await_subagent_roster_writer(self) -> None:
+        """Drain the single writer, including a generation queued as it exits."""
+        while True:
+            writer = self._subagent_roster_writer
+            if writer is None:
+                if self._subagent_roster_written_generation >= self._subagent_roster_generation:
+                    return
+                writer = asyncio.create_task(
+                    self._persist_subagent_roster(), name="persist-subagent-roster"
+                )
+                self._subagent_roster_writer = writer
+            await asyncio.shield(writer)
 
     async def _final_persist_snapshots(self) -> None:
         """Write the last roster and todo snapshots at teardown, in order.
@@ -5869,7 +5976,8 @@ class Session:
         Split out so :meth:`dispose` can bound the pair with a single
         ``wait_for``: both are transcript appends and neither may hang teardown.
         """
-        await self._persist_subagent_roster()
+        self._subagent_roster_generation += 1
+        await self._await_subagent_roster_writer()
         await self._maybe_persist_todos()
 
     def _load_subagent_roster(self) -> None:
@@ -5895,21 +6003,47 @@ class Session:
         in the CHILD's own transcript and is recovered by resuming or
         ``hub op='peek'``-ing it, never by re-reading it here.
         """
-        details = self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
+        details = _read_roster_sidecar(self._transcript.directory / SUBAGENT_ROSTER_SIDECAR)
+        loaded_sidecar = details is not None
+        if details is None:
+            details = self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
         if not details:
             return
+        self._subagent_roster_generation = int(details.get("generation") or 0)
+        self._subagent_roster_written_generation = (
+            self._subagent_roster_generation if loaded_sidecar else -1
+        )
         records = details.get("records") or []
+        logical_by_job: dict[str, str] = {}
+        aliases_by_job: dict[str, list[str]] = {}
         if records:
             # ``self.subagent_comms`` (the property) mints the instance on first
             # use; restoring into it is what makes the children addressable.
             try:
                 self.subagent_comms.restore(list(records))
+                for record in self.subagent_comms.snapshot():
+                    job_id = str(record.get("job_id") or "")
+                    session_dir = str(record.get("session_dir") or "")
+                    if job_id and session_dir:
+                        aliases = [
+                            str(alias) for alias in record.get("attempt_aliases", []) if alias
+                        ]
+                        aliases_by_job[job_id] = aliases
+                        for attempt_id in [*aliases, job_id]:
+                            logical_by_job[attempt_id] = session_dir
             except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
                 logger.warning("could not restore subagent records", exc_info=True)
         rows: list[AsyncJob] = []
         for raw in details.get("jobs") or []:
             try:
-                rows.append(AsyncJob.model_validate(raw))
+                payload = dict(raw)
+                job_id = str(payload.get("id") or "")
+                # Legacy job snapshots predate ``logical_id``; the comms half
+                # already carried the transcript directory, so join the two by
+                # attempt id before asking the manager to collapse duplicates.
+                payload.setdefault("logical_id", logical_by_job.get(job_id))
+                payload.setdefault("attempt_aliases", aliases_by_job.get(job_id, []))
+                rows.append(AsyncJob.model_validate(payload))
             except Exception:
                 logger.warning("dropping malformed persisted subagent row: %r", raw)
         if rows:

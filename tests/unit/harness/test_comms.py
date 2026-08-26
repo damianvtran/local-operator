@@ -59,6 +59,36 @@ async def wait_for(predicate, timeout: float = 10.0) -> None:
         await asyncio.sleep(0.01)
 
 
+def has_complete_tool_round(session_dir) -> bool:
+    """Whether a child's transcript already holds one FINISHED tool round.
+
+    "Finished" means an assistant message carrying tool calls plus a tool
+    result for every one of them. A round that is only half written is the
+    thing the cancel tests must not act on: cancelling there leaves a dangling
+    tool-use block, which ``_answered_prefix`` then trims away, and the test
+    asserting the child "kept the work it had already done" would be asserting
+    against an empty prefix.
+
+    Reading the file mid-append is safe by construction: the transcript is
+    JSONL and ``TranscriptEntry.from_json`` drops a malformed line on its own
+    rather than failing the parse, so a torn final row simply reads as not
+    there yet and the next poll sees it.
+    """
+    history = Transcript(session_dir).build_llm_history()
+    answered = {
+        message.tool_call_id
+        for message in history
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    return any(
+        isinstance(message, Message)
+        and message.role == "assistant"
+        and message.tool_calls
+        and all(call.id in answered for call in message.tool_calls)
+        for message in history
+    )
+
+
 # --- unit level: comms against a stand-in child -------------------------------
 
 
@@ -1244,11 +1274,15 @@ async def test_a_resumed_child_replays_the_stopped_ones_transcript(tmp_path, mon
     job_id = parent._launch_subagent(label="docs", prompt="Update the docs.")
     comms = parent.subagent_comms
     await wait_for(lambda: comms.session_dir_of(job_id) is not None)
-    # Let it do some work, then stop it. A running turn's messages are
-    # persisted when the turn ENDS (Session.prompt writes them after its loop
-    # finishes, and a hard cancel pre-empts that), so the stopped child's
-    # transcript only settles after cancel — the state resume has to read.
-    await asyncio.sleep(0.3)
+    # Let it finish real work before stopping it, and wait on THAT rather than
+    # on a duration: the child persists each tool round at its loop boundary
+    # (``Session._persist_progress``) roughly 0.29s after launch, so the fixed
+    # 0.3s sleep this replaced was inside one standard deviation of the thing
+    # it was betting against and lost the coin flip about a third of the time.
+    # Resume is only meaningful over a child that got somewhere, so the
+    # condition to wait for is a completed round, with seconds of headroom so
+    # this fails only if the child genuinely never runs a tool.
+    await wait_for(lambda: has_complete_tool_round(comms.session_dir_of(job_id)), timeout=30.0)
     await comms.cancel(job_id)
     await wait_for(lambda: status_of(parent, job_id) == "cancelled")
     await wait_for(lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) >= 2)
@@ -1287,7 +1321,11 @@ async def test_a_cancelled_child_keeps_the_work_it_had_already_done(tmp_path, mo
     job_id = parent._launch_subagent(label="docs", prompt="Update the docs.")
     comms = parent.subagent_comms
     await wait_for(lambda: comms.session_dir_of(job_id) is not None)
-    await asyncio.sleep(0.3)  # let it complete at least one tool round
+    # Wait for the round itself, not for how long a round usually takes. The
+    # assertions below are entirely about work the child had ALREADY completed
+    # before the cancel, so cancelling early does not fail loudly — it silently
+    # asserts over a transcript holding only the launch prompt.
+    await wait_for(lambda: has_complete_tool_round(comms.session_dir_of(job_id)), timeout=30.0)
 
     await comms.cancel(job_id)
     await wait_for(lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) > 1)
@@ -1465,9 +1503,8 @@ def test_the_roster_marks_a_child_whose_transcript_is_gone(tmp_path):
     assert comms.resume("job-1", "carry on")[0] is None
 
 
-def test_the_roster_refuses_to_offer_a_second_resume_of_one_transcript(tmp_path):
-    """Two children on one transcript directory destroy each other's history,
-    so the roster must not advertise a resume that ``resume`` would refuse."""
+def test_the_roster_replaces_a_terminal_attempt_with_its_continuation(tmp_path):
+    """A resumed transcript is one logical child, not one row per attempt."""
     comms, jobs, _child, _parent = wire()
     (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
     comms.attach("job-1", FakeChild(), tmp_path)
@@ -1479,10 +1516,10 @@ def test_the_roster_refuses_to_offer_a_second_resume_of_one_transcript(tmp_path)
     comms.record_launch("job-2", "parser")
     comms.attach("job-2", FakeChild(), tmp_path)
 
-    rows = {row.job_id: row for row in comms.roster()}
+    rows = comms.roster()
 
-    assert rows["job-1"].resumable is False
-    assert "already resumed as job job-2" in (rows["job-1"].detail or "")
+    assert [row.job_id for row in rows] == ["job-2"]
+    assert comms.session_dir_of("job-1") == tmp_path
 
 
 @pytest.mark.asyncio

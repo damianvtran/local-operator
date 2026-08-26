@@ -38,6 +38,31 @@
           <p class="trough" id="connected-detail"></p>
         </section>
 
+        <!-- Explicit pairing-success state, shown from the pair_result frame
+             alone (popup.ts): /health lags the pair by a worker reconnect, and
+             a form left on screen invites re-submitting the consumed code. The
+             check is stroked in the semantic success token — status, not
+             identity, so tinting is allowed (unlike the mark above). -->
+        <section id="paired" class="state hidden" role="status">
+          <svg
+            class="check"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M4 12.5 L9.5 18 L20 6.5" stroke-width="2.5" />
+          </svg>
+          <!-- "Paired.", not the branding doc's "Patched in." — the "Patch"
+               naming is retired (docs/store/assets.md: do not reuse it); the
+               doc supplies the microcopy PATTERN, not the name. -->
+          <h1 class="title">Paired.</h1>
+          <p class="sub">Code accepted. Connecting this browser to Local Operator…</p>
+        </section>
+
         <section id="pairing" class="state hidden">
           <h1 class="title">Pair with Local Operator</h1>
           <p class="sub">Enter the code shown in Local Operator.</p>
@@ -77,6 +102,30 @@
           <div class="actions">
             <button id="retry-incompatible" class="btn block">Check again</button>
           </div>
+        </section>
+
+        <!-- Origin-decision acknowledgement, shown from the click alone
+             (popup.ts): session storage and /health echo the prompt until the
+             worker round-trip lands, and a prompt left up with live buttons
+             reads as the click not working. Title/sub/tone/check are set per
+             decision by showOriginAck — allow is a success (check + success
+             tone), deny a completed neutral choice (no check, never danger). -->
+        <section id="origin-ack" class="state hidden" role="status">
+          <svg
+            id="origin-ack-check"
+            class="check"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M4 12.5 L9.5 18 L20 6.5" stroke-width="2.5" />
+          </svg>
+          <h1 class="title" id="origin-ack-title"></h1>
+          <p class="sub" id="origin-ack-sub"></p>
         </section>
 
         <section

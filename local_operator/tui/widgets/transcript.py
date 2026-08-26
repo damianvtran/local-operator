@@ -2013,27 +2013,24 @@ class TranscriptView(ScrollableContainer):
         *,
         anchor_offset: float | None = None,
     ) -> None:
-        """Mount blocks above the viewport while preserving its visible content.
+        """Insert history above visible content while preserving its anchor.
 
-        History normally inserts at zero. A subagent transcript with a synthetic
-        delegation has one fixed block above history, so its older page inserts
-        at one instead. In both cases Textual cannot preserve the anchor through
-        deferred layout itself: measure virtual-height growth after refresh and
-        add exactly that growth to the offset captured before asynchronous I/O.
+        Ordinary history inserts at zero. A subagent with a synthetic delegation
+        keeps that fixed prefix and inserts at one. The anchor is the retained
+        block containing the viewport top plus its intra-block offset, never a
+        virtual-height proxy: adaptive gap settlement can legitimately change
+        heights above it on a later layout pass.
         """
         additions = list(blocks)
         if not additions:
             return
         index = max(0, min(index, len(self._blocks)))
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
-        # Identity plus intra-block offset is the invariant the reader sees.
-        # Height/range deltas are only proxies and diverge when the viewport or
-        # adaptive gaps remeasure during the same insertion.
         anchor_block = next(
             (block for block in self._blocks if block.virtual_region.bottom > old_scroll),
             self._blocks[-1] if self._blocks else None,
         )
-        anchor_inset = old_scroll - anchor_block.virtual_region.y if anchor_block else 0.0
+        anchor_gap = anchor_block.virtual_region.y - old_scroll if anchor_block is not None else 0.0
         before = self._blocks[index] if index < len(self._blocks) else None
         if before is None:
             self.mount(*additions)
@@ -2043,16 +2040,18 @@ class TranscriptView(ScrollableContainer):
         self._name_col_cache = None
 
         def settle_then_restore() -> None:
-            # The mount barrier has laid out every new block. Settle adaptive
-            # gaps before reading the retained block's final region, then restore
-            # that SAME block to the SAME viewport-relative row immediately.
             self._settle_gaps(additions)
             self._remeasure_empty_state()
-            if anchor_block is not None:
+
+            def restore_anchor() -> None:
+                if anchor_block is None or anchor_block.parent is not self:
+                    return
                 self.scroll_to(
-                    y=max(0, anchor_block.virtual_region.y + anchor_inset),
+                    y=max(0, anchor_block.virtual_region.y - anchor_gap),
                     animate=False,
                 )
+
+            self.call_after_refresh(restore_anchor)
 
         self.call_after_refresh(settle_then_restore)
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.38.1"
+version = "0.39.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -116,7 +116,20 @@ fetch = ["markdownify"]
 all = ["local-operator[server,mcp,images,tokenizer,fetch]"]
 dev = [
     "local-operator[all]",
-    "ruff",
+    # PINNED TO THE VERSION CI RUNS (`.github/workflows/ci.yml` lint job). The
+    # documented gate — `.venv/bin/python -m flake8 .` in AGENTS.md, `make lint`
+    # in the Makefile — used to fail with `No module named flake8` on a fresh
+    # venv, because the dev extra shipped `ruff` instead while every other
+    # reference in the repo (CI, Makefile, CONTRIBUTING, SECURITY, the PR
+    # template) named flake8. `ruff` was invoked by nothing: no CI step, no make
+    # target, no `[tool.ruff]` config. A lint gate you cannot run locally is one
+    # you first meet as a red CI job, so the dev extra installs the real one and
+    # the unused one is gone (R1-2, agent review round 1).
+    #
+    # Unpinned it would drift from CI: a newer pycodestyle can flag code CI
+    # accepts, or accept code CI flags, and either way the local gate stops
+    # predicting the remote one. Bump this and the ci.yml pin together.
+    "flake8==7.1.0",
     "pyright",
     "pytest",
     "pytest-asyncio",
