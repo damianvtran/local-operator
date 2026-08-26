@@ -41,6 +41,13 @@ let locallyPaired = false;
 // See origin-flow.ts.
 let decidedOrigin: DecidedOrigin | null = null;
 
+// The origin the prompt is currently showing, whichever source supplied it.
+// After a worker restart session storage is empty and the prompt renders from
+// /health's pending_origin alone; a decision click must still acknowledge (and
+// key its latch) against THAT origin, or the click lands on the one branch
+// where the missing-feedback bug survives (review finding m1).
+let shownPromptOrigin: string | undefined;
+
 interface Health {
   extension_connected: boolean;
   paired: boolean;
@@ -98,6 +105,7 @@ async function render(): Promise<void> {
   const pendingOriginValue = pendingOrigin?.origin || health?.pending_origin;
   const originView = originPromptView(pendingOriginValue, decidedOrigin);
   if (originView === "none") {
+    shownPromptOrigin = undefined;
     // Round-trip landed and the prompt is gone: clear the latch so a future
     // prompt for the SAME origin (a retry after deny) is not swallowed.
     decidedOrigin = null;
@@ -114,6 +122,7 @@ async function render(): Promise<void> {
     // heading id stays constant, so no per-host text in the serif face.
     const host = document.getElementById("origin-host");
     if (host) host.textContent = pendingHost;
+    shownPromptOrigin = pendingOriginValue;
     // A fresh prompt must arrive with live buttons even if a previous
     // decision's lock is still set.
     setOriginBusy(false);
@@ -135,6 +144,13 @@ async function render(): Promise<void> {
     return;
   }
   if (health.paired) {
+    // Handoff complete: the worker holds the new token and health confirms it,
+    // so the pairing latch has done its job. Clearing it here means a LATER
+    // unpair (daemon revoke → close 4003) renders the form again instead of a
+    // stale success view (review finding m2). A revoke landing inside the
+    // pre-confirmation window is not distinguishable from the race itself and
+    // stays covered by the latch until the popup reopens.
+    locallyPaired = false;
     // Name the site the agent is driving so the user can see it without
     // hunting for a background tab (finding U3). The URL rides in a labelled
     // trough (the callback page's treatment); when nothing is open the label
@@ -200,10 +216,33 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
   const { token, port = DEFAULT_PORT } = await getLocal();
   try {
     const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
-    await new Promise((resolve, reject) => {
-      wire.onopen = resolve;
-      wire.onerror = reject;
+    // ONE shared rejection wired to error AND close for every await below: a
+    // socket that drops after open but before pair_result must land in
+    // `catch` — a bare onmessage promise would suspend forever, and with the
+    // busy lock held that means a form disabled until the popup is reopened
+    // (review finding M1). The no-op catch keeps a post-handshake close (our
+    // own close() included, if handlers weren't detached) from surfacing as an
+    // unhandled rejection.
+    let failed: (reason: Error) => void = () => {};
+    const failure = new Promise<never>((_, reject) => {
+      failed = reject;
     });
+    void failure.catch(() => {});
+    wire.onerror = () => failed(new Error("socket error"));
+    wire.onclose = () => failed(new Error("socket closed"));
+    await Promise.race([
+      new Promise((resolve) => {
+        wire.onopen = resolve;
+      }),
+      failure,
+    ]);
+    const nextMessage = (): Promise<MessageEvent> =>
+      Promise.race([
+        new Promise<MessageEvent>((resolve) => {
+          wire.onmessage = resolve;
+        }),
+        failure,
+      ]);
     wire.send(
       JSON.stringify({
         event: "hello",
@@ -213,16 +252,15 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
         browser: navigator.userAgent,
       }),
     );
-    await new Promise((resolve) => {
-      wire.onmessage = resolve;
-    });
+    await nextMessage();
     wire.send(JSON.stringify({ event: "pair", code: input.value.trim() }));
-    const verdict = await new Promise<MessageEvent>((resolve) => {
-      wire.onmessage = resolve;
-    });
+    const verdict = await nextMessage();
     const outcome = pairVerdict(JSON.parse(String(verdict.data)));
     if (outcome.ok) {
       await chrome.storage.local.set({ token: outcome.token });
+      // Detach before closing: this close is deliberate, not a failure.
+      wire.onerror = null;
+      wire.onclose = null;
       wire.close();
       // Confirm SUCCESS from the pair_result frame alone, before any health
       // round-trip: the worker has not reconnected with the new token yet, so
@@ -295,24 +333,37 @@ function showOriginAck(decision: OriginDecision): void {
 async function decide(decision: OriginDecision): Promise<void> {
   setOriginBusy(true);
   const { pendingOrigin } = await getSession();
-  if (pendingOrigin) {
+  // Fall back to the origin the prompt actually rendered from: after a worker
+  // restart the session record is gone and only /health carried the origin
+  // (finding m1) — the click must acknowledge either way.
+  const origin = pendingOrigin?.origin ?? shownPromptOrigin;
+  if (origin) {
     // Acknowledge from the CLICK alone, before the worker round-trip: session
     // storage and /health keep echoing this prompt until `origin_decision`
     // lands, and a render in that window would put the three buttons back with
     // no sign the click worked — the same race as pairing success. The latch
     // holds the ack through stale echoes; render() takes over to Connected
     // once the echo clears.
-    decidedOrigin = { origin: pendingOrigin.origin, decision };
+    decidedOrigin = { origin, decision };
     showOriginAck(decision);
     // Decisions are keyed by ORIGIN so a redirect chain resolves each hop
     // independently (finding A6).
     await chrome.runtime.sendMessage({
       event: "origin_decision",
-      origin: pendingOrigin.origin,
+      origin,
       decision,
     });
   }
   await render();
 }
+
+// Re-render whenever the worker changes connection state: the worker learns a
+// new token only on its own reconnect (its retry alarm can be ~30s out), and
+// without this the "Connecting…" success view sits until the user pokes the
+// popup (review finding m3). connState flips exactly when something the popup
+// shows has changed, so this is cheaper and quieter than polling /health.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "session" && changes.connState) void render();
+});
 
 void render();

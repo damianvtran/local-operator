@@ -26,7 +26,7 @@ export type PairVerdict = { ok: true; token: string } | { ok: false; message: st
 
 /** Fold a pair_result frame into exactly one of two outcomes. `ok` without a
  * token is treated as a failure: a success we cannot store a credential for
- * would render "Patched in." over a connection that can never authenticate. */
+ * would render "Paired." over a connection that can never authenticate. */
 export function pairVerdict(frame: PairResultFrame): PairVerdict {
   if (frame.ok && frame.token) return { ok: true, token: frame.token };
   return { ok: false, message: frame.message ?? PAIR_MISMATCH_MESSAGE };

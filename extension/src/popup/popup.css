@@ -263,9 +263,15 @@ input:disabled {
 .btn:disabled:hover {
   background: var(--surface);
 }
+/* Filled and outlined variants keep their identity while disabled: hover must
+ * not repaint a locked button, whatever its tone. */
 .btn.primary:disabled:hover {
   background: var(--ink);
   border-color: var(--ink);
+}
+.btn.danger:disabled:hover {
+  background: var(--surface);
+  border-color: var(--danger);
 }
 
 .actions {
