@@ -235,9 +235,6 @@ def run_subagent(
     ran at a chosen level the band should name.
     """
     effective_prompt, profile = _effective_prompt(prompt, agent, parent_session)
-    # Reserved before registration so a queued job already has a stable launch
-    # identity. Session.prompt writes this same ID as the transcript entry key.
-    launch_message_id = uuid.uuid4().hex
     queued = jobs_manager.at_capacity()
     job_id = jobs_manager.register(
         "task",
@@ -245,7 +242,6 @@ def run_subagent(
         _make_runner(
             label=label,
             effective_prompt=effective_prompt,
-            launch_message_id=launch_message_id,
             parent_session=parent_session,
             jobs_manager=jobs_manager,
             model_spec=model_spec,
@@ -256,6 +252,7 @@ def run_subagent(
         queued=queued,
     )
     job = jobs_manager.get(job_id)
+    launch_message_id = f"subagent-launch:{job_id}"
     if job is not None:
         # Recorded at REGISTRATION, not in the runner: a queued job has not
         # started and may never start, and a reader opening its panel still
@@ -315,7 +312,6 @@ def _make_runner(
     *,
     label: str,
     effective_prompt: str,
-    launch_message_id: str,
     parent_session: "Session",
     jobs_manager: "AsyncJobManager",
     model_spec: ModelSpec | None,
@@ -408,7 +404,10 @@ def _make_runner(
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
             try:
-                await child.prompt(effective_prompt, message_id=launch_message_id)
+                # The raw launch task and the role-expanded child prompt are two
+                # views of one turn. Persist the job-derived correlation id so
+                # projections render that durable row once without text matching.
+                await child.prompt(effective_prompt, message_id=f"subagent-launch:{job_id}")
             finally:
                 bridge.cancel()
                 with contextlib.suppress(BaseException):

@@ -24,9 +24,11 @@ the dashboard. Confirmed on the ground:
   pages. Documented in `guide://browser`.
 
 **Pick-up point:** once Radient's business verification + trader declaration
-clear, upload `local-operator-extension.zip`, paste the copy from `listing.md`,
+clear, finish the first-publication steps below for permanent item
+`omibaecbjdhgbbcedbnnnmjpmopfheof`, paste the copy from `listing.md`,
 `permissions.md`, `privacy-policy.md`, and the assets in `assets/`, then walk
-the rest of this checklist. Nothing product-side is blocking.
+the rest of this checklist. Later package uploads use the protected GitHub
+workflows documented below; no long-lived Google credential is stored.
 
 ## 0. Resolve the launch assumptions
 
@@ -146,14 +148,18 @@ the rest of this checklist. Nothing product-side is blocking.
 - [x] Keep original captures and editable compositions with the release record.
       → `build_assets.py` regenerates every PNG from the committed source frames.
 
-## 5. Create the dashboard item
+## 5. Finish the permanent dashboard item
 
-- [ ] Click **New item** and upload the release zip.
-- [ ] Save the generated item/extension ID. Pairing pins this ID on the local
-      bridge, so production testing and documentation must use it.
-- [ ] If the store-assigned ID differs from a development ID, rebuild/configure
-      only through the implementation's supported production-ID mechanism;
-      never hard-code around origin checks ad hoc.
+The permanent item/extension ID is
+**`omibaecbjdhgbbcedbnnnmjpmopfheof`**. Pairing pins this identity on the local
+bridge; do not create a replacement item or hard-code around origin checks.
+
+- [ ] Open that existing item in the Developer Dashboard; API v2 cannot create
+      items or change their visibility.
+- [ ] Upload the first release zip manually if the item has never been published.
+      Chrome Web Store requires the first publication, and the first publication
+      after any visibility change, to be completed in the dashboard before API
+      publishing can preserve that visibility.
 - [ ] Upload the 128 px icon, five screenshots, small promo tile, and optional
       marquee.
 
@@ -234,7 +240,9 @@ and what control remains with the user.
 
 ## 9. Distribution and submission
 
-- [ ] Visibility/distribution: **Public**.
+- [ ] Visibility/distribution: **Public**. Set and publish this manually for the
+      first release; API v2 deliberately cannot change visibility and will only
+      preserve the dashboard's already-published setting.
 - [ ] Pricing: **Free**; no paid features in the extension.
 - [ ] Select all supported regions unless Radient, Inc. has a legal reason to
       exclude one. **Assumption:** the source docs specify public/free but no
@@ -248,6 +256,72 @@ and what control remains with the user.
       (`chrome://extensions` → Developer mode) while review is pending.
 - [ ] Save submission timestamp, version, item ID, status screenshots, and any
       warnings shown by the dashboard.
+
+### Automated updates after the first public release
+
+The workflows use Chrome Web Store API v2 directly with `curl` and exchange a
+GitHub OIDC token for a short-lived service-account access token through
+`google-github-actions/auth@v3` (pinned by full commit SHA, like every action in
+the token-bearing workflows). Do not add a service-account JSON key, OAuth
+client secret, refresh token, or third-party upload action, and do not bump the
+pinned action SHAs without reviewing the new revision.
+
+Both workflows **fail closed**: before authenticating they verify through the
+GitHub API that their environment exists with at least one required reviewer
+and a custom deployment branch policy allowing exactly `main`, and that every
+release variable is defined **on the environment itself**. Repository- or
+organization-scoped copies are rejected so nobody can bypass environment
+protection by defining the same names at a broader scope.
+
+Define these environment variables (identifiers, not secrets) on **each** of
+`chrome-web-store` and `chrome-web-store-production`:
+
+- `CWS_PUBLISHER_ID` — Publisher ID from Developer Dashboard → Account.
+- `CWS_EXTENSION_ID` — `omibaecbjdhgbbcedbnnnmjpmopfheof`.
+- `GCP_WIF_PROVIDER` — full Workload Identity Provider resource name.
+- `CWS_SERVICE_ACCOUNT` — service-account email authorized in the Chrome Web
+  Store Developer Dashboard.
+
+Enable Chrome Web Store API in the GCP project and add the service account
+under Developer Dashboard → Account. Create the WIF provider with issuer
+`https://token.actions.githubusercontent.com/`, this attribute mapping:
+
+```
+google.subject=assertion.sub,attribute.repository_id=assertion.repository_id,attribute.ref=assertion.ref
+```
+
+and exactly this attribute condition. It pins the **numeric repository ID**
+(`922327641` for `damianvtran/local-operator`; renames and repo-name reuse
+cannot forge it, unlike the owner/name string) and the `main` ref, so a token
+minted from any other repository or branch cannot impersonate the release:
+
+```
+assertion.repository_id == "922327641" && assertion.ref == "refs/heads/main"
+```
+
+Grant the pool principal `roles/iam.workloadIdentityUser` on the service
+account scoped with the same `attribute.repository_id` value. Configure
+required reviewers on both GitHub environments; production should use the
+stricter launch approvers. Dispatch both workflows from `main` — the WIF ref
+condition and each workflow's own main-ancestry check reject anything else.
+
+1. Run **Chrome Web Store staged release** manually with a commit/tag already on
+   `main` and the exact manifest version. After environment approval it installs
+   frozen dependencies, runs typecheck/tests, builds exactly the source-map-free
+   zip, verifies manifest/package/input versions and an explicit zip allowlist,
+   uploads it, and submits with `STAGED_PUBLISH` at 100% deployment. If the
+   store reports the upload as asynchronous, the run fails closed — the API's
+   global upload status cannot be bound to this zip — and is safe to re-run
+   once processing finishes.
+2. Wait for Chrome review and verify `fetchStatus` reports that exact version as
+   `STAGED`. Review the approved package/listing before launch.
+3. Run **Promote staged Chrome Web Store release** with that exact version. Its
+   separate protected production environment is the explicit launch approval;
+   it refuses non-staged, mismatched, or partially-deployed versions and
+   verifies the result is `PUBLISHED` at 100% deployment.
+
+The existing GitHub Release asset behavior remains unchanged and independent of
+store publication.
 
 ## 10. Expected review timeline and responses
 

@@ -87,6 +87,7 @@ from local_operator.logger import current_log_file
 # boot path nothing the lazy-import discipline above is protecting.
 from local_operator.model.effort import default_effort, next_effort
 from local_operator.session import naming
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
@@ -102,6 +103,7 @@ from local_operator.tui.events import (
     EffectiveModelChanged,
     EventController,
     NoticePosted,
+    PeerMessageDelivered,
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
@@ -195,6 +197,7 @@ from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
     NoticeKind,
+    PeerMessageBlock,
     RichBlock,
     TranscriptView,
     UserBlock,
@@ -1470,6 +1473,13 @@ class OperatorApp(App[None]):
         #: the same conversation) would paint its receipt twice (review round
         #: 2, m2).
         self._live_wake_receipts: set[tuple[str, object]] = set()
+        #: Peer messages painted LIVE this session, keyed by the persisted
+        #: transcript row id. ``on_peer_message_delivered`` records each; the
+        #: history replay skips a persisted ``peer_message`` whose id is already
+        #: here, so a peer message that arrived mid-session and is then replayed
+        #: (``/resume`` into the same conversation) is not painted twice — the
+        #: exact double-paint guard ``_live_wake_receipts`` provides for wakes.
+        self._live_peer_receipts: set[str] = set()
         #: A bang-mode user row (`! <command>`) seen by the history replay but
         #: not yet paired with its bash card. The persisted shape is
         #: user/assistant/tool, so the assistant message immediately after a
@@ -2520,6 +2530,23 @@ class OperatorApp(App[None]):
                                 WakeBlock(str(details.get("text", "")), catchup=False)
                             )
                             appended = True
+                    continue
+                # A peer message (`lop send` from another session) is also a
+                # CustomMessage with no ``role`` and would otherwise fall
+                # through, leaving a resumed session with the agent's reply but
+                # no sign the peer note arrived. Replay it as its own block,
+                # skipping one already painted live this session (double-paint
+                # guard, mirroring the wake branch above).
+                if getattr(message, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    if str(getattr(message, "id", "")) not in self._live_peer_receipts:
+                        self._append_block(
+                            PeerMessageBlock(
+                                str(details.get("body", "")),
+                                details.get("sender") or {},
+                            )
+                        )
+                        appended = True
                     continue
                 role = getattr(message, "role", None)
                 if role == "tool":
@@ -13397,6 +13424,19 @@ class OperatorApp(App[None]):
         """
         self._live_wake_receipts.add((message.wake_id, message.occurrence))
         self._append_block(WakeBlock(message.text, catchup=message.catchup))
+
+    def on_peer_message_delivered(self, message: PeerMessageDelivered) -> None:
+        """Paint the cross-session indicator for a `lop send` delivery.
+
+        Fired the instant the message lands (even while the session is idle),
+        so the reader sees the inbound note immediately rather than only on the
+        next turn render. The delivery's ``message_id`` is recorded so the
+        history replay (``/resume`` into this same conversation) does not mount
+        a second copy — the same double-paint guard the wake receipt uses.
+        """
+        if message.message_id:
+            self._live_peer_receipts.add(message.message_id)
+        self._append_block(PeerMessageBlock(message.body, message.sender))
 
     def _announce_on_splash(self, text: str, kind: NoticeKind) -> None:
         """Hold ``text`` on the splash and raise a toast for it.

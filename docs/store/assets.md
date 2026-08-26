@@ -174,11 +174,13 @@ is safer.
 
 All shippable PNGs live in `docs/store/assets/` and are regenerated
 deterministically by `docs/store/assets/build_assets.py` (Pillow, no manual
-image-editor steps). Re-run with `.venv/bin/python docs/store/assets/build_assets.py`.
+image-editor steps). Re-run with `python3 docs/store/assets/build_assets.py`
+(any Python with Pillow ≥ 10 on FreeType ≥ 2.13, e.g. the repo venv — WOFF2
+variable-font loading is what sets the floor).
 
 | File | Size | Role | Source frame |
 |---|---:|---|---|
-| `store-icon-128.png` | 128 × 128 | Store icon | `static/local-operator-icon-2-light-clear.png` glyph on off-white plate |
+| `store-icon-128.png` | 128 × 128 | Store icon | `static/local-operator-icon-2-light-clear.png` glyph on site-paper plate |
 | `screenshot-1-connected.png` | 1280 × 800 | Connected / driving (hero) | `popup-connected.png` |
 | `screenshot-2-allow-site.png` | 1280 × 800 | Per-site allow prompt | `popup-origin-prompt.png` |
 | `screenshot-3-pairing.png` | 1280 × 800 | Pairing (no account) | `popup-pairing.png` |
@@ -190,15 +192,25 @@ image-editor steps). Re-run with `.venv/bin/python docs/store/assets/build_asset
 **Production facts (for reproducible store updates):**
 
 - Compositor: `build_assets.py`, Pillow 12.3, LANCZOS downsampling.
-- Type: Helvetica Neue (`/System/Library/Fonts/HelveticaNeue.ttc`) — Bold for
-  headlines/name, Regular for captions — matching the extension's system sans.
-- Palette: canvas `#181818`, backplate `#F7F7F9`, ink `#111113`, secondary
-  caption `#C4C4CC` on dark, accent red `#B03A2E` (the extension's own
-  deny/unpair red). Sampled from `icons-on-dark.png` and the rendered frames.
-- Store-icon treatment: the validated `icons-on-dark.png` backplate — a solid
-  off-white rounded square carrying the black glyph — verified at actual size
-  on both a white and a dark card (the plate supplies its own contrast on dark;
-  a hairline `#E2E2E6` border gives it an edge on white). Not transparent.
+- Type: the local-operator.com design system's own faces, vendored as the
+  site's variable WOFF2 builds in `docs/store/assets/fonts/` (see the README
+  there) — Fraunces (opsz build) at weight 400 for display headlines,
+  Figtree for captions, JetBrains Mono for uppercase eyebrow labels and URLs,
+  with the site's letter-spacing recipe (-0.024em display, +0.08em mono
+  eyebrows) applied per-glyph.
+- Palette: the site `@theme` tokens verbatim — warm paper `#f7f4ee` canvas,
+  ink `#211e18`, ink-muted `#565147`, ink-dim `#6c675c`, hairline-strong
+  `#d5cfc2` card edges, accent green `#177b45` (eyebrow dot + label only).
+  The popup captures' own background `(247,244,239)` is one RGB point off
+  site paper, so the real frames sit in the same colour world by construction.
+- Motif: the site's M5 dot field (1px dots, 24px pitch, hairline-strong,
+  radially masked so it fades before any edge) behind the framed artefact
+  only — texture concentrates behind the object, never wallpaper.
+- Store-icon treatment: solid site-paper plate carrying the black glyph,
+  bled square to the full 128 px (the file must be flat RGB with no alpha, so
+  corner rounding is left to CWS's own surface mask), hairline-strong border
+  for an edge on white cards; the light plate supplies its own contrast on
+  dark cards. Verified at 128/64/32 px on white, paper, and two dark grounds.
 - Captions are drawn from `listing.md`'s own section headings; none promise
   multi-tab, active-tab takeover, downloads/uploads, Firefox/Safari, or remote
   access.

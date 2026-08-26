@@ -348,6 +348,34 @@ def test_mcp_subcommands(parser: argparse.ArgumentParser) -> None:
     assert args.scope == "project"
 
 
+def test_send_subcommand_parses(parser: argparse.ArgumentParser) -> None:
+    # Default mailbox form: target + message positionals.
+    args = parser.parse_args(["send", "peer-send design", "gates are green"])
+    assert args.subcommand == "send"
+    assert args.target == "peer-send design"
+    assert args.message == "gates are green"
+    assert args.steer is False
+    assert args.wake is False
+    assert args.pid is None
+    assert args.session is None
+
+    # Targeting flags and delivery modes.
+    args = parser.parse_args(["send", "--pid", "42", "act now", "--wake"])
+    assert args.pid == 42
+    assert args.wake is True
+    # --now and --steer are the same dest.
+    assert parser.parse_args(["send", "t", "m", "--now"]).steer is True
+    assert parser.parse_args(["send", "t", "m", "--steer"]).steer is True
+    assert parser.parse_args(["send", "--session", "abc", "m"]).session == "abc"
+
+
+def test_sessions_subcommand_parses(parser: argparse.ArgumentParser) -> None:
+    args = parser.parse_args(["sessions"])
+    assert args.subcommand == "sessions"
+    assert args.json is False
+    assert parser.parse_args(["sessions", "--json"]).json is True
+
+
 @pytest.mark.parametrize("argv", [["--help"], ["exec", "--help"], ["login", "--help"]])
 def test_help_surfaces_parse(argv: list[str]) -> None:
     """Acceptance: these help paths exit 0 via the module functions."""

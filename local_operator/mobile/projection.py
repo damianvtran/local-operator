@@ -63,6 +63,7 @@ from local_operator.mobile.types import (
     TodoPhase,
     TranscriptEntry,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 
 #: How much of a tool result's text the expand payload carries. The phone's
 #: expanded row is a readable window, not a log file — beyond this the right
@@ -184,6 +185,21 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                         )
                     )
                 continue
+            if message.custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+                # A cross-session `lop send` delivery. The phone renders the raw
+                # body plus the sender identity (from details["sender"]); the
+                # model-facing wrapped envelope in details["text"] never travels.
+                body = str(message.details.get("body") or "").strip()
+                if body:
+                    entries.append(
+                        TranscriptEntry(
+                            id=message.id,
+                            kind="peer_message",
+                            text=body,
+                            details={"sender": message.details.get("sender") or {}},
+                        )
+                    )
+                continue
             text = _message_text(message)
             if text:
                 entries.append(
@@ -288,6 +304,21 @@ class ProjectionFold:
         entries: list[TranscriptEntry] = []
         for message in history:
             if isinstance(message, CustomMessage):
+                if message.custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+                    # A cross-session `lop send` delivery renders as its own
+                    # inbound card (never a bare notice), so an attaching phone
+                    # sees the same peer affordance the TUI paints.
+                    body = str(message.details.get("body") or "").strip()
+                    if body:
+                        entries.append(
+                            TranscriptEntry(
+                                id=message.id,
+                                kind="peer_message",
+                                text=body,
+                                details={"sender": message.details.get("sender") or {}},
+                            )
+                        )
+                    continue
                 text = _message_text(message)
                 if text:
                     entries.append(
@@ -548,6 +579,24 @@ class ProjectionFold:
         )
         self._bump()
 
+    def note_peer_message(self, text: str, *, sender: dict[str, Any] | None = None) -> None:
+        """Optimistic echo of an inbound cross-session (`lop send`) message.
+
+        Same reason as ``note_user_message``: the handle calls this the instant
+        it delivers a peer message so an attached phone paints the peer card
+        immediately, rather than waiting for the next full projection repaint.
+        The row carries the sender identity in ``details`` for the label."""
+        self._append(
+            TranscriptEntry(
+                id=f"peer-{time.time_ns()}",
+                kind="peer_message",
+                text=text,
+                details={"sender": sender or {}},
+                final=True,
+            )
+        )
+        self._bump()
+
     def absorb_user_event(self, message: Message) -> bool:
         """Fold a live user ``MessageStartEvent``. The session emits these for
         user turns now, so a prompt from ANY front end reaches the fold — the
@@ -664,8 +713,11 @@ class ProjectionFold:
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
             row.prompt = node.prompt
+            row.launch_message_id = node.launch_message_id
             row.effort = node.effort
-            row.ancestors = [ancestor.label for ancestor in comms.ancestors(node.job_id)]
+            ancestors = comms.ancestors(node.job_id)
+            row.ancestors = [ancestor.label for ancestor in ancestors]
+            row.ancestor_ids = [ancestor.job_id for ancestor in ancestors]
             row.child_ids = [child.job_id for child in comms.children(node.job_id)]
             row.peer_ids = [peer.job_id for peer in comms.peers(node.job_id)]
             row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
@@ -686,8 +738,13 @@ class ProjectionFold:
                 else:
                     mobile_status = status
                 row.status = mobile_status  # type: ignore[assignment] -- normalized literals
-                row.result_text = _compact(str(lifecycle.result_text or ""), 200)
-                row.error_text = _compact(str(lifecycle.error_text or ""), 200)
+                # The roster renderer truncates visually; the detail route must
+                # retain the complete handoff or provider failure so opening a
+                # child never loses the actionable tail behind a summary cap.
+                row.result_text = str(lifecycle.result_text or "")
+                row.error_text = str(lifecycle.error_text or "")
+                if lifecycle.age_s is not None:
+                    row.elapsed_s = max(0.0, float(lifecycle.age_s))
             progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
             row.progress = progress if row.status == "running" else ""
             row.activity = row.progress or ("thinking" if row.status == "running" else "")
@@ -697,7 +754,9 @@ class ProjectionFold:
                     from local_operator.tools.builtin import todo_snapshot
 
                     transcript = Transcript(node.session_dir)
-                    row.transcript = fold_messages_to_entries(transcript.build_llm_history())
+                    row.transcript = self._cap_tail(
+                        fold_messages_to_entries(transcript.build_llm_history())
+                    )
                     if node.session_id:
                         raw_todos = todo_snapshot(node.session_id)
                     else:

@@ -29,6 +29,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "extensions",
         "mcp",
         "mobile",
+        "peer-messaging",
         "teams",
     ]
     assert all(guide.resource_type == "guide" for guide in guides)
