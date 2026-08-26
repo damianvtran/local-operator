@@ -147,6 +147,15 @@ def test_fold_produces_prose_and_tool_rows_in_call_order() -> None:
     assert entries[2].result_text == "2 failed"
 
 
+@pytest.mark.parametrize("duration", [True, False, "1.25", {"seconds": 1.25}])
+def test_fold_rejects_bool_and_malformed_tool_durations(duration: object) -> None:
+    events = [
+        _call("e1", "edit", path="a.py", old_text="old", new_text="new"),
+        {**_result("e1", "edit", "Done!"), "duration_s": duration},
+    ]
+    assert fold_trajectory(events, settled=True)[0].duration_s is None
+
+
 def test_fold_preserves_tool_duration_diff_counts_and_diff_only_expansion() -> None:
     events = [
         _call("e1", "edit", path="a.py", old_text="old", new_text="new"),
@@ -450,6 +459,102 @@ async def test_history_settles_tool_split_across_durable_page_boundary(tmp_path)
         call = next(entry for entry in view._history_entries if entry.key == "boundary-call")
         assert call.outcome == "success"
         assert call.result_text == "done"
+
+
+@pytest.mark.asyncio
+async def test_durable_edit_and_write_restore_parent_diff_cards_and_durations(tmp_path) -> None:
+    """Completed child tools use the parent's ToolCard metadata, not raw args.
+
+    Diff details and execution time live in the durable tool message's harness
+    payload. Dropping that payload produced a checked row whose expansion was
+    the model's raw ``old_text``/``new_text`` fields and whose duration was
+    blank, even though the parent transcript had already rendered both.
+    """
+    transcript = Transcript(tmp_path / "child")
+    expected = {
+        "edit": (1, 1, ["--- a.py", "+++ a.py", "@@ -1 +1 @@", "-old", "+new"]),
+        "write": (2, 0, ["--- /dev/null", "+++ b.py", "@@ -0,0 +1,2 @@", "+one", "+two"]),
+    }
+    durations = {"edit": 1.25, "write": 2.5}
+    for name, (added, removed, diff) in expected.items():
+        call_id = f"{name}-call"
+        await transcript.append_message(
+            Message.assistant(
+                tool_calls=[
+                    ToolCall(
+                        id=call_id,
+                        name=name,
+                        arguments={
+                            "path": f"{name}.py",
+                            "old_text": "raw-old",
+                            "new_text": "raw-new",
+                        },
+                    )
+                ]
+            )
+        )
+        result = Message(
+            role="tool",
+            tool_call_id=call_id,
+            tool_name=name,
+            content=[TextContent(text="Done!")],
+            provider_payload={
+                "details": {"added": added, "removed": removed, "diff": diff},
+                "duration_s": durations[name],
+            },
+        )
+        await transcript.append_message(result)
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        cards = {
+            block.tool_name: block for block in view._body.blocks() if isinstance(block, ToolCard)
+        }
+        for name, (added, removed, diff) in expected.items():
+            assert cards[name]._added == added
+            assert cards[name]._removed == removed
+            assert cards[name]._diff == diff
+            assert cards[name]._duration == durations[name]
+            assert cards[name]._output == ["Done!"]
+
+
+@pytest.mark.asyncio
+async def test_durable_tool_rejects_bool_and_malformed_duration(tmp_path) -> None:
+    transcript = Transcript(tmp_path / "child")
+    for index, duration in enumerate((True, "1.25", {"seconds": 1.25})):
+        call_id = f"bad-duration-{index}"
+        await transcript.append_message(
+            Message.assistant(tool_calls=[ToolCall(id=call_id, name="write")])
+        )
+        await transcript.append_message(
+            Message(
+                role="tool",
+                tool_call_id=call_id,
+                tool_name="write",
+                provider_payload={"duration_s": duration},
+            )
+        )
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        cards = [block for block in view._body.blocks() if isinstance(block, ToolCard)]
+        assert len(cards) == 3
+        assert all(card._duration is None for card in cards)
 
 
 @pytest.mark.asyncio
@@ -1193,6 +1298,92 @@ async def test_the_page_opens_with_the_instruction_the_parent_delegated() -> Non
         await pilot.pause()
         assert view._body.blocks()[0] is first
         assert sum(1 for b in view._body.blocks() if isinstance(b, UserBlock)) == 1
+
+
+@pytest.mark.asyncio
+async def test_durable_history_cannot_move_the_delegation_after_child_work(tmp_path) -> None:
+    """Disk history may arrive after ``show`` but chronology cannot follow it.
+
+    The prompt is the user turn that caused the durable assistant rows. Loading
+    history asynchronously used to prepend those rows ahead of the already
+    mounted instruction, leaving the delegation at the transcript end.
+    """
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_message(Message.assistant("First child response."))
+    await transcript.append_message(Message.assistant("Final child response."))
+    job = _job_with([], status="completed")
+    job.prompt = "Delegated parent instruction."
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        assert [(entry.kind, entry.text) for entry in entries] == [
+            ("prompt", "Delegated parent instruction."),
+            ("text", "First child response."),
+            ("text", "Final child response."),
+        ]
+        assert isinstance(view._body.blocks()[0], InstructionBlock)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "durable_prompt",
+    ["Delegated parent instruction.", "[role: coder]\nDelegated parent instruction."],
+)
+async def test_durable_launch_turn_is_replaced_in_place(tmp_path, durable_prompt: str) -> None:
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_message(Message.assistant("Before launch row."))
+    launch = await transcript.append_message(Message.user(durable_prompt))
+    await transcript.append_message(Message.assistant("After launch row."))
+    job = _job_with([], status="completed")
+    job.prompt = "Delegated parent instruction."
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        assert [(entry.key, entry.kind, entry.text) for entry in entries] == [
+            (entries[0].key, "text", "Before launch row."),
+            (launch.id, "prompt", "Delegated parent instruction."),
+            (entries[2].key, "text", "After launch row."),
+        ]
+        assert sum(entry.kind == "prompt" for entry in entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_latest_durable_launch_match_wins_without_suppressing_user_rows(tmp_path) -> None:
+    transcript = Transcript(tmp_path / "child")
+    first = await transcript.append_message(Message.user("Delegated parent instruction."))
+    await transcript.append_message(Message.assistant("Work happened."))
+    latest = await transcript.append_message(Message.user("wrapper\nDelegated parent instruction."))
+    job = _job_with([], status="completed")
+    job.prompt = "Delegated parent instruction."
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        assert next(entry for entry in entries if entry.key == first.id).kind == "user"
+        replacement = next(entry for entry in entries if entry.key == latest.id)
+        assert replacement.kind == "prompt"
+        assert replacement.text == job.prompt
+        assert sum(entry.kind == "prompt" for entry in entries) == 1
 
 
 @pytest.mark.asyncio

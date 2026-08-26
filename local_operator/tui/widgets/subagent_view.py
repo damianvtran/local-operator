@@ -202,6 +202,11 @@ def _first_line(text: str) -> str:
     return ""
 
 
+def _normalized_prompt(text: str) -> str:
+    """Stable plain-text comparison form for durable launch-turn matching."""
+    return " ".join(strip_control_sequences(text).split())
+
+
 @dataclass(frozen=True)
 class SubagentEntry:
     """One row of the folded child transcript.
@@ -263,7 +268,7 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
 def fold_transcript_entries(
     entries: Sequence[TranscriptEntry],
     *,
-    tool_results: dict[str, tuple[str, bool]] | None = None,
+    tool_results: dict[str, tuple[str, bool, dict[str, Any] | None, float | None]] | None = None,
 ) -> list[SubagentEntry]:
     """Fold durable transcript rows into the viewer's stable row model.
 
@@ -273,7 +278,6 @@ def fold_transcript_entries(
     event log or positional guesses.
     """
     folded: list[SubagentEntry] = []
-    calls: dict[str, int] = {}
     # Durable page boundaries are arbitrary. A result may arrive in the newer
     # page before its call is loaded from the older one, so retain outcomes
     # across folds instead of treating every page as a complete conversation.
@@ -283,7 +287,24 @@ def fold_transcript_entries(
         if entry.type == ENTRY_MESSAGE and payload.get("role") == "tool":
             call_id = str(payload.get("tool_call_id") or "")
             if call_id:
-                results[call_id] = (_content_text(payload), bool(payload.get("is_error")))
+                provider_payload = payload.get("provider_payload")
+                metadata = provider_payload if isinstance(provider_payload, dict) else {}
+                details = metadata.get("details")
+                raw_duration = metadata.get("duration_s")
+                duration = (
+                    float(raw_duration)
+                    if isinstance(raw_duration, (int, float)) and not isinstance(raw_duration, bool)
+                    else None
+                )
+                # Tool result text is the model-facing payload; presentation
+                # metadata travels beside it so durable replay can restore the
+                # exact same ToolCard the live parent transcript painted.
+                results[call_id] = (
+                    _content_text(payload),
+                    bool(payload.get("is_error")),
+                    details if isinstance(details, dict) else None,
+                    duration,
+                )
     communication_ids: set[str] = set()
     # Host communication facts supersede their replay-visible custom message:
     # the former include replies and correlation while the latter contain XML
@@ -346,7 +367,6 @@ def fold_transcript_entries(
                 call_id = str(raw_call.get("id") or raw_call.get("tool_call_id") or "")
                 if not call_id:
                     continue
-                calls[call_id] = len(folded)
                 result = results.get(call_id)
                 folded.append(
                     SubagentEntry(
@@ -356,6 +376,8 @@ def fold_transcript_entries(
                         tool_args=dict(raw_call.get("arguments") or {}),
                         outcome=("error" if result[1] else "success") if result else None,
                         result_text=result[0] if result else "",
+                        details=result[2] if result else None,
+                        duration_s=result[3] if result else None,
                     )
                 )
             continue
@@ -469,9 +491,11 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 duration_s=(
                     float(event["duration_s"])
                     if isinstance(event.get("duration_s"), (int, float))
+                    and not isinstance(event.get("duration_s"), bool)
                     else (
                         float(result["duration_s"])
                         if isinstance(result.get("duration_s"), (int, float))
+                        and not isinstance(result.get("duration_s"), bool)
                         else None
                     )
                 ),
@@ -679,8 +703,9 @@ def entry_block(entry: SubagentEntry) -> TranscriptBlock:
     Tool rows settle through :meth:`ToolCard.restore` rather than
     ``mark_done``: those compute a duration from the moment the card was
     mounted, which for a replay is how long ago the page painted, not how long
-    the tool took. The trajectory records no durations, so the column stays
-    blank — the contract ``--resume`` replay already follows.
+    the tool took. Both trajectory end events and durable tool messages carry
+    the executor's measured duration, so replay restores that authoritative
+    value and leaves the column blank only for legacy rows that predate it.
     """
     if entry.kind == "prompt":
         return InstructionBlock(entry.text)
@@ -1015,7 +1040,9 @@ class SubagentView(Vertical):
         # replay/fact are both real examples). Retain the bounded-by-user-load
         # raw window and derive display rows from the whole canonical window.
         self._history_rows: list[TranscriptEntry] = []
-        self._history_tool_results: dict[str, tuple[str, bool]] = {}
+        self._history_tool_results: dict[
+            str, tuple[str, bool, dict[str, Any] | None, float | None]
+        ] = {}
         self._history_entries: list[SubagentEntry] = []
         self._history_loading = False
         self._history_exhausted = False
@@ -1166,9 +1193,7 @@ class SubagentView(Vertical):
                 self._known[entry.key] = entry
             elif _supersedes(entry, known):
                 self._known[entry.key] = entry
-        live = [self._known[key] for key in self._order]
-        durable_keys = {entry.key for entry in self._history_entries}
-        body = [*self._history_entries, *(entry for entry in live if entry.key not in durable_keys)]
+        body = self._chronological_entries()
 
         tail = self._tail_entry(gone, progress)
         if tail is not None:
@@ -1351,19 +1376,57 @@ class SubagentView(Vertical):
 
             self.call_after_refresh(settle_tail)
 
+    def _chronological_entries(self) -> list[SubagentEntry]:
+        """Compose durable and live rows in conversation order.
+
+        A resumed child's durable transcript already contains the launch turn,
+        sometimes wrapped in harness context before the plain job prompt. The
+        latest exact/suffix match is canonical because later ordinary user
+        turns may quote the same words. Replace that row in place, retaining its
+        durable key, and use the synthetic head row only until it is paged in.
+        This keeps chronology stable while history arrives asynchronously
+        without blindly suppressing a child's first genuine user message.
+        """
+        live = [self._known[key] for key in self._order]
+        durable_keys = {entry.key for entry in self._history_entries}
+        history = list(self._history_entries)
+        prompt_entry = self._known.get("__prompt__")
+        prompt_norm = _normalized_prompt(self._instruction)
+        matched = None
+        if prompt_norm:
+            for index in range(len(history) - 1, -1, -1):
+                candidate = history[index]
+                candidate_norm = _normalized_prompt(candidate.text)
+                if candidate.kind == "user" and (
+                    candidate_norm == prompt_norm or candidate_norm.endswith(prompt_norm)
+                ):
+                    matched = index
+                    break
+        if matched is not None:
+            original = history[matched]
+            history[matched] = SubagentEntry(original.key, "prompt", text=self._instruction)
+        return [
+            *([prompt_entry] if prompt_entry is not None and matched is None else []),
+            *history,
+            *(
+                entry
+                for entry in live
+                if entry.key != "__prompt__" and entry.key not in durable_keys
+            ),
+        ]
+
     def _reconcile_current_body(
         self, *, anchor: float | None = None, prepend: bool = False
     ) -> None:
-        live = [self._known[key] for key in self._order]
-        durable_keys = {entry.key for entry in self._history_entries}
-        entries = [
-            *self._history_entries,
-            *(entry for entry in live if entry.key not in durable_keys),
-        ]
+        entries = self._chronological_entries()
         tail = self._tail_entry(self._status == "gone", "")
         if tail is not None:
             entries.append(tail)
-        if prepend and self._body.is_mounted:
+        # Absolute prepend is valid only when history really is the first row.
+        # With a delegation above it, rebuilding preserves chronology; putting
+        # the new page before the prompt recreates the defect this composition
+        # exists to prevent.
+        if prepend and "__prompt__" not in self._known and self._body.is_mounted:
             common_suffix = 0
             for previous, current in zip(reversed(self._entries), reversed(entries)):
                 if previous != current:
