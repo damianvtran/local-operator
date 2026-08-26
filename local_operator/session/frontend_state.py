@@ -327,6 +327,13 @@ class FrontendSessionState(BaseModel):
     mcp_startup: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
     slash_capabilities: list[SlashCapability] = Field(default_factory=list)
+    # The owner's provider-catalogue rows, so an attached terminal's bare
+    # ``/model`` picker lists the models the SESSION can actually switch to
+    # (owner credentials/aggregators), never the follower's own possibly-
+    # credential-less registry (D3, review round 2). Bounded to the direct
+    # (non-aggregator) rows; a follower's current model and its own live
+    # refresh stay authoritative for their own rows.
+    model_catalogue: list[dict[str, Any]] = Field(default_factory=list)
     history_cursor: str | None = None
     attachment_root: str | None = None
 
@@ -896,6 +903,33 @@ class FrontendStateStore:
             if cost is not None:
                 child_costs[job.id] = cost
         return self.mutate(jobs=jobs, child_costs=child_costs)
+
+    def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
+        """Publish the owner's offerable model rows as canonical state.
+
+        The catalogue answers one question — which models may this SESSION
+        switch to — and only the owner's provider controller knows it (the
+        owner's credentials, its aggregators, its registry). Kept out of
+        ``refresh_from_session`` because that runs on the session loop for
+        every streaming edge; the catalogue changes on credential/registry
+        timescales, so the TUI publishes it on adoption and after login-style
+        mutations instead.
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in entries:
+            rows.append(
+                {
+                    "provider": str(getattr(entry, "provider", "") or ""),
+                    "model_id": str(getattr(entry, "model_id", "") or ""),
+                    "label": str(getattr(entry, "label", "") or ""),
+                    "context_window": int(getattr(entry, "context_window", 0) or 0),
+                    "input_price": float(getattr(entry, "input_price", 0.0) or 0.0),
+                    "output_price": float(getattr(entry, "output_price", 0.0) or 0.0),
+                    "connected": bool(getattr(entry, "connected", False)),
+                    "aggregated": bool(getattr(entry, "aggregated", False)),
+                }
+            )
+        return self.mutate(model_catalogue=rows)
 
     def observe_event(self, session: Any, event: AgentEvent[Any]) -> FrontendUpdate | None:
         now = time.time()

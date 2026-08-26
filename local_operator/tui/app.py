@@ -2018,6 +2018,13 @@ class OperatorApp(App[None]):
         # The refusal is latched per model, and this session may be on another
         # one; a stale latch would swallow the answer on the model that needs it.
         self._effort_refusal_shown = None
+        # The owner's offerable-model rows are canonical state, so a follower's
+        # bare ``/model`` picker lists the models the SESSION can run (D3,
+        # review round 2). Published on every adoption: the catalogue only
+        # changes on credential/registry timescales, and both adoption paths
+        # (boot and takeover) are exactly the moments a NEW owner's rows
+        # replace the previous one's.
+        self._publish_model_catalogue(session)
         # Approvals must be answered ON SCREEN from here on: the factory's
         # default gate reads stdin, which this app has taken over, so leaving it
         # installed hangs the first write/exec tool call forever.
@@ -2174,11 +2181,42 @@ class OperatorApp(App[None]):
             model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
+            # The profile/team segments must survive the swap: takeover is a
+            # transport rotation, not a conversation change, so the band may
+            # not drop (and later re-add) segments the canonical state never
+            # changed — the drop-and-restore shifts every following segment
+            # and truncates the title mid-transition (D2, review round 2).
+            agent_profile=str(getattr(session, "active_agent", "") or ""),
+            team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
             streaming=False,
         )
         self._wire_mcp_status(session)
+        # The durable ledger carries the conversation's true cost/context
+        # across the rotation. Seeding the band directly from the canonical
+        # snapshot (not only from restored turn usage, which is one turn's
+        # floor) keeps the cost segment on screen through the handoff —
+        # dropping it and letting the frontend update restore it later is the
+        # same visible flicker as the profile segment, one segment over.
+        frontend = getattr(session, "frontend_state", None)
+        if frontend is not None:
+            parent_cost = getattr(frontend, "cumulative_parent_cost", None)
+            if parent_cost is not None:
+                knowledge = getattr(
+                    getattr(frontend, "cost_knowledge", "unknown"), "value", "unknown"
+                )
+                self._total_cost = float(parent_cost or 0.0)
+                self._subagent_costs = dict(getattr(frontend, "child_costs", {}) or {})
+                self._spend_is_floor = knowledge in {"floor", "partial"}
+                self._status.update(cost=self._spend_text())
+            context_tokens = getattr(frontend, "context_tokens", None)
+            if context_tokens:
+                self._status.update(
+                    context_tokens=int(context_tokens),
+                    context_is_estimate=bool(getattr(frontend, "context_is_estimate", False)),
+                    context_window=_context_window(session),
+                )
 
     async def _request_tool_approval_on_app_loop(
         self, tool_name: str, description: str, *, job_id: str | None = None
@@ -5670,7 +5708,22 @@ class OperatorApp(App[None]):
 
                 def resolve_cancel(confirmed: int) -> None:
                     set_resolution(None)
-                    self._report_subagent_stop(confirmed if confirmed >= 0 else offered, offered)
+                    if confirmed < 0:
+                        # ``-1`` is the transport sentinel for "the owner never
+                        # answered" — NOT a count. Passing the optimistic
+                        # ``offered`` to the success reporter printed "stopped
+                        # 2 subagents" for a request that may have stopped
+                        # none (MAJOR-2, review round 2). A failed request is
+                        # recoverable (press again), so it renders as a
+                        # warning that says exactly what is unknown.
+                        self._replace_stop_notice(
+                            f"could not confirm the stop with the session owner — "
+                            f"{offered} subagent{'s' if offered != 1 else ''} may still "
+                            "be running; press Esc twice again to retry",
+                            "warning",
+                        )
+                        return
+                    self._report_subagent_stop(confirmed, offered)
 
                 set_resolution(resolve_cancel)
             else:
@@ -9415,6 +9468,19 @@ class OperatorApp(App[None]):
         lowered = arg.lower()
         persist_default = lowered == "default" or lowered.startswith("default ")
         target = arg[len("default ") :].strip() if persist_default else arg
+        if persist_default and bool(getattr(session, "is_remote", False)):
+            # The follower's own config write would persist a default the
+            # SESSION never switched to (the switch lives on the owner), and
+            # routing it would persist on the wrong machine. Declined
+            # explicitly — the owner's typed producer answers the same way,
+            # so both terminals state one rule (MAJOR-1, review round 2).
+            self._system_notice(
+                "/model default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern; /model <p>/<id> "
+                "switches the shared session now",
+                "warning",
+            )
+            return
         if session is None or not hasattr(session, "set_model"):
             # A rejected command changed nothing, so the conversation has not
             # started: `_system_notice` keeps the boot composition intact where
@@ -10220,6 +10286,29 @@ class OperatorApp(App[None]):
             status=_status_line(note, _catalogue_status(statuses), PERSIST_HINT),
         )
 
+    def _publish_model_catalogue(self, session: Any) -> None:
+        """Push the owner's offerable models into canonical state (D3).
+
+        Owner-only by construction: a follower's session facade has no
+        ``_frontend_state_store``, and its own provider controller describes
+        the wrong credentials. The DIRECT rows are the whole answer for a
+        follower — an aggregator's row set is enumerable only through the
+        account's live listing, which a synchronous publish must not fetch;
+        the picker's ordinary live refresh covers those for the invoker, and
+        a disconnected aggregator row is never selectable anyway. Failures
+        degrade to an empty publication, never an exception on the boot path.
+        """
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is None or self._providers is None:
+            return
+        try:
+            entries = [
+                entry for entry in self._providers.static_catalogue() if not entry.aggregated
+            ]
+            store.refresh_model_catalogue(entries)
+        except Exception:
+            logger.debug("model catalogue publication failed", exc_info=True)
+
     def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
         """``(rows, note)`` — the models this user can actually run, and what was cut.
 
@@ -10251,6 +10340,48 @@ class OperatorApp(App[None]):
         """
         usable = self._usable_providers()
         current = self._current_selector()
+        # A follower merges the OWNER's published catalogue: the session runs
+        # on the owner's credentials, so the owner's rows are the offerable
+        # set and the local registry (which may have no usable provider at
+        # all) only fills in rows the owner did not name. Without this the
+        # picker's "usable" filter — computed from the follower's own empty
+        # credential store — crossed out or dropped every row the session
+        # could actually switch to (D3, review round 2).
+        session = self._session
+        owner_catalogue = getattr(session, "owner_model_catalogue", None)
+        if callable(owner_catalogue):
+            owner_rows: list[dict[str, Any]] = []
+            try:
+                fetched = owner_catalogue()
+                if isinstance(fetched, list):
+                    owner_rows = fetched
+            except Exception:
+                owner_rows = []
+            if owner_rows:
+                from local_operator.providers.controller import CatalogueEntry
+
+                known = {entry.selector for entry in entries}
+                entries = entries + [
+                    CatalogueEntry(
+                        provider=str(row.get("provider", "") or ""),
+                        model_id=str(row.get("model_id", "") or ""),
+                        label=str(row.get("label", "") or row.get("model_id", "") or ""),
+                        context_window=int(row.get("context_window", 0) or 0),
+                        input_price=float(row.get("input_price", 0.0) or 0.0),
+                        output_price=float(row.get("output_price", 0.0) or 0.0),
+                        connected=bool(row.get("connected", False)),
+                        aggregated=bool(row.get("aggregated", False)),
+                    )
+                    for row in owner_rows
+                    if f"{row.get('provider', '')}/{row.get('model_id', '')}" not in known
+                ]
+                owner_usable = {
+                    str(row.get("provider", "") or "") for row in owner_rows if row.get("connected")
+                }
+                # The owner's usable set EXTENDS, never replaces: the local
+                # store may name providers the owner's static catalogue did
+                # not (aggregators enumerate only live).
+                usable = owner_usable | (usable or set())
         rows = [
             ModelRow(
                 provider=entry.provider,
@@ -12203,6 +12334,10 @@ class OperatorApp(App[None]):
             set_msg = self._apply_login_defaults(provider)
             if set_msg:
                 await notice(set_msg, "info")
+            # The credential set just changed, so the owner's offerable-model
+            # publication is stale: a follower's picker must see the newly
+            # usable provider without waiting for a session restart (D3).
+            self._publish_model_catalogue(self._session)
             # In the first-run setup state there is no session yet, so a
             # successful login has to BUILD one — re-polling the splash would
             # leave the user staring at a configured-but-not-started app. Outside
@@ -12452,15 +12587,28 @@ class OperatorApp(App[None]):
         if command == "agent":
             return self._agent_slash_result(args, SlashResult)
         if command == "model":
-            # Bare /model opens the invoker's OWN picker — there is nothing for
-            # the owner to paint, so the result is a noop and the follower
-            # hosts the widget. A selector is a mutation: it is applied through
-            # the routed set_model on the follower's own RemoteSession.
-            return SlashResult(kind="noop")
-        # Unknown routed commands degrade to a receipt rather than a crash:
-        # the follower's dispatch is capability-driven, so a command it does
-        # not know must still answer something.
-        return SlashResult(kind="notice", text=f"ran /{command}", style="info")
+            if not args.strip():
+                # Bare /model opens the invoker's OWN picker — there is nothing
+                # for the owner to paint, so the result is a noop and the
+                # follower hosts the widget. A selector is a mutation: it is
+                # applied here, on the authoritative session.
+                return SlashResult(kind="noop")
+            return self._model_slash_result(args, SlashResult)
+        if command == "loop":
+            return self._loop_slash_result(args, SlashResult)
+        if command == "compact":
+            return self._compact_slash_result(SlashResult)
+        if command == "approvals":
+            return self._approvals_slash_result(args, SlashResult)
+        # Every authoritative capability must land on a producer ABOVE: a
+        # success-shaped receipt for an operation that never ran is the round-2
+        # MAJOR-1 defect, so an unhandled command answers with an honest
+        # unsupported warning — never "ran /…".
+        return SlashResult(
+            kind="notice",
+            text=f"/{command} is not available from an attached terminal — run it on the owner",
+            style="warning",
+        )
 
     def _context_slash_result(self, SlashResult: Any) -> Any:
         data = self._context_breakdown()
@@ -12670,6 +12818,220 @@ class OperatorApp(App[None]):
                 )
             return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
         return SlashResult(kind="noop", data={"type": "agent_mutate", "args": arg})
+
+    def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """The routed, non-bare ``/model``: a REAL switch on the owner session.
+
+        ``_cmd_model`` cannot be reused here — it prints through the local
+        transcript, which is the OWNER's terminal, and the invoker would get
+        nothing. This runs the same validation and mutation against the same
+        session and returns the receipt as data; the persist half is declined
+        rather than silently applied, because the follower's own config file
+        (not the owner's) is what its next launch reads.
+        """
+        session = self._session
+        if session is None or not hasattr(session, "set_model"):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        lowered = arg.strip().lower()
+        if lowered == "default" or lowered.startswith("default "):
+            # The default is process-local config: the follower's boot reads
+            # ITS file, so persisting from the owner's process would save a
+            # default for a machine that never asked. Declined explicitly — a
+            # silent no-op here is exactly the MAJOR-1 shape.
+            return SlashResult(
+                kind="notice",
+                text="/model default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern; /model <p>/<id> "
+                "switches the shared session now",
+                style="warning",
+            )
+        target = arg.strip()
+        provider, sep, model_id = target.partition("/")
+        if not sep or not model_id:
+            return SlashResult(
+                kind="notice",
+                text="usage: /model <provider>/<model-id> "
+                "(e.g. openrouter/deepseek/deepseek-chat)",
+                style="warning",
+            )
+        provider = provider.lower()
+        if self._providers is None:
+            return SlashResult(
+                kind="notice",
+                text="provider controller unavailable — cannot infer model spec",
+                style="warning",
+            )
+        if self._providers.provider(provider) is None:
+            return SlashResult(
+                kind="notice", text=f"unknown provider: {provider} — see /provider", style="warning"
+            )
+        try:
+            spec = self._providers.resolve_model(provider, model_id)
+        except Exception as error:
+            return SlashResult(
+                kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
+            )
+        old_label = session.model_label
+        session.set_model(self._spec_with_chosen_effort(spec), explicit=True)
+        self._probe_quota_after_switch(session)
+        self._effort_refusal_shown = None
+        self._warm_usage_background()
+        suffix, warning = self._model_access_note(provider)
+        # The switch lands on the SHARED session, so every terminal's band
+        # repaints from the canonical update — the receipt below only has to
+        # reach the invoker. Mid-turn timing is stated by the owner-side
+        # notice path (the streamed turn's own events carry it).
+        text = (
+            f"model: {old_label} → {session.model_label} "
+            f"(this session){suffix} — {PERSIST_HINT}"
+        )
+        if warning:
+            text = f"{text}\n{warning}"
+        return SlashResult(kind="notice", text=text, style="info")
+
+    def _loop_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/loop``: start/stop the owner's goal loop for real.
+
+        The loop drives provider turns through the session, which lives here;
+        a follower-local loop would either drive nothing (its own facade has
+        no loop worker worth running — each iteration's prompt must cross the
+        socket anyway) or double-drive the session. Every stop/validation
+        branch mirrors ``_cmd_loop`` so the two UIs answer identically; only
+        the transport of the receipt differs.
+        """
+        session = self._session
+        if arg.lower() in ("stop", "cancel", "abort"):
+            if self._loop_running:
+                self._loop_cancelled = True
+                return SlashResult(
+                    kind="notice", text="loop will stop after the current turn", style="info"
+                )
+            return SlashResult(kind="notice", text="no loop is running", style="info")
+        if session is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if self._loop_running:
+            return SlashResult(
+                kind="notice",
+                text="a loop is already running — /loop stop to cancel",
+                style="warning",
+            )
+        if not getattr(session, "goal", ""):
+            return SlashResult(
+                kind="notice", text="set a goal first: /goal <text>", style="warning"
+            )
+        iterations = DEFAULT_LOOP_ITERATIONS
+        if arg:
+            try:
+                iterations = int(arg)
+            except ValueError:
+                return SlashResult(
+                    kind="notice",
+                    text=f"usage: /loop [n] (1..{MAX_LOOP_ITERATIONS})",
+                    style="warning",
+                )
+        if iterations < 1 or iterations > MAX_LOOP_ITERATIONS:
+            return SlashResult(
+                kind="notice",
+                text=f"iterations must be between 1 and {MAX_LOOP_ITERATIONS}",
+                style="warning",
+            )
+        self._loop_cancelled = False
+        self.run_worker(self._loop_worker(iterations), thread=False, group="loop")
+        return SlashResult(
+            kind="notice",
+            text=f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel",
+            style="info",
+        )
+
+    def _compact_slash_result(self, SlashResult: Any) -> Any:
+        """The routed ``/compact``: kick the owner's real pass, honestly.
+
+        The pass runs minutes on a long conversation, so it cannot be awaited
+        inside the request/response op — the socket would time out and report
+        failure for work that is actually running. The return is the ACCEPT
+        receipt; the settled outcome reaches every terminal (invoker
+        included) through the canonical compaction events, one vocabulary for
+        local and remote triggers. A refusal (no session, pass already
+        running) is answered synchronously because it IS the outcome.
+        """
+        session = self._session
+        if session is None:
+            return SlashResult(
+                kind="notice",
+                text="no session yet — there is no context to compact",
+                style="warning",
+            )
+        self.run_worker(self._compact_worker(session), thread=False, group="compact")
+        return SlashResult(kind="notice", text="compacting context…", style="info")
+
+    def _approvals_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/approvals``: report or switch the OWNER's gate.
+
+        The approval gate the engine consults is the owner process's — a
+        follower's own ``_approve_all`` governs only its local widgets, so
+        switching it locally would print a receipt the session's tools never
+        honour. The mode mutation therefore lands here; the persist half is
+        declined for the same machine-locality reason as ``/model default``.
+        """
+        argument = arg.strip().lower()
+        persist = argument == "default" or argument.startswith("default ")
+        mode = argument[len("default ") :].strip() if persist else argument
+        if persist:
+            return SlashResult(
+                kind="notice",
+                text="/approvals default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern; /approvals ask|auto "
+                "switches the shared session now",
+                style="warning",
+            )
+        if mode in ("ask", "on", "prompt"):
+            wanted_auto = False
+        elif mode in ("auto", "off", "yolo"):
+            wanted_auto = True
+        elif mode:
+            return SlashResult(
+                kind="notice",
+                text=f"unknown approval mode {mode!r} — use ask or auto, "
+                "or default ask / default auto to keep it",
+                style="warning",
+            )
+        else:
+            live = mode_word(self._approve_all)
+            saved = mode_word(self._approvals_default_auto)
+            effect = (
+                "every tool runs without asking"
+                if self._approve_all
+                else "write and command tools prompt before running"
+            )
+            if live == saved:
+                return SlashResult(
+                    kind="notice",
+                    text=f"tool approvals: {live} — {effect}; new sessions open the same way",
+                    style="warning" if self._approve_all else "info",
+                )
+            return SlashResult(
+                kind="notice",
+                text=f"tool approvals: {live} (this session) — {effect}; "
+                f"new sessions open in {saved} — /approvals default {live} changes that",
+                style="warning" if self._approve_all else "info",
+            )
+        if wanted_auto:
+            self._answer_live_approval_as_allowed()
+        else:
+            self._allow_approvals_again()
+        self._set_approve_all(wanted_auto)
+        if wanted_auto:
+            return SlashResult(
+                kind="notice",
+                text="tool approvals: auto — every tool runs without asking (this session) — "
+                "/approvals default auto saves it for new sessions",
+                style="warning",
+            )
+        return SlashResult(
+            kind="notice",
+            text="tool approvals: ask — write and command tools will prompt again (this session)",
+            style="info",
+        )
 
     def _cmd_mcp(self, arg: str, notice: NoticeFn) -> None:
         """``/mcp`` lists servers; its subcommands manage OAuth grants.

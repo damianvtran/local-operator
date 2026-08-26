@@ -113,6 +113,16 @@ _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
 }
 
 
+#: Delivery rank of one message-grade event within its id's lifecycle. A
+#: replay at or below the delivered rank is a duplicate; anything above it is
+#: the legitimate next beat of the SAME live message.
+_MESSAGE_PHASE: dict[type, int] = {
+    MessageStartEvent: 1,
+    MessageUpdateEvent: 2,
+    MessageEndEvent: 3,
+}
+
+
 def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """Rehydrate one relayed event into its concrete pydantic subclass.
 
@@ -161,6 +171,14 @@ class RemoteSession:
         # never paint twice (M4). Rebuilt on each sync from durable rows +
         # painted ids.
         self._message_events: set[str] = set()
+        # Lifecycle-progress filter for the live relay, separate from
+        # ``_message_events`` by necessity: one message id stamps its START,
+        # UPDATE and END events alike, so dedupe by id alone dropped the update
+        # and end of every live message (BLOCKER-1, review round 2). The value
+        # ranks the phases 0→3 and only a phase at or BELOW the rank already
+        # delivered for that id is a true replay duplicate — a legitimately
+        # later phase for the same id must always pass.
+        self._live_message_phase: dict[str, int] = {}
         self._handlers: list[EventHandler] = []
         # Events arriving before OperatorApp adopts/subscribes are retained;
         # otherwise a fast owner can stream between factory return and app
@@ -285,6 +303,12 @@ class RemoteSession:
         # Anything durable is by definition already accounted for; seed the
         # painted-id filter from it so the live seed cannot repaint those rows.
         self._message_events |= self._history_ids
+        # A reconnect loads fresh durable rows and reseeds the in-flight suffix
+        # from the snapshot, so the per-id lifecycle rank is rebuilt with the
+        # paint stream. Ids that ended stay in ``_message_events`` regardless;
+        # clearing the rank here only affects messages whose lifecycle is still
+        # open and will be re-seeded by ``_finish_sync``.
+        self._live_message_phase = {}
 
     def _finish_sync(self) -> None:
         """Install the canonical in-flight seed before post-sync events.
@@ -312,13 +336,24 @@ class RemoteSession:
     def _replay_durable_suffix(self) -> None:
         """Emit settled events for durable rows no live event ever painted.
 
-        Only rows whose id is absent from ``_message_events`` (the painted set)
-        are emitted, so a reconnect after a quiet gap replays nothing and a
-        reconnect across a missed turn repaints exactly that turn. Each replayed
-        id is tracked, so the follow-up sync's live seed and any later relay
-        dedupe against it rather than double-painting.
+        Reads the transcript DIRECTLY rather than ``self._history``: on the
+        reconnect path this runs before the fresh ``_load_history``, and the
+        pre-disconnect ``_history`` is exactly the rows that need no replay.
+        Only rows whose id is absent from ``_message_events`` (the painted
+        set) are emitted, so a reconnect after a quiet gap replays nothing and
+        a reconnect across a missed turn repaints exactly that turn. Each
+        replayed id is tracked, so the follow-up sync's live seed, the history
+        reload and any later relay dedupe against it rather than re-painting.
         """
-        for message in self._history:
+        transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+        try:
+            messages = transcript.build_llm_history()
+        except Exception:
+            # A transcript that cannot be read fails the replay, never the
+            # recovery: the reload that follows owns the honest error.
+            logger.debug("gap replay could not read the transcript", exc_info=True)
+            return
+        for message in messages:
             message_id = str(getattr(message, "id", "") or "")
             if not message_id or message_id in self._message_events:
                 continue
@@ -326,17 +361,63 @@ class RemoteSession:
             self._emit_or_buffer(MessageEndEvent(message=message))
 
     def _is_duplicate(self, event: AgentEvent[Any]) -> bool:
-        """Whether this message-grade event repaints an already-known row."""
+        """Whether this event is a true replay duplicate, never a lifecycle peer.
+
+        Two independent seams can replay a row — durable history and the sync
+        seed — and the live relay's own phases are NOT a third. A message id
+        already in the painted/durable set means the row is complete: a START
+        or END for it is a replay. In between, the phases must flow: a START
+        does not make its UPDATE or END a duplicate, because those are the
+        events that carry the content the start only announced. The phase
+        ranks in ``_MESSAGE_PHASE`` make "at or below what we already
+        delivered" the duplicate test.
+        """
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
-        return bool(message_id) and message_id in self._message_events
+        if not message_id:
+            return False
+        if isinstance(event, (MessageStartEvent, MessageEndEvent)):
+            # Durable or already-painted-complete: a replayed row, never the
+            # same live message's first/last beat.
+            if message_id in self._message_events:
+                return True
+        phase = _MESSAGE_PHASE.get(type(event))
+        if phase is None:
+            return False
+        delivered = self._live_message_phase.get(message_id, -1)
+        # A phase BELOW the delivered rank is a replay. At the SAME rank it
+        # depends on the phase: a second update for one in-flight message is
+        # the next legitimate beat (deltas are incremental and the UIs
+        # coalesce them), while a repeated start or end is a true duplicate.
+        if phase < delivered:
+            return True
+        if phase == delivered and not isinstance(event, MessageUpdateEvent):
+            return True
+        return False
 
     def _track(self, event: AgentEvent[Any]) -> None:
         """Record a painted live message id so a later sync/durable row skips it."""
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
-        if message_id and isinstance(
-            event, (MessageStartEvent, MessageUpdateEvent, MessageEndEvent)
+        if not message_id:
+            return
+        phase = _MESSAGE_PHASE.get(type(event))
+        if phase is None:
+            return
+        # Monotonic per id: a regressed phase is ignored by ``_is_duplicate``
+        # anyway, so the rank only ever moves forward.
+        if phase > self._live_message_phase.get(message_id, -1):
+            self._live_message_phase[message_id] = phase
+        # The row is SETTLED once its complete form is known — an END event,
+        # or a START whose message already carries its content (the durable
+        # seed folds completed rows in as message_start entries, and the
+        # join-time seed is exactly a replay of durable-looking events; M4
+        # then needs the id claimed immediately or a snapshot taken just
+        # after the end event would repaint the row). A bare START claims
+        # nothing — its update and end share the id.
+        if isinstance(event, MessageEndEvent) or (
+            isinstance(event, MessageStartEvent)
+            and bool(getattr(message, "text", "") or getattr(message, "tool_calls", None))
         ):
             self._message_events.add(message_id)
 
@@ -541,20 +622,21 @@ class RemoteSession:
                         await self._dial(record)
                         frontend = await self._await_frontend()
                         self._install_frontend(frontend.snapshot, publish=True)
-                        # A message committed while this follower was
-                        # disconnected is in the NEW snapshot's durable
-                        # history but was never relayed as a raw event here.
-                        # Reconcile against the fresh cursor so the missing
-                        # durable rows are loaded and the re-seeded live
-                        # suffix dedupes against what is already painted (M4).
+                        # The gap replay must run BEFORE the history reload:
+                        # ``_load_history`` seeds the painted-id set from every
+                        # durable row it loads, so running it first would mark
+                        # the gap rows painted before their replay event was
+                        # ever emitted — recovery then "succeeds" with the
+                        # rows in ``history()`` but never on screen (U6,
+                        # review round 2). The replay reads the transcript
+                        # itself and emits settled events for exactly the
+                        # durable ids this follower has not painted; the
+                        # reload afterwards brings ``_history`` to the same
+                        # point and the live seed dedupes against the ids the
+                        # replay just claimed (M4).
+                        self._replay_durable_suffix()
                         self._load_history(frontend.live_cursor)
                         self._finish_sync()
-                        # Rows that became durable WHILE disconnected were never
-                        # relayed as raw events, so nothing painted them. Emit a
-                        # settled message event for each NEW durable id so the
-                        # existing transcript path repaints exactly the missed
-                        # suffix — never the rows already on screen.
-                        self._replay_durable_suffix()
                         return
                     except (ConnectionError, OSError, TimeoutError):
                         pass
@@ -883,6 +965,15 @@ class RemoteSession:
             for row in self.frontend_state.jobs
             if row.type == "task" and row.status == "running" and not row.queued
         )
+
+    def owner_model_catalogue(self) -> list[dict[str, Any]]:
+        """The owner's offerable model rows, as published canonical state.
+
+        A follower's own provider controller describes the follower's
+        credentials, which are not the ones the shared session can run on —
+        the picker must offer the owner's rows (D3, review round 2).
+        """
+        return [dict(row) for row in self.frontend_state.model_catalogue]
 
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         self._approval_handler = handler
