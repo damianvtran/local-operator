@@ -65,6 +65,17 @@ the child-shaped tool — one peer, its parent — which is how it answers a
 question the parent asked and how it reports being blocked without waiting
 for its final result. See :mod:`local_operator.harness.comms`.
 
+``jobs`` is a SECOND, CONDITIONAL exception, on a different principle. It
+observes and cancels the child's OWN background jobs — it spawns nothing
+(that is ``task``) and dies with the child's job manager — so it crosses no
+boundary the prune protects. But a child can only produce a background job
+while its ``bash`` retains ``background``, and the bash receipt tells the
+model to poll such a job with ``jobs(op='peek')``. So the invariant is: a
+child keeps ``jobs`` IFF it can still background a bash command. The prune
+below re-adds ``jobs`` exactly under that condition (:func:`_can_background`),
+which is what stops a non-delegating role or grandchild that backgrounds a
+long command from looping forever on ``Tool not found: jobs``.
+
 Approvals the child asks for carry ``ToolContext.job_id`` — the id of the job
 this child IS — so a host can scope an approval decision to the delegated
 work that provoked it. Live failure it exists for: a subagent outliving its
@@ -145,6 +156,24 @@ TRAJECTORY_CAP = 500
 #: being present. Role guidance generally lives in
 #: :mod:`local_operator.agent_profiles`.
 SCOUT_TOOL_ALLOWLIST = frozenset({"read", "glob", "grep", "list_variables", "read_variable"})
+
+
+def _can_background(tools: "list[AgentTool]") -> bool:
+    """Whether this toolset can PRODUCE a background job.
+
+    Only ``bash`` spawns background jobs, and only while its schema still
+    carries the ``background`` parameter. A toolset with no such ``bash`` (a
+    scout, an allowlist that omits it) cannot register a job, so it has
+    nothing for ``jobs`` to observe. Deriving the answer from the actual
+    schema — rather than hard-coding which roles background — is what keeps
+    the ``jobs``-retention rule below tied to reality if the bash schema or a
+    role's allowlist later changes.
+    """
+    bash = next((tool for tool in tools if tool.name == "bash"), None)
+    if bash is None:
+        return False
+    return "background" in bash.parameters.get("properties", {})
+
 
 #: Preamble stamped onto a scout prompt when no profile resolves. The tool
 #: filter enforces the letter; this states the intent, so the scout REPORTS
@@ -1153,6 +1182,26 @@ async def _build_child_session(
         drop = merged_in
     else:
         drop = {name for name in merged_in if name == "wake"}
+    # ``jobs`` is the OBSERVE/CONTROL surface over this child's OWN background
+    # jobs (peek at output, cancel) — it spawns nothing (that's ``task``) and
+    # dies with the child's job manager, so it crosses no boundary the prune
+    # protects. Meanwhile the ``bash`` tool's ``background=true`` receipt tells
+    # the model to "follow it with jobs(op='peek')". When the branch above
+    # dropped the whole ``merged_in`` set (non-delegating role, grandchild),
+    # that advice pointed at a tool that no longer existed, so a child that
+    # backgrounded a long command (a coder polling a 10-min pyright) spun
+    # forever emitting ``Tool not found: jobs``. Invariant, encoded here rather
+    # than as two edits that can silently drift: a child keeps ``jobs`` IFF it
+    # can still produce a background job (its ``bash`` retains ``background``).
+    # Un-pruning ``jobs`` (not stripping ``bash``'s ``background``) preserves a
+    # real capability — a child genuinely benefits from backgrounding a long
+    # build and polling it — while killing the loop; stripping the schema
+    # per-session would be more invasive and would remove that capability.
+    # ``task``/``wait``/``wake`` keep their treatment: ``jobs`` polling is
+    # non-blocking and is the advertised path, so sparing ``jobs`` alone is the
+    # minimal correct fix, and a child that must not fan out still cannot.
+    if _can_background(tools):
+        drop = drop - {"jobs"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
     if mcp is not None:
         mcp.attach(child)
