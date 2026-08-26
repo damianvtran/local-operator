@@ -1,4 +1,4 @@
-import { close, goto, open, status } from "./commands/nav";
+import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
 import { screenshot } from "./commands/shot";
@@ -26,6 +26,7 @@ const HANDLERS: Record<
   type: typeText,
   close,
   status,
+  tabs,
   scroll,
   logs,
 };

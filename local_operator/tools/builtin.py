@@ -4661,6 +4661,11 @@ BROWSER_ACTIONS = (
     # approval tier and dispatch as everything else.
     "scroll",
     "logs",
+    # tabs lists every live extension-owned tab (all sessions', read-only
+    # awareness) so parallel agents can see what is being driven and know which
+    # handle to close. Bridge-only like scroll/logs: cmux keeps no multi-surface
+    # registry, so it degrades with the same typed "use the extension" error.
+    "tabs",
 )
 
 #: Actions that only the Local Operator browser extension can serve. cmux has no
@@ -4668,7 +4673,7 @@ BROWSER_ACTIONS = (
 #: partial result these degrade with a clear, actionable error naming the
 #: extension. Kept as a set beside BROWSER_ACTIONS so the degrade check and the
 #: advertised action list can never drift apart.
-BRIDGE_ONLY_BROWSER_ACTIONS = frozenset({"scroll", "logs"})
+BRIDGE_ONLY_BROWSER_ACTIONS = frozenset({"scroll", "logs", "tabs"})
 
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
@@ -4754,9 +4759,12 @@ class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str = Field(
-        description="open (start a surface at a URL) | goto | read (page text) | "
-        "snapshot (accessibility tree with click refs) | screenshot | click | "
-        "type | scroll (move the viewport) | logs (console + errors) | close."
+        description="open (start a surface at a URL; on the extension backend a "
+        "fresh open creates a NEW tab — your session then owns it and reuses it) "
+        "| goto | read (page text) | snapshot (accessibility tree with click "
+        "refs) | screenshot | click | type | scroll (move the viewport) | logs "
+        "(console + errors) | tabs (list all extension-driven tabs, other "
+        "sessions' included) | close (end YOUR tab when done with it)."
     )
     url: str = Field(default="", description="http(s) URL for 'open'/'goto'.")
     path: str = Field(default="", description="Destination file for 'screenshot'.")
@@ -5580,11 +5588,16 @@ async def _bridge_call(
     try:
         return await BridgeClient().call(action, params), None
     except BridgeError as exc:
-        return None, _error(
+        problem = _error(
             tool_call_id,
             "browser",
             format_error(exc, action=action, surface=surface),
         )
+        # Carry the TYPED wire code so callers can branch on it (dead-pin
+        # recovery, handle-drop) instead of substring-matching the human
+        # diagnostic, which broke silently on any rewording (finding m4).
+        problem.details = {"error_code": exc.code.value}
+        return None, problem
     except BridgeUnreachable as exc:
         return None, _error(tool_call_id, "browser", str(exc))
 
@@ -5594,10 +5607,26 @@ async def _bridge_open(
     state: BrowserSurfaceProtocol,
     raw_url: str,
 ) -> ToolResult:
+    # The session's pinned handle decides the mode. With one, `open` RESUMES
+    # that tab (extension-side it navigates exactly that surface); without one
+    # the extension creates a brand-new tab. The extension never falls back to
+    # reusing some other live surface — that reuse is how one session used to
+    # hijack another's tab mid-task when agents ran in parallel.
     params: dict[str, Any] = {"url": raw_url.strip()}
-    if state.surface_id.startswith("bridge:"):
+    resuming = state.surface_id.startswith("bridge:")
+    if resuming:
         params["tab"] = state.surface_id
     result, problem = await _bridge_call(tool_call_id, "open", params, surface=state.surface_id)
+    if (
+        problem is not None
+        and resuming
+        and (problem.details or {}).get("error_code") == "tab_closed"
+    ):
+        # The pinned tab died (user closed it, browser restarted). 'open' is
+        # the recovery verb — same contract as the cmux path — so drop the
+        # dead handle and create a fresh tab instead of surfacing the error.
+        state.surface_id = ""
+        result, problem = await _bridge_call(tool_call_id, "open", {"url": raw_url.strip()})
     if problem is not None:
         return problem
     assert result is not None
@@ -5671,6 +5700,74 @@ def _bridge_logs_result(
     )
 
 
+def _owns_redacted_tab(own_surface: str, redacted: str) -> bool:
+    """Whether the session's full pinned handle names a REDACTED listing entry.
+
+    The extension truncates listed nonces (`bridge:<tabId>:<prefix>…`) so a
+    listing cannot hand out drive capabilities (review finding M1); a session
+    recognises its own tab by prefix-matching the full token it was given at
+    open. Mirrors ownsRedacted in extension/src/state.ts.
+    """
+    if not own_surface or not redacted:
+        return False
+    if redacted.endswith("…"):
+        return own_surface.startswith(redacted[:-1])
+    return own_surface == redacted
+
+
+def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
+    """One listed tab: redacted handle, page, recency — the caller's own marked.
+
+    The "(yours)" marker matters because the listing shows EVERY session's
+    tabs: an agent must close its own when done, and must treat the rest as
+    read-only awareness. The handles are redacted by the extension and are NOT
+    driveable — driving needs the full token 'open' returned to its owner.
+    """
+    token = str(entry.get("tab", ""))
+    title = str(entry.get("title", "")).strip() or "(untitled)"
+    url = str(entry.get("url", "")).strip() or "(no URL)"
+    mine = " (yours)" if _owns_redacted_tab(own_surface, token) else ""
+    when = ""
+    last_used = entry.get("lastUsedAt")
+    if isinstance(last_used, (int, float)) and last_used > 0:
+        stamp = datetime.fromtimestamp(last_used / 1000, tz=UTC)
+        when = f" — last used {stamp.strftime('%H:%M:%S')} UTC"
+    return f"{token}{mine}: {title} — {url}{when}"
+
+
+async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
+    """List every live extension-driven tab (all sessions').
+
+    Discovery deliberately needs no open surface of our own: its main use is a
+    session deciding whether to resume, or being told the surface cap is hit
+    and needing to see what is already open. The extension prunes dead tabs as
+    part of answering, so the list is live by construction.
+    """
+    result, problem = await _bridge_call(tool_call_id, "tabs", {}, surface=state.surface_id)
+    if problem is not None:
+        return problem
+    assert result is not None
+    entries = [entry for entry in result.get("tabs") or [] if isinstance(entry, dict)]
+    if not entries:
+        return _text(
+            tool_call_id,
+            "browser",
+            "No extension-driven browser tabs are open. Use 'open' with a URL to start one.",
+            details={"tab_count": 0},
+        )
+    lines = [_format_bridge_tab(entry, state.surface_id) for entry in entries]
+    return _text(
+        tool_call_id,
+        "browser",
+        f"{len(entries)} extension-driven tab{'s' if len(entries) != 1 else ''} "
+        "(most recently used first; handles are redacted — the listing is "
+        "awareness-only and cannot drive or close a tab. Your own tab is "
+        "marked '(yours)'; drive it with the handle your session already "
+        "holds):\n\n" + "\n".join(lines),
+        details={"tab_count": len(entries), "surface_id": state.surface_id},
+    )
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -5709,7 +5806,8 @@ async def _bridge_action(
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
         # retaining it would make even the recovery verb target stale state.
-        if "is gone; dropped the handle" in problem.text:
+        # Branch on the typed code, not the diagnostic's wording (finding m4).
+        if (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
         return problem
     assert result is not None
@@ -5932,6 +6030,20 @@ async def execute_browser(
         return await _browser_open(tool_call_id, state, params.url)
     if action == "close":
         return await _browser_close(tool_call_id, state)
+    if action == "tabs":
+        # Discovery works without an owned surface (its point is finding out
+        # what is open), but it is extension-only: cmux keeps no multi-surface
+        # registry, so a cmux-pinned session degrades exactly like scroll/logs.
+        if state.surface_id.startswith("surface:") or not bridge_available:
+            return _error(
+                tool_call_id,
+                "browser",
+                "'tabs' is not supported on the cmux backend — use the Local Operator "
+                "browser extension (run 'lop browser status' / 'lop browser install' to "
+                "set it up). cmux has no multi-tab surface registry, so this action only "
+                "works through the extension bridge.",
+            )
+        return await _bridge_tabs(tool_call_id, state)
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
     if state.surface_id.startswith("bridge:"):
@@ -6164,8 +6276,14 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "cannot. 'scroll' pages the view (default one screen down, or by "
             "x/y pixels, a direction keyword, or a selector to reveal) and reports "
             "whether more content remains; 'logs' returns the page's console "
-            "output and uncaught exceptions for debugging web apps. 'scroll' and "
-            "'logs' need the extension backend (cmux says so). Use it for every "
+            "output and uncaught exceptions for debugging web apps. Parallel "
+            "sessions each drive their own tab: a fresh 'open' creates a NEW "
+            "extension tab pinned to this session (later opens navigate it), "
+            "'tabs' lists every extension-driven tab including other sessions' "
+            "(handles are redacted: the listing is awareness-only and cannot "
+            "drive or close anything), and 'close' "
+            "ends your own tab when you are done with it. 'scroll', 'logs' and "
+            "'tabs' need the extension backend (cmux says so). Use it for every "
             "screenshot and page interaction; never install or script a browser "
             "engine instead."
         ),

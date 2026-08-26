@@ -487,13 +487,23 @@ class BridgeService:
         if request.id in self.link.pending:
             return self._error_response(request.id, ErrorCode.BUSY, "request id already in flight")
         # Serialize per tab so concurrent sessions cannot interleave commands on
-        # the one shared surface (finding A4). Commands that name no tab (open,
-        # status) serialize on a shared key so a second open cannot race the
-        # first into a duplicate surface.
+        # the same surface (finding A4); commands on DIFFERENT tabs run in
+        # parallel, which is what lets each session drive its own surface.
+        # Commands that name no tab (open, status, tabs) serialize on a shared
+        # key so a fresh open cannot race another open past the surface cap, and
+        # a listing cannot interleave with an open's map write.
         tab_key = str(request.params.get("tab") or "__global__")
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
         async with lock:
-            return await self._dispatch_locked(request)
+            response = await self._dispatch_locked(request)
+        # Per-tab keys used to be near-singleton; with every opened tab minting
+        # a token the map would now grow for the daemon's lifetime. Evict the
+        # key once its tab is closed and nothing is waiting on the lock —
+        # unlocked-and-unwaited means a later command for the same (now dead)
+        # handle can safely mint a fresh Lock.
+        if request.method == "close" and tab_key != "__global__" and not lock.locked():
+            self._tab_locks.pop(tab_key, None)
+        return response
 
     async def _dispatch_locked(self, request: Request) -> JSONResponse:
         future: asyncio.Future[Response] = asyncio.get_running_loop().create_future()

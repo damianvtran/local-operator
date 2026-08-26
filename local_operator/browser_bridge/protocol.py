@@ -32,6 +32,14 @@ METHODS = (
     "type",
     "close",
     "status",
+    # tabs lists every live extension-owned surface. It exists because parallel
+    # sessions now each open their OWN tab (open no longer reuses another
+    # session's surface), so agents need read-only discovery of what is being
+    # driven. Listed handles are REDACTED (nonce truncated): the full token is
+    # the drive capability, granted only by the surface's own `open` response,
+    # so the listing is genuinely awareness-only. Bridge-only, like
+    # scroll/logs: cmux has no multi-surface registry.
+    "tabs",
     "scroll",
     "logs",
 )
@@ -68,6 +76,11 @@ COMMAND_TIMEOUTS = {
     "screenshot": 20.0,
     "close": 20.0,
     "status": 20.0,
+    # tabs, like status, names no tab and does no navigation: it enumerates the
+    # extension's surface map and prunes dead entries, a handful of chrome.tabs
+    # calls. It rides the same global lock key (no ``tab`` param) so a listing
+    # cannot interleave with an in-flight open's map write.
+    "tabs": 20.0,
     # scroll waits briefly for the wheel/scrollIntoView to settle and re-reads
     # position; logs just drains a per-tab ring buffer already in memory.
     "scroll": 20.0,
@@ -95,6 +108,16 @@ class ErrorCode(StrEnum):
     ORIGIN_DENIED = "origin_denied"
     ORIGIN_PROMPT_PENDING = "origin_prompt_pending"
     DEBUGGER_CONFLICT = "debugger_conflict"
+    # The extension refuses to open more concurrent tabs than its cap (see
+    # MAX_SURFACES in extension/src/state.ts): parallel sessions each own a
+    # tab now, and without a bound an agent fleet could spray tabs into the
+    # user's real browser. Typed so the tool can tell the agent to close one.
+    TAB_LIMIT = "tab_limit"
+    # A bare `close` while several tabs are open: the request is
+    # under-specified, not a bridge fault, so it must not render as an
+    # "internal" bridge error (review finding n1). The message carries the
+    # REDACTED live handles so the caller can pick its own.
+    TAB_AMBIGUOUS = "tab_ambiguous"
     BUSY = "busy"
     PROTO_MISMATCH = "proto_mismatch"
     INTERNAL = "internal"
