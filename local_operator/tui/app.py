@@ -8791,6 +8791,12 @@ class OperatorApp(App[None]):
                 getattr(job, "agent_role", None) or getattr(node, "agent_role", "") or ""
             ),
             effort=str(getattr(job, "effort", None) or getattr(node, "effort", "") or ""),
+            # Every deterministic launch identity this lineage owns mapped to
+            # its concise prompt, so the viewer reconciles collapsed resume
+            # attempts' durable rows too, not only the current launch. Comes
+            # from the comms node because a live job row only carries its own
+            # attempt (review round 4 R4-1).
+            launch_prompts=dict(getattr(node, "launch_prompts", {}) or {}),
             ancestors=[ancestor.label for ancestor in ancestors],
             transcript_directory=(
                 str(transcript_directory) if transcript_directory is not None else None

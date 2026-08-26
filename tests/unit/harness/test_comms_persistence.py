@@ -126,6 +126,127 @@ def test_restore_collapses_legacy_resume_records_and_preserves_aliases(tmp_path)
     assert comms.snapshot()[0]["attempt_aliases"] == ["old"]
 
 
+def test_attach_collapse_keeps_prior_attempt_launch_prompts(tmp_path) -> None:
+    """A resumed attempt inherits every collapsed launch's concise prompt.
+
+    #314 folds the settled predecessor into the newest record, whose own
+    ``prompt``/``launch_message_id`` only describe the continuation. The viewer
+    reconciles ALL durable launch rows in the shared transcript, so the prior
+    attempt's concise prompt must survive the collapse keyed by ITS deterministic
+    launch identity (review round 4 R4-1).
+    """
+    jobs = FakeJobs()
+    parent = FakeParent(jobs)
+    comms = SubagentComms(parent)  # type: ignore[arg-type]
+    session_dir = tmp_path / "child"
+    session_dir.mkdir()
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+
+    jobs.add("attempt-1", status="running")
+    comms.record_launch(
+        "attempt-1",
+        "reviewer",
+        prompt="Original task.",
+        effective_prompt="[role: reviewer]\nPREAMBLE\nOriginal task.",
+        launch_message_id="subagent-launch:attempt-1",
+    )
+    comms.attach("attempt-1", FakeChild(), session_dir)  # type: ignore[arg-type]
+    comms.record_outcome("attempt-1", "cancelled")
+    comms.detach("attempt-1")
+    jobs.jobs["attempt-1"].status = "cancelled"
+
+    jobs.add("attempt-2", status="running")
+    comms.record_launch(
+        "attempt-2",
+        "reviewer",
+        prompt="Wrap up.",
+        effective_prompt="[role: reviewer]\nPREAMBLE\nWrap up.",
+        launch_message_id="subagent-launch:attempt-2",
+    )
+    comms.attach("attempt-2", FakeChild(), session_dir)  # type: ignore[arg-type]
+
+    node = comms.node("attempt-2")
+    assert node is not None
+    # Both deterministic launch rows resolve to their own concise instruction.
+    assert node.launch_prompts == {
+        "subagent-launch:attempt-1": "Original task.",
+        "subagent-launch:attempt-2": "Wrap up.",
+    }
+    # The predecessor id still resolves to the collapsed record.
+    assert comms.node("attempt-1") is node or comms.node("attempt-1") == node
+
+
+def test_snapshot_restore_round_trips_collapsed_launch_prompts(tmp_path) -> None:
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    session_dir = tmp_path / "child"
+    session_dir.mkdir()
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    jobs.add("attempt-1", status="running")
+    comms.record_launch(
+        "attempt-1",
+        "reviewer",
+        prompt="Original task.",
+        launch_message_id="subagent-launch:attempt-1",
+    )
+    comms.attach("attempt-1", FakeChild(), session_dir)  # type: ignore[arg-type]
+    comms.record_outcome("attempt-1", "cancelled")
+    comms.detach("attempt-1")
+    jobs.jobs["attempt-1"].status = "cancelled"
+    jobs.add("attempt-2", status="running")
+    comms.record_launch(
+        "attempt-2",
+        "reviewer",
+        prompt="Wrap up.",
+        launch_message_id="subagent-launch:attempt-2",
+    )
+    comms.attach("attempt-2", FakeChild(), session_dir)  # type: ignore[arg-type]
+
+    fresh = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    fresh.restore(comms.snapshot())
+    node = fresh.node("attempt-2")
+    assert node is not None
+    assert node.launch_prompts == {
+        "subagent-launch:attempt-1": "Original task.",
+        "subagent-launch:attempt-2": "Wrap up.",
+    }
+
+
+def test_restore_folds_legacy_per_attempt_launch_prompts(tmp_path) -> None:
+    """A legacy snapshot with one record per resume yields every launch prompt.
+
+    Older builds stored a separate durable record per attempt. Restore collapses
+    them by directory; the loser's own launch prompt must fold under the winner
+    so the viewer can still reconcile the earlier durable launch row.
+    """
+    session_dir = tmp_path / "child"
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.restore(
+        [
+            {
+                "job_id": "subagent-launch-old",
+                "label": "same",
+                "session_dir": str(session_dir),
+                "prompt": "Original task.",
+                "launch_message_id": "subagent-launch:old",
+            },
+            {
+                "job_id": "subagent-launch-new",
+                "label": "same",
+                "session_dir": str(session_dir),
+                "prompt": "Wrap up.",
+                "launch_message_id": "subagent-launch:new",
+            },
+        ]
+    )
+    node = comms.node("subagent-launch-new")
+    assert node is not None
+    assert node.launch_prompts == {
+        "subagent-launch:old": "Original task.",
+        "subagent-launch:new": "Wrap up.",
+    }
+
+
 def test_identical_labels_with_distinct_transcripts_remain_distinct(tmp_path) -> None:
     comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
     comms.restore(

@@ -1011,6 +1011,12 @@ class SubagentView(Vertical):
         self._instruction = ""
         self._effective_prompt = ""
         self._launch_message_id = ""
+        #: Every deterministic ``subagent-launch:<id>`` identity this lineage
+        #: owns mapped to its concise delegated instruction, including attempts
+        #: #314 collapsed into the current record. Reconciliation replaces each
+        #: matching durable user row with its concise prompt so no collapsed
+        #: attempt leaks its full preamble (review round 4 R4-1).
+        self._launch_prompts: dict[str, str] = {}
         self._status = "running"
         self._queued = False
         self._elapsed = "0s"
@@ -1117,6 +1123,7 @@ class SubagentView(Vertical):
         prompt: str = "",
         effective_prompt: str = "",
         launch_message_id: str = "",
+        launch_prompts: dict[str, str] | None = None,
         progress: str = "",
         agent_role: str = "",
         effort: str = "",
@@ -1172,6 +1179,19 @@ class SubagentView(Vertical):
             self._instruction = strip_control_sequences(prompt).strip()
         self._effective_prompt = strip_control_sequences(effective_prompt).strip()
         self._launch_message_id = str(launch_message_id or "").strip()
+        # Concise instruction for every durable launch row this lineage owns.
+        # The current launch is derived from `prompt` (kept live above); the
+        # collapsed predecessors arrive already-authored from the comms node.
+        # Both are stripped once here rather than on each reconcile pass.
+        resolved_prompts: dict[str, str] = {}
+        for key, value in (launch_prompts or {}).items():
+            identity = str(key or "").strip()
+            concise = strip_control_sequences(str(value or "")).strip()
+            if identity and concise:
+                resolved_prompts[identity] = concise
+        if self._launch_message_id and self._instruction:
+            resolved_prompts[self._launch_message_id] = self._instruction
+        self._launch_prompts = resolved_prompts
         if self._instruction and "__prompt__" not in self._known:
             # HEAD position, and it is safe only because `AsyncJob.prompt` is
             # assigned at REGISTRATION (harness/subagent.py) — before a runner
@@ -1387,30 +1407,35 @@ class SubagentView(Vertical):
 
         A resumed child's durable transcript already contains the launch turn.
         New jobs carry its exact Message/TranscriptEntry ID, so replay replaces
-        only that row even when later turns repeat the same words. Legacy records
-        have no identity and keep the synthetic prompt at the head: duplicating
-        old wrapper text is safer than rewriting a user row from a paged window
-        that cannot prove what matching rows still exist before it.
+        that row even when later turns repeat the same words. After #314
+        collapses a resumed attempt into the newest record, the transcript still
+        holds every earlier attempt's ``subagent-launch:<id>`` turn, so ALL of
+        them — not just the current launch — are reconciled to their concise
+        authored prompt from ``self._launch_prompts``; otherwise a prior
+        attempt's full role/team/system preamble leaks back as a plain user row.
+        Legacy records without any launch identity keep the synthetic prompt at
+        the head: duplicating old wrapper text is safer than rewriting a user
+        row from a paged window that cannot prove what matching rows precede it.
         """
         live = [self._known[key] for key in self._order]
         durable_keys = {entry.key for entry in self._history_entries}
         history = list(self._history_entries)
         prompt_entry = self._known.get("__prompt__")
-        matched = None
-        if self._launch_message_id:
-            matched = next(
-                (
-                    index
-                    for index, candidate in enumerate(history)
-                    if candidate.kind == "user" and candidate.key == self._launch_message_id
-                ),
-                None,
-            )
-        if matched is not None:
-            original = history[matched]
-            history[matched] = SubagentEntry(original.key, "prompt", text=self._instruction)
+        # The synthetic head is the fallback for the CURRENT launch only, so its
+        # suppression tracks that row specifically: a paged window holding a
+        # prior attempt's launch but not the current one still needs the head.
+        current_matched = False
+        for index, candidate in enumerate(history):
+            if candidate.kind != "user":
+                continue
+            concise = self._launch_prompts.get(candidate.key)
+            if concise is None:
+                continue
+            history[index] = SubagentEntry(candidate.key, "prompt", text=concise)
+            if candidate.key == self._launch_message_id:
+                current_matched = True
         return [
-            *([prompt_entry] if prompt_entry is not None and matched is None else []),
+            *([prompt_entry] if prompt_entry is not None and not current_matched else []),
             *history,
             *(
                 entry

@@ -1476,6 +1476,77 @@ async def test_durable_launch_turn_is_replaced_in_place(
 
 
 @pytest.mark.asyncio
+async def test_resumed_view_projects_every_collapsed_launch_prompt(tmp_path) -> None:
+    """After #314 collapses attempts, ALL durable launch rows go concise.
+
+    The shared transcript holds one ``subagent-launch:<id>`` turn per attempt.
+    The comms node maps each to its concise prompt, so a resumed view must
+    replace every one, never leaking an earlier attempt's role/system preamble
+    as a plain user row (review round 4 R4-1).
+    """
+    transcript = Transcript(tmp_path / "child")
+    first_launch = await transcript.append_message(
+        Message.user("[role: reviewer]\nSYSTEM PREAMBLE\nOriginal task.")
+    )
+    await transcript.append_message(Message.assistant("first attempt"))
+    second_launch = await transcript.append_message(
+        Message.user("[role: reviewer]\nSYSTEM PREAMBLE\nWrap up.")
+    )
+    job = _job_with([], status="completed")
+    # The live job row only carries the CURRENT (newest) attempt.
+    job.prompt = "Wrap up."
+    job.effective_prompt = "[role: reviewer]\nSYSTEM PREAMBLE\nWrap up."
+    job.launch_message_id = second_launch.id
+    job.agent_role = "reviewer"
+    # The comms node carries every collapsed launch identity's concise prompt.
+    node = type(
+        "Node",
+        (),
+        {
+            "label": "reviewer",
+            "prompt": "Wrap up.",
+            "effective_prompt": "[role: reviewer]\nSYSTEM PREAMBLE\nWrap up.",
+            "launch_message_id": second_launch.id,
+            "agent_role": "reviewer",
+            "effort": "",
+            "session_id": None,
+            "session_dir": transcript.directory,
+            "launch_prompts": {
+                first_launch.id: "Original task.",
+                second_launch.id: "Wrap up.",
+            },
+        },
+    )()
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms",
+        (),
+        {
+            "session_dir_of": lambda self, _job_id: transcript.directory,
+            "node": lambda self, _job_id: node,
+            "ancestors": lambda self, _job_id: [],
+            "job": lambda self, _job_id: job,
+        },
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        kinds = {entry.key: entry for entry in entries}
+        # Both launch rows are concise, neither leaks its preamble.
+        assert kinds[first_launch.id].kind == "prompt"
+        assert kinds[first_launch.id].text == "Original task."
+        assert kinds[second_launch.id].kind == "prompt"
+        assert kinds[second_launch.id].text == "Wrap up."
+        assert "SYSTEM PREAMBLE" not in " ".join(entry.text for entry in entries)
+        # No leftover synthetic head: the current launch matched in history.
+        assert not any(entry.key == "__prompt__" for entry in entries)
+        assert sum(entry.kind == "prompt" for entry in entries) == 2
+
+
+@pytest.mark.asyncio
 async def test_specialist_identity_cannot_replace_a_later_suffix_collision(tmp_path) -> None:
     transcript = Transcript(tmp_path / "child")
     effective = "Specialist guidance.\n\nDelegated parent instruction."
