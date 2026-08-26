@@ -23,6 +23,7 @@ import asyncio
 import pytest
 
 from local_operator.harness.jobs import AsyncJob, AsyncJobManager, JobStatus
+from local_operator.harness.types import Usage
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:
@@ -133,7 +134,8 @@ async def test_fresh_identical_launches_remain_distinct() -> None:
 
 @pytest.mark.asyncio
 async def test_repeated_resume_attempts_replace_one_logical_row_and_alias_ids() -> None:
-    manager = AsyncJobManager()
+    calls: list[str] = []
+    manager = AsyncJobManager(on_roster_change=lambda: calls.append("persist"))
     manager.restore([_row("old", logical_id="/tmp/child")])
 
     async def runner(job_id, signal, report_progress):
@@ -141,7 +143,9 @@ async def test_repeated_resume_attempts_replace_one_logical_row_and_alias_ids() 
 
     current = manager.register("task", "same", runner)
     await asyncio.sleep(0)
+    before_bind = len(calls)
     manager.bind_logical_identity(current, "/tmp/child")
+    assert len(calls) == before_bind + 1
     assert [job.id for job in manager.list()] == [current]
     assert manager.get("old") is manager.get(current)
     assert manager.get(current).attempt_aliases == ["old"]  # type: ignore[union-attr]
@@ -153,14 +157,39 @@ async def test_legacy_duplicate_snapshot_keeps_newest_and_all_aliases() -> None:
     manager = AsyncJobManager()
     manager.restore(
         [
-            _row("oldest", start_time=1.0, logical_id="/tmp/child"),
-            _row("middle", start_time=2.0, logical_id="/tmp/child"),
-            _row("newest", start_time=3.0, logical_id="/tmp/child"),
+            _row(
+                "oldest",
+                start_time=1.0,
+                logical_id="/tmp/child",
+                usage=Usage(input_tokens=4, provider="test", model_id="model"),
+                descendant_usage=[Usage(input_tokens=2, provider="test", model_id="descendant")],
+            ),
+            _row(
+                "middle",
+                start_time=2.0,
+                logical_id="/tmp/child",
+                usage=Usage(input_tokens=6, provider="test", model_id="model"),
+                descendant_usage=[Usage(input_tokens=3, provider="test", model_id="descendant")],
+            ),
+            _row(
+                "newest",
+                start_time=3.0,
+                logical_id="/tmp/child",
+                usage=Usage(input_tokens=8, provider="test", model_id="model"),
+                descendant_usage=[Usage(input_tokens=5, provider="test", model_id="descendant")],
+            ),
         ]
     )
     assert [job.id for job in manager.list()] == ["newest"]
     assert manager.get("oldest") is manager.get("newest")
     assert manager.get("middle") is manager.get("newest")
+    assert {item.model_id: item.input_tokens for item in manager.accounting_components()} == {
+        "model": 18,
+        "descendant": 10,
+    }
+    # Accounting is transferred to the settled accumulator once; repeated reads
+    # must not re-fold the retained winner and double legacy attempts.
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 28
 
 
 @pytest.mark.asyncio

@@ -482,6 +482,12 @@ class AsyncJobManager:
         for alias, target in list(self._aliases.items()):
             if target in aliases:
                 self._aliases[alias] = job_id
+        # Registration persists before the runner can attach under the default
+        # task factory. The identity fold is therefore a second durability
+        # boundary: without this notification, that provisional two-row roster
+        # remains the newest snapshot if the parent exits while the continuation
+        # is still running.
+        self._notify_roster_change()
 
     def restore(self, rows: list["AsyncJob"]) -> None:
         """Rehydrate task rows from a persisted roster at resume.
@@ -530,6 +536,17 @@ class AsyncJobManager:
                 current = next(item for item in restored if item.logical_id == logical_id)
                 current.attempt_aliases = list(
                     dict.fromkeys([*row.attempt_aliases, row.id, *current.attempt_aliases])
+                )
+                # Legacy snapshots represented each continuation as a separate
+                # row. The visible roster now keeps only the newest attempt, but
+                # every discarded attempt remains billable. Carry its direct
+                # and descendant components onto the winner exactly once so a
+                # later restore cannot make accounting depend on which row won.
+                current.descendant_usage.extend(
+                    [
+                        *_usage_components(row.usage, row.model_label),
+                        *(item.model_copy(deep=True) for item in row.descendant_usage),
+                    ]
                 )
                 continue
             if logical_id:

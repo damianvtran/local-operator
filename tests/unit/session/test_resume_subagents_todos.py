@@ -82,6 +82,22 @@ async def _todo(ctx, call_id: str, args: dict[str, object]) -> None:
     await execute_todo(call_id, args, None, None, ctx)
 
 
+class HangingStream:
+    """A provider turn that stays live until the owning job is cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        async def gen():
+            self.started.set()
+            assert signal is not None
+            await signal.wait()
+            yield StreamEndEvent(stop_reason="aborted")
+
+        return gen()
+
+
 class IdleStream:
     """A parent stream that answers every turn with a single text delta.
 
@@ -161,6 +177,46 @@ async def test_a_completed_subagent_is_restored_and_resumable(tmp_path, monkeypa
     assert resumed.jobs.get(job_id) is resumed.jobs.get(new_job_id)
     assert [item.job_id for item in resumed.subagent_comms.roster()] == [new_job_id]
     assert resumed.subagent_comms.session_dir_of(job_id) == session_dir
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_continuation_persists_one_logical_row_before_restart(tmp_path, monkeypatch):
+    """Binding is the durability boundary, not eventual child settlement."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    old_id = parent._launch_subagent(label="explore", prompt="do a thing")
+    await wait_for(lambda: _status(parent, old_id) == "completed")
+    await parent._persist_subagent_roster()
+    await parent.dispose()
+
+    hanging = HangingStream()
+    resumed = _session(tmp_path, hanging)
+    await resumed.async_init()
+    new_id, error = resumed.subagent_comms.resume(old_id, "keep going")
+    assert error is None and new_id is not None
+    await hanging.started.wait()
+    await wait_for(
+        lambda: resumed.jobs.get(new_id) is not None
+        and resumed.jobs.get(new_id).logical_id is not None  # type: ignore[union-attr]
+    )
+
+    def _binding_is_durable() -> bool:
+        details = resumed._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE) or {}
+        return [row.get("id") for row in details.get("jobs", [])] == [new_id] and [
+            row.get("job_id") for row in details.get("records", [])
+        ] == [new_id]
+
+    await wait_for(_binding_is_durable)
+    restarted = _session(tmp_path, IdleStream())
+    await restarted.async_init()
+    assert [row.id for row in restarted.jobs.list() if row.type == "task"] == [new_id]
+    assert restarted.jobs.get(old_id) is restarted.jobs.get(new_id)
+    assert [item.job_id for item in restarted.subagent_comms.roster()] == [new_id]
+
+    await restarted.dispose()
     await resumed.dispose()
 
 
