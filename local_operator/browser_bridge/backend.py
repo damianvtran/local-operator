@@ -13,11 +13,18 @@ import httpx
 
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
+    COMMAND_TIMEOUTS,
+    ORIGIN_PROMPT_WINDOW_S,
     ErrorCode,
     ErrorDetail,
     Request,
     Response,
 )
+
+#: Slack on top of the daemon's worst-case budget so scheduling jitter and the
+#: daemon's own response serialization never push a legitimate typed answer
+#: past the client's deadline.
+_CLIENT_TIMEOUT_MARGIN_S = 5.0
 
 ERROR_MESSAGES = {
     ErrorCode.EXTENSION_DISCONNECTED: (
@@ -100,6 +107,22 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
     return f"browser bridge error ({error.code.value}): {error.message}"
 
 
+def client_timeout(method: str) -> float:
+    """HTTP budget for one RPC: the daemon's worst case, plus margin.
+
+    The timeout chain (finding A3) is extension deny 60 s < daemon prompt
+    window 65 s < this. The daemon deliberately holds a command open for
+    base + ORIGIN_PROMPT_WINDOW_S while the extension shows its approval
+    popup, so the client must outlive that whole budget or it fabricates an
+    "unreachable" failure mid-prompt while the daemon is healthy and about to
+    deliver a typed origin_denied/result (the flat 35 s timeout this replaces
+    did exactly that; QA transcript 0ee4974ba84a). Unknown methods get the
+    most conservative budget — the daemon rejects them quickly anyway.
+    """
+    base = COMMAND_TIMEOUTS.get(method, max(COMMAND_TIMEOUTS.values()))
+    return base + ORIGIN_PROMPT_WINDOW_S + _CLIENT_TIMEOUT_MARGIN_S
+
+
 class BridgeClient:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root
@@ -113,7 +136,7 @@ class BridgeClient:
             )
         request_id = f"r-{secrets.token_hex(6)}"
         request = Request(id=request_id, method=method, params=params)
-        timeout = 35.0 if method in ("open", "goto") else 30.0
+        timeout = client_timeout(method)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 http_response = await client.post(
@@ -121,10 +144,25 @@ class BridgeClient:
                     headers={"X-Bridge-Key": current.session_key},
                     json=request.model_dump(mode="json"),
                 )
-        except (httpx.RequestError, asyncio.TimeoutError) as exc:
+        except httpx.ConnectError as exc:
+            # Nothing accepted the TCP connection: the daemon really is gone
+            # (or the state file is stale), so restart advice is correct here.
             raise BridgeUnreachable(
                 f"browser bridge unreachable: the daemon at 127.0.0.1:{current.port} is not "
                 "answering. Run 'lop browser status'; 'lop browser install' starts it."
+            ) from exc
+        except (httpx.RequestError, asyncio.TimeoutError) as exc:
+            # We DID reach the daemon; it just never answered within a budget
+            # that already covers every legitimate wait (base + prompt window +
+            # margin). Calling this "unreachable" sent a QA session (transcript
+            # 0ee4974ba84a) into an hour of restarting a healthy daemon while
+            # the extension popup sat waiting on the human, so name the likely
+            # cause instead of the transport.
+            raise BridgeUnreachable(
+                f"the browser bridge accepted '{method}' but did not answer within "
+                f"{timeout:.0f}s. The daemon is running; the command may be stuck in the "
+                "browser — e.g. waiting on a site-permission decision in the extension "
+                "popup. Ask the user to check the extension popup before restarting anything."
             ) from exc
         if http_response.status_code == 401:
             raise BridgeUnreachable(

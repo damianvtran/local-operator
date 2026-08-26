@@ -53,3 +53,12 @@ def test_generated_method_union_and_types_cover_new_methods() -> None:
     assert "'scroll'" in rendered and "'logs'" in rendered
     assert "interface LogEntry" in rendered
     assert "interface ScrollResult" in rendered
+
+
+def test_generated_ts_emits_origin_prompt_timeout() -> None:
+    # origins.ts imports this from protocol.gen.ts so the extension's 60 s
+    # deny, the daemon's 65 s prompt window, and the session client's HTTP
+    # timeout all derive from one Python constant and cannot drift (finding
+    # A3: the chain extension deny < daemon window < client timeout is what
+    # turns a mid-prompt wait into a typed answer instead of "unreachable").
+    assert "export const ORIGIN_PROMPT_TIMEOUT_MS = 60000 as const;" in gen_ts_render()
