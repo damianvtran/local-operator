@@ -4807,6 +4807,21 @@ class OperatorApp(App[None]):
         bottom until the two met. That is the "logo and screen coming together"
         effect; it was never an animation anyone declared.
         """
+        # There is no layout to reconcile once the screen stack is gone, and
+        # every pass below reaches `self.screen`, which RAISES on an empty
+        # stack rather than returning None. Guarded here because this is the
+        # single funnel all three passes go through.
+        #
+        # A teardown race reaches it, not a hypothetical one: the splash
+        # resizes ASYNCHRONOUSLY — `WelcomeView._poll` posts `BlockResized`
+        # when the model label lands, which is exactly when the session factory
+        # resolves — so a quit that beats the factory home leaves that message
+        # queued against a torn-down stack, and `ScreenStackError: No screens
+        # on stack` comes out of the message pump. A fast quit during boot is
+        # ordinary use, and the crash lands at the one moment nothing can
+        # report it usefully.
+        if not self.screen_stack:
+            return
         size = self.size if size is None else size
         # Card first: the shell's width decides how tall the shell measures, which
         # is a term in the composition below.
