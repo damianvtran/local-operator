@@ -173,7 +173,14 @@ export function SessionScreen({
 				   cheap hardening: request_ids are unique per push today, so
 				   an approval→ask flip at the same index can't collide in
 				   practice, but if the daemon ever reuses an id across kinds
-				   the card must not inherit the other kind's state. */
+				   the card must not inherit the other kind's state. Known
+				   trade-off, deferred from review round 1 (A2): for parallel
+				   approvals the remount also resets the `remember` checkbox
+				   on the next card. Harmless today — tui_handle's
+				   approval_answer ignores `remember` entirely — and no clean
+				   key shape fixes it without also breaking the ask remount;
+				   revisit only if the daemon ever wires `remember` through
+				   to a per-tool store. */
 				<PendingCard
 					key={`${projection.pending.request_id}:${projection.pending.kind}:${projection.pending.question_index}`}
 					pid={sessionId}
