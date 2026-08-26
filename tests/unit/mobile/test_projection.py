@@ -375,6 +375,39 @@ def test_subagent_metadata_projection_never_constructs_transcript(monkeypatch) -
     assert len(fold.projection.subagents) == 75
 
 
+def test_hydrated_subagent_details_never_place_transcript_on_the_wire() -> None:
+    """A subagent's transcript is fetched lazily, never carried in the fold.
+
+    Embedding even a tail-capped child transcript per subagent pushed the
+    full-repaint projection past the daemon's 1 MB control-frame limit, so every
+    push was dropped as oversized and the phone fell back to the stale durable
+    fold. ``set_subagent_hydrated_details`` must therefore land todos (small,
+    needed for the live working line) while leaving ``row.transcript`` empty; the
+    transcript is served on demand from the child-history endpoint instead.
+    """
+    from local_operator.mobile.types import TranscriptEntry
+
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("child", "child")
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    heavy = [
+        TranscriptEntry(id=f"row-{i}", kind="assistant", text="x" * 4096)
+        for i in range(PROJECTION_TRANSCRIPT_LIMIT * 2)
+    ]
+    assert fold.set_subagent_hydrated_details(
+        "child", heavy, [{"text": "verify", "status": "pending"}]
+    )
+    row = fold._subagents["child"]
+    assert row.transcript == []
+    assert row.todos and row.todos[0].items[0].text == "verify"
+    # The serialized wire frame must contain no subagent transcript entries.
+    wire = fold.projection.to_json()
+    assert all(sub["transcript"] == [] for sub in wire["subagents"])
+
+
 def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
     """The runner records terminal state before the manager stamps its row."""
 

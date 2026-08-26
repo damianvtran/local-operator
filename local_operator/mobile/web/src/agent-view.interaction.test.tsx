@@ -339,4 +339,64 @@ describe("AgentConversation", () => {
 		expect(screen.queryByText(/send commands from the root conversation/i)).toBeNull();
 		expect(screen.getByRole("button", { name: "Open parent to steer" })).toBeTruthy();
 	});
+
+	it("lazily fetches the child transcript when the wire carries none", async () => {
+		/* The projection no longer embeds subagent transcripts (they overran the
+		   daemon's 1 MB control-frame cap and wedged real-time updates). A modern
+		   detail arrives with an empty transcript, so the sheet must fetch its
+		   newest page from the child-history endpoint and render THAT. */
+		const { detail, projection } = fixture();
+		const empty = { ...detail, transcript: [], prompt: "", launch_message_id: "" };
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockResolvedValueOnce({
+			entries: [entry("fetched", "assistant", "Lazily loaded reply")],
+			has_more: false,
+		});
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={empty} />,
+		);
+		await waitFor(() =>
+			expect(getSubagentHistory).toHaveBeenCalledWith("root", "current", null, 80, expect.anything()),
+		);
+		await waitFor(() => expect(screen.getByText("Lazily loaded reply")).toBeTruthy());
+	});
+
+	it("does not fetch when a legacy daemon still inlines the transcript", () => {
+		/* Back-compat: a producer that still ships detail.transcript wins outright
+		   and the sheet must render it without an extra network round trip. */
+		const { detail, projection } = fixture();
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockClear();
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={detail} />,
+		);
+		expect(screen.getByText("One response")).toBeTruthy();
+		expect(getSubagentHistory).not.toHaveBeenCalled();
+	});
+
+	it("keeps a running child's sheet live by polling its transcript", async () => {
+		/* status===running means the sheet must re-pull the transcript on an
+		   interval so an open sheet stays real-time; a settled child fetches once. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			const running = { ...detail, status: "running" as const, transcript: [], prompt: "", launch_message_id: "" };
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockResolvedValue({ entries: [], has_more: false });
+			getSubagentHistory.mockClear();
+			const { unmount } = render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(getSubagentHistory).toHaveBeenCalledTimes(1));
+			await vi.advanceTimersByTimeAsync(1600);
+			expect(getSubagentHistory.mock.calls.length).toBeGreaterThanOrEqual(2);
+			/* Unmount must cancel the interval: no further fetches after teardown. */
+			const afterUnmount = getSubagentHistory.mock.calls.length;
+			unmount();
+			await vi.advanceTimersByTimeAsync(3200);
+			expect(getSubagentHistory.mock.calls.length).toBe(afterUnmount);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

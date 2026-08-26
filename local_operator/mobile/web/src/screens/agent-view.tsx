@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { getSubagentDetail } from "../api";
+import { getSubagentDetail, getSubagentHistory } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
 import {
 	AGENT_GLYPH,
@@ -247,6 +247,84 @@ export function AgentLoading({ sessionId, connected }: { sessionId: string; conn
 	);
 }
 
+/** The tail of a child transcript the sheet paints without scrolling. Matches
+ * the daemon's PROJECTION_TRANSCRIPT_LIMIT so the initial fetch is the same
+ * window the projection used to inline, before it was removed from the wire. */
+const SUBAGENT_TRANSCRIPT_TAIL = 80;
+/** How often an OPEN sheet for a still-running child re-pulls its transcript.
+ * The list projection keeps status/progress/todos live over SSE with no poll;
+ * only the full transcript is fetched, and only while the child is running and
+ * its sheet is on screen. 1.5s is frequent enough to read as real-time without
+ * turning one open sheet into a tight request loop against the child's file. */
+const SUBAGENT_TRANSCRIPT_POLL_MS = 1500;
+
+/** Lazily hydrate a child's transcript for the open sheet.
+ *
+ * Subagent transcripts are no longer carried in the projection wire (they blew
+ * past the daemon's 1 MB control-frame cap and wedged real-time updates for the
+ * whole session — see ``ProjectionFold.set_subagent_hydrated_details``). So when
+ * a modern daemon sends an empty ``detail.transcript``, the sheet fetches the
+ * newest page from the lineage-checked history endpoint instead, and — while the
+ * child is still running — re-fetches on a modest interval so the open sheet
+ * stays live. A legacy daemon that still inlines ``detail.transcript`` is honored
+ * as-is (no fetch), which also keeps the component's unit tests transcript-driven.
+ *
+ * Older pages are still paged in by ``<Transcript>`` itself via the same
+ * endpoint as the user scrolls up; this hook only owns the newest tail.
+ */
+function useLazySubagentTranscript(
+	sessionId: string,
+	jobId: string,
+	detail: SubagentDetail,
+): TranscriptEntry[] {
+	// A daemon that still inlines the transcript wins outright: never fetch. This
+	// gates the fetch effect below (in its dep list) so legacy payloads render
+	// straight from the wire with no network round trip.
+	const inlined = detail.transcript.length > 0;
+	const [fetched, setFetched] = useState<TranscriptEntry[]>([]);
+	const running = detail.status === "running";
+	useEffect(() => {
+		// Reset when the addressed child changes so a stale page never flashes
+		// under a newly-opened sibling before its own fetch lands.
+		setFetched([]);
+	}, [sessionId, jobId]);
+	useEffect(() => {
+		if (inlined) return;
+		let alive = true;
+		let controller: AbortController | null = null;
+		const pull = async () => {
+			controller?.abort();
+			controller = new AbortController();
+			try {
+				const { entries } = await getSubagentHistory(
+					sessionId,
+					jobId,
+					null,
+					SUBAGENT_TRANSCRIPT_TAIL,
+					controller.signal,
+				);
+				if (alive) setFetched(entries);
+			} catch {
+				/* A dropped page is not fatal: the next poll (or projection
+				   frame remount) retries, and the working line stays live from
+				   the SSE projection regardless. */
+			}
+		};
+		void pull();
+		// Only an actively-running child needs the poll; a settled child's
+		// transcript is final, so one fetch suffices and the interval is skipped.
+		const timer = running
+			? window.setInterval(() => void pull(), SUBAGENT_TRANSCRIPT_POLL_MS)
+			: undefined;
+		return () => {
+			alive = false;
+			controller?.abort();
+			if (timer !== undefined) window.clearInterval(timer);
+		};
+	}, [sessionId, jobId, inlined, running]);
+	return inlined ? detail.transcript : fetched;
+}
+
 /** Keep loading/cache ownership outside the visual component so its complete
  * state can be exercised independently without introducing a second route. */
 export function AgentConversation({
@@ -270,7 +348,15 @@ export function AgentConversation({
 	const parentPath = detail.parent_job_id
 		? agentPath(sessionId, detail.parent_job_id)
 		: rootPath;
-	const entries = useMemo(() => agentConversationEntries(detail), [detail]);
+	const transcript = useLazySubagentTranscript(sessionId, jobId, detail);
+	// ``agentConversationEntries`` reads ``detail.transcript``; feed it the
+	// lazily-fetched tail when the wire no longer carries one. Identity-stable
+	// via useMemo so the transcript array only rebuilds when its inputs change.
+	const detailForRender = useMemo(
+		() => (detail.transcript.length > 0 ? detail : { ...detail, transcript }),
+		[detail, transcript],
+	);
+	const entries = useMemo(() => agentConversationEntries(detailForRender), [detailForRender]);
 	return (
 		<>
 			<AgentHeader

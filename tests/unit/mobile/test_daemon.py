@@ -142,6 +142,63 @@ async def test_registrant_publishes_and_daemon_adopts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dial_skips_oversized_frame_and_delivers_the_next() -> None:
+    """An oversized control frame must degrade to "drop this one frame", not
+    wedge the session on the durable fold forever.
+
+    ``StreamReader.readline`` DRAINS an over-limit line (clears the buffer)
+    before raising ``ValueError``, so ``_dial``'s ``except ValueError: continue``
+    already recovers — this pins that contract. The real guard against ever
+    reaching this path is fix #1 (subagent transcripts no longer ride the wire),
+    but a single future oversized frame must still leave the connection usable so
+    the NEXT normal projection lands and the phone keeps updating live. A
+    regression that reintroduced huge frames, OR a swap to ``readuntil`` (which
+    would NOT drain and would re-raise on the same bytes forever), fails here.
+    """
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Consume the daemon's auth line, then push one frame past the 1 MB
+        # limit followed by a valid projection the daemon must still adopt.
+        await reader.readline()
+        writer.write(b"{" + b"x" * (2 << 20) + b"}\n")
+        good = {
+            "op": "projection",
+            "data": {"session_id": "s-oversize", "pid": 4321, "conversation_name": "recovered"},
+        }
+        writer.write(json.dumps(good).encode() + b"\n")
+        await writer.drain()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    record = SessionRecord(
+        pid=4321,
+        kind="tui",
+        session_id="s-oversize",
+        conversation_name="recovered",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=port,
+        control_key="secret",
+    )
+    daemon = MobileDaemon(port=0, password="pw")
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    dial = asyncio.ensure_future(_dial(daemon, entry))
+    try:
+        for _ in range(50):
+            if entry.projection is not None:
+                break
+            await asyncio.sleep(0.05)
+        # The oversized frame was skipped; the following normal frame arrived.
+        assert entry.projection is not None
+        assert entry.projection.conversation_name == "recovered"
+    finally:
+        dial.cancel()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_wrong_key_is_rejected_silently() -> None:
     handle = FakeHandle()
     registrant = Registrant(handle, kind="tui")
@@ -781,13 +838,16 @@ def test_durable_subagent_routes_reconstruct_after_daemon_restart(tmp_path, monk
     detail = client.get("/api/sessions/root-session/agents/child-job")
     assert detail.status_code == 200
     assert detail.json()["prompt"] == "inspect durable state"
-    assert [row["id"] for row in detail.json()["transcript"]] == [
-        "child-oldest",
-        "child-newest",
-    ]
+    # The detail payload no longer embeds the child transcript — it is fetched
+    # lazily from the /history route below so a full repaint never carries an
+    # unbounded child transcript past the daemon's 1 MB control-frame limit.
+    assert detail.json()["transcript"] == []
     history = client.get("/api/sessions/root-session/agents/child-job/history", params={"limit": 1})
     assert history.status_code == 200
     assert [row["id"] for row in history.json()["entries"]] == ["child-newest"]
+    # The full child transcript is still reachable through paging.
+    full = client.get("/api/sessions/root-session/agents/child-job/history", params={"limit": 10})
+    assert [row["id"] for row in full.json()["entries"]] == ["child-oldest", "child-newest"]
 
     restarted = MobileDaemon(port=0, password="pw123")
     restarted_client = TestClient(build_app(restarted), follow_redirects=False)

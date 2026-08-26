@@ -252,10 +252,7 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 
 def _durable_projection(session_id: str) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk."""
-    from local_operator.mobile.projection import (
-        ProjectionFold,
-        fold_messages_to_entries,
-    )
+    from local_operator.mobile.projection import ProjectionFold
     from local_operator.resume import stored_session_title
     from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
     from local_operator.session.transcript import Transcript
@@ -330,11 +327,14 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             ancestor_ids=ancestor_ids,
             child_ids=list(by_parent.get(job_id, [])),
             peer_ids=peers,
-            transcript=(
-                fold._cap_tail(fold_messages_to_entries(child_transcript.build_llm_history()))
-                if child_transcript is not None
-                else []
-            ),
+            # A child transcript is NEVER carried on the wire — see
+            # ``ProjectionFold.set_subagent_hydrated_details`` for the full
+            # rationale. The daemon serves it lazily from disk over
+            # ``/api/sessions/{sid}/agents/{job_id}/history`` (this durable row's
+            # ``session_id`` is the child dir the endpoint reads), so even a
+            # reconstructed roster stays small. ``child_transcript`` is still
+            # read above for the durable todo snapshot fallback.
+            transcript=[],
             todos=fold._todo_phases(raw_todos),
         )
         projection.subagents.append(row)
@@ -372,9 +372,23 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
             try:
                 line = await reader.readline()
             except ValueError:
-                # A frame longer than the stream limit is not a reason to
-                # drop the session — a transcript push can outgrow 64 KB.
-                # Skip the oversized line and keep the connection.
+                # A frame longer than the 1 MB stream limit is skipped, not a
+                # reason to drop the session. ``StreamReader.readline`` already
+                # DRAINS the oversized line on LimitOverrunError (it removes the
+                # complete line through the separator, or clears the buffer when
+                # no separator is in range) BEFORE raising — unlike
+                # ``readuntil``, which would leave the bytes in place and make
+                # this loop re-raise on the same data forever. So ``continue``
+                # here degrades to "drop this one frame, keep the connection,
+                # deliver the next" without any manual read-and-discard. The
+                # real guard against ever reaching this path is keeping frames
+                # small: subagent transcripts are no longer embedded in the
+                # projection (see ``ProjectionFold.set_subagent_hydrated_details``
+                # and ``_durable_projection``) and are fetched lazily instead. A
+                # sustained flood of this warning means a producer regressed and
+                # is pushing oversized frames again — every skipped frame leaves
+                # ``entry.projection`` stale, so the phone falls back to the
+                # durable disk fold and stops updating live.
                 logger.warning("mobile daemon: oversized control frame from pid %s", record.pid)
                 continue
             if not line:

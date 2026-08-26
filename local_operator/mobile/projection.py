@@ -806,10 +806,19 @@ class ProjectionFold:
         row = self._subagents.get(job_id)
         if row is None:
             return False
-        # Cap the worker-hydrated history to the same render tail #298 applies
-        # on the synchronous path, so the full-screen conversation keeps its
-        # pinned opening user message without shipping an unbounded transcript.
-        row.transcript = self._cap_tail(transcript)
+        # A subagent transcript is NEVER placed on the wire. The projection is a
+        # full repaint pushed to the daemon on every folded event (~30x/s during
+        # a turn), and the daemon's control-socket reader caps a single frame at
+        # 1 MB (``daemon._dial`` ``limit=1 << 20``). Embedding even a tail-capped
+        # child transcript per subagent — multiplied across a deep roster — blew
+        # past that cap, so every push was skipped as an oversized frame and the
+        # phone silently fell back to the stale durable disk fold (the real-time
+        # regression this fixes). Todos stay on the wire (small, and needed for
+        # the live working line); the transcript is fetched lazily on demand from
+        # ``/api/sessions/{sid}/agents/{job_id}/history``, which reads the child's
+        # own on-disk transcript. ``transcript`` is intentionally left empty here;
+        # the argument is kept for signature/call-site compatibility.
+        _ = transcript  # deliberately not projected — see comment above
         row.todos = self._todo_phases(todos)
         self._sync_subagents()
         self._bump()
