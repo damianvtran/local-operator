@@ -15,9 +15,10 @@
 // content between reads — the same courtesy a PageDown key gives.
 export const PAGE_OVERLAP_PX = 80;
 
-/** One viewport down (minus overlap): the default "read more" gesture. */
+/** One viewport down (minus overlap): the default "read more" gesture. It is
+ * exactly the "down" direction, delegated so the two stay one expression. */
 export function defaultScrollExpression(): string {
-  return `window.scrollBy({left: 0, top: window.innerHeight - ${PAGE_OVERLAP_PX}, behavior: 'instant'})`;
+  return scrollExpressionFor("down");
 }
 
 /** Explicit pixel deltas; callers must pass finite numbers, never page input. */
@@ -28,7 +29,7 @@ export function deltaScrollExpression(dx: number, dy: number): string {
 /** Body for Runtime.callFunctionOn against a resolved node: center the element
  * so it is usable after the scroll rather than jammed against a viewport edge. */
 export const SCROLL_INTO_VIEW_FN =
-  `function(){ this.scrollIntoView({block:'center', inline:'center', behavior:'instant'}); }`;
+  `function(){ this.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); }`;
 
 /** Fixed expression per direction keyword; unknown directions are a no-op. */
 export function scrollExpressionFor(direction: string): string {

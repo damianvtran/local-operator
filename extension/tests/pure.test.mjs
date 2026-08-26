@@ -50,7 +50,7 @@ test("scroll expressions force instant behavior in every mode", async () => {
     }
     assert.match(defaultScrollExpression(), /behavior: 'instant'/);
     assert.match(deltaScrollExpression(10, -20), /left: 10, top: -20, behavior: 'instant'/);
-    assert.match(SCROLL_INTO_VIEW_FN, /behavior:'instant'/);
+    assert.match(SCROLL_INTO_VIEW_FN, /behavior: 'instant'/);
     // Unknown direction stays a no-op, never interpolated page-bound code.
     assert.equal(scrollExpressionFor("sideways"), "void 0");
   } finally { await module.close(); }
