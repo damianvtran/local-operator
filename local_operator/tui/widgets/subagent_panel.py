@@ -115,6 +115,30 @@ LABEL_FLOOR = 12
 #: beside the label, not the label itself.
 ROLE_CEILING = 14
 
+#: Maximum cells the row gives the two live numeric readings. Both are
+#: explicitly truncated to these budgets before they paint, and the role-rung
+#: gate reserves the SAME maxima whether a reading currently exists or not.
+#: That coupling is load-bearing: usage/context/cost arrive live and their raw
+#: formatters interpolate uncapped magnitudes, so measuring the current strings
+#: made the roster-wide role column appear/disappear at a fixed width after the
+#: first usage report or as spend grew (agent review round 3, R5).
+#:
+#: Context's normal full form is ``24.1%/200k`` (11 cells); fourteen preserves
+#: even ``999.9%/1000M`` whole and visibly ellipsises pathological magnitudes.
+#: Cost's ordinary largest precision is ``$999.99`` (7); ten preserves nine
+#: digits of useful magnitude before the ellipsis. The exact values matter less
+#: than sharing them between paint and acceptance: no live string may consume
+#: cells the width-only gate did not reserve.
+CONTEXT_CEILING = 14
+COST_CEILING = 10
+
+#: :func:`format_duration` is bounded at six cells by construction (``100d+``
+#: is the terminal spelling), independently tested in ``test_status_line``.
+#: Name the contract here because the role gate reserves this maximum rather
+#: than the current elapsed spelling, so a clock transition cannot toggle the
+#: whole column (R5).
+CLOCK_CEILING = 6
+
 #: Width the ladder assumes before the first layout has measured a row. Wide
 #: rather than narrow on purpose: an over-generous guess degrades to Rich's
 #: own ellipsis at the row's real edge, while an under-generous one would shed
@@ -434,10 +458,10 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
 #:    only rung whose acceptance is CONDITIONAL: :func:`_row_rung` rejects it
 #:    whenever keeping the shared column would drive ANY row's activity below
 #:    :data:`ACTIVITY_FLOOR`, including a roleless row that reserves blank
-#:    cells for alignment. The threshold is a WIDTH CAPACITY, not the current
-#:    length of a child-authored progress sentence, so live activity changes
-#:    cannot make the whole column flicker in and out (design review round 3,
-#:    D8).
+#:    cells for alignment. The threshold is a WIDTH CAPACITY whose other inputs
+#:    are explicit maxima, not current activity/elapsed/context/cost strings,
+#:    so no live update can make the whole column flicker in and out (design
+#:    review round 3 D8, agent review round 3 R5).
 #: 1. COST sheds next — it is monotonic and slow, and nothing an operator
 #:    acts on inside a second.
 #: 2. CONTEXT then SHORTENS before it drops: ``5%`` keeps the segment for two
@@ -513,18 +537,17 @@ def _row_rung(
 
     The ROLE rung is additionally rejected when keeping the shared role COLUMN
     would leave ANY row fewer than :data:`ACTIVITY_FLOOR` cells for activity
-    (D3/R4/D8). The column is roster-wide, so this capacity check is symmetric:
-    a roleless row still reserves the blank column to preserve D1's alignment.
+    (D3/R4/D8/R5). The column is roster-wide, so this capacity check is
+    symmetric: a roleless row still reserves the blank column for D1 alignment.
 
-    Crucially the veto compares CAPACITY, not the current activity's displayed
-    length. The earlier symmetric guard compared against the full unbounded,
-    child-authored sentence; one chatty row therefore moved the role column's
-    visibility floor from width 88 to 127 and made the whole column flicker at
-    a fixed width as that live string changed (design review round 3, D8).
-    Activities already truncate everywhere else. A stable column is the more
-    valuable list-wide invariant, so the role survives while every row can pay
-    the established floor and sheds only when width, not prose, makes that
-    floor unaffordable.
+    The veto consumes only WIDTH and bounded inputs. It does not measure the
+    current activity (D8), elapsed spelling, or live context/cost strings (R5):
+    all three change without a resize, and raw numeric formatters can grow with
+    magnitude. Instead it reserves ``CLOCK_CEILING`` and the maximum cells of
+    every numeric segment this rung can paint. `_lay_out` truncates those
+    segments to the same ceilings, so acceptance and rendering cannot diverge.
+    The result may conservatively shed the role earlier than today's short
+    values require, but it cannot flicker as stats arrive or counters grow.
     """
     for index in range(len(_RUNGS)):
         label, role, context, cost, activity = _lay_out(
@@ -539,15 +562,22 @@ def _row_rung(
         )
         numbers = sum(len(STATS_SEAM) + cell_len(part) for part in (context, cost) if part)
         if role_column and _RUNGS[index].keep_role:
-            # The progress sentence — including whether one happens to be
-            # present this tick — is deliberately NOT consulted here: it
-            # changes live and is unbounded, so it cannot be allowed to toggle
-            # a roster-wide column. Measure only the stable chrome/numeric
-            # fields and reserve the established activity floor on EVERY row.
-            # This applies to roleless rows too, which pay the shared blank
-            # column for D1 alignment (R4). The result is a function of width
-            # and roster identity/stats, never one child's current prose (D8).
-            activity_room = width - head - numbers - ACTIVITY_GAP
+            # Reserve MAXIMUM rendered widths, not today's strings. Elapsed,
+            # context and cost all update live; using ``head``/``numbers`` here
+            # let the first usage report or a magnitude transition toggle the
+            # whole column without a resize (R5). The painter applies the same
+            # ceilings in `_lay_out`, making this conservative but truthful.
+            fixed_head = (
+                _CHROME_CELLS
+                + max(cell_len(label), column)
+                + CLOCK_CEILING
+                + _glyph_cells(facts)
+                + _role_cells(index, role, role_column)
+            )
+            fixed_numbers = len(STATS_SEAM) + CONTEXT_CEILING
+            if _RUNGS[index].keep_cost:
+                fixed_numbers += len(STATS_SEAM) + COST_CEILING
+            activity_room = width - fixed_head - fixed_numbers - ACTIVITY_GAP
             if activity_room < ACTIVITY_FLOOR:
                 continue
         if not facts.activity:
@@ -646,7 +676,10 @@ def _lay_out(
     context = (
         ""
         if spelling == "none"
-        else context_spelling(stats.context_tokens, stats.context_window, form=spelling)
+        else truncate_cells(
+            context_spelling(stats.context_tokens, stats.context_window, form=spelling),
+            CONTEXT_CEILING,
+        )
     )
     # Bounded before it is measured, so one verbose specialist cannot make the
     # shared column below 34 cells wide and evict its peers' roles (D2).
@@ -654,7 +687,7 @@ def _lay_out(
     if not keep_cost:
         cost = ""
     elif stats.cost is not None:
-        cost = format_cost(stats.cost)
+        cost = truncate_cells(format_cost(stats.cost), COST_CEILING)
     else:
         # The band's own vocabulary for "billed, and nobody can price it".
         # Safe on a row now that the whole column sheds at one rung: at a rung

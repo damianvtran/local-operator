@@ -631,6 +631,89 @@ def test_the_role_column_is_stable_when_live_activity_text_changes() -> None:
         ), f"live progress toggled the role column at {width}: {short_rows!r} vs {long_rows!r}"
 
 
+def test_the_role_column_is_stable_when_all_live_stats_change() -> None:
+    """Elapsed, usage/context and cost cannot toggle a roster-wide column.
+
+    D8 removed activity prose from the width decision, but R5 found the same
+    class one level deeper: the first usage report, elapsed-width transitions,
+    and uncapped numeric magnitudes still changed ``head``/``numbers`` and
+    therefore role visibility at a fixed width. The gate now reserves bounded
+    maxima and the painter truncates to those exact caps. This pair deliberately
+    spans absent→huge values for ALL THREE live inputs and must discriminate
+    against c4c39b0d (agent review round 3, R5).
+    """
+
+    def roster(*, reported: bool) -> list[Job]:
+        usage = (
+            Usage(
+                input_tokens=10**30,
+                output_tokens=10**30,
+                context_tokens=10**30,
+                usd_cost=10**30,
+            )
+            if reported
+            else None
+        )
+        age = 86_400 * 100_000 if reported else 1
+        jobs = [
+            Job("plain", "sweep-notes", progress="collecting release notes", age=age, usage=usage),
+            Job(
+                "review",
+                "review-303",
+                progress="auditing merged MRs",
+                age=age,
+                usage=usage,
+                agent_role="reviewer",
+            ),
+            Job(
+                "ux",
+                "ux-303",
+                progress="walking the flow",
+                age=age,
+                usage=usage,
+                agent_role="ux-reviewer",
+            ),
+        ]
+        for job in jobs:
+            if reported:
+                # One token of capacity against an enormous live context makes
+                # the percentage formatter's raw output unbounded; `usd_cost`
+                # does the same through the authoritative receipt path.
+                job.context_window = 1
+        return jobs
+
+    before = roster(reported=False)
+    after = roster(reported=True)
+    for width in range(200, 11, -1):
+        before_rows = _column(before, width)
+        after_rows = _column(after, width)
+        assert ("reviewer" in before_rows[1]) == ("reviewer" in after_rows[1]), (
+            f"live elapsed/usage/cost toggled the role column at {width}: "
+            f"{before_rows!r} vs {after_rows!r}"
+        )
+
+    # The acceptance budget and painter are coupled. Import the new budgets
+    # locally so the fixed-width visibility assertion above can be applied to
+    # the previous head as a genuine behavioural discriminator rather than
+    # failing collection merely because those names did not exist there.
+    from local_operator.tui.widgets.subagent_panel import CONTEXT_CEILING, COST_CEILING
+
+    measured = [
+        (
+            row_facts(job, fallback_id=job.id, current=False),
+            job_stats(job, default_model_label=PARENT_MODEL),
+        )
+        for job in after
+    ]
+    rung, column, clock, role_column = panel_layout(measured, 200)
+    laid_out = [
+        _lay_out(facts, stats, 200, rung, column, clock, role_column) for facts, stats in measured
+    ]
+    assert any("…" in context or "…" in cost for _, _, context, cost, _ in laid_out)
+    assert all(cell_len(context) <= CONTEXT_CEILING for _, _, context, _, _ in laid_out)
+    assert all(cell_len(cost) <= COST_CEILING for _, _, _, cost, _ in laid_out)
+
+
 def test_the_shared_role_column_never_pushes_activity_below_its_floor() -> None:
     """R4 remains symmetric, but its bounded guarantee is stated truthfully.
 
