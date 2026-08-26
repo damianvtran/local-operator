@@ -6,6 +6,7 @@ sets LOCAL_OPERATOR_CONFIG_DIR to a tmp path)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -139,6 +140,80 @@ async def test_registrant_publishes_and_daemon_adopts() -> None:
             dial.cancel()
     finally:
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_dial_skips_oversized_frame_and_delivers_the_next() -> None:
+    """An oversized control frame must degrade to "drop this one frame", not
+    wedge the session on the durable fold forever.
+
+    ``StreamReader.readline`` DRAINS an over-limit line (clears the buffer)
+    before raising ``ValueError``, so ``_dial``'s ``except ValueError: continue``
+    already recovers — this pins that contract. The real guard against ever
+    reaching this path is fix #1 (subagent transcripts no longer ride the wire),
+    but a single future oversized frame must still leave the connection usable so
+    the NEXT normal projection lands and the phone keeps updating live. A
+    regression that reintroduced huge frames, OR a swap to ``readuntil`` (which
+    would NOT drain and would re-raise on the same bytes forever), fails here.
+    """
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Consume the daemon's auth line, then push one frame past the 1 MB
+        # limit followed by a valid projection the daemon must still adopt.
+        await reader.readline()
+        writer.write(b"{" + b"x" * (2 << 20) + b"}\n")
+        good = {
+            "op": "projection",
+            "data": {"session_id": "s-oversize", "pid": 4321, "conversation_name": "recovered"},
+        }
+        writer.write(json.dumps(good).encode() + b"\n")
+        await writer.drain()
+        # Close the fixture's side explicitly: the daemon never closes
+        # mid-stream, and a writer left open keeps the handler's socket
+        # transport alive after the test body finishes — Python 3.12's
+        # teardown then waits on that leaked transport forever (3.13+
+        # reap it, which is why only the 3.12 CI job hung).
+        writer.close()
+        with contextlib.suppress(ConnectionResetError):
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    record = SessionRecord(
+        pid=4321,
+        kind="tui",
+        session_id="s-oversize",
+        conversation_name="recovered",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=port,
+        control_key="secret",
+    )
+    daemon = MobileDaemon(port=0, password="pw")
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    dial = asyncio.ensure_future(_dial(daemon, entry))
+    try:
+        # Poll is bounded (50 x 0.05 s = 2.5 s), so a functional regression
+        # here fails the asserts instead of hanging the suite; the historical
+        # 3.12 hang was teardown, below, not this wait.
+        for _ in range(50):
+            if entry.projection is not None:
+                break
+            await asyncio.sleep(0.05)
+        # The oversized frame was skipped; the following normal frame arrived.
+        assert entry.projection is not None
+        assert entry.projection.conversation_name == "recovered"
+    finally:
+        dial.cancel()
+        # A cancelled task that is never awaited leaves the dial's reader/
+        # socket transport un-reaped; Python 3.12's asyncio teardown waits on
+        # it forever (3.13+ tolerate the leak). Await the cancellation to
+        # completion before tearing the server down.
+        with contextlib.suppress(asyncio.CancelledError):
+            await dial
+        server.close()
+        await server.wait_closed()
 
 
 @pytest.mark.asyncio
@@ -781,13 +856,16 @@ def test_durable_subagent_routes_reconstruct_after_daemon_restart(tmp_path, monk
     detail = client.get("/api/sessions/root-session/agents/child-job")
     assert detail.status_code == 200
     assert detail.json()["prompt"] == "inspect durable state"
-    assert [row["id"] for row in detail.json()["transcript"]] == [
-        "child-oldest",
-        "child-newest",
-    ]
+    # The detail payload no longer embeds the child transcript — it is fetched
+    # lazily from the /history route below so a full repaint never carries an
+    # unbounded child transcript past the daemon's 1 MB control-frame limit.
+    assert detail.json()["transcript"] == []
     history = client.get("/api/sessions/root-session/agents/child-job/history", params={"limit": 1})
     assert history.status_code == 200
     assert [row["id"] for row in history.json()["entries"]] == ["child-newest"]
+    # The full child transcript is still reachable through paging.
+    full = client.get("/api/sessions/root-session/agents/child-job/history", params={"limit": 10})
+    assert [row["id"] for row in full.json()["entries"]] == ["child-oldest", "child-newest"]
 
     restarted = MobileDaemon(port=0, password="pw123")
     restarted_client = TestClient(build_app(restarted), follow_redirects=False)
@@ -800,6 +878,117 @@ def test_durable_subagent_routes_reconstruct_after_daemon_restart(tmp_path, monk
         ).json()["entries"][0]["id"]
         == "child-oldest"
     )
+
+
+def test_durable_fold_bounds_prompt_and_outcome_on_the_wire(tmp_path, monkeypatch) -> None:
+    """A durable rebuild must not reintroduce the unbounded frame the live caps
+    prevent. ``_durable_projection`` rebuilds a roster from the persisted record,
+    whose prompt/result/error fields are unbounded on disk; the wire row must
+    compact them the same way the live fold does, or a restart/reconnect of a
+    deep-roster session re-wedges with the identical oversized-frame symptom.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.mobile.daemon import _durable_projection
+    from local_operator.mobile.projection import (
+        SUBAGENT_OUTCOME_CHARS,
+        SUBAGENT_PROMPT_PREVIEW_CHARS,
+    )
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "completed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "prompt": "P" * 50_000,
+                        "session_dir": str(child_dir),
+                        "outcome": "completed",
+                        "result_text": "R" * 50_000,
+                    }
+                ],
+            },
+        )
+    )
+
+    projection = _durable_projection("root-session")
+    assert projection is not None
+    row = projection.subagents[0]
+    assert len(row.prompt) <= SUBAGENT_PROMPT_PREVIEW_CHARS
+    assert len(row.result_text) <= SUBAGENT_OUTCOME_CHARS
+
+
+def test_durable_fold_keeps_failed_child_error_text_generous(tmp_path, monkeypatch) -> None:
+    """A FAILED child's ``error_text`` must survive to the phone in full.
+
+    ``error_text`` is ``str(exc)`` from the parent runner and is NEVER written
+    into the child transcript, so the phone's lazy /history fetch cannot recover
+    it: the durable wire value is the only copy the Outcome panel can render.
+    Capping it at the 200-char ``result_text`` preview would truncate the
+    failure tail everywhere on the phone with no recovery path (F1), so the
+    durable fold must carry it generously (``SUBAGENT_ERROR_CHARS``). This pins
+    that the error tail is not clipped to the result preview length, and that a
+    multi-line trace keeps its line breaks.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.mobile.daemon import _durable_projection
+    from local_operator.mobile.projection import (
+        SUBAGENT_ERROR_CHARS,
+        SUBAGENT_OUTCOME_CHARS,
+    )
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    # A realistic multi-line provider failure well past the 200-char result cap.
+    error = "Traceback (most recent call last):\n" + "\n".join(
+        f"  frame {i}: boom in module_{i}" for i in range(60)
+    )
+    assert len(error) > SUBAGENT_OUTCOME_CHARS
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "failed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "session_dir": str(child_dir),
+                        "outcome": "failed",
+                        "error_text": error,
+                    }
+                ],
+            },
+        )
+    )
+
+    projection = _durable_projection("root-session")
+    assert projection is not None
+    row = projection.subagents[0]
+    assert row.status == "failed"
+    # NOT truncated to the 200-char result preview: the whole failure tail rides.
+    assert len(row.error_text) > SUBAGENT_OUTCOME_CHARS
+    assert len(row.error_text) <= SUBAGENT_ERROR_CHARS
+    assert row.error_text.count("\n") > 1  # multi-line structure preserved
+    assert "frame 59" in row.error_text  # the tail survives, not just the head
 
 
 def test_http_command_requires_auth_and_rejects_empty_steer_before_dispatch() -> None:

@@ -73,6 +73,40 @@ TOOL_OUTPUT_TAIL_CHARS = 8_000
 #: Same bound for the args side of an expanded tool row.
 TOOL_ARGS_CHARS = 4_000
 
+#: How much of a subagent's launch prompt the roster row carries on the wire.
+#: The list projection is a full repaint pushed ~30x/s and every subagent row
+#: rides in it, so an uncapped prompt is a per-repaint tax that scales with
+#: roster depth: a power-user session at 80+ subagents put ~385 KB of prompt
+#: text into a single frame, pushing it toward the daemon's 1 MB control-frame
+#: cap (``daemon._dial`` ``limit=1 << 20``) and risking the same wedge that
+#: keeping transcripts off the wire fixed. The row only needs a preview for the
+#: sheet's "Parent request" line; the FULL prompt is reachable through the child
+#: transcript's launch message (resolved by ``launch_message_id``), which the
+#: phone fetches lazily from the /history endpoint. This bound is generous
+#: enough to read as the task while staying bounded per row.
+SUBAGENT_PROMPT_PREVIEW_CHARS = 1_000
+
+#: Preview bound for a settled child's ``result_text`` on the wire, shared by
+#: the live ``SubagentEndEvent`` path, the ``set_subagent_details`` lifecycle
+#: merge, and the durable rebuild so no path carries unbounded result text. A
+#: 200-char preview is safe here because ``result_text`` is the child's own last
+#: assistant message: it appears verbatim in the child transcript, which the
+#: phone now fetches in full lazily from
+#: ``/api/sessions/{sid}/agents/{job_id}/history`` — so truncating it on the
+#: wire loses nothing the reader cannot recover by opening the conversation.
+SUBAGENT_OUTCOME_CHARS = 200
+
+#: Failure-tail bound for a settled child's ``error_text`` on the wire. Unlike
+#: ``result_text``, ``error_text`` is ``str(exc)`` raised in the PARENT runner
+#: (``session.subagent``) and is NEVER appended to the child transcript, so the
+#: lazy /history fetch cannot recover it — the wire value is the ONLY copy the
+#: phone's Outcome panel ever renders. It is therefore carried generously,
+#: matching ``session._ROSTER_ERROR_CAP``, so a provider error or stack-trace
+#: tail survives to the surface an operator opens precisely to see "what went
+#: wrong". This costs almost nothing on frame size: 2000 chars across the worst
+#: ~81-subagent roster is ~150 KB, well under the 1 MB control-frame cap.
+SUBAGENT_ERROR_CHARS = 2_000
+
 
 def _message_text(message: AgentMessage) -> str:
     if isinstance(message, Message):
@@ -111,6 +145,23 @@ def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
 def _compact(text: str, limit: int) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _compact_multiline(text: str, limit: int) -> str:
+    """Length-bound ``text`` while preserving its line structure.
+
+    ``_compact`` flattens ALL whitespace (``text.split()`` splits on newlines
+    too), which is right for a one-line preview like a prompt or a tool summary
+    but destroys a multi-line handoff or a stack trace \u2014 exactly the outcome
+    fields (``result_text``/``error_text``) a reader most wants readable on the
+    failure path. This variant collapses only intra-line runs of spaces/tabs and
+    trims trailing blank lines, so a traceback stays legible line-by-line, then
+    applies the same character cap.
+    """
+    # Collapse spaces/tabs within each line but keep the line breaks between them.
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    collapsed = "\n".join(lines).strip("\n")
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
 
 
 def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
@@ -513,8 +564,12 @@ class ProjectionFold:
                 self._subagents[event.job_id] = row
             row.status = event.status  # type: ignore[assignment] — Literal matches
             row.progress = ""
-            row.result_text = _compact(event.result_text or "", 200)
-            row.error_text = _compact(event.error_text or "", 200)
+            # result_text is a preview (recoverable via the child transcript);
+            # error_text is carried generously because it is NOT in the
+            # transcript and the wire value is the only copy the phone renders.
+            # Both preserve newlines so a multi-line handoff/trace stays legible.
+            row.result_text = _compact_multiline(event.result_text or "", SUBAGENT_OUTCOME_CHARS)
+            row.error_text = _compact_multiline(event.error_text or "", SUBAGENT_ERROR_CHARS)
             row.elapsed_s = round(
                 time.monotonic() - self._subagent_started_at.pop(event.job_id, time.monotonic())
             )
@@ -746,7 +801,12 @@ class ProjectionFold:
                 row.label = node.label
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
-            row.prompt = node.prompt
+            # Compacted preview only — see SUBAGENT_PROMPT_PREVIEW_CHARS. The
+            # full launch prompt is recoverable from the child transcript (its
+            # launch user message, resolved by launch_message_id), which the
+            # phone fetches lazily; carrying it uncapped in every repaint scales
+            # the frame with roster depth.
+            row.prompt = _compact(node.prompt or "", SUBAGENT_PROMPT_PREVIEW_CHARS)
             row.launch_message_id = node.launch_message_id
             row.effort = node.effort
             # Preserve #298's ancestor_ids feature on the O(children) path.
@@ -777,11 +837,24 @@ class ProjectionFold:
                 else:
                     mobile_status = status
                 row.status = mobile_status  # type: ignore[assignment] -- normalized literals
-                # The roster renderer truncates visually; the detail route must
-                # retain the complete handoff or provider failure so opening a
-                # child never loses the actionable tail behind a summary cap.
-                row.result_text = str(lifecycle.result_text or "")
-                row.error_text = str(lifecycle.error_text or "")
+                # Bounded for the wire (a roster preview pushed ~30x/s), but the
+                # two outcome fields are recovered differently on the phone, so
+                # their caps differ. ``result_text`` is a PREVIEW: it is the
+                # child's own last assistant message and appears verbatim in the
+                # child transcript, which the phone fetches in full lazily from
+                # ``/api/sessions/{sid}/agents/{job_id}/history`` — so a short cap
+                # loses nothing. ``error_text`` is ``str(exc)`` from the parent
+                # runner and is NEVER in the transcript; the wire value is the
+                # ONLY copy the Outcome panel renders, so it is carried
+                # GENEROUSLY (see SUBAGENT_ERROR_CHARS) or the failure tail is
+                # lost with no recovery path. Newlines preserved on both so a
+                # multi-line handoff or stack trace stays legible.
+                row.result_text = _compact_multiline(
+                    str(lifecycle.result_text or ""), SUBAGENT_OUTCOME_CHARS
+                )
+                row.error_text = _compact_multiline(
+                    str(lifecycle.error_text or ""), SUBAGENT_ERROR_CHARS
+                )
                 if lifecycle.age_s is not None:
                     row.elapsed_s = max(0.0, float(lifecycle.age_s))
             progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
@@ -806,10 +879,19 @@ class ProjectionFold:
         row = self._subagents.get(job_id)
         if row is None:
             return False
-        # Cap the worker-hydrated history to the same render tail #298 applies
-        # on the synchronous path, so the full-screen conversation keeps its
-        # pinned opening user message without shipping an unbounded transcript.
-        row.transcript = self._cap_tail(transcript)
+        # A subagent transcript is NEVER placed on the wire. The projection is a
+        # full repaint pushed to the daemon on every folded event (~30x/s during
+        # a turn), and the daemon's control-socket reader caps a single frame at
+        # 1 MB (``daemon._dial`` ``limit=1 << 20``). Embedding even a tail-capped
+        # child transcript per subagent — multiplied across a deep roster — blew
+        # past that cap, so every push was skipped as an oversized frame and the
+        # phone silently fell back to the stale durable disk fold (the real-time
+        # regression this fixes). Todos stay on the wire (small, and needed for
+        # the live working line); the transcript is fetched lazily on demand from
+        # ``/api/sessions/{sid}/agents/{job_id}/history``, which reads the child's
+        # own on-disk transcript. ``transcript`` is intentionally left empty here;
+        # the argument is kept for signature/call-site compatibility.
+        _ = transcript  # deliberately not projected — see comment above
         row.todos = self._todo_phases(todos)
         self._sync_subagents()
         self._bump()
