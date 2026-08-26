@@ -1174,7 +1174,14 @@ class OpenAICompatClient:
             # reasoning being present, not on the model version. See
             # ``_stream_responses`` for how the resulting reasoning items are
             # handled on the wire (safely skipped; we do not yet replay them).
-            body["include"] = ["reasoning.encrypted_content"]
+            #
+            # Extend rather than assign: nothing else sets ``include`` on this
+            # path today, but a future include-bearing field must not be
+            # silently clobbered by this line (review round 1, N1). Dedupe so a
+            # re-entry cannot list the same value twice.
+            include = body.setdefault("include", [])
+            if "reasoning.encrypted_content" not in include:
+                include.append("reasoning.encrypted_content")
         if request.model.supports_prompt_cache and request.prompt_cache_key:
             # The 24h policy is meaningful only with a stable key. SessionStreamFn
             # supplies one per transcript, and retries preserve it on ChatRequest.
