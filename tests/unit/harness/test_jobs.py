@@ -135,6 +135,54 @@ def test_accounting_summary_covers_every_production_nesting_level() -> None:
     assert sum(item.input_tokens for item in summary) == 6
 
 
+def test_unchanged_accounting_reads_do_not_rewalk_children(monkeypatch) -> None:
+    child = AsyncJobManager()
+    child.restore([_task_row("leaf", usage=Usage(input_tokens=2))])
+    parent = AsyncJobManager()
+    parent._jobs["root"] = _task_row("root", status="running")
+    parent.attach_child_manager("root", child)
+    assert sum(item.input_tokens for item in parent.accounting_components()) == 2
+
+    def fail_if_rebuilt(seen):  # noqa: ANN001, ANN202
+        raise AssertionError("unchanged accounting read rebuilt the child tree")
+
+    monkeypatch.setattr(child, "_collect_accounting_components", fail_if_rebuilt)
+    for _ in range(100):
+        assert sum(item.input_tokens for item in parent.accounting_components()) == 2
+
+
+def test_grandchild_accounting_invalidation_reaches_root_once() -> None:
+    leaf = AsyncJobManager()
+    leaf._jobs["leaf"] = _task_row("leaf", usage=Usage(input_tokens=2), status="running")
+    child = AsyncJobManager()
+    child._jobs["child"] = _task_row("child", status="running")
+    child.attach_child_manager("child", leaf)
+    root = AsyncJobManager()
+    root._jobs["root"] = _task_row("root", status="running")
+    root.attach_child_manager("root", child)
+    assert sum(item.input_tokens for item in root.accounting_components()) == 2
+    revision = root._accounting_revision
+
+    leaf._jobs["leaf"].usage.input_tokens += 3  # type: ignore[union-attr]
+    leaf.note_usage_changed()
+    assert root._accounting_revision == revision + 1
+    assert sum(item.input_tokens for item in root.accounting_components()) == 5
+
+
+def test_accounting_listener_cycle_is_bounded() -> None:
+    left = AsyncJobManager()
+    right = AsyncJobManager()
+    left._jobs["left"] = _task_row("left", status="running")
+    right._jobs["right"] = _task_row("right", status="running")
+    left.attach_child_manager("left", right)
+    right.attach_child_manager("right", left)
+
+    revision = left._accounting_revision
+    right.note_usage_changed()
+    assert left._accounting_revision == revision + 1
+    assert left.accounting_components() == []
+
+
 def test_accounting_summary_keeps_duplicate_ids_from_independent_managers() -> None:
     left = AsyncJobManager()
     right = AsyncJobManager()
