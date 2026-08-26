@@ -1230,9 +1230,18 @@ Screen.subagent-compact #band {
  * four-row panel. It cannot come from the body's `TranscriptView` padding,
  * which the class below deliberately zeroes — the hint row is BELOW the body,
  * so the row has to be the page's. */
+/* An OPAQUE ground on the scrolling page. Without a fill the container is
+ * transparent, and a transparent scrolling region lets Textual's compositor
+ * skip clearing cells on a partial repaint: a hover on an `.actionable` hint
+ * plus the 8Hz working spinner then painted new cells over stale ones and the
+ * page appeared to tear on mouse-move. The `$lo-bg` token matches the Screen's
+ * own baseline ground on purpose — subagent mode is "the same app looking
+ * elsewhere" (see `_open_subagent_view`), so the fill must read as the app's own
+ * ground and not as an elevated slab the way the surface elevation would. */
 .subagent-view {
     height: 1fr;
     padding: 1 1 1 1;
+    background: $lo-bg;
 }
 
 .subagent-view-title {
