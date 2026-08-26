@@ -524,55 +524,102 @@ def _split_canvas(
     return cv
 
 
-def _demo_page(w: int = 620, h: int = 346) -> Image.Image:
+def _demo_page(w: int = 620, h: int = 346, row_right_inset: int = 0) -> Image.Image:
     """The local page the agent reached, typeset in the site's design system.
 
     WHY DRAWN, NOT PASTED: the real capture (`action-screenshot-page2.png`) is
-    the bridge's bare test HTML — default Times serif on stark white — which
+    the bridge's bare test HTML (default Times serif on stark white), which
     reads as an unstyled test file inside the otherwise site-themed
-    composition. The copy here is *verbatim* from that captured page ("Page
-    Two" / "Second page loaded.") and the URL in the chrome stays the real
-    127.0.0.1 bridge address, so nothing is fabricated — the same content is
-    simply typeset the way a Local Operator demo page actually looks: Fraunces
-    display heading on `surface`, mono eyebrow with the single accent, Figtree
-    body, hairline-ruled mono footer naming the local origin.
+    composition. So the reached page is typeset here instead: a small
+    connection-check page, which is exactly what a bridge *test page* is for.
+    It is deliberately named `lop-testpage.html` in the browser chrome so the
+    tab URL matches the "Bridge test page" URL visible in the adjacent
+    connected-popup capture; one page, one name, no second fictional origin.
+
+    TRUTHFULNESS RULES for this content: everything stated is a property of
+    the depicted demo state itself (bridge reachable, extension paired, tab
+    opened by the agent) on a 127.0.0.1 origin. No third-party brands, no
+    invented product claims, and no metrics that would imply real usage.
 
     Rendered at 2x then LANCZOS-downsampled so Fraunces' high-contrast
     hairlines survive at composite scale (drawing at 1x leaves the thin
     strokes ragged next to the resampled popup captures).
+
+    `row_right_inset` (page-local px) pulls the status rows' right edge in.
+    The marquee overlaps the popup card onto this page's right side, which
+    would bury the right-aligned status values; the inset keeps every check
+    visible there while screenshot (d), which is not overlapped, uses the
+    full width.
     """
     s = 2  # supersampling factor
     W, H = w * s, h * s
     pg = Image.new("RGB", (W, H), SURFACE)
     d = ImageDraw.Draw(pg)
-    mx = 52 * s  # page gutter — the site's content-column breathing room
-    y = 44 * s
+    mx = 44 * s  # page gutter, the site's content-column breathing room
+    y = 30 * s
 
-    # Mono eyebrow: the one accent use on the page (dot + label), mirroring
-    # the site's section-label recipe at a page-appropriate size.
-    ef = font("mono", 11 * s, 500)
+    # Mono eyebrow (dot + label), mirroring the site's section-label recipe.
+    # Accent is used twice on this page, eyebrow and status values, echoing
+    # the system's "one accent, few places" rule.
+    ef = font("mono", 10 * s, 500)
     easc = ef.getmetrics()[0]
     cy = y + easc // 2 + 1 * s
     d.ellipse([mx, cy - 3 * s, mx + 6 * s, cy + 3 * s], fill=ACCENT)
-    draw_tracked(d, (mx + 14 * s, y), "LOCAL DEMO PAGE", ef, ACCENT, 0.08 * 11 * s)
-    y += easc + 20 * s
+    draw_tracked(d, (mx + 14 * s, y), "LOCAL TEST PAGE", ef, ACCENT, 0.08 * 10 * s)
+    y += easc + 12 * s
 
-    # Fraunces display heading — the captured page's own H1 text, now in the
-    # brand's editorial drawing instead of default Times.
-    hf = font("display", 42 * s, 400)
-    draw_tracked(d, (mx, y), "Page Two", hf, INK, -0.024 * 42 * s)
-    y += round(42 * s * 1.1) + 16 * s
+    # Fraunces display heading. 30px keeps the whole check card in view at
+    # composite scale (a 42px H1 left no room for the status list below).
+    hf = font("display", 30 * s, 400)
+    draw_tracked(d, (mx, y), "Connection check", hf, INK, -0.024 * 30 * s)
+    y += round(30 * s * 1.15) + 8 * s
 
-    # Body line, verbatim from the capture.
-    bf = font("sans", 18 * s, 400)
-    d.text((mx, y), "Second page loaded.", font=bf, fill=INK_MUTED)
+    # One-line body: what loading this page actually demonstrates. Figtree
+    # body voice, ink-muted, exactly the site's supporting-copy recipe.
+    bf = font("sans", 14 * s, 400)
+    d.text(
+        (mx, y),
+        "If this page loads, the local bridge is reachable and the",
+        font=bf,
+        fill=INK_MUTED,
+    )
+    y += round(14 * s * 1.5)
+    d.text((mx, y), "agent can drive its own tab in this browser.", font=bf, fill=INK_MUTED)
+    y += round(14 * s * 1.5) + 14 * s
 
-    # Footer pinned to the page bottom: hairline rule + mono origin line, the
-    # quiet "this is your machine" signature. INK_DIM keeps it tertiary.
-    fy = H - 44 * s
-    d.line([mx, fy - 16 * s, W - mx, fy - 16 * s], fill=HAIRLINE, width=s)
-    ff = font("mono", 11 * s, 400)
-    d.text((mx, fy - 4 * s), "served from 127.0.0.1:8791 on your machine", font=ff, fill=INK_DIM)
+    # Status list: three hairline-separated rows, label left in Figtree ink,
+    # uppercase mono value right-aligned with a small accent check. Each row
+    # states a fact of the depicted demo state, nothing more.
+    rows = [
+        ("Local bridge", "REACHABLE"),
+        ("Extension", "PAIRED"),
+        ("This tab", "OPENED BY AGENT"),
+    ]
+    lf = font("sans", 13 * s, 500)
+    vf = font("mono", 10 * s, 500)
+    row_h = 27 * s
+    right = W - mx - row_right_inset * s
+    for label, value in rows:
+        d.line([mx, y, right, y], fill=HAIRLINE, width=s)
+        base = y + (row_h - lf.getmetrics()[0]) // 2
+        d.text((mx, base), label, font=lf, fill=INK)
+        vw = text_width(d, value, vf, 0.06 * 10 * s)
+        vbase = y + (row_h - vf.getmetrics()[0]) // 2 + 1 * s
+        # Check glyph drawn as two strokes (the mono face's U+2713 coverage
+        # is not guaranteed across the vendored subset, so we draw it).
+        ck_x = right - vw - 16 * s
+        ck_y = vbase + vf.getmetrics()[0] // 2
+        d.line([ck_x - 6 * s, ck_y, ck_x - 2 * s, ck_y + 4 * s], fill=ACCENT, width=2 * s)
+        d.line([ck_x - 2 * s, ck_y + 4 * s, ck_x + 5 * s, ck_y - 4 * s], fill=ACCENT, width=2 * s)
+        draw_tracked(d, (right - vw, vbase), value, vf, ACCENT, 0.06 * 10 * s)
+        y += row_h
+    d.line([mx, y, right, y], fill=HAIRLINE, width=s)
+
+    # Footer pinned to the page bottom: mono origin line, the quiet "this is
+    # your machine" signature. INK_DIM keeps it tertiary.
+    ff = font("mono", 10 * s, 400)
+    fy = H - 22 * s - ff.getmetrics()[0]
+    d.text((mx, fy), "served from 127.0.0.1:8791 on your machine", font=ff, fill=INK_DIM)
     return pg.resize((w, h), Image.LANCZOS)
 
 
@@ -675,7 +722,9 @@ def build_screenshot_action(path: str):
     # raw Times-on-white capture is not pasted directly). Same 620x346 band
     # the previous crop produced, so the composition is unchanged.
     page = _fit(_demo_page(), max_h=H - top - 64, max_w=740)
-    page_card = _browser_chrome(page, "127.0.0.1:8791/lop-page2.html")
+    # Tab URL matches the "Bridge test page" URL shown inside the adjacent
+    # popup capture, so the two frames tell one story about one page.
+    page_card = _browser_chrome(page, "127.0.0.1:8791/lop-testpage.html")
     px = MARGIN
     py = top + ((H - top - 64) - page_card.height) // 2
     rounded_shadow_card(cv, page_card, (px, py))
@@ -781,8 +830,12 @@ def build_marquee(path: str):
 
     # Right ~60%: the reached page (typeset in-theme — see _demo_page) in
     # browser chrome with the connected popup.
-    page = _fit(_demo_page(), max_h=360, max_w=600)
-    page_card = _browser_chrome(page, "127.0.0.1:8791/lop-page2.html")
+    # row_right_inset=150: the connected popup pasted below overlaps this
+    # card's right side from page-local x ~449 (popup left 1075 on canvas,
+    # card left 640, fit scale ~0.968); insetting the status rows to ~426
+    # keeps every check and value visible beside the popup.
+    page = _fit(_demo_page(row_right_inset=150), max_h=360, max_w=600)
+    page_card = _browser_chrome(page, "127.0.0.1:8791/lop-testpage.html")
     px = 640
     py = (H - page_card.height) // 2
     rounded_shadow_card(cv, page_card, (px, py))
