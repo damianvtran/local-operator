@@ -1,9 +1,18 @@
 import { DEFAULT_PORT, getLocal, getSession } from "../state";
+import { pairVerdict, viewForHealth } from "./pair-flow";
 
-type State = "connected" | "pairing" | "disconnected" | "incompatible" | "origin";
-const sections = ["connected", "pairing", "disconnected", "incompatible", "origin"].map((id) =>
-  document.getElementById(id),
+type State = "connected" | "paired" | "pairing" | "disconnected" | "incompatible" | "origin";
+const sections = ["connected", "paired", "pairing", "disconnected", "incompatible", "origin"].map(
+  (id) => document.getElementById(id),
 );
+
+// True once THIS popup saw pair_result.ok. The daemon confirms pairing on the
+// popup's own socket before /health reports paired (the worker still has to
+// reconnect with the new token), so a health-driven render in that window must
+// hold the explicit success view instead of putting the form back — a re-shown
+// form invites re-submitting the consumed one-time code, which then fails with
+// a misleading "No live pairing code". See pair-flow.ts.
+let locallyPaired = false;
 
 interface Health {
   extension_connected: boolean;
@@ -21,6 +30,7 @@ interface Health {
 // mark is never tinted — see popup.css. Mirrors callback_page.py's _TONE_VARS.
 const TONE: Record<State, string> = {
   connected: "var(--success)",
+  paired: "var(--success)",
   pairing: "var(--hairline-strong)",
   disconnected: "var(--hairline-strong)",
   incompatible: "var(--danger)",
@@ -99,7 +109,9 @@ async function render(): Promise<void> {
     show("connected");
     return;
   }
-  show("pairing");
+  // Health has not confirmed the new token yet: keep the success view if this
+  // popup already paired (the race above), otherwise offer the form.
+  show(viewForHealth(false, locallyPaired));
 }
 
 function hostnameOf(origin: string | undefined): string {
@@ -118,12 +130,27 @@ codeInput?.addEventListener("input", () => {
   codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
 });
 
+// Lock the form for the duration of one submission: a second click while the
+// first is in flight would spend the same one-time code twice, and the second
+// attempt always fails confusingly. The disabled ramp in popup.css plus the
+// relabelled button are the in-progress affordance.
+function setPairBusy(busy: boolean): void {
+  const input = document.getElementById("pair-code") as HTMLInputElement | null;
+  const button = document.querySelector<HTMLButtonElement>("#pair-form button[type='submit']");
+  if (input) input.disabled = busy;
+  if (button) {
+    button.disabled = busy;
+    button.textContent = busy ? "Pairing…" : "Pair";
+  }
+}
+
 document.getElementById("pair-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = document.getElementById("pair-code") as HTMLInputElement | null;
   const error = document.getElementById("pair-error");
   if (!input || !error) return;
   error.classList.add("hidden");
+  setPairBusy(true);
   const { token, port = DEFAULT_PORT } = await getLocal();
   try {
     const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
@@ -147,31 +174,40 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
     const verdict = await new Promise<MessageEvent>((resolve) => {
       wire.onmessage = resolve;
     });
-    const frame = JSON.parse(String(verdict.data)) as {
-      event: string;
-      ok: boolean;
-      token?: string;
-      message?: string;
-    };
-    if (frame.ok && frame.token) {
-      await chrome.storage.local.set({ token: frame.token });
+    const outcome = pairVerdict(JSON.parse(String(verdict.data)));
+    if (outcome.ok) {
+      await chrome.storage.local.set({ token: outcome.token });
       wire.close();
+      // Confirm SUCCESS from the pair_result frame alone, before any health
+      // round-trip: the worker has not reconnected with the new token yet, so
+      // /health still says unpaired and a render() here would re-show the form
+      // (the race documented at `locallyPaired`). The explicit success state is
+      // the user's feedback; render() below only upgrades it to the connected
+      // view once health confirms.
+      locallyPaired = true;
+      show("paired");
       await new Promise((resolve) => setTimeout(resolve, 250));
       await render();
     } else {
-      error.textContent =
-        frame.message ??
-        "That code didn't match. Codes expire after two minutes — check the app for a fresh one.";
+      error.textContent = outcome.message;
       error.classList.remove("hidden");
       // A live pairing error turns the status rule danger — the one place the
       // pairing state spends colour, and only on a real failure.
       document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
+      // Unlock BEFORE focusing: a disabled input refuses focus, and the
+      // `finally` unlock runs only after this handler returns. (The finally
+      // re-call is idempotent.)
+      setPairBusy(false);
       input.focus();
     }
   } catch {
     error.textContent = "Could not reach Local Operator on this machine.";
     error.classList.remove("hidden");
     document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
+  } finally {
+    // Always unlock, success included: if health later drops (daemon restart)
+    // the user lands back on this form, and it must not arrive pre-disabled.
+    setPairBusy(false);
   }
 });
 

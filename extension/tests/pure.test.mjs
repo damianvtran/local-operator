@@ -54,3 +54,38 @@ test("log filter keeps level matches and limits to the most recent", async () =>
     assert.deepEqual(filterEntries(entries, "all", 2).map((e) => e.text), ["c", "d"]);
   } finally { await module.close(); }
 });
+
+test("pair verdict renders success only with a storable token", async () => {
+  const module = await load("src/popup/pair-flow.ts");
+  try {
+    const { pairVerdict, PAIR_MISMATCH_MESSAGE } = module.loaded;
+    assert.deepEqual(pairVerdict({ event: "pair_result", ok: true, token: "t1" }), {
+      ok: true,
+      token: "t1",
+    });
+    // ok without a token is a failure: nothing to authenticate future
+    // connections with, so "Patched in." would be a lie.
+    assert.deepEqual(pairVerdict({ ok: true }), { ok: false, message: PAIR_MISMATCH_MESSAGE });
+    // daemon-provided message wins over the default mismatch copy.
+    assert.deepEqual(pairVerdict({ ok: false, message: "No live pairing code" }), {
+      ok: false,
+      message: "No live pairing code",
+    });
+    assert.deepEqual(pairVerdict({}), { ok: false, message: PAIR_MISMATCH_MESSAGE });
+  } finally { await module.close(); }
+});
+
+test("health render holds the success view during the pair/health race", async () => {
+  const module = await load("src/popup/pair-flow.ts");
+  try {
+    const { viewForHealth } = module.loaded;
+    // The race: pair_result.ok arrived but the worker has not reconnected, so
+    // health still says unpaired — the form must NOT come back.
+    assert.equal(viewForHealth(false, true), "paired");
+    // Health caught up: the connected view (with URL details) takes over.
+    assert.equal(viewForHealth(true, true), "connected");
+    assert.equal(viewForHealth(true, false), "connected");
+    // Never paired in this popup: the form is the right offer.
+    assert.equal(viewForHealth(false, false), "pairing");
+  } finally { await module.close(); }
+});

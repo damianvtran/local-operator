@@ -38,6 +38,28 @@
           <p class="trough" id="connected-detail"></p>
         </section>
 
+        <!-- Explicit pairing-success state, shown from the pair_result frame
+             alone (popup.ts): /health lags the pair by a worker reconnect, and
+             a form left on screen invites re-submitting the consumed code. The
+             check is stroked in the semantic success token — status, not
+             identity, so tinting is allowed (unlike the mark above). -->
+        <section id="paired" class="state hidden" role="status">
+          <svg
+            class="check"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M4 12.5 L9.5 18 L20 6.5" stroke-width="2.5" />
+          </svg>
+          <h1 class="title">Patched in.</h1>
+          <p class="sub">Pairing confirmed. Connecting this browser to Local Operator…</p>
+        </section>
+
         <section id="pairing" class="state hidden">
           <h1 class="title">Pair with Local Operator</h1>
           <p class="sub">Enter the code shown in Local Operator.</p>

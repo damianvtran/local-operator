@@ -204,6 +204,13 @@ input:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 1px;
 }
+/* In-flight pairing: the locked field drops to the sunken well so the form
+ * visibly stops accepting input without adding a spinner — hairlines and tone
+ * shifts are this system's whole motion vocabulary. */
+input:disabled {
+  background: var(--sunken);
+  color: var(--ink-dim);
+}
 
 /* Buttons follow the token ramp, not a flat black. Primary = ink fill, the
  * system's strongest affordance; secondary = surface with a hairline; danger =
@@ -246,6 +253,20 @@ input:focus-visible {
 .btn.danger:hover {
   background: color-mix(in srgb, var(--danger) 10%, var(--surface));
 }
+/* A disabled button steps down the ink ramp instead of greying out: the same
+ * subtle register as ink-muted text, and the primary keeps its fill so the
+ * "Pairing…" label reads as the button working, not the button broken. */
+.btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.btn:disabled:hover {
+  background: var(--surface);
+}
+.btn.primary:disabled:hover {
+  background: var(--ink);
+  border-color: var(--ink);
+}
 
 .actions {
   margin-top: 16px;
@@ -264,6 +285,16 @@ input:focus-visible {
   display: flex;
   width: 100%;
   margin-top: 8px;
+}
+
+/* The pairing-success check: the one glyph allowed the semantic success tone
+ * (state, not identity — the header mark stays --ink). Sized to the title's
+ * optical weight; the card's top rule goes --success in the same beat. */
+.check {
+  width: 28px;
+  height: 28px;
+  color: var(--success);
+  margin-bottom: 10px;
 }
 
 .error {
