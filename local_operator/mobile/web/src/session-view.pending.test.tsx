@@ -79,6 +79,11 @@ function projection(pending: PendingRequest): SessionProjection {
 		todos: [],
 		subagents: [],
 		pending,
+		// pending_count is the parallel-approval queue length (len of the
+		// daemon's pending queue), NOT the question count — an ask always
+		// fronts exactly one pending question, so it stays 1 here regardless
+		// of question_total. It drives the card's "1 of N" approvals badge,
+		// not the "Question N of M" counter.
 		pending_count: 1,
 		usage: {},
 		version: 1,
