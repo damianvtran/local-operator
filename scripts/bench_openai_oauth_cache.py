@@ -98,6 +98,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from local_operator.harness.types import (  # noqa: E402
+    AgentTool,
     ChatRequest,
     Message,
     ModelSpec,
@@ -112,6 +113,7 @@ from local_operator.prompts_api import build_system_blocks  # noqa: E402
 from local_operator.providers.auth_store import AuthStore, OAuthAccess  # noqa: E402
 from local_operator.providers.clients import (  # noqa: E402
     CODEX_RESPONSES_URL,
+    OpenAICompatClient,
     client_for_spec,
 )
 from local_operator.tools.registry import create_tools  # noqa: E402
@@ -180,7 +182,7 @@ class ScenarioResult:
 # ---------------------------------------------------------------------------
 
 
-def _build_prefix() -> tuple[list, list[str]]:
+def _build_prefix() -> tuple[list[AgentTool], list[str]]:
     """The realistic (tools, system_blocks) prefix shared by every scenario.
 
     The tool inventory and system blocks are what dominate the cached prefix
@@ -210,7 +212,7 @@ def _resolve_spec(reasoning_effort: str | None) -> ModelSpec:
 def _make_request(
     spec: ModelSpec,
     system_blocks: list[str],
-    tools: list,
+    tools: list[AgentTool],
     messages: list[Message],
     session_id: str,
 ) -> ChatRequest:
@@ -460,7 +462,12 @@ def _dry_run() -> None:
     """
     spec = _resolve_spec("medium")
     tools, system_blocks = _build_prefix()
+    # ``client_for_spec`` is typed as the ``WireClient`` protocol; for an OpenAI
+    # spec it is concretely an ``OpenAICompatClient``, whose codex body builder
+    # and ``aclose`` this benchmark introspects. Assert the concrete type so the
+    # introspection type-checks (CI runs whole-tree pyright).
     client = client_for_spec(spec, openai_api="responses")
+    assert isinstance(client, OpenAICompatClient)
 
     print(f"Codex Responses URL: {CODEX_RESPONSES_URL}")
     print("prompt_cache_key set on ChatRequest: yes (= session id)\n")
@@ -547,7 +554,7 @@ def _print_scenario_table(results: list[ScenarioResult]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-_SCENARIO_RUNNERS: dict[str, Callable] = {
+_SCENARIO_RUNNERS: dict[str, Callable[..., Any]] = {
     "long_session": lambda c, o, t: run_long_session(c, o, t, None, "long_session"),
     "stable_prefix": run_stable_prefix,
     "tool_heavy": run_tool_heavy,
@@ -567,6 +574,7 @@ async def _run_live(scenario: str | None, turns: int) -> int:
 
     spec = _resolve_spec(None)
     client = client_for_spec(spec, openai_api="responses")
+    assert isinstance(client, OpenAICompatClient)
 
     names = [scenario] if scenario else list(_SCENARIO_RUNNERS.keys())
     results: list[ScenarioResult] = []
