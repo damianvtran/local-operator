@@ -553,10 +553,18 @@ async def _persist_inflight(child: "Session") -> None:
             if message.id not in known:
                 await child._transcript.append_message(message)
 
+    write_task = asyncio.create_task(_write())
     try:
-        await asyncio.shield(_write())
+        await asyncio.shield(write_task)
     except asyncio.CancelledError:
-        pass  # the shielded write continues without us
+        # Shield keeps the write alive, but returning here races the terminal
+        # outcome: callers observe `cancelled` and resume before its transcript
+        # is coherent. The runner has already accepted cancellation, so finish
+        # the bounded local writes before publishing that resumable state.
+        try:
+            await write_task
+        except Exception:
+            logger.warning("could not persist cancelled subagent turn", exc_info=True)
     except Exception:
         logger.warning("could not persist cancelled subagent turn", exc_info=True)
 
