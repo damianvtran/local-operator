@@ -948,12 +948,12 @@ class FakeMcpManager:
         return self._meta.get(tool_name)
 
 
-async def build_child(parent, model_spec=None, job_id="job-1", agent="task"):
+async def build_child(parent, model_spec=None, job_id="job-1", agent="task", prompt="do the thing"):
     from local_operator.harness import subagent as subagent_mod
 
     return await subagent_mod._build_child_session(
         label="sub",
-        prompt="do the thing",
+        prompt=prompt,
         parent_session=parent,
         model_spec=model_spec,
         job_id=job_id,
@@ -989,7 +989,7 @@ async def test_child_gets_the_parents_mcp_manager_and_catalogue(tmp_path, monkey
     parent = make_session(tmp_path, OneShotStream())
     attach_manager(parent, manager)
 
-    child = await build_child(parent)
+    child = await build_child(parent, prompt="list the Linear issues")
 
     assert child.mcp_manager is manager
     tail = knowledge_tail(child)
@@ -1430,16 +1430,18 @@ async def test_a_reconnect_swaps_the_managers_tools_under_a_running_child(tmp_pa
 
 @pytest.mark.asyncio
 async def test_a_parent_with_no_configured_servers_gives_an_empty_tail(tmp_path, monkeypatch):
-    """A manager exists but discovery found nothing. The child must not carry
-    an empty ``<mcps>`` block into every prompt, and ``mcp://`` must still
-    answer rather than raise — the resolver is installed either way."""
+    """A manager exists but discovery found nothing. The child carries only
+    the compact discovery escape hatch, and ``mcp://`` still answers rather
+    than raising because the resolver is installed either way."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
     attach_manager(parent, FakeMcpManager({}))
 
     child = await build_child(parent)
 
-    assert knowledge_tail(child) == "<skills/>"
+    assert knowledge_tail(child) == (
+        "<mcps>Read `mcp://` to discover configured MCP servers.</mcps>"
+    )
     assert resolve(child, "mcp://nope") == "Unknown MCP server: nope. Available: (none)"
     await child.dispose()
     await parent.dispose()

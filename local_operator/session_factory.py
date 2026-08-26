@@ -624,7 +624,10 @@ class _KnowledgeHooks:
     #: freeze protects is already gone.
     frozen_compaction_id: str | None = None
     mcp_resolver: Callable[[str], str | None] | None = None
-    mcp_catalogue: Callable[[], str] | None = None
+    # Takes the frozen selection query. Configured names are populated before
+    # deferred connection work begins, closing the first-turn race without
+    # making connection completion part of the prompt-cache key.
+    mcp_catalogue: Callable[[str], str] | None = None
 
 
 def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
@@ -668,6 +671,18 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
             )
         )
     return hints
+
+
+def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
+    """Expose configured names before deferred live connections can race turn one."""
+    try:
+        from local_operator.mcp.config import load_all_mcp_configs
+        from local_operator.mcp.resources import render_mcp_suggestions
+
+        names = tuple(load_all_mcp_configs(cwd)[0])
+        hooks.mcp_catalogue = lambda query: render_mcp_suggestions(names, query)
+    except Exception:  # noqa: BLE001 — MCP hints remain optional enrichment
+        logger.debug("early MCP name discovery failed", exc_info=True)
 
 
 async def _setup_knowledge(
@@ -812,7 +827,7 @@ async def _select_knowledge_block(
 
     sections = [section for section in [render_block(picked)] if section]
     if hooks.mcp_catalogue is not None:
-        catalogue = hooks.mcp_catalogue()
+        catalogue = hooks.mcp_catalogue(query)
         if catalogue:
             sections.append(catalogue)
     hooks.frozen_block = "\n\n".join(sections)
@@ -1138,15 +1153,20 @@ async def _prepare(
     from local_operator.tools.registry import create_tools
 
     config_dir = Path(agent_registry.config_dir)
+    effective_cwd = cwd if cwd is not None else os.getcwd()
     knowledge_warnings: list[str] = []
     hooks = await _setup_knowledge(
         credential_manager, config_dir, agent_registry, knowledge_warnings
     )
+    # Configuration discovery is local filesystem work and must precede the
+    # first prompt. The TUI deliberately defers live MCP connections; deriving
+    # names only from the eventual manager let the knowledge block freeze empty
+    # before that background task won the race.
+    _seed_mcp_routing(hooks, effective_cwd)
     for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
     request_approval = _make_request_approval(yolo)
-    effective_cwd = cwd if cwd is not None else os.getcwd()
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and
     # values stay out of the system prompt (read on demand, not baked).
@@ -1513,7 +1533,9 @@ async def wire_mcp_into_session(
     from local_operator.mcp.resources import make_mcp_resolver, render_mcp_catalogue
 
     knowledge_hooks.mcp_resolver = make_mcp_resolver(manager, activate)
-    knowledge_hooks.mcp_catalogue = lambda: render_mcp_catalogue(manager)
+    # Once the manager exists, compaction-time reselection sees reloads. The
+    # already frozen first-task block remains byte-stable until compaction.
+    knowledge_hooks.mcp_catalogue = lambda query: render_mcp_catalogue(manager, query)
 
     def on_tools_changed(new_mcp_tools: list[AgentTool]) -> None:
         # Reconnects and tools/list_changed can replace AgentTool objects. Keep
