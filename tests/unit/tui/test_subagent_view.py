@@ -400,6 +400,62 @@ async def test_prompt_leads_the_body_ahead_of_durable_history(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prompt_stays_single_when_paging_multipage_history_to_the_start(
+    tmp_path,
+) -> None:
+    """Paging durable history to its very start must not re-mount the prompt.
+
+    The single-page guard above passes vacuously against the double-mount bug:
+    one page never exercises the prepend fast-path in `_reconcile_current_body`.
+    With the prompt PINNED at index 0, that path's prefix accounting has to
+    exclude the pinned head, or each paged-in older page treats index 0 as a
+    freshly-prepended row and mounts a SECOND prompt UserBlock. A settled child
+    has no 1Hz poll to self-heal it, so the duplicate persists on screen. This
+    seeds >100 rows (2+ pages) and pages to the start, asserting exactly one
+    prompt entry, one prompt block, and one instruction occurrence."""
+    instruction = "Audit the ingest path and report the retry-budget regression."
+    transcript = Transcript(tmp_path / "child")
+    for index in range(130):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with(TRAJECTORY, status="completed")
+    job.prompt = instruction
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        # Page all the way back to the transcript start, one disk read per edge.
+        while not view._history_exhausted:
+            view.action_home()
+            await _wait_history(pilot, view)
+        for _ in range(5):
+            await pilot.pause()
+
+        prompt_entries = [e for e in view._entries if e.key == "__prompt__"]
+        assert len(prompt_entries) == 1, [e.key for e in view._entries]
+        assert view._entries[0].key == "__prompt__", [e.key for e in view._entries]
+
+        prompt_blocks = [
+            b
+            for b in view._body.blocks()
+            if isinstance(b, UserBlock) and b.text().startswith("Audit the ingest path")
+        ]
+        assert len(prompt_blocks) == 1, [type(b).__name__ for b in view._body.blocks()]
+
+        rows = view.rendered_rows()
+        occurrences = sum(1 for row in rows if row.startswith("Audit the ingest path"))
+        assert occurrences == 1, rows
+        # The full window really did page in, so the guard ran against 2+ pages.
+        assert "durable 0" in " ".join(rows)
+        assert len(view._history_ids) == 130
+
+
+@pytest.mark.asyncio
 async def test_history_home_key_lands_on_newly_loaded_page(tmp_path) -> None:
     """The binding path must not sample the old tail before Home settles."""
     transcript = Transcript(tmp_path / "child")

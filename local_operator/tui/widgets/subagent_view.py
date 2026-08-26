@@ -1362,13 +1362,34 @@ class SubagentView(Vertical):
                 if previous != current:
                     break
                 common_suffix += 1
+            # The pinned delegation prompt (see `_merge_body`) is a STABLE
+            # PREFIX: it sits at index 0 in both the old and new body and is not
+            # part of the paged history. Older rows page in AFTER it, so the
+            # freshly-prepended set is the slice BETWEEN that prefix and the
+            # common suffix. Counting from index 0 instead (the old accounting)
+            # folded the prompt into the "new rows" set and remounted it a
+            # second time, because the prompt is no longer a pure front to
+            # prepend against once history rows exist below it.
+            common_prefix = 0
+            for previous, current in zip(self._entries, entries):
+                if previous != current:
+                    break
+                common_prefix += 1
             count = len(entries) - common_suffix
-            if count > 0:
-                new_entries = entries[:count]
+            # Clamp the prefix inside the newly-prepended window: an entry can
+            # be both leading-stable and trailing-stable only when nothing
+            # changed, which `count > common_prefix` already excludes.
+            common_prefix = min(common_prefix, count)
+            if count > common_prefix and common_prefix < len(self._blocks):
+                new_entries = entries[common_prefix:count]
                 new_blocks = [entry_block(entry) for entry in new_entries]
-                self._body.prepend_blocks(new_blocks, anchor_offset=anchor)
-                self._blocks[0:0] = new_blocks
-                self._entries[0:0] = new_entries
+                # Mount ahead of the current first post-prefix block (the first
+                # durable-history row) so the prompt above it stays put and the
+                # reader's anchor, further down, is untouched.
+                before_block = self._blocks[common_prefix]
+                self._body.prepend_blocks(new_blocks, anchor_offset=anchor, before=before_block)
+                self._blocks[common_prefix:common_prefix] = new_blocks
+                self._entries[common_prefix:common_prefix] = new_entries
                 self._pending = entries
                 return
         self._pending = entries
