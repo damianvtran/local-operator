@@ -225,7 +225,12 @@ def _safe_prompt_names(names: Sequence[str]) -> list[str]:
 
 
 def _explicit_name(
-    query: str, names: Sequence[str], *, technical: bool, words: frozenset[str]
+    query: str,
+    names: Sequence[str],
+    *,
+    technical: bool,
+    product_construction: bool,
+    words: frozenset[str],
 ) -> str | None:
     """Find deliberate configured-server use, excluding incidental code mentions."""
     folded = query.casefold()
@@ -240,7 +245,10 @@ def _explicit_name(
             continue
         if canonical in _CAPABILITY_HINTS:
             service_objects = words & _SERVICE_OBJECTS.get(canonical, frozenset())
-            if technical and not (clear_operation and service_objects):
+            # An artifact noun makes construction unambiguously software work
+            # even when it borrows an operational noun ("message bot"). Only
+            # other technical contexts may recover via operation+object intent.
+            if product_construction or (technical and not (clear_operation and service_objects)):
                 continue
             return name
         # Custom names have no trusted capability terms. Require URI syntax or
@@ -272,8 +280,15 @@ def select_mcp_suggestions(names: Sequence[str], query: str) -> list[str]:
     words = frozenset(_WORD_RE.findall(query.casefold()))
     construction = bool(words & _CONSTRUCTION_TERMS)
     software_artifact = bool(words & _SOFTWARE_ARTIFACT_TERMS)
-    technical = bool(_TECHNICAL_CONTEXT_RE.search(query)) or (construction and software_artifact)
-    explicit = _explicit_name(query, safe, technical=technical, words=words)
+    product_construction = construction and software_artifact
+    technical = bool(_TECHNICAL_CONTEXT_RE.search(query)) or product_construction
+    explicit = _explicit_name(
+        query,
+        safe,
+        technical=technical,
+        product_construction=product_construction,
+        words=words,
+    )
     if explicit is not None:
         return [explicit]
     if technical:
