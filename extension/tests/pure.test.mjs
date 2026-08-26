@@ -36,6 +36,26 @@ test("AX compaction assigns epoch-scoped click refs", async () => {
   } finally { await module.close(); }
 });
 
+test("scroll expressions force instant behavior in every mode", async () => {
+  const module = await load("src/scroll-expressions.ts");
+  try {
+    const { scrollExpressionFor, defaultScrollExpression, deltaScrollExpression, SCROLL_INTO_VIEW_FN } = module.loaded;
+    // Pages can opt into CSS scroll-behavior:smooth, and Chrome throttles rAF
+    // to zero in hidden tabs, so a smooth scroll never progresses in our
+    // background surface. Every fixed expression must override with 'instant'.
+    for (const direction of ["top", "bottom", "up", "down", "left", "right"]) {
+      const expr = scrollExpressionFor(direction);
+      assert.match(expr, /behavior: 'instant'/, `${direction} must scroll instantly`);
+      assert.match(expr, /window\.scroll(By|To)\(\{/, `${direction} must use the options form`);
+    }
+    assert.match(defaultScrollExpression(), /behavior: 'instant'/);
+    assert.match(deltaScrollExpression(10, -20), /left: 10, top: -20, behavior: 'instant'/);
+    assert.match(SCROLL_INTO_VIEW_FN, /behavior: 'instant'/);
+    // Unknown direction stays a no-op, never interpolated page-bound code.
+    assert.equal(scrollExpressionFor("sideways"), "void 0");
+  } finally { await module.close(); }
+});
+
 test("log filter keeps level matches and limits to the most recent", async () => {
   const module = await load("src/log-capture.ts");
   try {
