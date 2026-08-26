@@ -145,3 +145,74 @@ async def test_await_access_does_not_block_request_access(tmp_path: Path) -> Non
     # The request completed while the await was still parked: no queueing.
     assert request_elapsed < 1.0, f"request_access waited {request_elapsed:.2f}s behind await"
     assert await_elapsed >= 2.0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_await_evicts_its_lock_key(tmp_path: Path) -> None:
+    """Round-3 M1: cancelling a parked await_access (client disconnect
+    surfaces as CancelledError inside the HTTP handler) must still evict its
+    per-request lock key. Pre-fix, cancellation propagated past the eviction
+    line and retained `__await__:<id>` forever — the reviewer's reproduction
+    read the leaked key straight out of `_tab_locks`."""
+    import asyncio
+
+    from local_operator.browser_bridge.daemon import BridgeService
+    from local_operator.browser_bridge.protocol import Request
+
+    service = BridgeService(root=tmp_path)
+
+    async def park_forever(payload: dict[str, object]) -> None:
+        await asyncio.sleep(3600)
+
+    service.link.send = park_forever  # type: ignore[method-assign]
+    request = Request(id="r-cancel", method="await_access", params={"url": "https://x.example"})
+    task = asyncio.get_running_loop().create_task(service._dispatch_serialized(request))
+    await asyncio.sleep(0.1)  # parked inside the await wait
+    assert "__await__:r-cancel" in service._tab_locks
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The finally-path eviction covered the cancellation.
+    assert service._tab_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_await_lock_key_evicted_on_normal_and_error_exits(tmp_path: Path) -> None:
+    """Round-3 M1: the two non-cancellation exits must evict too — normal
+    completion and the daemon timeout on a never-answering extension."""
+    import asyncio
+
+    from local_operator.browser_bridge.daemon import BridgeService
+    from local_operator.browser_bridge.protocol import (
+        COMMAND_TIMEOUTS,
+        Request,
+        Response,
+    )
+
+    service = BridgeService(root=tmp_path)
+
+    # Normal exit: the fake extension answers immediately.
+    async def answer(payload: dict[str, object]) -> None:
+        request = Request.model_validate(payload)
+        future = service.link.pending.get(request.id)
+        if future and not future.done():
+            future.set_result(
+                Response(id=request.id, ok=True, result={"origin": "x", "state": "pending"})
+            )
+
+    service.link.send = answer  # type: ignore[method-assign]
+    await service._dispatch_serialized(
+        Request(id="r-ok", method="await_access", params={"url": "https://x.example"})
+    )
+    assert service._tab_locks == {}
+
+    # Error exit (timeout): the extension never answers; the daemon's command
+    # timeout fires inside _dispatch_locked.
+    async def silent(payload: dict[str, object]) -> None:
+        await asyncio.sleep(COMMAND_TIMEOUTS["await_access"] + 5)
+
+    service.link.send = silent  # type: ignore[method-assign]
+    await service._dispatch_serialized(
+        Request(id="r-timeout", method="await_access", params={"url": "https://x.example"})
+    )
+    assert service._tab_locks == {}

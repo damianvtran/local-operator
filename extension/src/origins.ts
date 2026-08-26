@@ -200,49 +200,55 @@ export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
   return decision !== "deny";
 }
 
-/** Fold the user's decision into a live async access request, if one matches.
+/** Fold the user's decision into a live async access request — the
+ * NON-LOCKING body (suffix `Locked`: caller already holds the session
+ * mutation queue). Splitting the old self-locking helper is what makes the
+ * round-3 B1 fix possible: resolveOrigin's validation and this mutation now
+ * share one critical section, so a queued replacement cannot slip between
+ * them. Returns false when there is nothing left to apply (no live record,
+ * wrong origin, or already decided — the duplicate-delivery idempotence).
  * This is the second half of the decoupling: the popup's one decision message
  * must land on BOTH an in-command wait (resolveOrigin's map) and the async
  * record, because the agent may be waiting either way and the popup cannot
  * tell which. Persisting "always" and minting the "once" grant happen here
- * for the async path — there is no askOrigin continuation to do it. Runs
- * under the session-mutation queue: it read-modify-writes the same keys the
- * consume paths do. */
-function recordAccessDecision(origin: string, decision: OriginDecision): Promise<void> {
-  return withSessionMutation(async () => {
-    const now = Date.now();
-    const session = await getSession();
-    const live = activeRequest(session.accessRequest, now);
-    if (!live || live.origin !== origin || live.decision) return;
-    await chrome.storage.session.set({ accessRequest: { ...live, decision } });
-    if (decision === "once") {
-      // The grant is bound to the REQUEST's requester AND to the command that
-      // raised the request: an async "Allow once" is earned by the flow that
-      // asked, so the handoff records BOTH identities. A navigation spends it
-      // if it carries EITHER — the session identity (normal path: the same
-      // session's next open/goto) or the exact command id (a raw-RPC caller
-      // whose navigation reuses the request_access id). A third session
-      // carries neither and is refused (fail-closed; see access-flow.ts).
-      const grants = session.onceGrants ?? {};
-      await chrome.storage.session.set({
-        onceGrants: {
-          ...grants,
-          [origin]: {
-            expiresAt: now + ONCE_GRANT_TTL_MS,
-            requester: live.requester,
-            handoff: session.pendingOrigin?.requestId ?? "",
-          },
+ * for the async path — there is no askOrigin continuation to do it. */
+async function recordAccessDecisionLocked(
+  origin: string,
+  decision: OriginDecision,
+  session: { accessRequest?: AccessRequest; onceGrants?: import("./access-flow").OnceGrants; pendingOrigin?: { requestId?: string } },
+): Promise<boolean> {
+  const now = Date.now();
+  const live = activeRequest(session.accessRequest, now);
+  if (!live || live.origin !== origin || live.decision) return false;
+  await chrome.storage.session.set({ accessRequest: { ...live, decision } });
+  if (decision === "once") {
+    // The grant is bound to the REQUEST's requester AND to the command that
+    // raised the request: an async "Allow once" is earned by the flow that
+    // asked, so the handoff records BOTH identities. A navigation spends it
+    // if it carries EITHER — the session identity (normal path: the same
+    // session's next open/goto) or the exact command id (a raw-RPC caller
+    // whose navigation reuses the request_access id). A third session
+    // carries neither and is refused (fail-closed; see access-flow.ts).
+    const grants = session.onceGrants ?? {};
+    await chrome.storage.session.set({
+      onceGrants: {
+        ...grants,
+        [origin]: {
+          expiresAt: now + ONCE_GRANT_TTL_MS,
+          requester: live.requester,
+          handoff: session.pendingOrigin?.requestId ?? "",
         },
-      });
-    }
-    if (decision === "always") {
-      const { origins = {} } = await getLocal();
-      await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
-    }
-    // The async prompt has no waiting command to clean up after itself; clear
-    // the badge/notification here so the "!" does not outlive the decision.
-    await clearPrompt();
-  });
+      },
+    });
+  }
+  if (decision === "always") {
+    const { origins = {} } = await getLocal();
+    await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
+  }
+  // The async prompt has no waiting command to clean up after itself; clear
+  // the badge/notification here so the "!" does not outlive the decision.
+  await clearPrompt();
+  return true;
 }
 
 /** Apply the popup's decision — IF it names the live prompt generation.
@@ -253,29 +259,44 @@ function recordAccessDecision(origin: string, decision: OriginDecision): Promise
  * of racing worker suspension (round-2 M2). Resolves true when applied,
  * false when rejected as stale.
  *
- * Stale rejection (round-2 B1): the popup binds its click to the promptId it
- * RENDERED. If another request replaced the slot after that render, the ids
- * differ, nothing resolves, no grant is minted — the user's click was an
- * answer to a question that is no longer being asked. A missing promptId
- * (legacy popup / health-fallback render) still requires the ORIGIN to match
- * the live prompt, the pre-generation guard. */
-export async function resolveOrigin(
+ * Validation AND persistence run in ONE withSessionMutation critical section
+ * (round-3 B1): validating before entering the queue was a TOCTOU — a
+ * same-origin replacement queued behind the stale decision's validation
+ * installed its fresh generation after the check passed but before
+ * recordAccessDecision ran, so the stale click applied to (and minted a grant
+ * for) the NEW request. Inside the queue the pending prompt is re-read
+ * atomically with the mutation that consumes it; the in-command waiter is
+ * resolved only after that atomic validation succeeds. A duplicate delivery
+ * of the CURRENT generation is idempotent: the record already carries the
+ * decision, so the re-read sees `live.decision` set and nothing re-applies
+ * (still `applied:true` — the user's click did land, it just already landed). */
+export function resolveOrigin(
   origin: string,
   decision: OriginDecision,
   promptId: string = "",
 ): Promise<boolean> {
-  const { pendingOrigin } = await getSession();
-  if (!pendingOrigin || pendingOrigin.origin !== origin) return false;
-  if (promptId && pendingOrigin.promptId && promptId !== pendingOrigin.promptId) return false;
-  // In-command wait first (synchronous handoff into the promise), then the
-  // durable async record.
-  const resolve = waiting.get(origin);
-  if (resolve) {
-    waiting.delete(origin);
-    resolve(decision);
-  }
-  await recordAccessDecision(origin, decision);
-  return true;
+  return withSessionMutation(async () => {
+    // Stale rejection (round-2 B1): the popup binds its click to the promptId
+    // it RENDERED. If another request replaced the slot after that render,
+    // nothing resolves, no grant is minted — the user's click was an answer
+    // to a question that is no longer being asked. A missing promptId
+    // (legacy popup / health-fallback render) still requires the ORIGIN to
+    // match the live prompt, the pre-generation guard.
+    const session = await getSession();
+    const pendingOrigin = session.pendingOrigin;
+    if (!pendingOrigin || pendingOrigin.origin !== origin) return false;
+    if (promptId && pendingOrigin.promptId && promptId !== pendingOrigin.promptId) return false;
+    const applied = await recordAccessDecisionLocked(origin, decision, session);
+    if (!applied) return false;
+    // In-command wait AFTER atomic validation: the waiter must never be
+    // resolved by a decision the queue just rejected as stale.
+    const resolve = waiting.get(origin);
+    if (resolve) {
+      waiting.delete(origin);
+      resolve(decision);
+    }
+    return true;
+  });
 }
 
 /** Lazy TTL cleanup, called from the worker's expiry alarm and on every

@@ -393,3 +393,84 @@ test("resolveOrigin settles only after the decision is durable (M2)", async () =
     chrome.restore();
   }
 });
+
+test("a queued same-origin replacement cannot be decided by a stale click (R3-B1 TOCTOU)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    const stalePrompt = chrome.session("pendingOrigin");
+    // The reviewer's interleaving: B's same-origin replacement enters the
+    // mutation queue FIRST and pauses mid-write; the stale A click validates
+    // against the OLD prompt while B is queued; B then installs its fresh
+    // generation; the stale click must NOT apply to it.
+    const realSet = globalThis.chrome.storage.session.set;
+    let releaseB;
+    const gateB = new Promise((resolve) => { releaseB = resolve; });
+    globalThis.chrome.storage.session.set = async (obj) => {
+      if (obj && obj.accessRequest && obj.accessRequest.requester === "session:B") {
+        await gateB; // B paused INSIDE its queued mutation, after A's validation
+      }
+      const changes = {};
+      for (const [key, value] of Object.entries(obj || {})) {
+        changes[key] = { newValue: value };
+        chrome.areas.session.set(key, value);
+      }
+      void realSet;
+    };
+    // B's raise enters the queue and parks on the gate.
+    const raiseB = origins.raiseAccessRequest(urlOf(), "session:B");
+    await new Promise((resolve) => setTimeout(resolve, 20)); // B queued + parked
+    // A's stale click (old generation) is delivered and — pre-fix — validated
+    // OUTSIDE the queue, then queued behind B's parked mutation.
+    const staleClick = origins.resolveOrigin(ORIGIN, "once", stalePrompt.promptId);
+    await new Promise((resolve) => setTimeout(resolve, 20)); // stale click queued behind B
+    releaseB();
+    const applied = await staleClick;
+    await raiseB;
+    globalThis.chrome.storage.session.set = realSet;
+    // The invariant: the stale click did NOT decide B's request.
+    assert.equal(applied, false, "stale click must be rejected, not applied to B");
+    const record = chrome.session("accessRequest");
+    assert.equal(record.requester, "session:B");
+    assert.equal(record.decision, undefined, "B's request is still undecided");
+    const grants = chrome.session("onceGrants");
+    assert.ok(!grants || !grants[ORIGIN], "no grant minted for B from A's stale click");
+    // B's CURRENT generation still decides normally afterwards.
+    const current = chrome.session("pendingOrigin");
+    assert.notEqual(current.promptId, stalePrompt.promptId);
+    const appliedNow = await origins.resolveOrigin(ORIGIN, "once", current.promptId);
+    assert.equal(appliedNow, true);
+    const grantsNow = chrome.session("onceGrants");
+    assert.equal(grantsNow[ORIGIN].requester, "session:B", "grant for B, by B's click");
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("duplicate current-generation delivery is idempotent (R3-B1)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    const prompt = chrome.session("pendingOrigin");
+    const first = await origins.resolveOrigin(ORIGIN, "once", prompt.promptId);
+    const second = await origins.resolveOrigin(ORIGIN, "once", prompt.promptId);
+    assert.equal(first, true);
+    // The duplicate is a NO-OP, not an error: the prompt record is consumed
+    // by the first decision, so the re-delivery finds nothing live and is
+    // rejected as stale — with no side effects (the grant below is untouched).
+    assert.equal(second, false, "duplicate delivery applies nothing");
+    const grants = chrome.session("onceGrants");
+    assert.ok(grants && grants[ORIGIN], "exactly one grant object");
+    assert.equal(grants[ORIGIN].expiresAt, grants[ORIGIN].expiresAt);
+    const record = chrome.session("accessRequest");
+    assert.equal(record.decision, "once");
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});

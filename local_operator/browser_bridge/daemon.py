@@ -526,6 +526,21 @@ class BridgeService:
     async def _dispatch_serialized(self, request: Request) -> JSONResponse:
         tab_key = self.lock_key_for(request)
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
+        # A per-request await key is used exactly once (request ids are
+        # unique) and MUST be evicted on every exit path — success, typed
+        # error, timeout, AND cancellation (client disconnect surfaces as
+        # CancelledError inside the HTTP handler). Evicting only after a
+        # normal return was round-3 M1: a cancelled parked await propagated
+        # past the eviction line and permanently retained its unique key, so
+        # repeated disconnects grew the lock map without bound. The `finally`
+        # block covers all exits; the pop is unconditional because no other
+        # request can ever share a per-request key.
+        if request.method == "await_access":
+            try:
+                async with lock:
+                    return await self._dispatch_locked(request)
+            finally:
+                self._tab_locks.pop(tab_key, None)
         async with lock:
             response = await self._dispatch_locked(request)
         # Per-tab keys used to be near-singleton; with every opened tab minting
@@ -534,11 +549,6 @@ class BridgeService:
         # unlocked-and-unwaited means a later command for the same (now dead)
         # handle can safely mint a fresh Lock.
         if request.method == "close" and tab_key != "__global__" and not lock.locked():
-            self._tab_locks.pop(tab_key, None)
-        # A per-request await key is used exactly once (request ids are
-        # unique); without eviction every await_access would leave a Lock in
-        # the map for the daemon's lifetime.
-        if request.method == "await_access":
             self._tab_locks.pop(tab_key, None)
         return response
 
