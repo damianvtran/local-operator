@@ -1,11 +1,12 @@
 import { BridgeCommandError, cdp } from "./cdp";
 import { safeHttpUrl, storedOriginAllowed } from "./origin-policy";
+import { ORIGIN_PROMPT_TIMEOUT_MS } from "./protocol.gen";
 import { getLocal } from "./state";
 
 export { safeHttpUrl } from "./origin-policy";
+export { ORIGIN_PROMPT_TIMEOUT_MS } from "./protocol.gen";
 
 export type OriginDecision = "once" | "always" | "deny";
-export const ORIGIN_PROMPT_TIMEOUT_MS = 60_000;
 
 // The popup resolves a decision by ORIGIN, not by command id: a single command
 // can pause on several origins in a redirect chain, and keying the resolver by

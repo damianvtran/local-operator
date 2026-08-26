@@ -30,6 +30,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
+    COMMAND_TIMEOUTS,
+    ORIGIN_PROMPT_WINDOW_S,
     PROTO_VERSION,
     ErrorCode,
     ErrorDetail,
@@ -52,31 +54,6 @@ PAIR_TTL_S = 120.0
 PAIR_MAX_ATTEMPTS = 5
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
-COMMAND_TIMEOUTS = {
-    "open": 30.0,
-    "goto": 30.0,
-    "click": 25.0,
-    "type": 25.0,
-    "read": 20.0,
-    "snapshot": 20.0,
-    "screenshot": 20.0,
-    "close": 20.0,
-    "status": 20.0,
-    # scroll waits briefly for the wheel/scrollIntoView to settle and re-reads
-    # position; logs just drains a per-tab ring buffer already in memory.
-    "scroll": 20.0,
-    "logs": 20.0,
-}
-
-#: Extra budget granted to a command that is BLOCKED on a human origin
-#: decision, on top of the base command timeout. The extension gives the user
-#: 60 s to answer (origins.ts); without this the 25–30 s command timeout fired
-#: first, so a user who took longer than that got a spurious tool failure while
-#: the tab navigated anyway against a surface the session had written off
-#: (finding A3). Slightly above 60 s so the extension's own deny-timeout wins
-#: the race and returns a typed ORIGIN_DENIED rather than this firing blind.
-ORIGIN_PROMPT_WINDOW_S = 65.0
-
 #: Poll granularity for the extendable command wait. A pending future is
 #: normally resolved by the receive loop the instant the response lands; this
 #: only bounds how quickly a deadline EXTENSION (awaiting_origin) is noticed.
