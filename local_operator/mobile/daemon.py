@@ -252,7 +252,12 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 
 def _durable_projection(session_id: str) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk."""
-    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.mobile.projection import (
+        SUBAGENT_OUTCOME_CHARS,
+        SUBAGENT_PROMPT_PREVIEW_CHARS,
+        ProjectionFold,
+        _compact,
+    )
     from local_operator.resume import stored_session_title
     from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
     from local_operator.session.transcript import Transcript
@@ -316,11 +321,21 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             agent=str(record.get("agent_role") or job.get("agent_role") or "task"),
             status=status,  # type: ignore[arg-type] -- normalized persisted literals
             model_label=str(job.get("model_label") or ""),
-            result_text=str(record.get("result_text") or ""),
-            error_text=str(record.get("error_text") or job.get("error_text") or ""),
+            # Bound the settled text on the wire to match the live fold. A
+            # durable rebuild must not reintroduce the unbounded frame the live
+            # caps prevent — the FULL text is still retained by the daemon in
+            # ``subagent_details`` and served through getSubagentDetail.
+            result_text=_compact(str(record.get("result_text") or ""), SUBAGENT_OUTCOME_CHARS),
+            error_text=_compact(
+                str(record.get("error_text") or job.get("error_text") or ""),
+                SUBAGENT_OUTCOME_CHARS,
+            ),
             parent_job_id=parent_id,
             session_id=child_dir.name if child_dir else None,
-            prompt=str(record.get("prompt") or ""),
+            # Compacted preview only, same bound as the live fold — see
+            # SUBAGENT_PROMPT_PREVIEW_CHARS. Uncapped prompts across a deep
+            # durable roster reintroduce the oversized-frame wedge.
+            prompt=_compact(str(record.get("prompt") or ""), SUBAGENT_PROMPT_PREVIEW_CHARS),
             launch_message_id=str(record.get("launch_message_id") or ""),
             effort=str(record.get("effort") or job.get("effort") or ""),
             ancestors=ancestors,

@@ -408,6 +408,36 @@ def test_hydrated_subagent_details_never_place_transcript_on_the_wire() -> None:
     assert all(sub["transcript"] == [] for sub in wire["subagents"])
 
 
+def test_live_fold_bounds_subagent_prompt_and_outcome_on_the_wire() -> None:
+    """Uncapped prompt/result text re-wedges the frame the transcript cap saved.
+
+    The list projection is a full repaint pushed ~30x/s and every subagent row
+    rides in it, so uncapped prompt/result/error text scales the frame with
+    roster depth: a power-user session at 80+ subagents put hundreds of KB of
+    prompt text into one frame, back toward the 1 MB control-frame cap. The row
+    only needs a preview; the full text is retained by the daemon and served
+    through getSubagentDetail. This pins the wire bounds so the regression cannot
+    silently return.
+    """
+    from local_operator.mobile.projection import (
+        SUBAGENT_OUTCOME_CHARS,
+        SUBAGENT_PROMPT_PREVIEW_CHARS,
+    )
+
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("child", "child", prompt="P" * 50_000)
+    comms.record_outcome("child", "completed", result_text="R" * 50_000)
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    wire_row = fold.projection.to_json()["subagents"][0]
+    assert len(wire_row["prompt"]) <= SUBAGENT_PROMPT_PREVIEW_CHARS
+    assert len(wire_row["result_text"]) <= SUBAGENT_OUTCOME_CHARS
+    # An empty error field stays empty (a cap must not manufacture a placeholder).
+    assert wire_row["error_text"] == ""
+
+
 def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
     """The runner records terminal state before the manager stamps its row."""
 

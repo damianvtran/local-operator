@@ -73,6 +73,23 @@ TOOL_OUTPUT_TAIL_CHARS = 8_000
 #: Same bound for the args side of an expanded tool row.
 TOOL_ARGS_CHARS = 4_000
 
+#: How much of a subagent's launch prompt the roster row carries on the wire.
+#: The list projection is a full repaint pushed ~30x/s and every subagent row
+#: rides in it, so an uncapped prompt is a per-repaint tax that scales with
+#: roster depth: a power-user session at 80+ subagents put ~385 KB of prompt
+#: text into a single frame, pushing it toward the daemon's 1 MB control-frame
+#: cap (``daemon._dial`` ``limit=1 << 20``) and risking the same wedge that
+#: keeping transcripts off the wire fixed. The row only needs a preview for the
+#: sheet's "Parent request" line; the FULL prompt is still reachable through
+#: ``getSubagentDetail`` (the daemon retains it in ``subagent_details``). This
+#: bound is generous enough to read as the task while staying bounded per row.
+SUBAGENT_PROMPT_PREVIEW_CHARS = 1_000
+
+#: Settled-outcome text bound shared by the live and durable folds. The live
+#: ``SubagentEndEvent`` path already compacts to 200; the durable rebuild must
+#: match so a reconstructed roster cannot carry unbounded result/error text.
+SUBAGENT_OUTCOME_CHARS = 200
+
 
 def _message_text(message: AgentMessage) -> str:
     if isinstance(message, Message):
@@ -746,7 +763,10 @@ class ProjectionFold:
                 row.label = node.label
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
-            row.prompt = node.prompt
+            # Compacted preview only — see SUBAGENT_PROMPT_PREVIEW_CHARS. The
+            # full prompt stays available via getSubagentDetail; carrying it
+            # uncapped in every repaint scales the frame with roster depth.
+            row.prompt = _compact(node.prompt or "", SUBAGENT_PROMPT_PREVIEW_CHARS)
             row.launch_message_id = node.launch_message_id
             row.effort = node.effort
             # Preserve #298's ancestor_ids feature on the O(children) path.
@@ -777,11 +797,14 @@ class ProjectionFold:
                 else:
                     mobile_status = status
                 row.status = mobile_status  # type: ignore[assignment] -- normalized literals
-                # The roster renderer truncates visually; the detail route must
-                # retain the complete handoff or provider failure so opening a
-                # child never loses the actionable tail behind a summary cap.
-                row.result_text = str(lifecycle.result_text or "")
-                row.error_text = str(lifecycle.error_text or "")
+                # Compacted for the wire (same bound as the SubagentEndEvent
+                # path and the durable fold). The row is a roster preview pushed
+                # ~30x/s; the COMPLETE handoff/failure is retained by the daemon
+                # in ``subagent_details`` and served through getSubagentDetail,
+                # so opening a child still gets the full actionable tail while a
+                # deep roster's frame stays bounded (see SUBAGENT_OUTCOME_CHARS).
+                row.result_text = _compact(str(lifecycle.result_text or ""), SUBAGENT_OUTCOME_CHARS)
+                row.error_text = _compact(str(lifecycle.error_text or ""), SUBAGENT_OUTCOME_CHARS)
                 if lifecycle.age_s is not None:
                     row.elapsed_s = max(0.0, float(lifecycle.age_s))
             progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")

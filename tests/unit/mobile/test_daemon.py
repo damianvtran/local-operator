@@ -862,6 +862,55 @@ def test_durable_subagent_routes_reconstruct_after_daemon_restart(tmp_path, monk
     )
 
 
+def test_durable_fold_bounds_prompt_and_outcome_on_the_wire(tmp_path, monkeypatch) -> None:
+    """A durable rebuild must not reintroduce the unbounded frame the live caps
+    prevent. ``_durable_projection`` rebuilds a roster from the persisted record,
+    whose prompt/result/error fields are unbounded on disk; the wire row must
+    compact them the same way the live fold does, or a restart/reconnect of a
+    deep-roster session re-wedges with the identical oversized-frame symptom.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.mobile.daemon import _durable_projection
+    from local_operator.mobile.projection import (
+        SUBAGENT_OUTCOME_CHARS,
+        SUBAGENT_PROMPT_PREVIEW_CHARS,
+    )
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "completed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "prompt": "P" * 50_000,
+                        "session_dir": str(child_dir),
+                        "outcome": "completed",
+                        "result_text": "R" * 50_000,
+                    }
+                ],
+            },
+        )
+    )
+
+    projection = _durable_projection("root-session")
+    assert projection is not None
+    row = projection.subagents[0]
+    assert len(row.prompt) <= SUBAGENT_PROMPT_PREVIEW_CHARS
+    assert len(row.result_text) <= SUBAGENT_OUTCOME_CHARS
+
+
 def test_http_command_requires_auth_and_rejects_empty_steer_before_dispatch() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     record = SessionRecord(
