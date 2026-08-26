@@ -894,11 +894,12 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
 
 
 #: The ONLY ``AsyncJob`` fields the roster snapshot carries. An allowlist, not
-#: an exclude set, because the whole task-row list is re-appended on every
-#: roster move and custom entries are never reclaimed (``compact_file`` folds
-#: only the message prune journal) — so anything unbounded here is written once
-#: per surviving child per move, i.e. O(children²) bytes of superseded data on
-#: disk. The fields kept are all small and bounded: the identity, the timings
+#: an exclude set, because the roster projection must stay small: it is written
+#: to the replaced sidecar on every roster move, and a superseded copy in a
+#: legacy transcript is only reclaimed lazily (``compact_file`` now collapses
+#: superseded ``subagent_roster`` customs, but not until the next compaction) —
+#: so anything unbounded here bloats both surfaces. The fields kept are all
+#: small and bounded: the identity, the timings
 #: the panel prices elapsed from, the model/usage/window it paints, and the
 #: routing/queue flags a restore needs. Everything a reader might want beyond
 #: this — the child's full ``result_text``, its verbatim ``prompt`` (documented
@@ -1454,6 +1455,19 @@ class Session:
         self._subagent_roster_generation = 0
         self._subagent_roster_written_generation = 0
         self._subagent_roster_writer: asyncio.Task[None] | None = None
+        # The CONTENT of the roster payload last written to the sidecar, so a
+        # redundant write can be skipped. The roster persist hook fires on every
+        # job-row mutation — usage/heartbeat churn included — but most of those
+        # events leave the persisted projection ({version, jobs, records}, minus
+        # the ever-incrementing ``generation`` counter) byte-identical. A real
+        # fan-out fired ~3 sidecar writes per settle, ~2 of them identical, and
+        # each is a full mkstemp + fsync + os.replace + directory-fsync cycle;
+        # that fsync volume is what tripped the macOS "disk writes exceeding
+        # limit" throttle on a long delegating session. Mirrors the todo guard
+        # (:meth:`_maybe_persist_todos`): fingerprint the durable content and
+        # write only when it actually moved. ``None`` means nothing persisted
+        # yet, so the first event always writes.
+        self._persisted_roster_fingerprint: str | None = None
         # Session-scoped task group (HC-11): wake deliveries and aside
         # persistence are routed through it so dispose() cancels them
         # deterministically and a delivery after dispose never raises into an
@@ -5929,27 +5943,52 @@ class Session:
                 records = (
                     self._subagent_comms.snapshot() if self._subagent_comms is not None else []
                 )
+                compact_records = [_compact_subagent_record(record) for record in records]
                 payload = {
                     "version": _SUBAGENT_ROSTER_VERSION,
                     "generation": generation,
                     "jobs": rows,
-                    "records": [_compact_subagent_record(record) for record in records],
+                    "records": compact_records,
                 }
-                await asyncio.to_thread(
-                    _write_roster_sidecar,
-                    self._transcript.directory / SUBAGENT_ROSTER_SIDECAR,
-                    payload,
+                # Fingerprint the CONTENT, not the counter. ``generation`` is
+                # bumped on every roster event by design (it drives the
+                # coalescing loop), so including it here would make every payload
+                # unique and defeat the guard. Everything else is the durable
+                # projection a resume actually reads. ``sort_keys`` makes the
+                # serialization order-stable so an unchanged roster hashes
+                # identically across writes.
+                fingerprint = json.dumps(
+                    {
+                        "version": _SUBAGENT_ROSTER_VERSION,
+                        "jobs": rows,
+                        "records": compact_records,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
                 )
-                # Keep one bounded legacy entry for readers predating v0.35.2;
-                # future mutations replace only the sidecar, avoiding quadratic
-                # history while preserving a rolling-upgrade resume path.
-                if (rows or records) and self._transcript.latest_custom(
-                    SUBAGENT_ROSTER_CUSTOM_TYPE
-                ) is None:
-                    await self._transcript.append_custom(
-                        SUBAGENT_ROSTER_CUSTOM_TYPE,
-                        {"jobs": rows, "records": payload["records"]},
+                if fingerprint != self._persisted_roster_fingerprint:
+                    await asyncio.to_thread(
+                        _write_roster_sidecar,
+                        self._transcript.directory / SUBAGENT_ROSTER_SIDECAR,
+                        payload,
                     )
+                    # Keep one bounded legacy entry for readers predating
+                    # v0.35.2; future mutations replace only the sidecar,
+                    # avoiding quadratic history while preserving a
+                    # rolling-upgrade resume path.
+                    if (rows or records) and self._transcript.latest_custom(
+                        SUBAGENT_ROSTER_CUSTOM_TYPE
+                    ) is None:
+                        await self._transcript.append_custom(
+                            SUBAGENT_ROSTER_CUSTOM_TYPE,
+                            {"jobs": rows, "records": payload["records"]},
+                        )
+                    self._persisted_roster_fingerprint = fingerprint
+                # Advance the written-generation watermark whether or not this
+                # payload was actually flushed: the CONTENT is up to date on
+                # disk (identical bytes already there), and leaving the watermark
+                # behind would make ``_await_subagent_roster_writer`` at teardown
+                # loop forever chasing a generation the guard will always skip.
                 self._subagent_roster_written_generation = generation
         except Exception:  # noqa: BLE001 - persistence must never break a turn
             logger.warning("could not persist subagent roster", exc_info=True)
