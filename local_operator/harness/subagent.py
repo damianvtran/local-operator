@@ -824,7 +824,7 @@ class _ChildMcp:
     """
 
     tools: list[AgentTool]
-    catalogue: Callable[[], str]
+    catalogue: Callable[[str], str]
     resolve: Callable[[str], str | None]
     attach: Callable[["Session"], None]
 
@@ -904,7 +904,7 @@ def _child_mcp_wiring(parent_session: "Session") -> _ChildMcp | None:
 
     return _ChildMcp(
         tools=selected(manager.get_tools()),
-        catalogue=lambda: render_mcp_catalogue(manager),
+        catalogue=lambda query: render_mcp_catalogue(manager, query),
         resolve=make_mcp_resolver(manager, activate),
         attach=attach,
     )
@@ -979,7 +979,11 @@ async def _build_child_session(
     user_instructions = load_user_instructions()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
-    mcp = _child_mcp_wiring(parent_session)
+    # MCP activation is an executable capability, so restricted roles must not
+    # receive its resolver or its prompt hint. Decide before ToolContext closes
+    # over the resolver rather than merely filtering already activated schemas.
+    mcp_allowed = not ((profile is not None and bool(profile.tools)) or agent == "scout")
+    mcp = _child_mcp_wiring(parent_session) if mcp_allowed else None
     parent_resolver = parent_session._skill_resolver
 
     def resolve_internal_url(url: str) -> str | None:
@@ -995,6 +999,12 @@ async def _build_child_session(
             handled = mcp.resolve(url)
             if handled is not None:
                 return handled
+        # The parent's resolver also ends in its MCP resolver. Falling through
+        # for a restricted child would therefore bypass the child's capability
+        # boundary and activate schemas in the parent inventory. Reject only
+        # this namespace here so guide:// and skill:// remain inherited.
+        if not mcp_allowed and url.startswith("mcp://"):
+            return None
         return parent_resolver(url) if parent_resolver is not None else None
 
     # The child context carries no subagent_launcher, jobs or wake scheduler,
@@ -1092,7 +1102,7 @@ async def _build_child_session(
         )
         return build_system_blocks(
             tools,
-            mcp.catalogue() if mcp is not None else "",
+            mcp.catalogue(prompt) if mcp is not None else "",
             _env_details(cwd),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,

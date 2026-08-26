@@ -948,12 +948,12 @@ class FakeMcpManager:
         return self._meta.get(tool_name)
 
 
-async def build_child(parent, model_spec=None, job_id="job-1", agent="task"):
+async def build_child(parent, model_spec=None, job_id="job-1", agent="task", prompt="do the thing"):
     from local_operator.harness import subagent as subagent_mod
 
     return await subagent_mod._build_child_session(
         label="sub",
-        prompt="do the thing",
+        prompt=prompt,
         parent_session=parent,
         model_spec=model_spec,
         job_id=job_id,
@@ -989,7 +989,7 @@ async def test_child_gets_the_parents_mcp_manager_and_catalogue(tmp_path, monkey
     parent = make_session(tmp_path, OneShotStream())
     attach_manager(parent, manager)
 
-    child = await build_child(parent)
+    child = await build_child(parent, prompt="list the Linear issues")
 
     assert child.mcp_manager is manager
     tail = knowledge_tail(child)
@@ -1174,6 +1174,55 @@ async def test_grandchild_cannot_fan_out_but_polls_its_own_background_bash(tmp_p
     # ...but it can observe/cancel its OWN background job.
     assert "jobs" in names
     assert {"bash", "read", "edit", "write"} <= names
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_restricted_child_cannot_fall_through_to_parent_mcp(tmp_path, monkeypatch):
+    """A restricted role keeps guide/skill resolution but cannot list or
+    activate MCP through the parent's combined resolver chain."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+    from local_operator.mcp.resources import make_mcp_resolver
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager = FakeMcpManager({"slack": ["post_message"]})
+    parent_activations: list[tuple[str, str]] = []
+
+    def parent_resolver(url: str) -> str | None:
+        if url == "guide://safe":
+            return "safe guide"
+        return make_mcp_resolver(
+            manager, lambda server, tool: parent_activations.append((server, tool))
+        )(url)
+
+    parent = make_session(
+        tmp_path,
+        OneShotStream(),
+        skill_resolver=parent_resolver,
+    )
+    attach_manager(parent, manager)
+    profile = AgentProfile(
+        name="reviewer",
+        description="reviews without MCP access",
+        tools=("read", "grep"),
+    )
+    child = await subagent_mod._build_child_session(
+        label="review",
+        prompt="review the Slack integration",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-restricted",
+        agent="reviewer",
+        profile=profile,
+    )
+
+    assert resolve(child, "guide://safe") == "safe guide"
+    assert resolve(child, "mcp://slack") is None
+    assert resolve(child, "mcp://slack/post_message") is None
+    assert parent_activations == []
+    assert all(not tool.name.startswith("mcp__") for tool in child._tools)
     await child.dispose()
     await parent.dispose()
 
@@ -1430,16 +1479,18 @@ async def test_a_reconnect_swaps_the_managers_tools_under_a_running_child(tmp_pa
 
 @pytest.mark.asyncio
 async def test_a_parent_with_no_configured_servers_gives_an_empty_tail(tmp_path, monkeypatch):
-    """A manager exists but discovery found nothing. The child must not carry
-    an empty ``<mcps>`` block into every prompt, and ``mcp://`` must still
-    answer rather than raise — the resolver is installed either way."""
+    """A manager exists but discovery found nothing. The child carries only
+    the compact discovery escape hatch, and ``mcp://`` still answers rather
+    than raising because the resolver is installed either way."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
     attach_manager(parent, FakeMcpManager({}))
 
     child = await build_child(parent)
 
-    assert knowledge_tail(child) == "<skills/>"
+    assert knowledge_tail(child) == (
+        "<mcps>Read `mcp://` to discover configured MCP servers.</mcps>"
+    )
     assert resolve(child, "mcp://nope") == "Unknown MCP server: nope. Available: (none)"
     await child.dispose()
     await parent.dispose()
