@@ -243,6 +243,71 @@ async def test_compaction_boundary_survives_folding(tmp_path):
     assert [m.text for m in replayed[1:] if isinstance(m, Message)] == ["recent"]
 
 
+@pytest.mark.asyncio
+async def test_compact_file_heals_legacy_roster_bloat(tmp_path):
+    """A pre-v0.40.0 transcript with a long run of superseded ``subagent_roster``
+    custom entries sheds all but the newest on compaction, reclaiming the bytes,
+    while messages, replay, and ``latest_custom`` stay intact.
+
+    This is the heal for the real 125 MB session that re-appended a full roster
+    snapshot on every roster move. The old bloat never journals a prune, so the
+    fold must run on the superseded-custom signal alone (no pending prune)."""
+    transcript = Transcript(tmp_path / "sess")
+    keep_msg = Message.user("keep me")
+    await transcript.append_message(keep_msg)
+    # A long run of superseded roster snapshots, each carrying a big record tail
+    # (the pre-cap shape). Only the last one is live; the rest are dead weight.
+    for generation in range(50):
+        await transcript.append_custom(
+            "subagent_roster",
+            {"generation": generation, "jobs": [], "records": [{"blob": "X" * 2_000}]},
+        )
+    # An unrelated newest-wins custom that is NOT collapsible must be untouched.
+    await transcript.append_custom("todo_snapshot", {"items": ["a"]})
+
+    before = transcript.path.stat().st_size
+    n_roster_before = sum(
+        1
+        for e in transcript.entries()
+        if e.type == "custom" and e.payload.get("custom_type") == "subagent_roster"
+    )
+    assert n_roster_before == 50
+
+    # No pending prune: the heal fires on the superseded-custom signal alone.
+    expected = transcript.reclaimable_bytes()
+    reclaimed = await transcript.compact_file(min_reclaim_bytes=1)
+    assert reclaimed == expected > 0
+    assert transcript.path.stat().st_size == before - reclaimed
+
+    reopened = Transcript(tmp_path / "sess")
+    roster_entries = [
+        e
+        for e in reopened.entries()
+        if e.type == "custom" and e.payload.get("custom_type") == "subagent_roster"
+    ]
+    # Exactly one roster entry survives, and it is the NEWEST (generation 49).
+    assert len(roster_entries) == 1
+    assert roster_entries[0].payload["details"]["generation"] == 49
+    # latest_custom is unchanged by the collapse.
+    latest_roster = reopened.latest_custom("subagent_roster")
+    assert latest_roster is not None and latest_roster["generation"] == 49
+    # The non-collapsible custom and the message are byte-preserved.
+    assert reopened.latest_custom("todo_snapshot") == {"items": ["a"]}
+    replayed = reopened.build_llm_history()
+    assert [m.text for m in replayed if isinstance(m, Message)] == ["keep me"]
+
+
+@pytest.mark.asyncio
+async def test_compact_file_keeps_a_single_roster_entry(tmp_path):
+    """One roster entry is already minimal: nothing to collapse, no rewrite."""
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_message(Message.user("hi"))
+    await transcript.append_custom("subagent_roster", {"generation": 0, "records": []})
+    before = transcript.path.read_bytes()
+    assert await transcript.compact_file(min_reclaim_bytes=1) == 0
+    assert transcript.path.read_bytes() == before
+
+
 def test_encode_rejects_nothing_it_cannot_rebuild():
     """Belt and braces on the encoder itself: every field it drops must be
     reconstructible by pydantic from the model default."""

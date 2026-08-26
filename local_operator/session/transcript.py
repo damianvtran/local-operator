@@ -80,6 +80,27 @@ COMPACT_FILE_THRESHOLD_BYTES = 256 * 1024
 #: Lives under ``provider_payload`` so an older build simply ignores it.
 SHRUNK_KEY = "context_shrunk_here"
 
+#: Custom-entry types whose SUPERSEDED copies :meth:`Transcript.compact_file`
+#: drops on disk, keeping only the newest. These are the NEWEST-WINS types: the
+#: session reads them exclusively through :meth:`latest_custom`, so every older
+#: entry is dead weight the moment a newer one lands.
+#:
+#: ``subagent_roster`` is the reason this exists. Before v0.40.0 the roster
+#: re-appended a full snapshot to the transcript on every roster move, and a
+#: real fan-out left ~247 giant superseded roster entries in one file — a 125 MB
+#: transcript that loads whole into memory on every resume and is re-serialized
+#: wholesale on every compaction. v0.40.0 stopped writing NEW bloat (the roster
+#: moved to a replaced sidecar) but never healed transcripts already bloated;
+#: collapsing here is that heal, so an upgraded session sheds the dead entries on
+#: its next compaction instead of carrying them forever.
+#:
+#: This is an ALLOWLIST, not "every custom type", because it is NOT safe to
+#: collapse a type that accumulates. ``hub_communication`` is read by ITERATION
+#: (``subagent_view`` folds the whole parent/child message log), so dropping its
+#: older entries would erase history; it is deliberately absent. Add a type here
+#: only after confirming nothing reads it by iteration.
+_COLLAPSIBLE_CUSTOM_TYPES = frozenset({"subagent_roster"})
+
 
 @dataclass
 class TranscriptEntry:
@@ -752,6 +773,32 @@ class Transcript:
 
     # -- lifecycle ----------------------------------------------------------
 
+    def _superseded_custom_indices(self) -> set[int]:
+        """Indices of collapsible custom entries that a newer copy supersedes.
+
+        For each type in :data:`_COLLAPSIBLE_CUSTOM_TYPES` the NEWEST entry is
+        kept and every older one is returned for dropping. These types are read
+        only through :meth:`latest_custom`, so an older copy is pure dead weight
+        — the pre-v0.40.0 roster bloat this heals is exactly a long run of them
+        (see the constant's note). Keeping the newest is load-bearing: it is the
+        one ``latest_custom`` returns and a resume restores from.
+        """
+        newest_by_type: dict[str, int] = {}
+        for index, entry in enumerate(self._entries):
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            custom_type = entry.payload.get("custom_type")
+            if custom_type in _COLLAPSIBLE_CUSTOM_TYPES:
+                newest_by_type[custom_type] = index
+        keep = set(newest_by_type.values())
+        return {
+            index
+            for index, entry in enumerate(self._entries)
+            if entry.type == ENTRY_CUSTOM
+            and entry.payload.get("custom_type") in _COLLAPSIBLE_CUSTOM_TYPES
+            and index not in keep
+        }
+
     def reclaimable_bytes(self) -> int:
         """Bytes :meth:`compact_file` would free right now.
 
@@ -759,12 +806,15 @@ class Transcript:
         and the one-line notice that replaces it, plus the journal entries
         themselves — MINUS the few bytes the fold adds back, which is the
         boundary mark it leaves in place of the journal entry's position (see
-        :func:`_shrink_marked`). Small, but this figure is compared for equality
-        against what :meth:`compact_file` actually reclaims, and an estimate
-        that ignores a cost the fold really pays is simply wrong.
+        :func:`_shrink_marked`) — PLUS every superseded collapsible custom entry
+        dropped whole (see :meth:`_superseded_custom_indices`). Small for the
+        prune half, but this figure is compared for equality against what
+        :meth:`compact_file` actually reclaims, so it must price every byte the
+        fold really frees, the roster-bloat drop included.
         """
         prunes = self.pending_prunes()
-        if not prunes:
+        superseded = self._superseded_custom_indices()
+        if not prunes and not superseded:
             return 0
         total = 0
         boundary: TranscriptEntry | None = None
@@ -773,6 +823,10 @@ class Transcript:
             default=-1,
         )
         for index, entry in enumerate(self._entries):
+            if index in superseded:
+                # Dropped whole, newline included, exactly as the fold writes it.
+                total += len(entry.to_json()) + 1
+                continue
             if entry.type == ENTRY_PRUNE:
                 total += len(entry.to_json()) + 1
                 continue
@@ -797,6 +851,16 @@ class Transcript:
         entries disappear because their effect is now materialized, and
         :meth:`build_llm_history` produces the same messages either way.
 
+        It ALSO drops superseded collapsible custom entries (see
+        :meth:`_superseded_custom_indices`) — the pre-v0.40.0 roster bloat that
+        left ~247 giant ``subagent_roster`` snapshots in one file. That is
+        equally invisible: those types are read only through
+        :meth:`latest_custom`, which returns the newest, and the newest is
+        exactly the one kept. This is why the method now runs when there are
+        superseded customs even with NO pending prunes: a legacy bloated
+        transcript never journals a prune, so gating on prunes alone would leave
+        it bloated forever.
+
         Returns the bytes reclaimed (0 when below ``min_reclaim_bytes``, so
         the caller can invoke it every turn without rewriting a large file
         for a few hundred bytes). Crash-safe: the new file is written beside
@@ -805,7 +869,8 @@ class Transcript:
         """
         async with self._lock:
             prunes = self.pending_prunes()
-            if not prunes:
+            superseded = self._superseded_custom_indices()
+            if not prunes and not superseded:
                 return 0
             before = self.path.stat().st_size if self.path.exists() else 0
             # WHERE the newest prune sat, before the entries carrying that fact
@@ -824,6 +889,11 @@ class Transcript:
             boundary = -1
             for index, entry in enumerate(self._entries):
                 if entry.type == ENTRY_PRUNE:
+                    continue
+                # Superseded roster/newest-wins customs are dropped whole: a
+                # newer copy of the same type survives, and nothing reads the
+                # older ones. This is what heals a pre-v0.40.0 bloated file.
+                if index in superseded:
                     continue
                 if entry.type == ENTRY_MESSAGE and entry.id in prunes:
                     entry = _pruned_entry(entry, prunes[entry.id])
