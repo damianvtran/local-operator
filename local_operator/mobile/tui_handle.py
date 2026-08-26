@@ -37,6 +37,7 @@ import asyncio
 import inspect
 import logging
 import secrets
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.mobile.command_reservation import CommandReservations
@@ -304,6 +305,41 @@ class TuiSessionHandle(SessionHandle):
         if self._on_projection is not None:
             self._on_projection()
         return "steering queued"
+
+    async def receive_peer_message(
+        self,
+        text: str,
+        *,
+        mode: str = "mailbox",
+        wake: bool = False,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        # Session.receive_peer_message is a COROUTINE that must run on the owner
+        # event loop (it touches _context.messages, the transcript, and may
+        # spawn a turn). `_on_app` only runs SYNC callables on the Textual
+        # thread, so we reuse the prompt() machinery: a sync shim scheduled on
+        # the app captures the owner loop and schedules the coroutine there with
+        # run_coroutine_threadsafe, and we await its result from this bridge
+        # coroutine. Do NOT call the coroutine directly off-loop.
+        sender = sender or {}
+
+        def schedule() -> "Future[str]":
+            session = self._session()
+            owner_loop = asyncio.get_running_loop()
+            return asyncio.run_coroutine_threadsafe(
+                session.receive_peer_message(text, mode=mode, wake=wake, sender=sender),
+                owner_loop,
+            )
+
+        fut = await self._on_app(schedule)
+        detail = await asyncio.wrap_future(fut)
+        # Optimistic phone echo, matching steer(): put the card on the
+        # projection now so an attached phone paints it without waiting for the
+        # next projection repaint.
+        self._fold.note_peer_message(text, sender=sender)
+        if self._on_projection is not None:
+            self._on_projection()
+        return str(detail)
 
     async def recall_steer(self, command_id: str) -> str:
         """Recall one queued steer by the Message id its producer supplied."""

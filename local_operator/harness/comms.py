@@ -56,6 +56,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     StaleAside,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
 
 if TYPE_CHECKING:
@@ -1920,4 +1921,11 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         return PeekStep(index, "hub", "hub message", _clip(body))
     if custom_type == "compaction_summary":
         return PeekStep(index, "system", "compaction", _clip(str(details.get("summary", ""))))
+    if custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+        # A parent peeking a child that received a `lop send` message sees who
+        # reached in, so the peek view stays honest about cross-session traffic.
+        sender = details.get("sender") or {}
+        who = str(sender.get("conversation_name") or sender.get("pid") or "another session")
+        body = str(details.get("body") or details.get("text") or "")
+        return PeekStep(index, "system", f"peer ← {who}", _clip(body))
     return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))
