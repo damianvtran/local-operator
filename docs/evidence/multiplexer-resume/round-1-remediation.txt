@@ -1,0 +1,116 @@
+Agent review round 1 — remediation evidence
+===========================================
+
+Re-runs of the reviewer's own reproductions, before and after the fix, plus a
+real-multiplexer check for F3. Harnesses are the reviewer's, unchanged.
+
+
+F1 — stop() must not block the Textual event loop
+-------------------------------------------------
+Harness: a backend whose publish/retire both sit for CALL_TIMEOUT_S (5.0s),
+mirroring a `cmux rpc` parked in `subprocess.run(timeout=...)`. A publish is
+allowed to get INTO the wedged call first, then stop(retire=True) is timed.
+
+    BEFORE (6edcf186)
+      F1 [hanging] stop() blocked the calling thread for 9.51s
+      F1 [healthy] stop() blocked the calling thread for 0.02s
+
+    AFTER
+      F1 [hanging] stop() blocked the calling thread for 0.01s
+      F1 [healthy] stop() blocked the calling thread for 0.00s
+
+The withdrawal still happens — it is dispatched to a daemon worker and observed
+completing once the wedged backend is released. What no longer happens is the
+event loop waiting for it. The `_retired` latch is set synchronously inside
+stop(), so the clean-exit-wins-over-re-assert rule does not depend on the
+worker running at all.
+
+
+F2 — a failing publish must not pin the loop to the 5s poll
+-----------------------------------------------------------
+Harness: a backend whose publish always returns False, against a session that
+IS resumable, with a 90s re-assert interval, observed for ~21s.
+
+    BEFORE (6edcf186)
+      F2 publish attempts in ~21s with a 90s re-assert interval: 5
+      F2 gaps between attempts (s): [5.01, 5.0, 5.0, 5.01]
+
+    AFTER
+      F2 publish attempts in ~21s with a 90s re-assert interval: 1
+
+One attempt: the immediate publish at start. Everything after it is governed by
+the re-assert interval, because the cadence now keys on is_resumable_session()
+rather than on publish success. The fast cadence still exists and still only
+costs a stat — pinned by
+test_a_cold_session_still_polls_until_its_transcript_appears, which shows a
+cold session publishing within one poll of its transcript appearing.
+
+
+F3 — zellij markers must not collide across panes
+--------------------------------------------------
+Not a mock. A real zellij 0.42.2 session with two real panes, each running the
+actual registry + ZellijBackend, publishing a different session id.
+(cmux/tmux vars cleared in the probe because this zellij is nested inside them
+on this host and the registry deliberately prefers the outermost multiplexer.)
+
+Environment observed inside the two panes:
+
+    pane A: ZELLIJ=0  ZELLIJ_SESSION_NAME=<same>  ZELLIJ_PANE_ID=0
+    pane B: ZELLIJ=0  ZELLIJ_SESSION_NAME=<same>  ZELLIJ_PANE_ID=1
+
+    BEFORE (6edcf186) — both panes published successfully, ONE file resulted:
+      zellij-f3old.json -> bbbbbbbbbbbb
+      (pane 0's binding is gone: last publisher won)
+
+    AFTER — one file per pane, each holding its own session:
+      zellij-f3c-0.json -> aaaaaaaaaaaa
+      zellij-f3c-1.json -> bbbbbbbbbbbb
+
+The sibling-deletion half is pinned by
+test_two_zellij_panes_in_one_session_do_not_share_a_marker, which retires pane
+0 and asserts pane 1's marker survives.
+
+
+F4 — screen window identity
+---------------------------
+Verified on screen 4.00.03 on this host that a process inside a session exports
+both, confirming the reviewer's reading:
+
+    STY=42653.loprev
+    WINDOW=0
+
+Keyed on STY+WINDOW, with STY alone kept as a fallback (documented in the
+module docstring and the docs table, since in that case the marker is per
+session rather than per window).
+
+
+Gates
+-----
+flake8 clean; black --check 26.1.0 clean (499 files); isort --check-only
+--profile black clean; pyright 0 errors, 0 warnings; unit suite 6797 passed.
+
+Multiplexer suites specifically: 55 passed, run 3x consecutively with no
+flake (tests/unit/test_multiplexer.py + tests/unit/tui/test_multiplexer_broadcast.py).
+
+Three failures in the full run are pre-existing and unrelated to this diff,
+confirmed by reproducing them on unmodified 6edcf186 in a detached worktree:
+  - tests/unit/tui/test_app_pilot.py::test_esc_aborts_a_running_shell_command
+    (fails on the unmodified head too)
+  - tests/unit/harness/test_comms.py::test_a_resumed_child_replays_the_stopped_ones_transcript
+  - tests/unit/harness/test_comms.py::test_a_cancelled_child_keeps_the_work_it_had_already_done
+    (both timing-sensitive: 2 clean runs then a failure on the unmodified head)
+
+
+New tests, and that they fail without the fix
+---------------------------------------------
+The eight new/changed tests were run against unmodified 6edcf186 with only the
+test file copied in. All eight failed, e.g.:
+
+    test_stop_does_not_block_the_caller_on_a_wedged_backend
+      AssertionError: stop() blocked the caller for 59.82s
+    test_a_failing_publish_backs_off_to_the_reassert_cadence
+      AssertionError: failing publish retried 3x on the fast poll
+    test_two_zellij_panes_in_one_session_do_not_share_a_marker
+      + 'zellij-main.json'  - 'zellij-main-1.json'
+    test_the_retire_latch_is_set_before_stop_returns
+      AssertionError: assert ['retire'] == []

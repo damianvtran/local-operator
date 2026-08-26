@@ -1020,6 +1020,30 @@ class WakeDeliveredEvent(AgentEvent[Literal["wake_delivered"]]):
     occurrence: int = 0
 
 
+class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
+    """A message from ANOTHER local lop session (`lop send`) was delivered here.
+
+    Fires the instant the message lands in this session's transcript/context,
+    even while the session is idle, so the owner TUI can paint the
+    cross-session indicator immediately rather than waiting for the next turn
+    render. Carries ``body`` (the raw text the human reads) and ``sender`` (the
+    advisory pid/conversation/model identity for the indicator label).
+
+    Modeled on ``WakeDeliveredEvent`` (which also fires before/around a turn):
+    ``message_id`` lets a front end dedup this live receipt against the
+    persisted ``peer_message`` row on a later history replay, so a resumed
+    session does not double-paint the same delivery.
+    """
+
+    type: Literal["peer_message_delivered"] = "peer_message_delivered"
+    body: str
+    #: Advisory sender identity (pid/session_id/conversation_name/model_label/
+    #: cwd). All fields optional — an older/leaner sender still delivers.
+    sender: dict[str, Any] = Field(default_factory=dict)
+    #: Transcript entry id of the persisted peer message, for replay dedup.
+    message_id: str = ""
+
+
 class SteeringDeliveredEvent(AgentEvent[Literal["steering_delivered"]]):
     """Queued steering messages have entered the model's context.
 

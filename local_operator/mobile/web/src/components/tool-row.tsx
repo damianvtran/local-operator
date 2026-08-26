@@ -100,7 +100,7 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 			<button
 				type="button"
 				onClick={() => hasDetails && setOpen(!open)}
-				className="flex min-h-8 w-full items-center gap-1.5 text-left select-none"
+				className="flex min-h-11 w-full items-center gap-1.5 text-left select-none"
 			>
 				<span
 					className={cn(

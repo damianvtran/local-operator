@@ -10,6 +10,112 @@ permissions:
   contents: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Browser extension release asset.
+  #
+  # The extension has its own release line, decoupled from the Python package
+  # version (extension/manifest.json carries its own semver). It is attached to
+  # the GitHub Release as a packed .zip ONLY when extension code actually
+  # changed since the previous tag — a docs-only or unrelated release does not
+  # re-attach an identical binary. This is the "attach to the normal release
+  # now" path; a dedicated extension-v* tag stream + Chrome Web Store publish
+  # step is a deliberate future addition (see the TODO at the end of this job).
+  #
+  # The zip is the SAME artifact `pnpm build:zip` produces locally: MV3,
+  # source-map-free, so what ships in the release equals what a maintainer
+  # uploads to the store. Store submission is intentionally a separate,
+  # protected manual workflow so publishing a Python release cannot also make
+  # browser code public without its own approval.
+  # ---------------------------------------------------------------------------
+  extension-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # upload the zip as a release asset
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history to diff the release tag against the previous tag and
+          # decide whether extension/ changed.
+          fetch-depth: 0
+
+      - name: Decide whether the extension changed since the previous tag
+        id: ext-changed
+        run: |
+          set -euo pipefail
+          CURRENT_TAG="${{ github.event.release.tag_name }}"
+          # Find the previous RELEASE tag by ANCESTRY, not by creation date.
+          # `git describe --abbrev=0 <tag>^` returns the nearest tag reachable
+          # from the current tag's first parent — i.e. the release this one was
+          # actually cut on top of. This is correct even when a backport/hotfix
+          # tag was created later on an older commit (the A15 case that a
+          # `--sort=-creatordate` scan gets wrong), because reachability, not
+          # wall-clock time, defines "the previous release".
+          #
+          # `--exclude '*-*'` skips prerelease tags (v1.2.3-rc1, -beta, etc.)
+          # so a prerelease is never treated as the baseline for the diff (A16);
+          # our tags are plain vMAJOR.MINOR.PATCH, but this keeps the gate
+          # correct if prereleases are ever adopted.
+          #
+          # If there is no ancestor tag (the first release ever), treat the
+          # extension as changed so the first release always carries the binary.
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude '*-*' "${CURRENT_TAG}^" 2>/dev/null || true)
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous release tag reachable from ${CURRENT_TAG}; attaching the extension."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$PREV_TAG" "$CURRENT_TAG" -- extension/; then
+            echo "extension/ unchanged since $PREV_TAG; skipping the extension asset."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "extension/ changed since $PREV_TAG; building and attaching."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.ext-changed.outputs.changed == 'true' }}
+        with:
+          version: 11.22.0
+
+      - uses: actions/setup-node@v4
+        if: ${{ steps.ext-changed.outputs.changed == 'true' }}
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: extension/pnpm-lock.yaml
+
+      - name: Install extension dependencies
+        if: ${{ steps.ext-changed.outputs.changed == 'true' }}
+        working-directory: extension
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the packed, source-map-free extension zip
+        if: ${{ steps.ext-changed.outputs.changed == 'true' }}
+        id: ext-build
+        working-directory: extension
+        run: |
+          pnpm build:zip
+          # Name the asset with the extension's own version so the release page
+          # states exactly which extension build shipped, independent of the
+          # Python package version in the tag.
+          EXT_VERSION=$(node -p "require('./manifest.json').version")
+          ASSET="local-operator-extension-v${EXT_VERSION}.zip"
+          mv local-operator-extension.zip "$ASSET"
+          # Guardrail: a store zip must never contain source maps.
+          if unzip -l "$ASSET" | grep -q '\.map'; then
+            echo "::error::source maps leaked into the extension release zip"
+            exit 1
+          fi
+          echo "asset=extension/${ASSET}" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the extension zip to the GitHub Release
+        if: ${{ steps.ext-changed.outputs.changed == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.ext-build.outputs.asset }}
+
+      # Chrome Web Store submission remains in chrome-web-store.yml rather than
+      # this automatic release event. It rebuilds and validates the same store
+      # artifact behind a dedicated protected environment before API upload.
+
   release-build:
     runs-on: ubuntu-latest
     outputs:
@@ -57,6 +163,12 @@ jobs:
             echo "::error::mobile web bundle missing from the wheel"
             exit 1
           }
+          # The store extension has its own release line and must never inflate
+          # or couple the Python package to a browser-specific artifact.
+          if unzip -l dist/local_operator-*.whl | grep -q "extension/"; then
+            echo "::error::browser extension leaked into the Python wheel"
+            exit 1
+          fi
 
       - name: Upload distributions
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}

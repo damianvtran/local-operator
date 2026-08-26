@@ -14,6 +14,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
     AgentStartEvent,
+    CustomMessage,
     ImageContent,
     Message,
     MessageEndEvent,
@@ -186,6 +187,7 @@ def test_legacy_subagent_projection_rebuilds_new_detail_collections() -> None:
     row = projection.subagents[0]
     assert projection.pid == 42
     assert row.ancestors == []
+    assert row.ancestor_ids == []
     assert row.child_ids == []
     assert row.peer_ids == []
     assert row.transcript == []
@@ -232,6 +234,7 @@ def test_subagent_details_seed_nested_descendants_for_recursive_navigation() -> 
     assert by_id["child"].child_ids == ["grandchild"]
     assert by_id["grandchild"].parent_job_id == "child"
     assert by_id["grandchild"].ancestors == ["parent", "child"]
+    assert by_id["grandchild"].ancestor_ids == ["parent", "child"]
     assert by_id["grandchild"].activity == "reading"
 
     session.jobs.rows["grandchild"].latest_details = {"progress": "summarizing"}
@@ -335,6 +338,43 @@ def test_swept_nested_outcome_survives_fresh_projection_and_reconnect(
         assert selected.activity == ""
 
 
+@pytest.mark.parametrize(
+    "parents",
+    [
+        {"a": "a"},
+        {"a": "b", "b": "a"},
+    ],
+)
+def test_subagent_metadata_projection_tolerates_legacy_parent_cycles(
+    parents,
+) -> None:  # noqa: ANN001
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for job_id, parent_id in parents.items():
+        comms.record_launch(job_id, job_id, parent_job_id=parent_id)
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    assert {row.job_id for row in fold.projection.subagents} == set(parents)
+
+
+def test_subagent_metadata_projection_never_constructs_transcript(monkeypatch) -> None:
+    """The ordinary event path must remain memory-only regardless of child count."""
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(75):
+        comms.record_launch(f"child-{index}", f"child {index}")
+
+    class ForbiddenTranscript:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError("metadata projection opened a child transcript")
+
+    monkeypatch.setattr("local_operator.session.transcript.Transcript", ForbiddenTranscript)
+    fold = make_fold()
+    for _ in range(100):
+        fold.set_subagent_details(comms)
+    assert len(fold.projection.subagents) == 75
+
+
 def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
     """The runner records terminal state before the manager stamps its row."""
 
@@ -402,6 +442,35 @@ def test_history_fold_pairs_tool_calls_with_results() -> None:
     assert tool_row.tool_state == "done"
     assert tool_row.summary == "/x.py"
     assert tool_row.details["output"] == "file body"
+
+
+def test_history_fold_maps_peer_message_to_its_own_kind() -> None:
+    from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
+
+    fold = make_fold()
+    sender = {"pid": 42, "conversation_name": "peer", "model_label": "test/model"}
+    peer = CustomMessage(
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        attribution="user",
+        details={"text": "<wrapped>hi</wrapped>", "body": "hi there", "sender": sender},
+    )
+    fold.fold_history([peer])
+    rows = fold.projection.transcript
+    assert len(rows) == 1
+    # The phone renders the raw body, never the model-facing wrapped envelope,
+    # and carries the sender for the card label.
+    assert rows[0].kind == "peer_message"
+    assert rows[0].text == "hi there"
+    assert rows[0].details["sender"] == sender
+
+
+def test_note_peer_message_appends_optimistic_row() -> None:
+    fold = make_fold()
+    fold.note_peer_message("live echo", sender={"pid": 7, "conversation_name": "peer"})
+    row = fold.projection.transcript[-1]
+    assert row.kind == "peer_message"
+    assert row.text == "live echo"
+    assert row.details["sender"]["pid"] == 7
 
 
 def test_transcript_is_capped_from_the_front() -> None:

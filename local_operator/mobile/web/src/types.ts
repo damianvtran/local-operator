@@ -15,7 +15,10 @@ export type EntryKind =
 	| "steer"
 	| "compaction"
 	| "parent_message"
-	| "subagent_message";
+	| "subagent_message"
+	// An inbound message from another local lop session (`lop send`). Rendered
+	// as a distinct cross-session card, never as the user's own turn.
+	| "peer_message";
 
 export type ToolState =
 	| "composing"
@@ -43,6 +46,18 @@ export interface TranscriptEntryDetails {
 	output?: string;
 	diff?: string | string[];
 	partial?: string;
+	/* Sender identity on a `peer_message` entry (`lop send`): pid /
+	   conversation_name / model_label / session_id / cwd, all advisory. Rides
+	   through the fold's `details` so the card can label who reached in. */
+	sender?: PeerSender;
+}
+
+export interface PeerSender {
+	pid?: number;
+	session_id?: string;
+	conversation_name?: string;
+	model_label?: string;
+	cwd?: string;
 }
 
 export interface TranscriptEntry {
@@ -107,13 +122,22 @@ export interface SubagentRow {
 	parent_job_id: string | null;
 	session_id: string | null;
 	prompt: string;
+	launch_message_id: string;
 	effort: string;
 	ancestors: string[];
+	ancestor_ids: string[];
 	child_ids: string[];
 	peer_ids: string[];
 	transcript: TranscriptEntry[];
 	todos: TodoPhase[];
 	activity: string;
+}
+
+/** Selected-child payload. Root snapshots remain compatible with the legacy
+    aggregate shape, but current daemons leave transcript/todos empty there and
+    serve these fields only for the active route. */
+export interface SubagentDetail extends SubagentRow {
+	version: number;
 }
 
 /** One selectable answer on an ask question. Carries the consequence line the
@@ -237,8 +261,7 @@ export interface PromptImage {
 }
 
 export type CommandOp =
-	| { op: "prompt"; command_id: string; text: string; images?: PromptImage[] }
-	| { op: "steer"; text: string; images?: PromptImage[] }
+	| { op: "prompt" | "steer"; command_id: string; text: string; images?: PromptImage[] }
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
 	| { op: "set_effort"; effort: string }

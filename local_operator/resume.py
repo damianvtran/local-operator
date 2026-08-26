@@ -61,6 +61,50 @@ ORIGIN_SUBAGENT = "subagent"
 #: the window scan for sessions written before the sidecar existed.
 TITLE_SIDECAR_NAME = "title.json"
 
+#: The title backfill's per-directory "nothing to journal" marker. The sweep
+#: used to treat only an existing :data:`TITLE_SIDECAR_NAME` as answered, so a
+#: session with no journalled title anywhere in its transcript — the majority
+#: of a long-lived store, since every session that simply never got renamed
+#: stays in that state forever — was FULLY RE-READ on every boot: measured 323
+#: ms per boot on a 1,365-session store, 1,268 of which could never produce a
+#: sidecar. The sentinel records that the scan RAN and found nothing, so the
+#: second boot's answer costs one ``stat`` per directory. JSON rather than an
+#: empty file so a future reader can carry a reason (``scanned_at``) without a
+#: second format migration; ``write_session_title``'s mtime-preservation
+#: contract applies to it too, for the reason its docstring gives.
+TITLE_SCAN_SENTINEL_NAME = "title-scan.json"
+
+#: The origin sweep's own "considered and not a subagent" marker, mirroring
+#: :data:`TITLE_SCAN_SENTINEL_NAME`. It exists SEPARATELY from that sentinel
+#: because the two sweeps answer different questions and traverse
+#: independently: the origin sweep stops at ``limit`` STAMPS while the title
+#: sweep is uncapped, so a title sentinel must never stand in for an origin
+#: answer — a directory the origin sweep never reached would be suppressed
+#: forever. Only the origin sweep writes this file, so its presence means
+#: exactly "this pass read this opener and it was not a subagent's".
+ORIGIN_SCAN_SENTINEL_NAME = "origin-scan.json"
+
+#: The session's ATTACHED IDENTITY — the ``/team`` roster, the ``/agent``
+#: profile, and the ``/goal`` — journalled beside the transcript, mirroring
+#: :data:`TITLE_SIDECAR_NAME` exactly.
+#:
+#: Why this file has to exist at all: the team and agent briefs ride the
+#: VOLATILE TAIL of the system prompt (see ``prompts_api.build_system_blocks``
+#: and ``session/goal.py``), and the tail is rebuilt from a ``GoalState`` that
+#: ``session_factory`` constructs EMPTY on every session. Nothing in the
+#: transcript reproduces it, so a ``--resume`` genuinely dropped the persona
+#: from the prompt — the manager a user attached with ``/team`` was not merely
+#: missing from the status band, it was gone from the model's instructions and
+#: the conversation carried on as an ordinary session. Only the FRONT END could
+#: see the blank band, which is why this read as a display bug for so long.
+#:
+#: A SIDECAR rather than a transcript row, for the reasons the title sidecar
+#: documents and one more that is specific to this state: the attachment is a
+#: property OF the session, not an event IN the conversation, and the restore
+#: runs during construction, before any replay, so a value it had to scan the
+#: JSONL for would arrive too late to reach the first prompt's tail.
+ATTACHMENT_SIDECAR_NAME = "attachment.json"
+
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
 #:
@@ -381,6 +425,120 @@ def write_session_title(
         return
 
 
+class SessionAttachment(NamedTuple):
+    """What ``/team``, ``/agent`` and ``/goal`` had put on a session.
+
+    NAMES, never brief BODIES, and that is the load-bearing decision rather
+    than a size optimisation. A stored brief is a SNAPSHOT of a team's
+    collaboration/project text or a profile's instructions at attach time; the
+    operator edits those files between sessions (that is the whole point of a
+    durable registry), so replaying a stored copy would resume the session onto
+    instructions that no longer exist anywhere. Re-resolving the name through
+    the live registry on restore means a resumed session runs the CURRENT
+    definition, which is what the user means by "resume my lopdev manager".
+
+    The tradeoff is accepted deliberately: a renamed or deleted team cannot be
+    restored, where a stored brief could have been. That case is handled by
+    saying so plainly (see the TUI's restore notice) rather than by silently
+    reviving a definition the operator removed.
+    """
+
+    #: ``/team`` roster name; "" when no team was attached.
+    team: str
+    #: ``/agent`` profile DISPLAY name; "" when no profile was attached.
+    agent: str
+    #: The standing ``/goal`` text; "" when unset. Stored here rather than left
+    #: to the transcript because it shares the volatile tail's fate exactly.
+    goal: str
+
+
+def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
+    """Parse ``attachment.json``, or ``None`` when absent or unusable.
+
+    Tolerant on exactly the same terms as :func:`_read_title_sidecar`, and the
+    ``errors="replace"`` is load-bearing for the same reason: a process killed
+    mid-write can cut the file inside a multi-byte character, and a strict
+    decode raises ``UnicodeDecodeError`` — a ``ValueError``, which would sail
+    past an ``except OSError`` and take down not a picker row this time but the
+    whole RESUME. A session must always reopen; losing an attachment is a
+    notice, losing the conversation is not survivable.
+    """
+    try:
+        raw = (session_dir / ATTACHMENT_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    def _text(key: str) -> str:
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
+
+
+def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
+    """Journal the session's attached identity so a resume can rebuild it.
+
+    Called on CHANGE (attach, detach, goal set/clear), never per turn: the
+    attachment moves a handful of times in a session's life, and a per-turn
+    write would be pure I/O for a value that did not move.
+
+    Best-effort by contract, exactly like :func:`write_session_title` and
+    :func:`mark_session_origin`. An attachment that cannot be journalled
+    (read-only volume, full disk) must never fail the turn that changed it: the
+    cost is one resume that opens unattached, which is the behaviour every
+    session had before this file existed.
+
+    The write is ATOMIC (pid-named temp + ``replace``) because two processes
+    can hold the same session directory — a live owner and a ``/resume`` that
+    is about to be refused both touch it — and a reader hitting a half-written
+    document would parse as "no attachment" and silently drop the persona. The
+    PID in the temp name keeps two concurrent writers from ``replace``-ing a
+    document the other is still filling, the same hazard ``write_session_title``
+    and ``search_index._save`` document.
+
+    **The directory's mtime is preserved**, for the reason the other two
+    sidecars preserve it: recency ranks by the transcript's mtime, and
+    journalling an attachment is bookkeeping ABOUT a session, never activity IN
+    it. Attaching a team must not reorder the ``/resume`` picker.
+    """
+    # ``strip()`` ONLY — never ``" ".join(x.split())``. These are LOOKUP KEYS,
+    # not display titles, and every resolver they are matched against strips
+    # without collapsing (``resolve_profile``, ``resolve_profile_or_specialist``,
+    # ``TeamRegistry.get_team_by_name``, which casefolds and strips). Collapsing
+    # internal whitespace here broke the round trip for any agent profile whose
+    # registered name contains repeated spaces — free-form and not normalised by
+    # ``AgentRegistry.create_agent`` — so a profile named ``"Deep  Auditor"``
+    # attached live, was written as ``"Deep Auditor"``, then failed to resolve on
+    # resume and told the user it had been renamed or deleted (R2). Normalising
+    # is right for a title (the sidecar this shape was copied from) and wrong
+    # for a key: what is stored has to be what the resolver will compare.
+    payload = {
+        "team": (team or "").strip(),
+        "agent": (agent or "").strip(),
+        "goal": (goal or "").strip(),
+    }
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
+        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(sidecar)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
 def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     """Stamp pre-existing subagent directories once, and return how many.
 
@@ -428,6 +586,16 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
             # hand to un-hide a session is not silently written back.
             if (directory / ORIGIN_NAME).exists():
                 continue
+            # This pass's OWN "considered and not a subagent" marker — not
+            # the title sweep's sentinel. The two sweeps traverse
+            # independently and THIS one stops at ``limit`` stamps, so a
+            # title sentinel written for a directory this pass never reached
+            # would suppress the origin question forever (the 501st
+            # stampable subagent behind a >500 backlog, permanently
+            # unmarked). A marker only this pass writes can only exist for
+            # a directory this pass genuinely visited.
+            if (directory / ORIGIN_SCAN_SENTINEL_NAME).exists():
+                continue
         except OSError:
             continue
         opening = session_name(directory, max_chars=NAME_MAX_CHARS, condense=False)
@@ -436,6 +604,13 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
         if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
             mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
             stamped += 1
+        else:
+            # Not a subagent: record it the same way the marker records the
+            # opposite answer, so the next boot's sweep costs one stat here
+            # too. Best-effort and mtime-preserving for the same reasons the
+            # title sentinel's writer gives; a failed write costs one redundant
+            # opener read, never a lost session.
+            _write_origin_scan_sentinel(directory)
     return stamped
 
 
@@ -484,6 +659,56 @@ def _scan_all_titles(transcript: Path) -> list[tuple[str, bool]]:
     return titles
 
 
+def _write_origin_scan_sentinel(session_dir: Path) -> None:
+    """Record that the origin sweep read this opener and found no subagent.
+
+    Same best-effort, mtime-preserving, atomic-write contract as
+    :func:`_write_title_scan_sentinel` — see its docstring for the reasoning;
+    this is that function with a different file name, kept separate so each
+    sweep owns its own answer.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        sentinel = session_dir / ORIGIN_SCAN_SENTINEL_NAME
+        tmp = sentinel.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"scanned": True}), encoding="utf-8")
+        tmp.replace(sentinel)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def _write_title_scan_sentinel(session_dir: Path) -> None:
+    """Record that the title backfill scanned this directory and found nothing.
+
+    Mirrors :func:`write_session_title`'s best-effort contract, because it is
+    the same trade: the sentinel is a boot-cost optimisation, and a session on
+    a read-only volume must still RUN. The cost of a failed write is one
+    redundant full scan on the next boot — the pre-fix behaviour — never a
+    lost turn. Mtime is preserved and the write is atomic (pid-named temp +
+    ``replace``) for the reasons the title sidecar's writer documents at
+    length: journalling a scan is bookkeeping ABOUT a session, never activity
+    IN it, and a concurrent reader must never see a torn file.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        sentinel = session_dir / TITLE_SCAN_SENTINEL_NAME
+        tmp = sentinel.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"scanned": True}), encoding="utf-8")
+        tmp.replace(sentinel)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
 def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     """Write the title sidecar for sessions that predate it, and return how many.
 
@@ -502,6 +727,17 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     it is confined to this startup path — bounded by ``limit`` and run once per
     session ever, never per picker-open — exactly the trade
     :func:`backfill_session_origins` makes.
+
+    "Once per session ever" now includes the no-title case. A directory with
+    no journalled title gets a sentinel (:data:`TITLE_SCAN_SENTINEL_NAME`) so
+    the next boot answers it with one ``stat`` instead of another full read;
+    without it the sweep was perpetual on exactly the store it was meant to
+    fix once — a session that never bore a title can never grow a sidecar, so
+    it was re-scanned to the same "nothing" on every launch for the store's
+    whole life (measured 323 ms per boot on a real 1,365-session store,
+    1,268 of them permanently in that state). The sentinel is deliberately
+    NOT a title: neither the picker nor :func:`stored_session_title` reads it,
+    so their behaviour is byte-identical before and after.
 
     Best-effort and bounded like every other function here: an unreadable
     directory is skipped rather than raised, and ``limit`` caps how many
@@ -529,8 +765,11 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
             # Already answered: never re-stamp. The sidecar is event-sourced
             # from here on, so a rewrite would only risk clobbering a newer
             # sidecar with an older full scan on a session that has since been
-            # renamed.
+            # renamed. The scan sentinel answers the same "considered" question
+            # for the no-title case, which is what ends the perpetual rescan.
             if (directory / TITLE_SIDECAR_NAME).exists():
+                continue
+            if (directory / TITLE_SCAN_SENTINEL_NAME).exists():
                 continue
         except OSError:
             continue
@@ -539,7 +778,9 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
             # No journalled title at all (a session that predates title
             # journalling, or one closed before its naming call landed). Leave
             # it to the window-scan fallback and the opening-message name; there
-            # is nothing to journal.
+            # is nothing to journal — but RECORD that the scan ran, so the next
+            # boot does not pay for the same answer again.
+            _write_title_scan_sentinel(directory)
             continue
         past_names = [text for text, _ in titles]
         newest_text, newest_user_set = titles[-1]

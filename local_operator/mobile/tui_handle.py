@@ -37,10 +37,12 @@ import asyncio
 import inspect
 import logging
 import secrets
-from typing import TYPE_CHECKING, Any, Callable
+from concurrent.futures import Future
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from local_operator.mobile.command_reservation import CommandReservations
-from local_operator.mobile.projection import ProjectionFold
+from local_operator.mobile.projection import ProjectionFold, fold_messages_to_entries
 from local_operator.mobile.registrant import SessionHandle, image_blocks
 from local_operator.mobile.types import (
     PendingRequest,
@@ -105,6 +107,7 @@ class TuiSessionHandle(SessionHandle):
         # projection subscription on session swaps.
         self._on_event: Callable[[dict[str, Any]], None] | None = None
         self._unsubscribe_events: Callable[[], None] | None = None
+        self._unsubscribe_detail_changes: Callable[[], None] | None = None
         # Mutated only on Textual's loop, making admission atomic even though
         # several registrant coroutines may cross from its socket thread.
         self._command_reservations = CommandReservations(session)
@@ -121,6 +124,12 @@ class TuiSessionHandle(SessionHandle):
         # too (``ask_answer`` hops onto it before touching this), so the
         # single-winner race is decided by one owner, not by dict atomicity.
         self._ask_pending: dict[str, Any] = {}
+        # Child transcripts can contain thousands of attachment-backed entries.
+        # Keep their I/O off Textual's loop and bound work to one coalescing
+        # worker per child so a streaming burst cannot queue stale full reads.
+        self._detail_tasks: dict[str, asyncio.Task[None]] = {}
+        self._detail_generations: dict[str, int] = {}
+        self._detail_fingerprints: dict[str, tuple[int, int]] = {}
 
     def _session(self) -> Any:
         """The app's current session. A property method (not cached) because
@@ -148,11 +157,15 @@ class TuiSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001
                 logger.debug("mobile event unsubscribe failed", exc_info=True)
             self._unsubscribe_events = None
+        if self._unsubscribe_detail_changes is not None:
+            self._unsubscribe_detail_changes()
+            self._unsubscribe_detail_changes = None
         self._projection.session_id = session.session_id
         self._projection.transcript.clear()
         self._projection.todos.clear()
         self._projection.subagents.clear()
         self._projection.pending = None
+        self._cancel_detail_tasks()
         self._fold = ProjectionFold(self._projection)
         # A /new or /resume mid-ask abandons the old picker; drop its mapping
         # so a late phone answer for a question that no longer exists reports
@@ -185,12 +198,21 @@ class TuiSessionHandle(SessionHandle):
                 self._fold.fold_event(event)
                 self._refresh_state()
                 self._refresh_todos()
+                job_id = getattr(event, "job_id", None)
+                if isinstance(job_id, str):
+                    self._invalidate_subagent_detail(job_id)
             except Exception:  # noqa: BLE001
                 logger.debug("mobile fold failed", exc_info=True)
             if self._on_projection is not None:
                 self._on_projection()
 
         unsubscribe = session.subscribe(handler)
+        comms = getattr(session, "_subagent_comms", None)
+        subscribe_details = getattr(comms, "subscribe_detail_changes", None)
+        if callable(subscribe_details):
+            unsubscribe_details = subscribe_details(self._invalidate_subagent_detail)
+            if callable(unsubscribe_details):
+                self._unsubscribe_detail_changes = cast(Callable[[], None], unsubscribe_details)
         try:
             self._fold.fold_history(session.history())
         except Exception:  # noqa: BLE001
@@ -201,6 +223,8 @@ class TuiSessionHandle(SessionHandle):
         # events (start/end/turn-end) are the sole authority — see
         # ``_reconcile_streaming`` for why per-event reads are poison.
         self._reconcile_streaming()
+        self._refresh_state()
+        self._warm_subagent_details()
         self._unsubscribe = unsubscribe
         return unsubscribe
 
@@ -321,6 +345,41 @@ class TuiSessionHandle(SessionHandle):
         if self._on_projection is not None:
             self._on_projection()
         return "steering queued"
+
+    async def receive_peer_message(
+        self,
+        text: str,
+        *,
+        mode: str = "mailbox",
+        wake: bool = False,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        # Session.receive_peer_message is a COROUTINE that must run on the owner
+        # event loop (it touches _context.messages, the transcript, and may
+        # spawn a turn). `_on_app` only runs SYNC callables on the Textual
+        # thread, so we reuse the prompt() machinery: a sync shim scheduled on
+        # the app captures the owner loop and schedules the coroutine there with
+        # run_coroutine_threadsafe, and we await its result from this bridge
+        # coroutine. Do NOT call the coroutine directly off-loop.
+        sender = sender or {}
+
+        def schedule() -> "Future[str]":
+            session = self._session()
+            owner_loop = asyncio.get_running_loop()
+            return asyncio.run_coroutine_threadsafe(
+                session.receive_peer_message(text, mode=mode, wake=wake, sender=sender),
+                owner_loop,
+            )
+
+        fut = await self._on_app(schedule)
+        detail = await asyncio.wrap_future(fut)
+        # Optimistic phone echo, matching steer(): put the card on the
+        # projection now so an attached phone paints it without waiting for the
+        # next projection repaint.
+        self._fold.note_peer_message(text, sender=sender)
+        if self._on_projection is not None:
+            self._on_projection()
+        return str(detail)
 
     async def recall_steer(self, command_id: str) -> str:
         """Recall one queued steer by the Message id its producer supplied."""
@@ -774,6 +833,75 @@ class TuiSessionHandle(SessionHandle):
         self._app.call_from_thread(wrapped)
         return await asyncio.wait_for(future, timeout=10.0)
 
+    def _cancel_detail_tasks(self) -> None:
+        for task in self._detail_tasks.values():
+            task.cancel()
+        self._detail_tasks.clear()
+        self._detail_generations.clear()
+        self._detail_fingerprints.clear()
+
+    def _warm_subagent_details(self) -> None:
+        """Adopt restored descendants without delaying the initial projection."""
+        comms = getattr(self._session(), "_subagent_comms", None)
+        if comms is None:
+            return
+        for node in comms.nodes():
+            if node.session_dir is not None:
+                self._invalidate_subagent_detail(node.job_id)
+
+    def _invalidate_subagent_detail(self, job_id: str) -> None:
+        """Coalesce child mutations behind one generation-guarded worker."""
+        comms = getattr(self._session(), "_subagent_comms", None)
+        node = comms.node(job_id) if comms is not None else None
+        if node is None or node.session_dir is None:
+            return
+        self._detail_generations[job_id] = self._detail_generations.get(job_id, 0) + 1
+        task = self._detail_tasks.get(job_id)
+        if task is None or task.done():
+            self._detail_tasks[job_id] = asyncio.create_task(
+                self._hydrate_subagent_detail(job_id),
+                name=f"mobile-detail-{job_id}",
+            )
+
+    async def _hydrate_subagent_detail(self, job_id: str) -> None:
+        """Hydrate only the invalidated child, repeating once if it moved."""
+        try:
+            while True:
+                generation = self._detail_generations.get(job_id, 0)
+                comms = getattr(self._session(), "_subagent_comms", None)
+                node = comms.node(job_id) if comms is not None else None
+                if comms is None or node is None or node.session_dir is None:
+                    return
+                session_dir = str(node.session_dir)
+                try:
+                    result = await asyncio.to_thread(_load_subagent_detail, session_dir)
+                except _DetailChangedDuringHydration:
+                    # Appends and atomic compaction can overlap a worker read.
+                    # Retry in this same coalesced task so no later event is
+                    # required to recover the newest stable generation.
+                    await asyncio.sleep(0)
+                    continue
+                if generation != self._detail_generations.get(job_id):
+                    continue
+                current = comms.node(job_id)
+                if current is None or str(current.session_dir) != session_dir:
+                    return
+                fingerprint, transcript, todos = result
+                if self._detail_fingerprints.get(session_dir) != fingerprint:
+                    self._detail_fingerprints[session_dir] = fingerprint
+                    if self._fold.set_subagent_hydrated_details(job_id, transcript, todos):
+                        if self._on_projection is not None:
+                            self._on_projection()
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - child detail is additive
+            logger.debug("mobile child-detail hydration failed", exc_info=True)
+        finally:
+            task = self._detail_tasks.get(job_id)
+            if task is asyncio.current_task():
+                self._detail_tasks.pop(job_id, None)
+
     def _refresh_state(self) -> None:
         session = self._session()
         self._fold.set_state(
@@ -835,6 +963,30 @@ def _set_unless_done(
         future.set_exception(error)
     else:
         future.set_result(value)
+
+
+class _DetailChangedDuringHydration(RuntimeError):
+    """Worker result became stale while its transcript was being read."""
+
+
+def _load_subagent_detail(
+    session_dir: str,
+) -> tuple[tuple[int, int], list[Any], list[dict[str, Any]]]:
+    """Read one child transcript in a worker and return its stable fingerprint."""
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME, Transcript
+
+    path = Path(session_dir) / TRANSCRIPT_FILENAME
+    before = path.stat()
+    transcript = Transcript(session_dir)
+    entries = fold_messages_to_entries(transcript.build_llm_history())
+    raw_todos = (transcript.latest_custom("todo_snapshot") or {}).get("items") or []
+    after = path.stat()
+    # Atomic transcript replacement or an append during hydration invalidates
+    # this result; the caller's next child event will request the newer detail.
+    fingerprint = (after.st_size, after.st_mtime_ns)
+    if (before.st_size, before.st_mtime_ns) != fingerprint:
+        raise _DetailChangedDuringHydration("child transcript changed during hydration")
+    return fingerprint, entries, raw_todos if isinstance(raw_todos, list) else []
 
 
 def _session_cwd(session: Any) -> str:

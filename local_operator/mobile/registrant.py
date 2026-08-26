@@ -202,6 +202,11 @@ class SessionHandle(Protocol):
     # recall_steer(command_id) -> str: unsend the queued steering message the
     #   follower submitted under ``command_id``; raises when it already
     #   drained. Optional for the same reason.
+    # receive_peer_message(text, *, mode="mailbox", wake=False, sender=None)
+    #   -> str: deliver a message from another local lop session (`lop send`).
+    #   Optional (getattr-probed in _dispatch) so reduced test handles and
+    #   non-interactive exec hosts that never wired it keep working — a handle
+    #   lacking it answers "this session cannot receive peer messages".
 
 
 class Registrant:
@@ -759,6 +764,22 @@ class Registrant:
             if not inspect.isawaitable(result):
                 raise ValueError("owner adopt_aside operation must be awaitable")
             return await result
+        if op == "peer_message":
+            # Cross-session `lop send` delivery. Optional capability — an owner
+            # host that predates peer messaging (or a non-interactive exec host
+            # that never wired it) answers with a clear error, which the sender
+            # surfaces as "this session cannot receive peer messages". Same
+            # getattr guard as recall_steer above.
+            receive = getattr(h, "receive_peer_message", None)
+            if not callable(receive):
+                raise ValueError("this session cannot receive peer messages")
+            typed_receive = cast(Callable[..., Awaitable[str]], receive)
+            return await typed_receive(
+                frame["text"],
+                mode=str(frame.get("mode", "mailbox")),
+                wake=bool(frame.get("wake", False)),
+                sender=frame.get("sender") or {},
+            )
         raise ValueError(f"unknown op: {op!r}")
 
     async def _dispatch_payload(self, op: str, frame: dict[str, Any]) -> Any:

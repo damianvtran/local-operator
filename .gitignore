@@ -9,6 +9,12 @@ __pycache__/
 .venv
 .DS_Store
 dist/
+node_modules/
+local-operator-extension.zip
+# google-github-actions/auth creates these only when credential-file export is
+# enabled; ignore them defensively so a local workflow experiment cannot commit
+# a short-lived credential alongside the extension artifact.
+gha-creds-*.json
 *.egg-info/
 .pytest_cache/
 .vscode/

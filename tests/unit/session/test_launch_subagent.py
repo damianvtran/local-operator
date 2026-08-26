@@ -32,7 +32,11 @@ from local_operator.harness.types import (
     SubagentStartEvent,
     Usage,
 )
-from local_operator.mobile.projection import ProjectionFold, SessionProjection
+from local_operator.mobile.projection import (
+    ProjectionFold,
+    SessionProjection,
+    fold_messages_to_entries,
+)
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 
@@ -136,6 +140,30 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert stream.requests[0].messages
     assert isinstance(stream.requests[0].messages[0], Message)
     assert stream.requests[0].messages[0].text == "go do a thing"
+
+    # ``set_subagent_details`` is metadata-only (the freeze fix keeps child
+    # transcript I/O off the Textual loop), so it fills lineage/prompt but NOT
+    # the transcript. The full-screen subagent conversation (#298) is hydrated
+    # off-loop and published through ``set_subagent_hydrated_details``.
+    fold = ProjectionFold(SessionProjection(session_id="root", pid=1))
+    fold.set_subagent_details(parent.subagent_comms)
+    [row] = fold.projection.subagents
+    assert row.prompt == "go do a thing"
+    assert row.launch_message_id == f"subagent-launch:{job_id}"
+    assert row.result_text == "child did the work"
+    assert row.transcript == []  # not hydrated synchronously on the event path
+
+    # The worker path reads the durable child transcript off-loop and publishes
+    # the SAME rendered conversation the detail endpoint serves.
+    node = parent.subagent_comms.node(job_id)
+    assert node is not None and node.session_dir is not None
+    hydrated = fold_messages_to_entries(Transcript(node.session_dir).build_llm_history())
+    assert fold.set_subagent_hydrated_details(job_id, hydrated, [])
+    assert [(entry.kind, entry.text) for entry in row.transcript] == [
+        ("user", "go do a thing"),
+        ("assistant", "child did the work"),
+    ]
+    assert row.transcript[0].id == f"subagent-launch:{job_id}"
 
     # Item 12: once the task settles, the idle TOP-LEVEL parent re-wakes with
     # the result instead of polling `jobs`; the shared provider sees a second

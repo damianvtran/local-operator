@@ -56,6 +56,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     StaleAside,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
 
 if TYPE_CHECKING:
@@ -223,6 +224,7 @@ class SubagentNode:
     session_id: str | None
     session_dir: Path | None
     prompt: str = ""
+    launch_message_id: str = ""
     agent_role: str = ""
     effort: str = ""
 
@@ -255,6 +257,7 @@ class _ChildRecord:
     # execution ownership out of each session's own job manager.
     parent_job_id: str | None = None
     prompt: str = ""
+    launch_message_id: str = ""
     agent_role: str = ""
     effort: str = ""
     #: The child's transcript directory. Set at attach; the whole basis of
@@ -331,6 +334,27 @@ class SubagentComms:
     def __init__(self, session: "Session") -> None:
         self._session = session
         self._records: dict[str, _ChildRecord] = {}
+        self._detail_listeners: set[Callable[[str], None]] = set()
+
+    def subscribe_detail_changes(self, listener: Callable[[str], None]) -> Callable[[], None]:
+        """Observe child transcript mutations through the shared root registry."""
+        self._detail_listeners.add(listener)
+
+        def unsubscribe() -> None:
+            self._detail_listeners.discard(listener)
+
+        return unsubscribe
+
+    def notify_detail_persisted(self, job_id: str) -> None:
+        """Publish only after a child has durably appended its new history."""
+        self._notify_detail_change(job_id)
+
+    def _notify_detail_change(self, job_id: str) -> None:
+        for listener in tuple(self._detail_listeners):
+            try:
+                listener(job_id)
+            except Exception:  # noqa: BLE001 - projection listeners are additive
+                logger.debug("subagent detail listener failed", exc_info=True)
 
     # -- launch bookkeeping ---------------------------------------------------
 
@@ -341,6 +365,7 @@ class SubagentComms:
         *,
         parent_job_id: str | None = None,
         prompt: str = "",
+        launch_message_id: str = "",
         agent_role: str = "",
         effort: str = "",
     ) -> None:
@@ -376,6 +401,7 @@ class SubagentComms:
             existing.label = label
             existing.parent_job_id = parent_job_id
             existing.prompt = prompt
+            existing.launch_message_id = launch_message_id
             existing.agent_role = agent_role
             existing.effort = effort
             return
@@ -384,6 +410,7 @@ class SubagentComms:
             label=label,
             parent_job_id=parent_job_id,
             prompt=prompt,
+            launch_message_id=launch_message_id,
             agent_role=agent_role,
             effort=effort,
         )
@@ -482,6 +509,7 @@ class SubagentComms:
             session_id=session_id,
             session_dir=record.session_dir,
             prompt=record.prompt,
+            launch_message_id=record.launch_message_id,
             agent_role=record.agent_role,
             effort=record.effort,
         )
@@ -666,6 +694,7 @@ class SubagentComms:
                     "label": record.label,
                     "parent_job_id": record.parent_job_id,
                     "prompt": record.prompt,
+                    "launch_message_id": record.launch_message_id,
                     "agent_role": record.agent_role,
                     "effort": record.effort,
                     "session_dir": str(record.session_dir),
@@ -706,6 +735,7 @@ class SubagentComms:
                 label=str(row.get("label") or job_id),
                 parent_job_id=(str(row["parent_job_id"]) if row.get("parent_job_id") else None),
                 prompt=str(row.get("prompt") or ""),
+                launch_message_id=str(row.get("launch_message_id") or ""),
                 agent_role=str(row.get("agent_role") or ""),
                 effort=str(row.get("effort") or ""),
                 session_dir=session_dir,
@@ -1576,6 +1606,10 @@ class SubagentComms:
         """
 
         async def watcher(event: AgentEvent) -> None:
+            # Nested child events never flow through the root Session, but this
+            # shared registry sees every attached child. Notify detail consumers
+            # before ask-specific filtering so mobile history stays fresh.
+            self._notify_detail_change(record.job_id)
             if not record.armed or record.ask is None or record.ask.done():
                 return
             if not isinstance(event, MessageEndEvent):
@@ -1920,4 +1954,11 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         return PeekStep(index, "hub", "hub message", _clip(body))
     if custom_type == "compaction_summary":
         return PeekStep(index, "system", "compaction", _clip(str(details.get("summary", ""))))
+    if custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+        # A parent peeking a child that received a `lop send` message sees who
+        # reached in, so the peek view stays honest about cross-session traffic.
+        sender = details.get("sender") or {}
+        who = str(sender.get("conversation_name") or sender.get("pid") or "another session")
+        body = str(details.get("body") or details.get("text") or "")
+        return PeekStep(index, "system", f"peer ← {who}", _clip(body))
     return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))

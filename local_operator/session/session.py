@@ -40,6 +40,8 @@ import contextlib
 import inspect
 import json
 import logging
+import os
+import tempfile
 import time
 from collections.abc import (
     AsyncIterator,
@@ -87,6 +89,7 @@ from local_operator.harness.types import (
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
+    PeerMessageDeliveredEvent,
     StaleAside,
     SteeringDeliveredEvent,
     StreamEvent,
@@ -95,6 +98,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolCall,
     ToolContext,
+    ToolExecutionEndEvent,
     ToolResult,
     Usage,
     WakeDeliveredEvent,
@@ -123,6 +127,7 @@ from local_operator.session.naming import (
     MAX_TITLE_CHARS,
     ConversationName,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import (
@@ -137,6 +142,12 @@ if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
     # It only holds the manager the composition root hands it.
     from local_operator.mcp.manager import McpManager
+
+    # Type-only for the same reason ``resume`` is imported lazily at its two
+    # call sites below: ``cli.py``'s startup path is guarded by a test that
+    # fails if resolving ``--resume`` drags the engine in, and that guard runs
+    # in the other direction too.
+    from local_operator.resume import SessionAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +187,9 @@ SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 #: their transcripts survive on disk. Re-snapshotted (newest-wins, like every
 #: custom entry) whenever the roster moves; loaded once at construction.
 SUBAGENT_ROSTER_CUSTOM_TYPE = "subagent_roster"
+SUBAGENT_ROSTER_SIDECAR = "subagent-roster.v1.json"
+_SUBAGENT_ROSTER_VERSION = 1
+_SUBAGENT_SUMMARY_CHARS = 500
 
 #: Transcript custom-entry type holding the session's todo list. The todo tool
 #: keeps the live list in a module-level table keyed by session id (see
@@ -415,12 +429,16 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             WAKE_PROMPT_MESSAGE_TYPE,
             HUB_MESSAGE_TYPE,
             JOB_RESULT_MESSAGE_TYPE,
+            PEER_MESSAGE_MESSAGE_TYPE,
         ):
             # A hub message renders exactly like a wake delivery: the sender
             # already formatted ``details["text"]``, and it must reach the
             # model as a user turn or the agent it was addressed to never
-            # sees it. Unlisted custom types are dropped (bookkeeping), which
-            # is precisely the trap a new aside type falls into.
+            # sees it. A peer message (`lop send` from another local session)
+            # rides the same path: it MUST be listed here or the human sees the
+            # cross-session transcript row but the model never does. Unlisted
+            # custom types are dropped (bookkeeping), which is precisely the
+            # trap a new aside type falls into.
             out.append(
                 Message(
                     role="user",
@@ -939,6 +957,56 @@ def _subagent_job_row(job: AsyncJob) -> dict[str, Any]:
     return row
 
 
+def _compact_subagent_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Bound list-surface text while preserving the exact resume directory."""
+    compact = dict(record)
+    for key in ("prompt", "error_text", "result_text"):
+        value = compact.get(key)
+        if value is not None:
+            compact[key] = str(value)[:_SUBAGENT_SUMMARY_CHARS]
+    return compact
+
+
+def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
+    """Replace current roster state durably without exposing a partial JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = path.with_name(os.path.basename(raw_temp))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+
+
+def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
+    """Read a supported sidecar, falling back to the legacy transcript on error."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or payload.get("version") != _SUBAGENT_ROSTER_VERSION:
+            return None
+        generation = payload.get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            return None
+        if not isinstance(payload.get("jobs"), list) or not isinstance(
+            payload.get("records"), list
+        ):
+            return None
+        return payload
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _parsed_usage(payload: dict[str, Any]) -> Usage | None:
     """One persisted ``usage`` payload as a :class:`Usage`, or ``None``.
 
@@ -1157,6 +1225,51 @@ class Session:
         #: collaboration and project briefs without the manager restating them.
         #: ``None`` on an ordinary session.
         self.active_team: Any | None = None
+        #: User-facing copy explaining why a stored attachment did NOT come
+        #: back ("" when it did, or when there was none). Set by
+        #: :meth:`_restore_attachment` for a team or profile that failed to
+        #: resolve, whether because it is gone or because the registry was
+        #: unavailable.
+        #:
+        #: NOT named ``…_error``: it holds display copy, and its only consumer
+        #: renders it as a ``"warning"`` system notice, deliberately not an
+        #: ``"error"`` — a missing team is a recoverable state of this session,
+        #: not a failure of it. The name says so, so the next reader does not
+        #: route it to an error surface or log it as a fault (D5).
+        #:
+        #: Held instead of raised because a missing team must never make a
+        #: conversation unopenable, and held instead of logged because the
+        #: reader who needs it is the user staring at a band segment that
+        #: stayed blank.
+        self.attachment_restore_notice: str = ""
+        #: True only while :meth:`_restore_attachment` is re-applying the stored
+        #: attachment, which suppresses the journal write in
+        #: :meth:`_persist_attachment`. Without it the restore would write back
+        #: through the very mutators it calls, and a PARTIAL restore would erase
+        #: the half it could not resolve: a session whose team is momentarily
+        #: unresolvable (registry not wired on this host, a team dir not yet
+        #: synced) would persist ``team=""`` and lose the name for good, turning
+        #: a recoverable miss into permanent data loss. A restore is a READ of
+        #: state that is already on disk; it has nothing new to record.
+        self._restoring_attachment = False
+        #: Stored names the restore could NOT resolve, carried so the next
+        #: journal write preserves them instead of erasing them (R1).
+        #:
+        #: Suppressing the write during the restore is not enough on its own,
+        #: and the gap was a real data-loss path: once the restore returns,
+        #: ``active_team`` is ``None`` for the half that missed, so the very
+        #: next ordinary mutation — a plain ``/goal`` is enough — journals that
+        #: emptiness over the surviving name and the attachment is gone for
+        #: good, one command after a failure that was supposed to be
+        #: recoverable. Keeping the name here makes the recovery survive
+        #: arbitrary further use of the session, which is what "transient"
+        #: has to mean.
+        #:
+        #: Cleared per slot by an explicit user action (a successful attach
+        #: replaces it, a detach drops it), never by the miss itself — see
+        #: :meth:`_persist_attachment`.
+        self._unresolved_team: str = ""
+        self._unresolved_agent: str = ""
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -1330,6 +1443,9 @@ class Session:
         self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
 
         self._disposed = False
+        self._subagent_roster_generation = 0
+        self._subagent_roster_written_generation = 0
+        self._subagent_roster_writer: asyncio.Task[None] | None = None
         # Session-scoped task group (HC-11): wake deliveries and aside
         # persistence are routed through it so dispose() cancels them
         # deterministically and a delivery after dispose never raises into an
@@ -1476,6 +1592,16 @@ class Session:
         # answering when it closed, not silently re-route the first prompt to
         # the provider that was failing.
         self._restore_active_route()
+        # Same contract as the route restore, for the other half of what a
+        # session was when it closed: the ``/team`` roster, ``/agent`` profile
+        # and ``/goal`` ride the prompt's volatile tail, which is rebuilt empty
+        # on every construction, so without this a resume dropped the persona
+        # from the model's instructions entirely. Here rather than in
+        # ``async_init`` because the tail must be populated before ANY turn can
+        # be built, and quiet (no event) for the reason the route restore is:
+        # nothing has subscribed yet, so hosts read the restored state when
+        # they build their chrome.
+        self._restore_attachment()
         # Owned here, not by the browser tool, for the same reason the wake
         # scheduler is: _build_tool_context runs at the start of EVERY turn, so
         # a handle the tool stored on the ToolContext lived exactly one turn.
@@ -2256,6 +2382,9 @@ class Session:
         next turn and only invalidates that tail — never the cached prefix.
         """
         stored = self._goal_state.set(text)
+        # Same tail, same fate on resume as the team/agent briefs, so the goal
+        # is journalled by the same mechanism rather than a second one.
+        self._persist_attachment()
         self.refresh_frontend_state()
         return stored
 
@@ -2284,8 +2413,13 @@ class Session:
         :attr:`active_team`.
         """
         self.active_team = team
+        # Either branch is the user acting on the team slot, so a carried
+        # unresolved name stops being a recovery hint here (R1): a detach means
+        # they no longer want it, and an attach replaces it outright.
+        self._clear_unresolved("team")
         if team is None:
             self._goal_state.team_brief = ""
+            self._persist_attachment()
             self.refresh_frontend_state()
             return
         preamble = getattr(team, "manager_preamble", lambda: "")()
@@ -2317,7 +2451,215 @@ class Session:
                     + (preamble or "")
                 )
         self._goal_state.team_brief = preamble or ""
+        # Journal the NAME so a resume can rebuild this tail. On change only:
+        # the roster moves a handful of times per session, and the brief itself
+        # is deliberately not stored (see ``SessionAttachment``).
+        self._persist_attachment()
         self.refresh_frontend_state()
+
+    def _persist_attachment(self) -> None:
+        """Journal the attached team/agent/goal beside the transcript.
+
+        Called from every mutation of the attached identity — ``attach_team``
+        (from BOTH of its branches: the ``team is None`` detach returns early,
+        so the tail write cannot cover it), ``_stamp_agent_brief``,
+        ``clear_agent_profile`` and ``set_goal`` — because those are the only
+        ways the volatile tail's persistent half moves. Writing from the
+        mutators rather than from the TUI commands is what makes this hold for
+        every front end: the mobile relay sets a goal through
+        ``Session.set_goal`` too, and a front-end-side write would have left
+        that path unpersisted.
+
+        Synchronous and best-effort. The write is a sub-kilobyte atomic replace
+        and these mutators are not on the hot turn path, so a thread hop would
+        buy nothing and would open a window where a session disposed
+        immediately after ``/team`` lost the attachment it just reported. The
+        helper never raises by contract (see ``write_session_attachment``), and
+        the broad guard here covers a reduced test double whose transcript has
+        no directory rather than any failure of the write itself.
+
+        A name the restore could not resolve is written back UNCHANGED rather
+        than as the empty live value (R1). Without that fallback a transient
+        miss survived only until the next mutation: ``active_team`` is ``None``
+        for the half that failed, so a plain ``/goal`` in the resumed session
+        journalled the emptiness over the stored name and the attachment was
+        lost for good — one command after a failure the design calls
+        recoverable. The carried name is dropped only when the user acts on
+        that slot themselves (see :meth:`_clear_unresolved`), so "recoverable"
+        holds for the whole life of the session rather than for the duration of
+        the restore.
+        """
+        from local_operator.resume import write_session_attachment
+
+        if self._restoring_attachment:
+            return
+        try:
+            directory = self._transcript.directory
+        except Exception:  # noqa: BLE001 — a reduced host must not lose its turn
+            return
+        write_session_attachment(
+            directory,
+            team=self.active_team_name or self._unresolved_team,
+            agent=self._goal_state.agent_name or self._unresolved_agent,
+            goal=self._goal_state.text,
+        )
+
+    def _clear_unresolved(self, slot: str) -> None:
+        """Forget a carried unresolved name because the user acted on that slot.
+
+        The counterpart to the fallback in :meth:`_persist_attachment`. A
+        carried name is a RECOVERY hint for a team or profile that was
+        momentarily unreachable, so it must survive incidental mutations — but
+        it must NOT survive the user deliberately attaching something else or
+        detaching, or a ``/team other`` would leave the old name to reappear at
+        the next resume and re-attach a roster the user had moved off.
+
+        Per slot, because the two are independent: re-attaching an agent says
+        nothing about whether the stored team is still wanted.
+        """
+        if slot == "team":
+            self._unresolved_team = ""
+        else:
+            self._unresolved_agent = ""
+
+    def _restore_attachment(self) -> None:
+        """Re-attach the team/agent/goal this session was carrying when it closed.
+
+        THE resume fix. The team and agent briefs live only in ``GoalState``,
+        which ``session_factory`` builds empty on every construction, so before
+        this a ``--resume`` reopened the conversation with the persona GONE
+        from the system prompt — not merely missing from the status band. The
+        band was reporting the truth, which is why it must keep being driven
+        from the session (see the TUI's ``_sync_team_band``) and never painted
+        from the sidecar directly: a segment naming a team that failed to
+        resolve would turn an honest blank into a lie.
+
+        Re-resolves by NAME through the same entry points the live ``/team``
+        and ``/agent`` commands use (``attach_team`` after a registry lookup,
+        ``attach_agent_profile``, and through it the one shared
+        ``_resolve_profile_or_specialist`` ordering). Deliberate, and the
+        reason the sidecar stores names instead of briefs: the operator may
+        have edited the team's briefs or the profile's instructions since the
+        session last ran, and a stored brief would resume them onto a
+        definition that no longer exists. Going through the live resolvers also
+        means this path cannot drift from the attach path — a change to
+        resolution order applies to a resumed session automatically.
+
+        Runs during construction, BEFORE any turn, so the restored briefs are
+        in the tail the first prompt is built from. It mutates the shared
+        ``GoalState`` holder the system-blocks provider already closed over, so
+        nothing is rebuilt and the cached persona PREFIX is untouched — only
+        the volatile tail this state has always lived in.
+
+        Failures degrade to unattached and are RECORDED for the host to report
+        (:attr:`attachment_restore_notice`) rather than raised: a team the user
+        renamed or deleted must not make a conversation unopenable.
+        """
+        from local_operator.resume import read_session_attachment
+
+        try:
+            stored = read_session_attachment(self._transcript.directory)
+        except Exception:  # noqa: BLE001 — a resume must always open
+            return
+        if stored is None:
+            return
+
+        self._restoring_attachment = True
+        try:
+            self._apply_stored_attachment(stored)
+        finally:
+            self._restoring_attachment = False
+
+    def _apply_stored_attachment(self, stored: "SessionAttachment") -> None:
+        """Re-apply one parsed attachment; see :meth:`_restore_attachment`.
+
+        Split out so the suppression flag around it is a plain ``try/finally``
+        with no early ``return`` able to skip the reset.
+        """
+        if stored.goal:
+            # Straight onto the holder: ``set_goal`` would re-journal a value
+            # that just came off disk, and the restore is not a user action.
+            self._goal_state.set(stored.goal)
+
+        # ``(what was missed, which command re-attaches it)``, so the notice can
+        # name the recovery step per slot the way every sibling miss-notice in
+        # the TUI does ("Run /team to list teams, …").
+        missing: list[tuple[str, str]] = []
+        # True only when a lookup ran to completion and answered "no such
+        # thing". A registry that is absent or that RAISED has established
+        # nothing about whether the team still exists, and saying "renamed or
+        # deleted" for those sends the operator off to re-create something that
+        # is still there (D2/R3). Both of those are also the transient cases the
+        # carried-name recovery exists for.
+        looked_up_and_absent = True
+        if stored.team:
+            team = None
+            registry = self.team_registry
+            if registry is None:
+                looked_up_and_absent = False
+            else:
+                try:
+                    team = registry.get_team_by_name(stored.team)
+                except Exception:  # noqa: BLE001 — a bad registry row is not fatal
+                    team = None
+                    looked_up_and_absent = False
+            if team is None:
+                missing.append((f"team {stored.team!r}", "/team"))
+                # Carried so the next mutation cannot erase it (R1).
+                self._unresolved_team = stored.team
+            else:
+                # Through ``attach_team`` rather than by setting the brief, so
+                # ``active_team`` (what subagents inherit) is restored too, not
+                # just the prompt text.
+                self.attach_team(team)
+        if stored.agent:
+            resolved = None
+            try:
+                resolved = self.attach_agent_profile(stored.agent)
+            except Exception:  # noqa: BLE001 — same contract as the team path
+                resolved = None
+                looked_up_and_absent = False
+            if resolved is None:
+                missing.append((f"agent {stored.agent!r}", "/agent"))
+                self._unresolved_agent = stored.agent
+        if missing:
+            #: Held rather than logged, because the person who needs to know is
+            #: the one looking at a band segment that did NOT come back. The TUI
+            #: reads this once on adopt and says so in its ordinary
+            #: system-notice style; headless hosts may ignore it.
+            #
+            # Names what did NOT come back, never a blanket "unattached": a
+            # partial miss is the common case (a deleted team beside a profile
+            # that resolved fine), and claiming the whole session is bare would
+            # contradict the band segment still showing the half that restored.
+            #
+            # Copy shape follows the established miss-notice idiom in the TUI:
+            # ONE em-dash clause separator (never a parenthetical plus a
+            # semicolon, which was a third idiom — D3), and it ends on the
+            # RECOVERY rather than on the damage, because "run /team to
+            # re-attach" is the only part the user can act on (D2).
+            what = " and ".join(name for name, _ in missing)
+            # Deduped: a both-missing restore would otherwise say "/team or
+            # /team". ``dict.fromkeys`` is the file's ordered-set idiom.
+            commands = " or ".join(dict.fromkeys(command for _, command in missing))
+            # "from the previous session" is dropped deliberately: this notice
+            # only ever fires on adopt after a resume, "restore" already says
+            # it, and the words cost 26 cells that pushed the common one-slot
+            # case to 101 characters — over a 100-column terminal, so it wrapped
+            # to two lines for no added meaning (D3).
+            #
+            # The cause clause is dropped as well once BOTH slots are missing:
+            # naming two things already costs ~35 cells, and keeping the clause
+            # there put the line back over 100 and wrapped it again. Of the two,
+            # the cause is the part the user cannot act on — WHAT is gone and
+            # HOW to get it back are both load-bearing — so it is the one that
+            # yields. A both-missing restore is also overwhelmingly a moved
+            # config directory rather than two independent deletions, which is
+            # the case the clause would describe least accurately anyway.
+            cause = " — renamed or deleted" if looked_up_and_absent and len(missing) == 1 else ""
+            self.attachment_restore_notice = (
+                f"could not restore {what}{cause}. Run {commands} to re-attach."
+            )
 
     def _resolve_profile_or_specialist(self, name: str) -> tuple[str | None, Any, str, str]:
         """Resolve a NAME to an attachable profile, priority order fixed here.
@@ -2414,6 +2756,14 @@ class Session:
         # contradicting each other. Both fields are stamped together in
         # ``_stamp_agent_brief``; they must be cleared together too.
         self._goal_state.agent_name = ""
+        # An explicit detach also retires a carried unresolved name (R1), or
+        # ``/agent clear`` would appear to work and the profile would come back
+        # at the next resume.
+        self._clear_unresolved("agent")
+        # A detach is as much a fact to survive a resume as an attach: without
+        # this the sidecar would still name the profile the user just dropped,
+        # and the next resume would silently re-attach it.
+        self._persist_attachment()
         self.refresh_frontend_state()
 
     def _stamp_agent_brief(self, body: str, display_name: str) -> str:
@@ -2430,6 +2780,12 @@ class Session:
         # case): the profile IS attached and the band must name it, so the
         # segment tracks "which profile is in force", not "did it layer text".
         self._goal_state.agent_name = display_name
+        # A successful attach supersedes any carried unresolved name (R1).
+        self._clear_unresolved("agent")
+        # The single funnel every successful ``/agent`` attach passes through
+        # (role, seed and specialist all land here), so journalling once from
+        # this point cannot miss a path the way three call-site writes could.
+        self._persist_attachment()
         self.refresh_frontend_state()
         return display_name
 
@@ -2927,6 +3283,124 @@ class Session:
             self.refresh_frontend_state()
         return found
 
+    def _peer_custom_message(self, text: str, sender: dict[str, Any]) -> CustomMessage:
+        """Build the transcript entry for one inbound cross-session message.
+
+        ``details["text"]`` is what the MODEL reads: it is wrapped in a
+        provenance envelope (mirroring the subagent-message envelope in
+        ``comms.py``) so the model knows the message came from another session
+        and who sent it, rather than mistaking it for the user's own turn.
+        ``details["body"]`` is the raw text the UIs (TUI/phone) render, and
+        ``details["sender"]`` carries the advisory identity for the indicator
+        label. ``attribution="user"`` routes it through the same allow-listed
+        user-turn path as a wake/hub delivery (see ``build_llm_history``).
+        """
+        pid = sender.get("pid")
+        conversation = sender.get("conversation_name", "")
+        model_label = sender.get("model_label", "")
+        wrapped = (
+            f"<peer-session-message "
+            f"from_pid={pid!r} "
+            f"conversation={conversation!r} "
+            f"model={model_label!r}>\n"
+            f"{text}\n"
+            "</peer-session-message>"
+        )
+        return CustomMessage(
+            custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": wrapped, "body": text, "sender": sender},
+        )
+
+    async def receive_peer_message(
+        self,
+        text: str,
+        *,
+        mode: str = "mailbox",
+        wake: bool = False,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        """Deliver a message from ANOTHER local lop session into this one.
+
+        This is the receive half of ``lop send``. No existing method both
+        persists a message durably to the transcript AND makes it visible to
+        the model without driving a turn, which is why record-only needs its
+        own branch here rather than reusing ``queue_aside`` (materializes only
+        at a turn boundary — a genuinely idle session has no boundary) or
+        ``seed_history`` (pre-first-turn only).
+
+        Delivery modes:
+        - ``mailbox`` (default), no wake: record-only. Persist the row now so
+          the human sees it immediately and a crash cannot lose it, and append
+          to live context so the model reads it on its next turn. The idle
+          session stays idle — non-interrupting by design.
+        - ``mailbox`` + ``wake`` while idle: drive a turn now via the prompt
+          pipeline (which persists the row once — do NOT also append).
+        - ``steer`` while busy: inject mid-turn through the existing steer
+          path (which persists its own steering row — do NOT also append).
+        - ``steer`` while idle: nothing to steer into, so degrade to a driven
+          turn exactly like mailbox+wake idle (dropping it would violate the
+          guarantee that the message MUST appear in history).
+
+        Returns a short human-readable detail string for the sender's ack.
+        """
+        sender = sender or {}
+        message = self._peer_custom_message(text, sender)
+        busy = self._is_streaming
+        if mode == "steer":
+            if busy:
+                # steer() persists its own transcript row when the queue
+                # drains; appending here too would double-write.
+                self.steer(str(message.details["body"]), message_id=message.id)
+                await self._emit_peer_receipt(message, sender)
+                return "delivered mid-turn (steered)"
+            # Idle steer has nothing to interrupt: open a turn so the message is
+            # still delivered and read. _prompt_messages persists the row once.
+            await self._emit_peer_receipt(message, sender)
+            self._spawn_background(self._prompt_messages([message]))
+            return "delivered (opened a turn)"
+        # mode == "mailbox"
+        if wake and not busy:
+            # _prompt_messages persists the row through the pipeline — a
+            # separate transcript/context append here would double-write.
+            await self._emit_peer_receipt(message, sender)
+            self._spawn_background(self._prompt_messages([message]))
+            return "delivered and woke the session"
+        # Record-only (idle without wake, or busy): persist durably NOW so the
+        # human sees it and a crash cannot lose it, and make it visible to the
+        # model on its next turn. The transcript write is immediate; the live
+        # append routes through _append_or_park_journal, NOT a bare
+        # _context.messages.append. A bare append is a splice hazard on the
+        # BUSY path: appending a user-attributed message while a tool batch is
+        # open leaves the live list ending assistant(tool_use) -> user with the
+        # tool_results still to come, which every provider rejects and which
+        # trips _pair_spliced_tool_results (same class as PR #302, C1). The
+        # journal path parks the live append to the next turn-safe boundary
+        # while writing the transcript now, so the record-only guarantee holds:
+        # the human sees the row immediately, and the parked append lands
+        # before the next turn reads context. On the idle path it appends
+        # straight through, matching the prior behaviour.
+        await self._transcript.append_message(message)
+        self._append_or_park_journal(message)
+        await self._emit_peer_receipt(message, sender)
+        return "delivered to the mailbox (will be read on the next turn)"
+
+    async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
+        """Fire the live receipt so the owner TUI paints the indicator now.
+
+        Mirrors ``WakeDeliveredEvent`` firing before/around the turn spawn:
+        even for the record-only idle case the front end must be told the
+        instant the message lands, and ``message_id`` lets it dedup this live
+        receipt against the persisted row on a later history replay.
+        """
+        await self._emit(
+            PeerMessageDeliveredEvent(
+                body=str(message.details.get("body", "")),
+                sender=sender,
+                message_id=message.id,
+            )
+        )
+
     def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
         """Install the host's tool-approval gate (see SessionProtocol).
 
@@ -3077,6 +3551,20 @@ class Session:
             logger.warning("cancelling subagent job %s failed", job_id, exc_info=True)
 
     # -- live tool refresh (MCP late-connect / reconnect) ---------------------
+
+    def _set_mcp_startup_sink(self, sink: Callable[[Any], None] | None) -> None:
+        """Install the MCP settle/wiring sink through a guarded accessor.
+
+        The attribute itself is private because only two writers should ever
+        touch it: the TUI's ``_wire_mcp_status`` (at adoption, possibly BEFORE
+        the manager exists — deferred wiring) and ``dispose`` (to drop a sink
+        that would otherwise fire into a torn-down app). A setter rather than
+        a bare attribute assignment keeps those call sites greppable and lets
+        a subclass or reduced host intercept. Noop-safe by contract: the
+        wiring's settle path looks the sink up defensively, so a host that
+        never installs one simply gets no re-report — the headless default.
+        """
+        self._on_mcp_startup_settled = sink
 
     def refresh_tools(self, tools: Sequence[AgentTool]) -> None:
         """Replace the full tool inventory mid-session.
@@ -3267,8 +3755,16 @@ class Session:
         return self._frontend_state_store.subscribe(handler)
 
     def refresh_frontend_state(self) -> None:
-        """Publish non-event source changes through the canonical contract."""
-        self._frontend_state_store.refresh_from_session(self)
+        """Publish non-event source changes through the canonical contract.
+
+        Guarded because the attachment restore (#301) re-attaches the stored
+        team/agent DURING construction, before the store exists; those
+        mutations are captured by the store's own construction snapshot, so
+        skipping the publish here loses nothing.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_from_session(self)
 
     def refresh_frontend_usage(self) -> None:
         """Refresh restored usage without scanning transcript/jobs/tool schemas."""
@@ -3624,7 +4120,17 @@ class Session:
                         # pipeline flushes it if no continuation is queued.
                         self._held_end = event
                     continue
+                is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
+                if is_todo_end:
+                    # The tool has already mutated its store when this event is
+                    # yielded. Persist before async subscriber fan-out so a
+                    # cancellation from a handler cannot expose live todo state
+                    # that resume cannot recover. The fingerprint guard makes
+                    # failed/view/no-op todo calls a zero-write comparison.
+                    await self._maybe_persist_todos()
                 await self._emit(event)
+                if is_todo_end and self._job_id is not None and self._subagent_comms is not None:
+                    self._subagent_comms.notify_detail_persisted(self._job_id)
 
             # Track the latest provider usage for compaction trigger math.
             for message in reversed(new_messages):
@@ -3661,6 +4167,12 @@ class Session:
             # ``from_checkpoint`` — clobber the richer checkpoint a TUI wrote.
             if self._has_ui or self._frontend_state_store.has_subscribers:
                 await self._frontend_state_store.checkpoint(self._transcript)
+
+            # Child events reach the shared comms watcher before either durable
+            # append. Notify only after messages AND todos are stable, including
+            # provider-error turns that emit no later terminal event.
+            if self._job_id is not None and self._subagent_comms is not None:
+                self._subagent_comms.notify_detail_persisted(self._job_id)
 
             pending_incident = self._pending_incident
             self._pending_incident = None
@@ -5498,40 +6010,65 @@ class Session:
         """
         if self._disposed or self._job_id is not None:
             return
-        self._spawn_background(self._persist_subagent_roster())
+        self._subagent_roster_generation += 1
+        if self._subagent_roster_writer is None or self._subagent_roster_writer.done():
+            self._subagent_roster_writer = asyncio.create_task(
+                self._persist_subagent_roster(), name="persist-subagent-roster"
+            )
 
     async def _persist_subagent_roster(self) -> None:
-        """Snapshot the task job rows AND the comms records to the transcript.
-
-        Both halves are needed and neither alone suffices. The job ROWS carry
-        what the subagent panel paints (label, status, model, usage, elapsed);
-        the comms RECORDS carry what ``hub op='resume'`` needs (the
-        ``job_id \u2192 session_dir`` mapping and how each child settled). They are
-        written together, newest-wins like every custom entry, so a resume reads
-        one coherent snapshot rather than two that drifted.
-
-        Only ``task`` rows are stored: ``bash`` jobs are host-local processes
-        that cannot outlive the process that spawned them, so persisting them
-        would only invite a resume to show a job it can never touch.
-        """
+        """Coalesce current roster state into one atomically replaced sidecar."""
         try:
-            rows = [
-                _subagent_job_row(job)
-                for job in self.jobs.list()
-                if getattr(job, "type", "") == "task"
-            ]
-            records = self._subagent_comms.snapshot() if self._subagent_comms is not None else []
-            # Nothing to record means no append: a session that never delegated
-            # must not pay a transcript write (and, at teardown, a wedged-mount
-            # timeout) for an empty roster it will never read back.
-            if not rows and not records:
-                return
-            await self._transcript.append_custom(
-                SUBAGENT_ROSTER_CUSTOM_TYPE,
-                {"jobs": rows, "records": records},
-            )
+            while self._subagent_roster_written_generation < self._subagent_roster_generation:
+                generation = self._subagent_roster_generation
+                rows = [
+                    _subagent_job_row(job)
+                    for job in self.jobs.list()
+                    if getattr(job, "type", "") == "task"
+                ]
+                records = (
+                    self._subagent_comms.snapshot() if self._subagent_comms is not None else []
+                )
+                payload = {
+                    "version": _SUBAGENT_ROSTER_VERSION,
+                    "generation": generation,
+                    "jobs": rows,
+                    "records": [_compact_subagent_record(record) for record in records],
+                }
+                await asyncio.to_thread(
+                    _write_roster_sidecar,
+                    self._transcript.directory / SUBAGENT_ROSTER_SIDECAR,
+                    payload,
+                )
+                # Keep one bounded legacy entry for readers predating v0.35.2;
+                # future mutations replace only the sidecar, avoiding quadratic
+                # history while preserving a rolling-upgrade resume path.
+                if (rows or records) and self._transcript.latest_custom(
+                    SUBAGENT_ROSTER_CUSTOM_TYPE
+                ) is None:
+                    await self._transcript.append_custom(
+                        SUBAGENT_ROSTER_CUSTOM_TYPE,
+                        {"jobs": rows, "records": payload["records"]},
+                    )
+                self._subagent_roster_written_generation = generation
         except Exception:  # noqa: BLE001 - persistence must never break a turn
             logger.warning("could not persist subagent roster", exc_info=True)
+        finally:
+            if self._subagent_roster_writer is asyncio.current_task():
+                self._subagent_roster_writer = None
+
+    async def _await_subagent_roster_writer(self) -> None:
+        """Drain the single writer, including a generation queued as it exits."""
+        while True:
+            writer = self._subagent_roster_writer
+            if writer is None:
+                if self._subagent_roster_written_generation >= self._subagent_roster_generation:
+                    return
+                writer = asyncio.create_task(
+                    self._persist_subagent_roster(), name="persist-subagent-roster"
+                )
+                self._subagent_roster_writer = writer
+            await asyncio.shield(writer)
 
     async def _final_persist_snapshots(self) -> None:
         """Write the last roster and todo snapshots at teardown, in order.
@@ -5539,7 +6076,8 @@ class Session:
         Split out so :meth:`dispose` can bound the pair with a single
         ``wait_for``: both are transcript appends and neither may hang teardown.
         """
-        await self._persist_subagent_roster()
+        self._subagent_roster_generation += 1
+        await self._await_subagent_roster_writer()
         await self._maybe_persist_todos()
 
     def _load_subagent_roster(self) -> None:
@@ -5565,9 +6103,16 @@ class Session:
         in the CHILD's own transcript and is recovered by resuming or
         ``hub op='peek'``-ing it, never by re-reading it here.
         """
-        details = self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
+        details = _read_roster_sidecar(self._transcript.directory / SUBAGENT_ROSTER_SIDECAR)
+        loaded_sidecar = details is not None
+        if details is None:
+            details = self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
         if not details:
             return
+        self._subagent_roster_generation = int(details.get("generation") or 0)
+        self._subagent_roster_written_generation = (
+            self._subagent_roster_generation if loaded_sidecar else -1
+        )
         records = details.get("records") or []
         if records:
             # ``self.subagent_comms`` (the property) mints the instance on first

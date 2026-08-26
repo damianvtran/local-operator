@@ -45,6 +45,7 @@ from local_operator.harness.types import (
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
+    PeerMessageDeliveredEvent,
     RetryEndEvent,
     RetryStartEvent,
     SteeringDeliveredEvent,
@@ -99,6 +100,7 @@ _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
         ToolExecutionUpdateEvent,
         ToolExecutionEndEvent,
         NoticeEvent,
+        PeerMessageDeliveredEvent,
         WakeDeliveredEvent,
         SteeringDeliveredEvent,
         SubagentStartEvent,
@@ -234,7 +236,7 @@ class RemoteSession:
         await self._dial(record)
         frontend = await self._await_frontend()
         self._install_frontend(frontend.snapshot)
-        self._load_history(frontend.live_cursor)
+        await self._load_history(frontend.live_cursor)
         self._finish_sync()
         return self
 
@@ -265,7 +267,9 @@ class RemoteSession:
         except TimeoutError as exc:
             raise ConnectionError("owner did not send frontend synchronization") from exc
 
-    def _load_history(self, live_cursor: str | None = None) -> None:
+    async def _load_history(
+        self, live_cursor: str | None = None, *, drop_history_duplicates: bool = True
+    ) -> None:
         """Read durable history exactly up to the sync's advertised boundary.
 
         ``live_cursor`` is the owner's ``history_cursor``: the id of the newest
@@ -276,10 +280,18 @@ class RemoteSession:
         the whole transcript) is what makes the boundary EXACT: a message that
         became durable between snapshot and this read is NOT double-loaded,
         because its live event is what paints it.
+
+        BOTH the transcript construction and the history build are threaded
+        (#300): ``Transcript.__init__`` eagerly reads and parses the whole
+        file, so a long session's replay is file I/O plus JSON parsing from
+        end to end, with nothing the loop needs until the result is bound.
         """
-        transcript = Transcript(self._config_dir / "sessions" / self._session_id)
-        entries = transcript.entries()
-        history = transcript.build_llm_history()
+
+        def _replay() -> tuple[list[Any], list[Any]]:
+            transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+            return transcript.entries(), transcript.build_llm_history()
+
+        entries, history = await asyncio.to_thread(_replay)
         if live_cursor is not None:
             # Keep only the message entries at or before the advertised cursor.
             # The cursor names a transcript ENTRY id (any type); walk to it and
@@ -300,6 +312,18 @@ class RemoteSession:
         self._history_ids = {
             str(message.id) for message in self._history if getattr(message, "id", None)
         }
+        # Frames that arrived during the threaded replay were deduped against
+        # a still-empty id set and buffered (#300 F2). The replay answer is now
+        # authoritative: re-filter before anything drains, so a message that
+        # landed durably mid-replay is not painted twice (once from history,
+        # once from the buffered relay frame). INITIAL connect only: the app
+        # renders the loaded history there, so a buffered frame for a durable
+        # row is a duplicate. On RECONNECT nothing re-renders history — the
+        # buffered gap-replay events (U6) and any live frame that settled
+        # mid-reload are the ONLY paint those rows get, so dropping them here
+        # would reproduce the invisible-recovery bug the gap replay closes.
+        if drop_history_duplicates:
+            self._filter_known_messages()
         # Anything durable is by definition already accounted for; seed the
         # painted-id filter from it so the live seed cannot repaint those rows.
         self._message_events |= self._history_ids
@@ -480,7 +504,12 @@ class RemoteSession:
         event = deserialize_event(data)
         # A message-grade event whose row is already durable (history was read
         # after the socket began buffering) or already painted live is dropped
-        # by stable message id — the single dedup rule for both seams.
+        # by stable message id — the single dedup rule for both seams. The
+        # check runs again at DRAIN time (see ``_filter_known_messages``)
+        # because the replay runs in a thread: a frame that arrives while the
+        # ids are still empty passes HERE, sits in the buffer, and would
+        # otherwise double-paint once the replayed history — which already
+        # contains that message — is handed to the app.
         if self._is_duplicate(event):
             return
         if isinstance(event, AgentStartEvent):
@@ -490,6 +519,30 @@ class RemoteSession:
             self._streaming = False
         self._track(event)
         self._emit_or_buffer(event)
+
+    def _filter_known_messages(self) -> None:
+        """Drop buffered events whose message the replayed history contains.
+
+        The SECOND half of the double-paint guard above. ``_load_history``
+        yields to the loop for the whole transcript replay (that is the A3
+        fix), so relay frames can arrive between the socket opening and the
+        ids binding — each one checked against a still-empty set and
+        buffered. Anything that landed durably in that window is ALREADY in
+        the replayed history, so re-filtering the buffer against the bound
+        ids before delivery drops exactly those. Non-message events (tool
+        cards, notices) keep flowing: they have no stable id to compare and
+        their replay equivalent is not painted from history.
+        """
+        if not self._buffered_events:
+            return
+        kept: list[AgentEvent[Any]] = []
+        for event in self._buffered_events:
+            message = getattr(event, "message", None)
+            message_id = str(getattr(message, "id", "") or "")
+            if message_id and message_id in self._history_ids:
+                continue
+            kept.append(event)
+        self._buffered_events = kept
 
     def _emit_or_buffer(self, event: AgentEvent[Any]) -> None:
         if not self._ready_for_events or not self._handlers:
@@ -635,7 +688,9 @@ class RemoteSession:
                         # point and the live seed dedupes against the ids the
                         # replay just claimed (M4).
                         self._replay_durable_suffix()
-                        self._load_history(frontend.live_cursor)
+                        await self._load_history(
+                            frontend.live_cursor, drop_history_duplicates=False
+                        )
                         self._finish_sync()
                         return
                     except (ConnectionError, OSError, TimeoutError):

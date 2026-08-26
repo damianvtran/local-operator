@@ -291,6 +291,14 @@ class AsyncJobManager:
         # retention can remove them. The owning parent runner later copies this
         # snapshot onto its AsyncJob; polling never participates in durability.
         self._settled_accounting: dict[tuple[str | None, str | None, bool], Usage] = {}
+        # The status band reads this ledger every second. Cache the bounded
+        # aggregate and propagate invalidations through live manager edges so
+        # unchanged reads never recurse through the subagent tree.
+        self._accounting_revision = 0
+        self._accounting_cache_revision = -1
+        self._accounting_cache: tuple[Usage, ...] = ()
+        self._accounting_listeners: set[Callable[[set[int]], None]] = set()
+        self._child_accounting_unsubscribes: dict[str, Callable[[], None]] = {}
         self._signals: dict[str, AbortSignal] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._sinks: dict[str, DeliverySink] = {}
@@ -340,9 +348,13 @@ class AsyncJobManager:
         the summary proportional to distinct billing routes rather than child
         fan-out or model-call count, while retaining every token and dollar.
         """
-        return self._accounting_components(set())
+        if self._accounting_cache_revision != self._accounting_revision:
+            rebuilt = self._collect_accounting_components(set())
+            self._accounting_cache = tuple(component.model_copy(deep=True) for component in rebuilt)
+            self._accounting_cache_revision = self._accounting_revision
+        return [component.model_copy(deep=True) for component in self._accounting_cache]
 
-    def _accounting_components(self, seen: set[int]) -> list[Usage]:
+    def _collect_accounting_components(self, seen: set[int]) -> list[Usage]:
         identity = id(self)
         if identity in seen:
             return []
@@ -359,10 +371,59 @@ class AsyncJobManager:
             components = [*_usage_components(job.usage, job.model_label), *job.descendant_usage]
             child_manager = job.child_jobs
             if isinstance(child_manager, AsyncJobManager):
-                components.extend(child_manager._accounting_components(seen))
+                components.extend(child_manager._collect_accounting_components(seen))
             for component in components:
                 _merge_accounting_component(grouped, component)
         return [component.model_copy(deep=True) for component in grouped.values()]
+
+    def _invalidate_accounting(self, seen: set[int] | None = None) -> None:
+        """Invalidate this aggregate and notify parents once, tolerating cycles."""
+        visited = seen if seen is not None else set()
+        identity = id(self)
+        if identity in visited:
+            return
+        visited.add(identity)
+        self._accounting_revision += 1
+        for listener in tuple(self._accounting_listeners):
+            listener(visited)
+
+    def subscribe_accounting(self, listener: Callable[[set[int]], None]) -> Callable[[], None]:
+        self._accounting_listeners.add(listener)
+
+        def unsubscribe() -> None:
+            self._accounting_listeners.discard(listener)
+
+        return unsubscribe
+
+    def attach_child_manager(self, job_id: str, child: "AsyncJobManager") -> None:
+        """Attach the live accounting lease and propagate child mutations."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return
+        unsubscribe = self._child_accounting_unsubscribes.pop(job_id, None)
+        if unsubscribe is not None:
+            unsubscribe()
+        job.child_jobs = child
+        self._child_accounting_unsubscribes[job_id] = child.subscribe_accounting(
+            self._invalidate_accounting
+        )
+        self._invalidate_accounting()
+
+    def detach_child_manager(self, job_id: str, descendant_usage: list[Usage]) -> None:
+        """Replace a live child edge with its final detached durable ledger."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return
+        unsubscribe = self._child_accounting_unsubscribes.pop(job_id, None)
+        if unsubscribe is not None:
+            unsubscribe()
+        job.descendant_usage = [item.model_copy(deep=True) for item in descendant_usage]
+        job.child_jobs = None
+        self._invalidate_accounting()
+
+    def note_usage_changed(self) -> None:
+        """Invalidate after an in-place Usage mutation owned by a child relay."""
+        self._invalidate_accounting()
 
     def _notify_roster_change(self) -> None:
         """Signal a task-roster mutation to persistence and observers."""
@@ -430,6 +491,7 @@ class AsyncJobManager:
             self._jobs[row.id] = row
             if row.status != "running":
                 self._record_settled_accounting(row)
+        self._invalidate_accounting()
 
     # -- registration -------------------------------------------------------
 
@@ -491,6 +553,10 @@ class AsyncJobManager:
             # Parked behind a caller-managed gate; holds no execution slot and
             # keeps its runner for start_queued().
             self._queued_runners[job_id] = run
+        # A new row is a roster change the owner may want to persist (task rows
+        # only carry a resumable transcript, but the listener filters that).
+        if type == "task":
+            self._invalidate_accounting()
         self._notify_job_change(task_roster=type == "task")
         return job_id
 
@@ -514,6 +580,8 @@ class AsyncJobManager:
         # like register/settle/cancel, so it notifies too: without this the flag
         # move only reaches disk at the next roster event, and a snapshot taken
         # in between would restore the row as if it were still parked.
+        if job.type == "task":
+            self._invalidate_accounting()
         self._notify_job_change(task_roster=job.type == "task")
         return True
 
@@ -620,6 +688,8 @@ class AsyncJobManager:
                 logger.warning("job %s pre-start cleanup raised", job_id, exc_info=True)
         self._settle(job)
         self._sweep_due()
+        if job.type == "task":
+            self._invalidate_accounting()
         self._notify_job_change(task_roster=job.type == "task")
         return True
 
@@ -748,6 +818,8 @@ class AsyncJobManager:
         # roster now sees the terminal status, and persisting here (rather than
         # only after delivery) means a crash between settle and delivery still
         # leaves the outcome on disk for the next resume.
+        if job.type == "task":
+            self._invalidate_accounting()
         self._notify_job_change(task_roster=job.type == "task")
         try:
             await self._deliver(job)
@@ -849,6 +921,10 @@ class AsyncJobManager:
             components.extend(child_manager.accounting_components())
         for component in components:
             _merge_accounting_component(self._settled_accounting, component)
+        unsubscribe = self._child_accounting_unsubscribes.pop(job.id, None)
+        if unsubscribe is not None:
+            unsubscribe()
+        self._invalidate_accounting()
 
     def _sweep_due(self) -> None:
         """Drop settled jobs older than the retention window.

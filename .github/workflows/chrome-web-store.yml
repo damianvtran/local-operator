@@ -1,0 +1,100 @@
+name: Chrome Web Store staged release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit or tag to build and submit
+        required: true
+        default: main
+      version:
+        description: Expected extension manifest/package version
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  # Required by verify-release-environment.sh: reading environment protection
+  # rules and environment-scoped variables needs Actions read scope, and the
+  # default token here is otherwise stripped to the two scopes above.
+  actions: read
+
+concurrency:
+  group: chrome-web-store-release
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    # Protect this environment with required reviewers. Uploading creates the
+    # store draft and submission, so authentication must not happen before the
+    # human release decision even though approval cannot expose a long-lived key.
+    environment: chrome-web-store
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Require a release commit from main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          # Environment approval protects credentials, but it must not authorize
+          # arbitrary branch code. Only reviewed commits already on main may run
+          # the build and the token-bearing upload client.
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::the selected ref must resolve to a commit on main"
+            exit 1
+          }
+          echo "Building reviewed commit $(git rev-parse HEAD)"
+      - name: Verify protected environment configuration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+        run: |
+          extension/scripts/verify-release-environment.sh chrome-web-store \
+            CWS_PUBLISHER_ID "$CWS_PUBLISHER_ID" \
+            CWS_EXTENSION_ID "$CWS_EXTENSION_ID" \
+            GCP_WIF_PROVIDER "$GCP_WIF_PROVIDER" \
+            CWS_SERVICE_ACCOUNT "$CWS_SERVICE_ACCOUNT"
+      - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d # v4.1.0
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: extension/pnpm-lock.yaml
+      - name: Install extension dependencies
+        working-directory: extension
+        run: pnpm install --frozen-lockfile
+      - name: Build and validate the exact store package
+        working-directory: extension
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          pnpm typecheck
+          pnpm test
+          pnpm build:zip
+          bash scripts/validate-store-zip.sh local-operator-extension.zip "$EXPECTED_VERSION"
+      - name: Authenticate without a service-account key
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          create_credentials_file: false
+      - name: Upload and submit for staged publication
+        working-directory: extension
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: bash scripts/chrome-web-store.sh stage local-operator-extension.zip "$EXPECTED_VERSION"

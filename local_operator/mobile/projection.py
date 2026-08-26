@@ -63,6 +63,7 @@ from local_operator.mobile.types import (
     TodoPhase,
     TranscriptEntry,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 
 #: How much of a tool result's text the expand payload carries. The phone's
 #: expanded row is a readable window, not a log file — beyond this the right
@@ -184,6 +185,21 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                         )
                     )
                 continue
+            if message.custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+                # A cross-session `lop send` delivery. The phone renders the raw
+                # body plus the sender identity (from details["sender"]); the
+                # model-facing wrapped envelope in details["text"] never travels.
+                body = str(message.details.get("body") or "").strip()
+                if body:
+                    entries.append(
+                        TranscriptEntry(
+                            id=message.id,
+                            kind="peer_message",
+                            text=body,
+                            details={"sender": message.details.get("sender") or {}},
+                        )
+                    )
+                continue
             text = _message_text(message)
             if text:
                 entries.append(
@@ -288,6 +304,21 @@ class ProjectionFold:
         entries: list[TranscriptEntry] = []
         for message in history:
             if isinstance(message, CustomMessage):
+                if message.custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+                    # A cross-session `lop send` delivery renders as its own
+                    # inbound card (never a bare notice), so an attaching phone
+                    # sees the same peer affordance the TUI paints.
+                    body = str(message.details.get("body") or "").strip()
+                    if body:
+                        entries.append(
+                            TranscriptEntry(
+                                id=message.id,
+                                kind="peer_message",
+                                text=body,
+                                details={"sender": message.details.get("sender") or {}},
+                            )
+                        )
+                    continue
                 text = _message_text(message)
                 if text:
                     entries.append(
@@ -548,6 +579,24 @@ class ProjectionFold:
         )
         self._bump()
 
+    def note_peer_message(self, text: str, *, sender: dict[str, Any] | None = None) -> None:
+        """Optimistic echo of an inbound cross-session (`lop send`) message.
+
+        Same reason as ``note_user_message``: the handle calls this the instant
+        it delivers a peer message so an attached phone paints the peer card
+        immediately, rather than waiting for the next full projection repaint.
+        The row carries the sender identity in ``details`` for the label."""
+        self._append(
+            TranscriptEntry(
+                id=f"peer-{time.time_ns()}",
+                kind="peer_message",
+                text=text,
+                details={"sender": sender or {}},
+                final=True,
+            )
+        )
+        self._bump()
+
     def absorb_user_event(self, message: Message) -> bool:
         """Fold a live user ``MessageStartEvent``. The session emits these for
         user turns now, so a prompt from ANY front end reaches the fold — the
@@ -644,15 +693,49 @@ class ProjectionFold:
     # -- todos / pending / state -------------------------------------------
 
     def set_subagent_details(self, comms: Any) -> None:
-        """Project the shared lineage and enrich every descendant transcript.
+        """Project descendant metadata without touching child transcripts.
 
         Only direct children emit lifecycle events through the root session;
-        nested children still live in the shared comms registry. Seed missing
-        rows from that authoritative registry so each ``child_ids`` edge has a
-        corresponding phone-addressable record.
+        nested children still live in the shared comms registry. This method is
+        called for every root event, so it is deliberately restricted to the
+        in-memory registry. Child history and attachment hydration belongs to
+        ``TuiSessionHandle``'s worker path.
         """
         roster = {item.job_id: item for item in comms.roster()}
-        for node in comms.nodes():
+        nodes = comms.nodes()
+        by_id = {node.job_id: node for node in nodes}
+        children: dict[str | None, list[Any]] = {}
+        for node in nodes:
+            children.setdefault(node.parent_job_id, []).append(node)
+        ancestor_nodes: dict[str, list[Any]] = {}
+
+        def ancestors(job_id: str) -> list[Any]:
+            """Root-to-parent lineage from the local maps (O(children), no I/O).
+
+            Cycle-safe with the same stop-on-repeat contract as
+            ``SubagentComms.ancestors``: a legacy snapshot may hold self or
+            multi-node parent cycles, so a plain recursive walk would recurse
+            forever. Building it here from ``by_id`` keeps the metadata path off
+            any per-child comms lineage recomputation.
+            """
+            cached = ancestor_nodes.get(job_id)
+            if cached is not None:
+                return cached
+            lineage: list[Any] = []
+            seen = {job_id}
+            parent_id = by_id[job_id].parent_job_id
+            while parent_id is not None and parent_id not in seen:
+                seen.add(parent_id)
+                parent = by_id.get(parent_id)
+                if parent is None:
+                    break
+                lineage.append(parent)
+                parent_id = parent.parent_job_id
+            lineage.reverse()
+            ancestor_nodes[job_id] = lineage
+            return lineage
+
+        for node in nodes:
             job = comms.job(node.job_id)
             lifecycle = roster.get(node.job_id)
             row = self._subagents.get(node.job_id)
@@ -664,10 +747,18 @@ class ProjectionFold:
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
             row.prompt = node.prompt
+            row.launch_message_id = node.launch_message_id
             row.effort = node.effort
-            row.ancestors = [ancestor.label for ancestor in comms.ancestors(node.job_id)]
-            row.child_ids = [child.job_id for child in comms.children(node.job_id)]
-            row.peer_ids = [peer.job_id for peer in comms.peers(node.job_id)]
+            # Preserve #298's ancestor_ids feature on the O(children) path.
+            lineage = ancestors(node.job_id)
+            row.ancestors = [ancestor.label for ancestor in lineage]
+            row.ancestor_ids = [ancestor.job_id for ancestor in lineage]
+            row.child_ids = [child.job_id for child in children.get(node.job_id, [])]
+            row.peer_ids = [
+                peer.job_id
+                for peer in children.get(node.parent_job_id, [])
+                if peer.job_id != node.job_id
+            ]
             row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
             row.model_label = str(getattr(job, "model_label", None) or "")
             if lifecycle is not None:
@@ -686,31 +777,43 @@ class ProjectionFold:
                 else:
                     mobile_status = status
                 row.status = mobile_status  # type: ignore[assignment] -- normalized literals
-                row.result_text = _compact(str(lifecycle.result_text or ""), 200)
-                row.error_text = _compact(str(lifecycle.error_text or ""), 200)
+                # The roster renderer truncates visually; the detail route must
+                # retain the complete handoff or provider failure so opening a
+                # child never loses the actionable tail behind a summary cap.
+                row.result_text = str(lifecycle.result_text or "")
+                row.error_text = str(lifecycle.error_text or "")
+                if lifecycle.age_s is not None:
+                    row.elapsed_s = max(0.0, float(lifecycle.age_s))
             progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
             row.progress = progress if row.status == "running" else ""
             row.activity = row.progress or ("thinking" if row.status == "running" else "")
-            try:
-                if node.session_dir is not None:
-                    from local_operator.session.transcript import Transcript
-                    from local_operator.tools.builtin import todo_snapshot
-
-                    transcript = Transcript(node.session_dir)
-                    row.transcript = fold_messages_to_entries(transcript.build_llm_history())
-                    if node.session_id:
-                        raw_todos = todo_snapshot(node.session_id)
-                    else:
-                        raw_todos = []
-                    if not raw_todos:
-                        raw_todos = (transcript.latest_custom("todo_snapshot") or {}).get(
-                            "items"
-                        ) or []
-                    row.todos = self._todo_phases(raw_todos)
-            except Exception:
-                continue
+            # NOTE: no ``Transcript`` construction here. #298's full-screen
+            # subagent conversation still gets its history and todos, but they
+            # are hydrated OFF the Textual loop by ``TuiSessionHandle`` and
+            # published through ``set_subagent_hydrated_details`` below. Reading
+            # every child transcript synchronously on each root event was the
+            # freeze this change removes.
         self._sync_subagents()
         self._bump()
+
+    def set_subagent_hydrated_details(
+        self,
+        job_id: str,
+        transcript: list[TranscriptEntry],
+        todos: list[dict[str, Any]],
+    ) -> bool:
+        """Publish one worker-hydrated child without rebuilding the roster."""
+        row = self._subagents.get(job_id)
+        if row is None:
+            return False
+        # Cap the worker-hydrated history to the same render tail #298 applies
+        # on the synchronous path, so the full-screen conversation keeps its
+        # pinned opening user message without shipping an unbounded transcript.
+        row.transcript = self._cap_tail(transcript)
+        row.todos = self._todo_phases(todos)
+        self._sync_subagents()
+        self._bump()
+        return True
 
     @staticmethod
     def _todo_phases(phases: list[dict[str, Any]]) -> list[TodoPhase]:

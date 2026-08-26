@@ -52,6 +52,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -212,6 +213,106 @@ def _umask() -> int:
     return current
 
 
+#: How long a catalogue fetch lease stands before a peer may steal it. A
+#: listing fetch is bounded by the caller's own timeout (tens of seconds at
+#: worst), so a lease comfortably longer covers a slow response, and a
+#: process that dies mid-fetch cannot strand the document: the lease lapses
+#: and the next session fetches.
+_LISTING_LEASE_S = 60.0
+
+#: How long a lease LOSER waits for the winner's write before re-reading.
+#: Bounded hard because the caller can be a session boot: this is a
+#: courtesy pause, not a barrier.
+_LISTING_LEASE_WAIT_S = 2.0
+
+
+class _ListingFetchLease:
+    """A best-effort cross-process lock on one catalogue document.
+
+    Modelled on the usage cache's SQLite lease but lockfile-based, because
+    this module's store is plain files and pulling SQLite in here would put
+    a database dependency on the model-picker path. ``O_CREAT | O_EXCL`` is
+    the atomic take; the file carries the holder's identity and an expiry
+    so a crashed holder cannot block the next refresh. EVERY failure mode
+    degrades to "no lease": an unwritable directory, a race lost, an
+    unreadable holder file — the caller then just fetches, which is the
+    pre-lease behaviour and always correct, merely less polite to the
+    endpoint.
+    """
+
+    def __init__(self, document: Path) -> None:
+        self._path = document.with_name(document.name + ".fetching")
+        self._token = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self._held = False
+
+    def acquire(self) -> bool:
+        """Take the lease if free or expired. True means THIS process fetches."""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            # Standing lease. Legitimate only while unexpired; a stale one
+            # (holder crashed mid-fetch) is stolen by replacing it, where the
+            # same O_EXCL race decides the single winner among the stealers.
+            try:
+                raw = self._path.read_text(encoding="utf-8", errors="replace")
+                expires = float(json.loads(raw).get("expires_at", 0.0))
+            except (OSError, ValueError):
+                expires = 0.0
+            if expires > time.time():
+                return False
+            try:
+                self._path.unlink()
+            except OSError:
+                return False
+            return self.acquire()
+        except OSError:
+            # Unwritable cache dir or worse: fetch without a lease. Correct,
+            # just unpolite.
+            return True
+        try:
+            payload = json.dumps(
+                {"holder": self._token, "expires_at": time.time() + _LISTING_LEASE_S}
+            )
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+        self._held = True
+        return True
+
+    def await_peer_briefly(self) -> None:
+        """Give the lease holder a moment, then return whatever is on disk.
+
+        Polls the DOCUMENT, not the lease: the winner's atomic rename is the
+        event we are waiting for, and a holder that fails leaves the lease
+        standing until expiry — waiting for the lease would mean waiting out
+        the full lease TTL on every failed peer fetch.
+        """
+        document = self._path.with_name(self._path.name[: -len(".fetching")])
+        deadline = time.monotonic() + _LISTING_LEASE_WAIT_S
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            if document.exists():
+                try:
+                    if time.time() - document.stat().st_mtime < _LISTING_LEASE_WAIT_S * 2:
+                        return
+                except OSError:
+                    return
+
+    def release(self) -> None:
+        """Free the lease if this process holds it."""
+        if not self._held:
+            return
+        self._held = False
+        try:
+            raw = self._path.read_text(encoding="utf-8", errors="replace")
+            if json.loads(raw).get("holder") == self._token:
+                self._path.unlink()
+        except (OSError, ValueError):
+            # Already gone or unreadable: nothing to free.
+            pass
+
+
 def cached_listing(
     key: str,
     fetch: Callable[[], dict[str, Any]],
@@ -228,6 +329,13 @@ def cached_listing(
     client's response). Returns None only when there is no cache AND the fetch
     failed, which is the one case where the caller must keep its static
     fallbacks.
+
+    A cross-process fetch lease guards the miss path: several lop sessions
+    cold-starting together all miss in the same instant, and without the
+    lease each fires its own live listing request at the same public
+    endpoint — the thundering herd that earns a 429 for data one request
+    would have fetched. See :class:`_ListingFetchLease` for the degradation
+    contract; nothing here can block a session start.
     """
     # Swept here because this module owns the naming scheme: a caller cannot know
     # which document names went dead, and a dead name has no reader left to
@@ -238,9 +346,23 @@ def cached_listing(
     if payload is not None and age < ttl_s:
         return payload
 
+    # CROSS-PROCESS FETCH LEASE (see the class docstring): the winner fetches
+    # and writes; losers give the winner a brief window, re-read, and serve
+    # whatever is on disk — stale included, which is already this module's
+    # stale-beats-absent rule. Every failure degrades to fetching.
+    lease = _ListingFetchLease(path)
+    if not lease.acquire():
+        lease.await_peer_briefly()
+        payload, age = _read_cache(path)
+        if payload is not None:
+            return payload
+        # No document even after the peer's window: fall through and fetch.
+        # The lease is lost or stale; a cold machine must still start.
+
     try:
         fresh = fetch()
     except Exception as exc:  # noqa: BLE001 - any client/transport error degrades
+        lease.release()
         if payload is not None:
             # Stale beats absent: the numbers are days old at worst, whereas
             # the static fallback is wrong by nearly a factor of six.
@@ -250,6 +372,7 @@ def cached_listing(
         return None
 
     _write_cache(path, fresh)
+    lease.release()
     return fresh
 
 

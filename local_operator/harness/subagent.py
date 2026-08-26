@@ -250,6 +250,7 @@ def run_subagent(
         queued=queued,
     )
     job = jobs_manager.get(job_id)
+    launch_message_id = f"subagent-launch:{job_id}"
     if job is not None:
         # Recorded at REGISTRATION, not in the runner: a queued job has not
         # started and may never start, and a reader opening its panel still
@@ -273,6 +274,7 @@ def run_subagent(
             label,
             parent_job_id=getattr(parent_session, "_job_id", None),
             prompt=prompt,
+            launch_message_id=launch_message_id,
             agent_role=agent,
             effort=effort or "",
         )
@@ -374,7 +376,14 @@ def _make_runner(
                 # The edge is only a lease: the finalizer atomically replaces it
                 # with detached components before disposal can evict rows or pin
                 # the child Session through its manager callback.
-                job.child_jobs = child.jobs
+                attach_child_manager = getattr(parent_session.jobs, "attach_child_manager", None)
+                if callable(attach_child_manager):
+                    attach_child_manager(job_id, child.jobs)
+                else:
+                    job.child_jobs = child.jobs
+                # The new child edge is canonical frontend state too: the
+                # accounting invalidation above feeds cost, this publish feeds
+                # the roster snapshot every attached full TUI renders.
                 jobs_manager._notify_roster_change()
             if comms is not None:
                 # Before the prompt runs: the parent may already have a
@@ -400,11 +409,24 @@ def _make_runner(
                         logger.warning("could not persist roster after attach", exc_info=True)
             await emit(SubagentStartEvent(job_id=job_id, label=label, agent_id=child.agent_id))
             unsubscribe = child.subscribe(
-                _make_relay(job_id, label, job, jobs_manager, emit, report_progress, final)
+                _make_relay(
+                    job_id,
+                    label,
+                    job,
+                    jobs_manager,
+                    emit,
+                    report_progress,
+                    final,
+                    parent_session.jobs,
+                )
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
             try:
-                await child.prompt(effective_prompt)
+                # The raw launch task and the role-expanded child prompt are two
+                # views of one turn. Persist a correlation id so projections can
+                # render that durable row once without text matching or hiding
+                # later user steering messages with similar content.
+                await child.prompt(effective_prompt, message_id=f"subagent-launch:{job_id}")
             finally:
                 bridge.cancel()
                 with contextlib.suppress(BaseException):
@@ -487,8 +509,15 @@ def _make_runner(
                     if job is not None:
                         # Clear the live edge even if teardown itself fails: a
                         # retained parent row must never pin the child Session.
-                        job.descendant_usage = child.jobs.accounting_components()
-                        job.child_jobs = None
+                        descendant_usage = child.jobs.accounting_components()
+                        detach_child_manager = getattr(
+                            parent_session.jobs, "detach_child_manager", None
+                        )
+                        if callable(detach_child_manager):
+                            detach_child_manager(job_id, descendant_usage)
+                        else:
+                            job.descendant_usage = descendant_usage
+                            job.child_jobs = None
 
     return runner
 
@@ -505,56 +534,18 @@ async def _abort_bridge(signal: Any, child: "Session") -> None:
 
 
 async def _persist_inflight(child: "Session") -> None:
-    """Write the cancelled child's unsaved turn to its own transcript.
+    """Publish the already-durable state of a cancelled child.
 
-    ``Session.prompt`` persists a turn's messages AFTER its loop finishes, so
-    a child whose runner task is hard-cancelled mid-turn loses everything it
-    said and did — measured: a cancelled child's transcript held one entry,
-    its launch prompt, with the tool calls and results it had already
-    completed gone. That is invisible while a cancelled child is a dead end,
-    and wrong the moment one can be resumed: ``hub op='resume'`` replays this
-    file, so what is missing here is what the resumed agent has forgotten.
-
-    Deduplicated by message id (the transcript uses the message's own id as
-    the entry id), so anything ``prompt`` already wrote is not written twice —
-    a duplicate entry would replay as a duplicate message. Shielded, because
-    the calling task is already being cancelled; best-effort, because failing
-    to save a cancelled turn must not break teardown.
-
-    The tail is trimmed to a COHERENT history first (see
-    :func:`_answered_prefix`): a cancel lands mid tool batch, so the live
-    context routinely ends with an assistant message whose tool calls have no
-    results yet, and every major provider rejects a request carrying a
-    tool-use block with no matching tool result. Persisting that tail would
-    make the resumed child unable to make its first request at all.
+    ``Session._run_turn`` owns message durability in its ``finally`` block, and
+    todo mutations are persisted at their tool-completion boundary. Keeping
+    those writes with their owners means cancellation never needs a detached
+    task that can retain the child or touch its transcript after disposal.
     """
-
-    async def _write() -> None:
-        # Imported here rather than at module scope: ``session.session`` imports
-        # this module, so a top-level import is a cycle (the TYPE_CHECKING block
-        # above imports ``Session`` the same way).
-        from local_operator.session.session import _is_persistable_message
-
-        known = {entry.id for entry in child._transcript.entries()}
-        for message in _answered_prefix(list(child._context.messages)):
-            # The SAME allow-list the session's own flush uses. This writes the
-            # child's LIVE context, which after a compaction pass begins with
-            # the summary marker and may carry a todo reminder — neither of
-            # which may be persisted as a message: the marker is already stored
-            # as its own compaction entry, so writing it again replays a
-            # superseded summary beside the live one, and a stored reminder
-            # comes back as a user message the user never sent.
-            if not _is_persistable_message(message):
-                continue
-            if message.id not in known:
-                await child._transcript.append_message(message)
-
-    try:
-        await asyncio.shield(_write())
-    except asyncio.CancelledError:
-        pass  # the shielded write continues without us
-    except Exception:
-        logger.warning("could not persist cancelled subagent turn", exc_info=True)
+    comms = getattr(child, "_subagent_comms", None)
+    job_id = getattr(child, "_job_id", None)
+    notify = getattr(comms, "notify_detail_persisted", None)
+    if isinstance(job_id, str) and callable(notify):
+        notify(job_id)
 
 
 def _answered_prefix(messages: list[Any]) -> list[Any]:
@@ -672,6 +663,7 @@ def _make_relay(
     emit: Callable[[AgentEvent], Awaitable[None]],
     report_progress: Callable[[str], None],
     final: dict[str, Any],
+    owner_jobs: Any = None,
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """The child-stream handler: trajectory + throttled parent relay.
 
@@ -719,6 +711,9 @@ def _make_relay(
                 # Capture the last assistant text as the job's result.
                 final["text"] = message.text
                 _accumulate_usage(job, message.usage)
+                note_usage_changed = getattr(owner_jobs, "note_usage_changed", None)
+                if callable(note_usage_changed):
+                    note_usage_changed()
                 jobs_manager._notify_roster_change()
                 progress = ACTIVITY_THINKING
         elif isinstance(event, ModelChangeEvent):

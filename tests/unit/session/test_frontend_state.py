@@ -305,9 +305,12 @@ def test_child_costs_price_descendant_usage_like_the_owner() -> None:
     from local_operator.model.registry import ModelInfo
 
     priced = ModelInfo(id="sonnet", name="sonnet", description="", input_price=10.0)
+    # The pricing path is paint-safe (#300): ``turn_cost`` reads
+    # ``resolve_model_info_paint``'s memo-or-registry answer, never the full
+    # discovery resolver, so that is the seam a priced test must feed.
     with patch(
-        "local_operator.model.configure.resolve_model_info",
-        side_effect=lambda provider, model_id: priced,
+        "local_operator.model.configure.resolve_model_info_paint",
+        side_effect=lambda provider, model_id: (priced, True),
     ):
         store = FrontendStateStore(_state(jobs=[], child_costs={}))
         update = store.refresh_jobs(session)
@@ -318,8 +321,8 @@ def test_child_costs_price_descendant_usage_like_the_owner() -> None:
     # Follower re-pricing from the wire DTO reaches the same figure.
     remote_manager = SimpleNamespace(list=lambda: [JobState.model_validate(dto.model_dump())])
     with patch(
-        "local_operator.model.configure.resolve_model_info",
-        side_effect=lambda provider, model_id: priced,
+        "local_operator.model.configure.resolve_model_info_paint",
+        side_effect=lambda provider, model_id: (priced, True),
     ):
         remote_store = FrontendStateStore(_state(jobs=[], child_costs={}))
         remote_store.refresh_jobs(

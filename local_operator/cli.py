@@ -400,6 +400,72 @@ def build_cli_parser() -> argparse.ArgumentParser:
     serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
     serve_mobile_parser.add_argument("--port", type=int, default=4098)
 
+    # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
+    # startup must not pull Starlette/uvicorn in just to render --help.
+    browser_parser = subparsers.add_parser(
+        "browser", help="Connect the browser tool to a Chromium extension", parents=[parent_parser]
+    )
+    browser_subparsers = browser_parser.add_subparsers(dest="browser_command")
+    install_browser = browser_subparsers.add_parser("install", help="Install the bridge daemon")
+    install_browser.add_argument("--port", type=int, default=4099)
+    browser_subparsers.add_parser("status", help="Show daemon, extension and pairing status")
+    for action in ("start", "stop", "restart"):
+        browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
+    pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
+    pair_browser.add_argument(
+        "--reset", action="store_true", help="Revoke the paired browser first"
+    )
+    logs_browser = browser_subparsers.add_parser("logs", help="Tail the daemon log")
+    logs_browser.add_argument("--lines", type=int, default=100)
+    logs_browser.add_argument("--follow", "-f", action="store_true")
+    uninstall_browser = browser_subparsers.add_parser("uninstall", help="Remove the bridge daemon")
+    uninstall_browser.add_argument("--purge", action="store_true", help="Also delete pairing state")
+    serve_browser = browser_subparsers.add_parser(
+        "serve", help="Run the bridge daemon (foreground)"
+    )
+    serve_browser.add_argument("--port", type=int, default=4099)
+
+    # Peer-to-peer session messaging: hand a message to another local lop
+    # session without cmux, over the same control-socket + registry substrate
+    # the mobile stack already uses (loopback + 0600 record => same-account
+    # trust boundary). See guides/peer-messaging.
+    send_parser = subparsers.add_parser(
+        "send",
+        help="Send a message to another local lop session (no cmux needed)",
+        parents=[parent_parser],
+    )
+    send_parser.add_argument(
+        "target",
+        nargs="?",
+        help="conversation-name / session-id / cwd substring (case-insensitive)",
+    )
+    send_parser.add_argument(
+        "message",
+        nargs="?",
+        help="message text; omit to read the body from stdin",
+    )
+    send_parser.add_argument("--pid", type=int, help="target by exact pid")
+    send_parser.add_argument("--session", dest="session", help="target by exact session id")
+    send_parser.add_argument(
+        "--now",
+        "--steer",
+        dest="steer",
+        action="store_true",
+        help="inject mid-turn (steer) instead of the default mailbox",
+    )
+    send_parser.add_argument(
+        "--wake",
+        action="store_true",
+        help="if the target is idle, drive a turn now (mailbox mode only)",
+    )
+
+    sessions_parser = subparsers.add_parser(
+        "sessions",
+        help="List active lop sessions and their resource usage",
+        parents=[parent_parser],
+    )
+    sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
@@ -863,6 +929,403 @@ def config_list_command() -> int:
         print(f"\033[1;32m│   Description: {description}\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
     return 0
+
+
+def browser_command(args: argparse.Namespace) -> int:
+    """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
+    command = getattr(args, "browser_command", None)
+    if command == "serve":
+        from local_operator.browser_bridge.daemon import main as serve_main
+
+        return serve_main(["--port", str(args.port)])
+
+    from local_operator.browser_bridge import install as browser_install
+    from local_operator.browser_bridge.daemon import pairing_status, reset_pairing
+
+    if command == "install":
+        result = browser_install.install(args.port)
+        steps = result.get("steps", [])
+        assert isinstance(steps, list)
+        for step in steps:
+            print(f"  {step}")
+        if not result.get("ok"):
+            print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
+            return 1
+        print("\nbrowser bridge installed and healthy.")
+        print("  load the Local Operator extension, then run `lop browser pair`.")
+        return 0
+    if command == "status":
+        result = browser_install.status()
+        health = result.get("health") or {}
+        assert isinstance(health, dict)
+        print(f"installed:           {'yes' if result['installed'] else 'no'}")
+        print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
+        connected = bool(health.get("extension_connected"))
+        print(f"extension connected: {'yes' if connected else 'no'}")
+        print(f"paired:              {'yes' if result['paired'] else 'no'}")
+        # A paired-but-not-connected browser is the normal closed/backgrounded
+        # state, not a fault; say so rather than leaving a user to guess (N2).
+        if result["paired"] and not connected:
+            print(
+                "                     (browser not currently attached; it reconnects when opened)"
+            )
+        driven = health.get("current_url")
+        if connected and driven:
+            print(f"driving:             {driven}")
+        print(f"port:                {result['port']}")
+        print(f"log:                 {result['log']}")
+        return 0 if result["healthy"] else 1
+    if command == "pair":
+        if args.reset:
+            # File unlink here; the running daemon's revocation watcher (and
+            # the per-request pairing re-check) sever any LIVE socket within a
+            # few seconds, so a revoked browser loses drive authority now, not
+            # only at its next reconnect (findings A5/U1).
+            reset_pairing()
+            print(
+                "revoked the paired browser; any live connection is dropped within a few seconds."
+            )
+            # A successful revoke must not report failure to a wrapping script
+            # even when no extension is currently waiting to pair (UX-N1).
+            pair = pairing_status()
+            code = pair.get("pending_code")
+            if code:
+                print(f"pairing code: {code}")
+                print("enter this 6-digit code in the Local Operator extension popup.")
+            else:
+                print("open the extension popup to pair a browser again.")
+            return 0
+        pair = pairing_status()
+        code = pair.get("pending_code")
+        if code:
+            print(f"pairing code: {code}")
+            print("enter this 6-digit code in the Local Operator extension popup.")
+            return 0
+        if pair.get("paired"):
+            print("browser extension is already paired. Use --reset to pair another profile.")
+            return 0
+        print("no extension is waiting to pair. Open the extension popup, then retry.")
+        return 1
+    if command in ("start", "stop", "restart"):
+        result = browser_install.service_action(command)
+        if not result["ok"]:
+            print(f"\033[1;31m{result['error']}\033[0m")
+            return 1
+        print(f"browser bridge {command} ok")
+        return 0
+    if command == "logs":
+        import subprocess
+
+        command_line = ["tail", "-n", str(args.lines)]
+        if args.follow:
+            command_line.append("-f")
+        command_line.append(str(browser_install.log_path()))
+        return subprocess.call(command_line)
+    if command == "uninstall":
+        result = browser_install.uninstall(purge=args.purge)
+        steps = result.get("steps", [])
+        assert isinstance(steps, list)
+        for step in steps:
+            print(f"  {step}")
+        return 0 if result.get("ok") else 1
+    print("usage: lop browser {install|status|start|stop|restart|pair|logs|uninstall|serve}")
+    return 1
+
+
+# Peer messaging body cap. Well under the registrant's 1 MB line limit so a
+# huge paste is rejected with a clear message here rather than becoming a
+# silently dropped oversized line on the wire.
+_PEER_MESSAGE_MAX_BYTES = 256 * 1024
+
+
+def _peer_red(message: str) -> None:
+    """Print one red error line, matching the rest of the CLI's error style."""
+    print(f"\n\033[1;31m{message}\033[0m", file=sys.stderr)
+
+
+def _format_bytes(value: "int | None") -> str:
+    """Human-readable memory size, or an em dash when the probe returned None.
+
+    ``lop sessions`` shows one column per number; an unknown value must read as
+    'we could not measure this' (—), never as zero."""
+    if value is None:
+        return "—"
+    size = float(value)
+    for unit in ("B", "K", "M", "G", "T"):
+        if size < 1024 or unit == "T":
+            if unit == "B":
+                return f"{int(size)}{unit}"
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}T"
+
+
+def _peer_sender_identity() -> "dict[str, Any]":
+    """Best-effort identity of the calling session for the peer indicator.
+
+    ``lop send`` is a short-lived child of the ``lop`` TUI that spawned it, so
+    the parent pid is the sending session's pid. We look that record up in the
+    registry and copy its conversation/model/session id so the target's
+    indicator can name the sender honestly. When the caller is headless or its
+    record cannot be found, we still carry the pid — the identity is advisory,
+    never load-bearing for delivery."""
+    from local_operator.mobile import registry
+
+    ppid = os.getppid()
+    sender: dict[str, Any] = {"pid": ppid}
+    try:
+        for record, state in registry.scan(config_dir()):
+            if record.pid == ppid:
+                sender.update(
+                    {
+                        "session_id": record.session_id,
+                        "conversation_name": record.conversation_name,
+                        "model_label": record.model_label,
+                        "cwd": record.cwd,
+                    }
+                )
+                break
+    except OSError:
+        # A scan failure never blocks a send: the message still delivers, it is
+        # just less labelled.
+        pass
+    return sender
+
+
+def _resolve_peer_target(
+    args: argparse.Namespace,
+) -> "tuple[Any | None, list[Any], str]":
+    """Resolve a ``lop send`` target to one live SessionRecord.
+
+    Priority: ``--pid`` (exact), ``--session`` (exact session_id), then the
+    positional substring matched case-insensitively against conversation_name,
+    then session_id, then the cwd basename. Only ``live`` records are eligible
+    (a ``wedged`` owner will not service the socket promptly; ``stale`` is
+    dead). Returns ``(record, candidates, error)``: exactly one of record or
+    error is meaningful; ``candidates`` is populated on an ambiguous substring
+    so the caller can print them for disambiguation."""
+    import os as _os
+
+    from local_operator.mobile import registry
+
+    scanned = registry.scan(config_dir())
+    live = [(rec, state) for rec, state in scanned if state == "live"]
+
+    if args.pid is not None:
+        for rec, state in scanned:
+            if rec.pid == args.pid:
+                if state != "live":
+                    return (
+                        None,
+                        [],
+                        (
+                            f"target pid {args.pid} is {state}, not live "
+                            "(its owner is not responding); try again shortly"
+                        ),
+                    )
+                return rec, [], ""
+        return None, [], f"no session found with pid {args.pid}"
+
+    if args.session:
+        for rec, state in scanned:
+            if rec.session_id == args.session:
+                if state != "live":
+                    return None, [], (f"target session {args.session} is {state}, not live")
+                return rec, [], ""
+        return None, [], f"no session found with session id {args.session!r}"
+
+    target = (args.target or "").strip()
+    if not target:
+        return None, [], "no target given (pass a name/substring, --pid, or --session)"
+
+    needle = target.lower()
+    matches: list[Any] = []
+    for rec, _state in live:
+        haystacks = [
+            rec.conversation_name or "",
+            rec.session_id or "",
+            _os.path.basename(rec.cwd or ""),
+        ]
+        if any(needle in field.lower() for field in haystacks):
+            matches.append(rec)
+
+    if not matches:
+        # Distinguish "matched but not live" from "no match at all" so the user
+        # knows whether to wait or to fix the name.
+        wedged = [
+            rec
+            for rec, state in scanned
+            if state != "live"
+            and needle
+            in (
+                f"{rec.conversation_name or ''} {rec.session_id or ''} "
+                f"{_os.path.basename(rec.cwd or '')}"
+            ).lower()
+        ]
+        if wedged:
+            return (
+                None,
+                [],
+                (
+                    f"the only match for {target!r} is not responding "
+                    f"(pid {wedged[0].pid}); try again shortly"
+                ),
+            )
+        return None, [], f"no live session matches {target!r}"
+    if len(matches) > 1:
+        return None, matches, ""
+    return matches[0], [], ""
+
+
+def send_command(args: argparse.Namespace) -> int:
+    """``lop send`` — hand a message to another local lop session.
+
+    Delivery mode maps from the flags: ``--now``/``--steer`` => steer (inject
+    mid-turn), otherwise mailbox; ``--wake`` drives a turn if the mailbox
+    target is idle. The body comes from the positional argument or, when
+    omitted, stdin (the ergonomic path for piping a longer note)."""
+    import asyncio
+
+    from local_operator.mobile.peer_client import send_peer_message
+
+    record, candidates, error = _resolve_peer_target(args)
+    if candidates:
+        print(f"{len(candidates)} sessions match; disambiguate with --pid:", file=sys.stderr)
+        for rec in candidates:
+            name = rec.conversation_name or rec.session_id
+            print(f"  --pid {rec.pid}  {name}  ({rec.model_label})", file=sys.stderr)
+        return 1
+    if error or record is None:
+        _peer_red(error or "no target resolved")
+        return 1
+
+    # Self-send guard (U2): `lop send` is a child of the launching TUI, so
+    # os.getppid() IS the sending session's pid. A target resolving to that pid
+    # means the session is messaging itself, which would paint a
+    # "peer message from <own name>" card as though a DIFFERENT session sent it
+    # (and, in --wake/--now mode, self-trigger a turn). Refuse rather than
+    # deliver a mislabeled self-note; the composer is the way to talk to
+    # yourself.
+    if record.pid == os.getppid():
+        _peer_red("that target is this session; use the composer to message yourself")
+        return 1
+
+    # Body: positional wins; otherwise read stdin (piped note).
+
+    if args.message is not None:
+        text = args.message
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read()
+    else:
+        _peer_red("no message given (pass it as an argument or pipe it on stdin)")
+        return 1
+    if not text.strip():
+        _peer_red("message is empty")
+        return 1
+    if len(text.encode("utf-8")) > _PEER_MESSAGE_MAX_BYTES:
+        _peer_red(
+            f"message is too large ({len(text.encode('utf-8'))} bytes); "
+            f"cap is {_PEER_MESSAGE_MAX_BYTES} bytes"
+        )
+        return 1
+
+    mode = "steer" if args.steer else "mailbox"
+    sender = _peer_sender_identity()
+    try:
+        detail = asyncio.run(
+            send_peer_message(
+                record,
+                text=text,
+                mode=mode,
+                wake=bool(args.wake),
+                sender=sender,
+            )
+        )
+    except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
+        # ValueError covers a read fault the frame reader could still surface
+        # (e.g. an oversized non-welcome line): it must become the same soft,
+        # non-zero "could not deliver" line, never an uncaught traceback (U1).
+        _peer_red(f"could not deliver: {exc}")
+        return 1
+    name = record.conversation_name or record.session_id
+    print(f"→ {name} (pid {record.pid}): {detail}")
+    return 0
+
+
+def sessions_command(args: argparse.Namespace) -> int:
+    """``lop sessions`` — list active sessions and their resource usage.
+
+    RSS is the always-present baseline; FOOTPRINT is the true memory number
+    where the platform can report it (macOS phys footprint / Linux Pss) and —
+    otherwise. HEARTBEAT_AGE surfaces wedged-ness numerically so counts can be
+    eyeballed against reality."""
+    import json as _json
+
+    from local_operator.mobile import registry
+    from local_operator.mobile.resources import session_resource_usage
+
+    scanned = registry.scan(config_dir())
+    now = time.time()
+    live_pids = [rec.pid for rec, state in scanned if state == "live"]
+    usage = session_resource_usage(live_pids)
+
+    rows = []
+    for rec, state in scanned:
+        use = usage.get(rec.pid)
+        rows.append(
+            {
+                "state": state,
+                "pid": rec.pid,
+                "kind": rec.kind,
+                "conversation_name": rec.conversation_name,
+                "session_id": rec.session_id,
+                "model_label": rec.model_label,
+                "cwd": rec.cwd,
+                "rss_bytes": use.rss_bytes if use else None,
+                "footprint_bytes": use.footprint_bytes if use else None,
+                "uptime_s": max(0.0, now - rec.started_at),
+                "heartbeat_age_s": max(0.0, now - rec.heartbeat_at),
+            }
+        )
+
+    if args.json:
+        print(_json.dumps(rows, indent=2))
+        return 0
+
+    if not rows:
+        print("no active lop sessions")
+        return 0
+
+    header = (
+        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'CONVERSATION':<24} "
+        f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
+    )
+    print(header)
+    for row in rows:
+        name = (row["conversation_name"] or row["session_id"] or "")[:24]
+        model = (row["model_label"] or "")[:24]
+        print(
+            f"{row['state']:<7} {row['pid']:>7} {row['kind']:<7} {name:<24} "
+            f"{model:<24} {_format_bytes(row['rss_bytes']):>8} "
+            f"{_format_bytes(row['footprint_bytes']):>9} "
+            f"{_format_duration(row['uptime_s']):>8} "
+            f"{_format_duration(row['heartbeat_age_s']):>7}"
+        )
+    return 0
+
+
+def _format_duration(seconds: float) -> str:
+    """Compact duration for the sessions table: 45s, 12m, 3h, 2d."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
 
 
 def mobile_command(args: argparse.Namespace) -> int:
@@ -1422,18 +1885,26 @@ async def create_session(
     agent_registry: "AgentRegistry",
     *,
     has_ui: bool = False,
+    defer_mcp_wiring: bool = False,
 ):
     """Build a wired harness session for interactive/headless use.
 
     Thin facade over :func:`local_operator.session_factory.create_session`
     (the composition root shared with ``exec`` and the background worker).
     The engine import is lazy so importing ``cli`` never pulls in
-    providers/session internals.
+    providers/session internals. ``defer_mcp_wiring`` passes through to the
+    factory's TUI-boot opt-in unchanged (see its docstring for why only a
+    full front end may take it).
     """
     from local_operator.session_factory import create_session as _create_session
 
     return await _create_session(
-        args, config_manager, credential_manager, agent_registry, has_ui=has_ui
+        args,
+        config_manager,
+        credential_manager,
+        agent_registry,
+        has_ui=has_ui,
+        defer_mcp_wiring=defer_mcp_wiring,
     )
 
 
@@ -1889,7 +2360,7 @@ def main() -> int:
         # round-trip (`$SHELL -l -c 'echo $PATH'`) on startup. The helper keeps
         # a per-process cache, so a session that later needs it still primes at
         # most once. ``None`` is the bare interactive launch.
-        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile"})
+        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile", "browser"})
         if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
             setup_cross_platform_environment()
 
@@ -2098,6 +2569,12 @@ def main() -> int:
             return serve_command(args.host, args.port, args.reload)
         elif args.subcommand == "mobile":
             return mobile_command(args)
+        elif args.subcommand == "browser":
+            return browser_command(args)
+        elif args.subcommand == "send":
+            return send_command(args)
+        elif args.subcommand == "sessions":
+            return sessions_command(args)
         elif args.subcommand == "login":
             return login_command(args)
         elif args.subcommand == "logout":
@@ -2333,6 +2810,7 @@ def main() -> int:
                     credential_manager,
                     agent_registry,
                     has_ui=True,
+                    defer_mcp_wiring=True,
                 )
 
             # The provider controller gives the TUI the full provider/model/
@@ -2386,6 +2864,7 @@ def main() -> int:
                         credential_manager,
                         agent_registry,
                         has_ui=True,
+                        defer_mcp_wiring=True,
                     )
 
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)

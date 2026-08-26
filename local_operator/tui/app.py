@@ -87,6 +87,7 @@ from local_operator.logger import current_log_file
 # boot path nothing the lazy-import discipline above is protecting.
 from local_operator.model.effort import default_effort, next_effort
 from local_operator.session import naming
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
@@ -102,6 +103,7 @@ from local_operator.tui.events import (
     EffectiveModelChanged,
     EventController,
     NoticePosted,
+    PeerMessageDelivered,
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
@@ -195,6 +197,7 @@ from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
     NoticeKind,
+    PeerMessageBlock,
     RichBlock,
     TranscriptView,
     UserBlock,
@@ -214,6 +217,7 @@ from local_operator.tui.widgets.welcome import (
 )
 
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
+    from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
@@ -1259,6 +1263,14 @@ class OperatorApp(App[None]):
         #: which owns the terminal, and lent to the band, which owns the state
         #: it displays — see :meth:`_start_terminal_title`.
         self._terminal_title: TerminalTitle | None = None
+        #: Publishes "this pane holds session <id>" to the host multiplexer, so
+        #: a crash that takes the multiplexer down can bring the conversation
+        #: back instead of opening a fresh shell (see
+        #: :mod:`local_operator.multiplexer`). ``None`` when there is no
+        #: multiplexer, the session is a subagent's, or the kill switch is set
+        #: — all ordinary, none an error. Rebound on every session swap, since
+        #: the pane's binding must name the conversation currently in it.
+        self._multiplexer_broadcast: SessionBroadcast | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,
@@ -1470,6 +1482,13 @@ class OperatorApp(App[None]):
         #: the same conversation) would paint its receipt twice (review round
         #: 2, m2).
         self._live_wake_receipts: set[tuple[str, object]] = set()
+        #: Peer messages painted LIVE this session, keyed by the persisted
+        #: transcript row id. ``on_peer_message_delivered`` records each; the
+        #: history replay skips a persisted ``peer_message`` whose id is already
+        #: here, so a peer message that arrived mid-session and is then replayed
+        #: (``/resume`` into the same conversation) is not painted twice — the
+        #: exact double-paint guard ``_live_wake_receipts`` provides for wakes.
+        self._live_peer_receipts: set[str] = set()
         #: A bang-mode user row (`! <command>`) seen by the history replay but
         #: not yet paired with its bash card. The persisted shape is
         #: user/assistant/tool, so the assistant message immediately after a
@@ -1983,6 +2002,10 @@ class OperatorApp(App[None]):
             )
             self._unsubscribe_frontend = subscription.unsubscribe
             self._apply_frontend_state(subscription.sync.snapshot)
+        # Straight after the session is adopted: the pane's resume binding has
+        # to name the conversation now in it, and a swap (`/new`, `/resume`)
+        # is exactly when the old one becomes wrong.
+        self._start_multiplexer_broadcast()
         # A remote follower must never publish a second discovery record for
         # the shared session, and it must be ready to replace this facade with
         # the lease-winning real Session after owner death. The callback uses
@@ -2059,6 +2082,19 @@ class OperatorApp(App[None]):
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
+        # AFTER the replay, and the order is load-bearing (D1). A stale
+        # attachment is by definition only reachable on a session that ALREADY
+        # RAN, so this notice always lands on a transcript with history. Raised
+        # before the replay it became block 0 of N, the replayed history was
+        # appended after it, the transcript auto-scrolled to the bottom, and the
+        # notice sat at y=-63 with the viewport at y=65 — off screen entirely,
+        # producing exactly the silent downgrade `_report_attachment_restore`
+        # exists to prevent. Last block puts it directly above the composer,
+        # where the eye already is, and it IS the most recent thing that
+        # happened to this session. Costs nothing on an empty transcript:
+        # `_render_resumed_history` no-ops there, so the boot splash is
+        # untouched and the notice still lands under it.
+        self._report_attachment_restore(session)
         # AFTER the history is on screen, because that is where the fallback
         # label comes from: a session resumed from a transcript written before
         # titles were journalled has no stored name to restore, and the band
@@ -2186,6 +2222,12 @@ class OperatorApp(App[None]):
             # not drop (and later re-add) segments the canonical state never
             # changed — the drop-and-restore shifts every following segment
             # and truncates the title mid-transition (D2, review round 2).
+            # The replacement is also a REAL Session that ran
+            # `_restore_attachment` at construction, so it may carry a
+            # team/agent the remote facade never painted (R4); painting from
+            # the new session covers both. Read defensively, as
+            # `_adopt_session` does, so a reduced facade without the accessors
+            # cannot raise here.
             agent_profile=str(getattr(session, "active_agent", "") or ""),
             team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
@@ -2639,6 +2681,23 @@ class OperatorApp(App[None]):
                                 WakeBlock(str(details.get("text", "")), catchup=False)
                             )
                             appended = True
+                    continue
+                # A peer message (`lop send` from another session) is also a
+                # CustomMessage with no ``role`` and would otherwise fall
+                # through, leaving a resumed session with the agent's reply but
+                # no sign the peer note arrived. Replay it as its own block,
+                # skipping one already painted live this session (double-paint
+                # guard, mirroring the wake branch above).
+                if getattr(message, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    if str(getattr(message, "id", "")) not in self._live_peer_receipts:
+                        self._append_block(
+                            PeerMessageBlock(
+                                str(details.get("body", "")),
+                                details.get("sender") or {},
+                            )
+                        )
+                        appended = True
                     continue
                 role = getattr(message, "role", None)
                 if role == "tool":
@@ -4271,6 +4330,34 @@ class OperatorApp(App[None]):
         self._submit_command_prompt(request, attachments)
 
     # -- MCP status ---------------------------------------------------------
+    def _on_deferred_mcp_wiring_settled(self, _outcome: Any) -> None:
+        """Re-enter the app when deferred MCP wiring completes or settles.
+
+        The factory's wiring calls this sink from the background task's
+        continuation, on the app's own loop but outside the message pump —
+        so everything below hops through ``call_later`` for the same reason
+        every other manager callback here does: widget mutation happens on
+        the Textual thread or not at all.
+
+        Both moments route through here deliberately. The wiring's GATE
+        pass (manager built, outcome recorded, TUI hooks still missing)
+        needs the subscriptions this installs; the SETTLE pass (last
+        deferred server terminal) needs the boot report re-run against the
+        combined tally. Reading the CURRENT session — not one captured at
+        wire time — keeps a session swap from re-reporting a retired
+        session's outcome onto the live one, the same guard the ordinary
+        settle callback below carries.
+        """
+
+        def _rewire() -> None:
+            current = self._session
+            if current is None:
+                return
+            self._wire_mcp_status(current)
+            self._report_mcp_startup(current)
+
+        self.call_later(_rewire)
+
     def _wire_mcp_status(self, session: SessionProtocol) -> None:
         """Paint the band's MCP segment and keep it LIVE for the session.
 
@@ -4284,9 +4371,30 @@ class OperatorApp(App[None]):
         painted once: discovery may have failed, and that state comes from the boot
         record rather than from the manager that does not exist. Returning without
         painting left the band identical to a machine that never configured MCP.
+
+        A manager that is absent because wiring has not LANDED yet (the
+        deferred-wiring boot path) is a different case from a failed discovery,
+        and the distinction is load-bearing: returning here would leave the
+        settle sink uninstalled, so the wiring's completion would never
+        re-enter the app and the whole live segment — boot toast, failure
+        notices, OAuth-expiry toasts, the post-merge context re-measure —
+        would be severed for the session. The settle sink is therefore
+        installed BEFORE the early return, and it re-runs this method plus
+        the boot report once the manager exists.
         """
         manager = getattr(session, "mcp_manager", None)
         if manager is None:
+            # Deferred wiring in flight: the sink is the ONE route the wiring's
+            # completion has back into this app (the factory's settle callback
+            # looks it up on the session), so it must exist even though there
+            # is no manager to subscribe to yet. Installed through the session
+            # helper rather than by assignment because Session owns the
+            # attribute; guarded for reduced hosts (embedders, pilot fakes)
+            # that lack it — for them nothing is deferred and the paint below
+            # is all there is, exactly as before.
+            setter = getattr(session, "_set_mcp_startup_sink", None)
+            if callable(setter):
+                setter(self._on_deferred_mcp_wiring_settled)
             self._refresh_mcp_status()
             return
         # CHAIN, never replace: the incumbent callback is the composition root's,
@@ -4440,6 +4548,48 @@ class OperatorApp(App[None]):
         # server that does not exist.
         for name, error in sorted(outcome.failures.items()):
             self._system_notice(f"MCP {name} failed: {error}", "error")
+
+    def _report_attachment_restore(self, session: SessionProtocol) -> None:
+        """Say so when a resumed session's team/agent could not be re-attached.
+
+        A resume re-resolves the stored team/agent by NAME (see
+        ``Session._restore_attachment``), so one the operator has since renamed
+        or deleted resolves to nothing and the session opens unattached. That
+        is the honest outcome, but a SILENT one would be the worst of both: the
+        user left a manager attached, comes back, and the agent answers in its
+        base voice with nothing on screen explaining why.
+
+        Once, on adopt, in the same system-notice style a failed ``/team`` or
+        ``/agent`` attach already uses — which also keeps it out of the empty
+        state, exactly like the MCP startup record above: a stale attachment is
+        infrastructure news the user did not ask for, and it must not collapse
+        the boot composition.
+
+        The band is NOT touched here. It is driven from the session, so a team
+        that failed to resolve leaves its segment blank on its own; painting
+        the stored name would contradict the notice and claim a persona the
+        prompt does not carry.
+
+        A restored GOAL is reported here too, and for the same reason the team
+        and agent get band segments (D4): it is invisible standing state that
+        steers the conversation. The band is the wrong home for it — a goal is a
+        sentence, not a bounded name, and the drop ladder's ``_UNBOUNDED_RUNGS``
+        exists to keep exactly that out — but saying nothing means ``/loop``
+        iterates toward an objective set days ago that the user cannot see.
+        Informational rather than a warning: nothing went wrong, and this is the
+        feature working.
+        """
+        detail = str(getattr(session, "attachment_restore_notice", "") or "")
+        if detail:
+            self._system_notice(detail, "warning")
+        goal = str(getattr(session, "goal", "") or "").strip()
+        if goal:
+            from local_operator.tui.widgets.tool_card import truncate_cells
+
+            # Capped so a goal written up to MAX_GOAL_CHARS (2000) cannot turn
+            # a one-line receipt into a wall of replayed text above the
+            # composer. The full text is always available from `/goal`.
+            self._system_notice(f"goal restored: {truncate_cells(goal, 96)}", "info")
 
     # -- text selection (TUI-021) -------------------------------------------
     def on_text_selected(self, event: TextSelected) -> None:
@@ -4795,6 +4945,21 @@ class OperatorApp(App[None]):
         bottom until the two met. That is the "logo and screen coming together"
         effect; it was never an animation anyone declared.
         """
+        # There is no layout to reconcile once the screen stack is gone, and
+        # every pass below reaches `self.screen`, which RAISES on an empty
+        # stack rather than returning None. Guarded here because this is the
+        # single funnel all three passes go through.
+        #
+        # A teardown race reaches it, not a hypothetical one: the splash
+        # resizes ASYNCHRONOUSLY — `WelcomeView._poll` posts `BlockResized`
+        # when the model label lands, which is exactly when the session factory
+        # resolves — so a quit that beats the factory home leaves that message
+        # queued against a torn-down stack, and `ScreenStackError: No screens
+        # on stack` comes out of the message pump. A fast quit during boot is
+        # ordinary use, and the crash lands at the one moment nothing can
+        # report it usefully.
+        if not self.screen_stack:
+            return
         size = self.size if size is None else size
         # Card first: the shell's width decides how tall the shell measures, which
         # is a term in the composition below.
@@ -7007,6 +7172,101 @@ class OperatorApp(App[None]):
             self._status.set_terminal_title(title)
         title.start()
 
+    def _start_multiplexer_broadcast(self) -> None:
+        """Tell the host multiplexer which session this pane is holding.
+
+        Called on every session adoption rather than once at mount, because
+        the fact being published is "this PANE holds THIS conversation" and a
+        ``/new`` or ``/resume`` changes the second half of that. The previous
+        binding is retired first so a swap cannot leave the pane advertising
+        the conversation the user just moved away from.
+
+        Everything below is best-effort and returns ``None`` on the ordinary
+        paths — no multiplexer, a subagent's session, a session whose first
+        turn has not persisted yet, the kill switch — see
+        :mod:`local_operator.multiplexer`. Nothing here can raise into the
+        boot path, and no subprocess runs on this thread: the broadcast owns a
+        daemon timer thread of its own precisely so the event loop never waits
+        on a multiplexer socket. That holds for the retire of the OUTGOING
+        binding below too — ``stop`` dispatches it to a worker and returns
+        immediately, so a swap cannot stall this coroutine on a wedged socket.
+
+        The swap's ORDERING lives in the successor broadcast, not here:
+        ``_stop_multiplexer_broadcast`` hands the outgoing handle over and the
+        successor's own timer thread waits for that withdrawal (bounded) before
+        it publishes, so the outgoing clear cannot land after — and delete —
+        the fresh binding. Waiting here would put a subprocess join on the
+        event loop, which is the freeze this hook must never incur.
+        """
+        # Stopped FIRST, and the outgoing handle is handed to the successor
+        # rather than dropped: both bindings name the same pane, so the
+        # successor must not publish until this one's withdrawal has landed
+        # (see `SessionBroadcast` for where that wait runs).
+        outgoing = self._stop_multiplexer_broadcast()
+        # Headless means no pane to bind, and this gate is what keeps the test
+        # suite off the developer's own multiplexer. The suite runs INSIDE cmux
+        # and its conftest does not clear `CMUX_*` (it isolates HOME and the
+        # provider keys), so every pilot test would otherwise publish a binding
+        # against the real surface the developer is sitting in front of —
+        # rewriting the resume binding of the session running the tests. The
+        # same hazard is documented on `Notifier._env` in `tui/notify.py`.
+        if self.is_headless:
+            return
+        session = self._session
+        if session is None:
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return
+        # Guarded even though `broadcast_session` guards itself: the IMPORT is
+        # part of this path too, and the whole point of the feature is that it
+        # can never be the reason a session fails to open.
+        try:
+            from local_operator.multiplexer import broadcast_session
+
+            started = broadcast_session(session_id, cwd=os.getcwd(), predecessor=outgoing)
+        except Exception:  # noqa: BLE001 — bookkeeping must not break a session
+            logger.debug("multiplexer broadcast failed to start", exc_info=True)
+            started = None
+        self._multiplexer_broadcast = started
+        # The successor owns the outgoing handle from here (it drains it on its
+        # own thread). When no successor could start, nothing sequences the
+        # withdrawal — but nothing is publishing into the pane either, so the
+        # withdraw simply lands whenever its worker finishes and the exit
+        # drain still guarantees it lands at all.
+
+    def _stop_multiplexer_broadcast(self, *, retire: bool = True) -> "SessionBroadcast | None":
+        """Withdraw this pane's binding (idempotent), returning the handle.
+
+        The returned handle is the OUTGOING broadcast, when there was one. The
+        swap path passes it to the successor as ``predecessor`` so the
+        successor can wait out this withdrawal before publishing; every other
+        caller ignores it, and the exit drain still guarantees the withdrawal
+        runs before the process is gone.
+
+        ``retire=False`` deliberately LEAVES the binding in place, which is
+        what a crash path wants: an abandoned binding is how the session comes
+        back, and clearing it would delete the feature. The default withdraws,
+        because a user who quit on purpose must not have that session replayed
+        into their next shell in this pane.
+        """
+        broadcast = self._multiplexer_broadcast
+        if broadcast is None:
+            return None
+        # Cleared FIRST, so a failure below cannot leave the app holding a
+        # handle it believes is still publishing.
+        self._multiplexer_broadcast = None
+        try:
+            if retire:
+                from local_operator.multiplexer import retire_session
+
+                retire_session(broadcast)
+            else:
+                broadcast.stop(retire=False)
+        except Exception:  # noqa: BLE001 — never block an exit path
+            logger.debug("multiplexer broadcast failed to stop", exc_info=True)
+        return broadcast
+
     def _stop_terminal_title(self) -> None:
         """Give the terminal its own title back (idempotent).
 
@@ -7297,6 +7557,11 @@ class OperatorApp(App[None]):
         # the common case so the phone list drops the session immediately
         # rather than at the next scan.
         self._mobile_teardown()
+        # Alongside the mobile record and for the same reason: this is a clean
+        # exit, so the pane must stop advertising a session the user has just
+        # closed. A crash never reaches this line, which is what leaves the
+        # binding standing for the restore to find.
+        self._stop_multiplexer_broadcast()
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()
@@ -14229,6 +14494,19 @@ class OperatorApp(App[None]):
         """
         self._live_wake_receipts.add((message.wake_id, message.occurrence))
         self._append_block(WakeBlock(message.text, catchup=message.catchup))
+
+    def on_peer_message_delivered(self, message: PeerMessageDelivered) -> None:
+        """Paint the cross-session indicator for a `lop send` delivery.
+
+        Fired the instant the message lands (even while the session is idle),
+        so the reader sees the inbound note immediately rather than only on the
+        next turn render. The delivery's ``message_id`` is recorded so the
+        history replay (``/resume`` into this same conversation) does not mount
+        a second copy — the same double-paint guard the wake receipt uses.
+        """
+        if message.message_id:
+            self._live_peer_receipts.add(message.message_id)
+        self._append_block(PeerMessageBlock(message.body, message.sender))
 
     def _announce_on_splash(self, text: str, kind: NoticeKind) -> None:
         """Hold ``text`` on the splash and raise a toast for it.

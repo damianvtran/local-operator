@@ -1397,6 +1397,164 @@ class WakeBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+class PeerMessageBlock(TranscriptBlock):
+    """An inbound message from ANOTHER local lop session (`lop send`).
+
+    This is deliberately NOT a :class:`UserBlock` and NOT a :class:`WakeBlock`.
+    It must read as *inbound cross-session* — a note the user did not type and
+    the schedule did not fire, but that another running session handed over —
+    so it carries its own affordances:
+
+    - A ``↔`` glyph in the gutter rule marks the block as a two-way
+      cross-session hand-off, distinct from the user prompt's plain ``▌`` bar.
+      Using the same full-height rule discipline as :class:`UserBlock` keeps a
+      multi-paragraph peer message reading as ONE block rather than several.
+    - A muted header line names the sending session (conversation / pid /
+      model) so the reader can see WHO reached in, which is the whole point of
+      a cross-session indicator — the parent/wake paths have no slot for it.
+
+    The header is app chrome (the app naming the sender), so it is excluded
+    from a copy the same way :class:`UserBlock`'s attachment receipt is; the
+    body copies verbatim.
+    """
+
+    #: A cross-session message arrives unbidden — always give it air so it does
+    #: not fuse with whatever row preceded it.
+    SPACING_KIND = "peer"
+    SPACING_LEAD = True
+
+    #: ``↔`` (LEFT RIGHT ARROW): a two-way link between sessions. One cell of
+    #: glyph plus a trailing space fills the same gutter width the user rule
+    #: uses, so the body lands in the shared text column and no other block
+    #: moves.
+    RULE = "↔"
+    RULE_COLS = SPINE_INDENT
+    #: The rule and header wear the accent-free ``muted`` ink: loud enough to
+    #: register as "something reached in", quiet enough not to compete with the
+    #: live-turn accent. The body is full ``fg`` so the message itself reads at
+    #: body weight.
+    RULE_TOKEN = "muted"
+    HEADER_TOKEN = "muted"
+    TEXT_TOKEN = "fg"
+    MIN_BODY = 8
+
+    def __init__(self, body: str, sender: dict[str, object] | None = None) -> None:
+        super().__init__()
+        self.add_class("peer-message-block")
+        self._text = body
+        self._sender = sender or {}
+        #: Rendered index of the header row (always 0 when present), so
+        #: ``copy_row_is_chrome`` matches the frame without re-deriving it.
+        self._header_row: int | None = None
+        self.set_content(self._build())
+        self.finalize()
+
+    def text(self) -> str:
+        """The peer message body as delivered, for callers that recognise
+        their own row (parallel to :meth:`UserBlock.text`)."""
+        return self._text
+
+    def _header(self) -> str:
+        """The sender label: 'peer message from "<name>" (pid N, <model>)'.
+
+        Every field is advisory — a leaner sender omits some — so the label is
+        assembled from whatever is present and never assumes a key exists."""
+        name = str(self._sender.get("conversation_name") or "").strip()
+        pid = self._sender.get("pid")
+        model = str(self._sender.get("model_label") or "").strip()
+        bits: list[str] = []
+        if pid is not None:
+            bits.append(f"pid {pid}")
+        if model:
+            bits.append(model)
+        detail = f" ({', '.join(bits)})" if bits else ""
+        if name:
+            return f'peer message from "{name}"{detail}'
+        if bits:
+            return f"peer message from{detail}"
+        return "peer message from another session"
+
+    def copy_gutter(self, index: int) -> int:
+        """The rule occupies the gutter on every row (same as UserBlock)."""
+        return self.RULE_COLS
+
+    def copy_row_is_chrome(self, index: int) -> bool:
+        """The sender header is the app talking, not the peer's message body."""
+        return self._header_row is not None and index == self._header_row
+
+    def on_resize(self, event: object) -> None:
+        """Re-wrap at the new width and re-ask the spacing gap, matching the
+        UserBlock discipline: this block wraps itself, so a width change is a
+        content change and also a height change adaptive spacing depends on."""
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build())
+        finally:
+            self._finalized = was_finalized
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
+
+    def retheme(self) -> None:
+        """Re-ink rule, header and body from the current ramp."""
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build(), layout=False)
+        finally:
+            self._finalized = was_finalized
+
+    def _body_rows(self, body: int) -> list[str]:
+        """The message body wrapped to ``body`` cells, paragraphs preserved.
+
+        Same wrapping rule as :meth:`UserBlock._rows` (split on newlines first,
+        wrap each paragraph, keep authored indentation) so a pasted snippet in
+        a peer message keeps its shape."""
+        rows: list[str] = []
+        for paragraph in self._text.split("\n"):
+            stripped = paragraph.lstrip(" ")
+            indent = " " * min(len(paragraph) - len(stripped), max(body - 1, 0))
+            room = max(body - len(indent), 1)
+            rows.extend(indent + row if row else "" for row in wrap_cells(stripped, room))
+        while len(rows) > 1 and not rows[0]:
+            rows.pop(0)
+        while len(rows) > 1 and not rows[-1]:
+            rows.pop()
+        return rows
+
+    def _build(self) -> RenderableType:
+        """The sender header then the body, every row behind the ``↔`` gutter.
+
+        Height is pinned to the row count for the same reason UserBlock pins
+        its own (an ``auto`` measurement caches the fallback-width build and
+        leaves a hole); this block authors its rows so it knows its height."""
+        rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
+        header_style = Style(color=theme_mod.semantic_color(self.HEADER_TOKEN))
+        text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
+        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
+
+        # The header is one wrapped paragraph; the body rows follow. The header
+        # is row 0 so a copy can exclude it.
+        header_rows = wrap_cells(self._header(), body) or [""]
+        body_rows = self._body_rows(body)
+        self._header_row = 0
+
+        rows: list[tuple[str, bool]] = [(row, True) for row in header_rows]
+        rows.extend((row, False) for row in body_rows)
+        self.styles.height = len(rows)
+
+        line = Text(no_wrap=True, overflow="ellipsis")
+        for index, (row, is_header) in enumerate(rows):
+            if index:
+                line.append("\n")
+            line.append(gutter, style=rule_style)
+            if row:
+                line.append(row, style=header_style if is_header else text_style)
+        return line
+
+
 class RichBlock(TranscriptBlock):
     """A finalized block wrapping one pre-built rich renderable.
 
@@ -1848,18 +2006,37 @@ class TranscriptView(ScrollableContainer):
         """Mount older blocks above the viewport without moving its content.
 
         History paging is the only prepend path. Textual cannot preserve the
-        visual anchor automatically because mounting changes ``virtual_size``
-        before the next layout pass, so remember the old virtual height and add
-        exactly its growth to ``scroll_y`` after refresh. The optional offset is
-        captured by the caller before asynchronous I/O starts; using the later
-        value would apply the prepend to wherever the user moved meanwhile.
+        visual anchor automatically, so the anchor is restored explicitly here.
+        The optional offset is captured by the caller before asynchronous I/O
+        starts; using the later value would apply the prepend to wherever the
+        user moved meanwhile.
+
+        The anchor is expressed as a BLOCK and that block's offset from the top
+        of the viewport, not as ``virtual_size`` growth. Growth is the obvious
+        formulation and it is subtly wrong: the batch is mounted with its gaps
+        decided while its blocks were still unmounted, where
+        ``spans_multiple_rows()`` has no width to measure against and falls back
+        to 80 columns, and :meth:`_settle_gaps` then re-decides them against real
+        widths. Re-deciding rewrites margin classes, which changes the heights of
+        the blocks ABOVE the anchor, which changes ``virtual_size`` on a LATER
+        layout pass than the one that restored the scroll. Any offset derived
+        from a height sampled before that pass is stale by exactly the rows the
+        settle reclaimed, so the reader's row came to rest up to 2 rows off
+        (measured on a 140-message history page: 142 rows pre-settle, 140 after).
+        A block's own ``virtual_region`` is re-derived by the same layout pass
+        that resizes it, so reading the position back afterwards is correct
+        whichever pass wins the race.
         """
         additions = list(blocks)
         if not additions:
             return
-        old_height = self.virtual_size.height
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
         before = self._blocks[0] if self._blocks else None
+        # The row the reader is looking at, and where it sits in the viewport.
+        # Prepending never moves this block within the ledger, so it survives
+        # the mount and every gap re-decision above it.
+        anchor_block = before
+        anchor_gap = (before.virtual_region.y - old_scroll) if before is not None else 0.0
         if before is None:
             self.mount(*additions)
         else:
@@ -1867,13 +2044,21 @@ class TranscriptView(ScrollableContainer):
         self._blocks[0:0] = additions
         self._name_col_cache = None
 
-        def restore_anchor() -> None:
-            growth = max(0, self.virtual_size.height - old_height)
-            self.scroll_to(y=max(0, old_scroll + growth), animate=False)
+        def settle_then_restore() -> None:
+            # Settle FIRST so the heights above the anchor are final, then let
+            # the layout pass that applied them publish new positions before the
+            # anchor is read back.
             self._settle_gaps(additions)
             self._remeasure_empty_state()
 
-        self.call_after_refresh(restore_anchor)
+            def restore_anchor() -> None:
+                if anchor_block is None or anchor_block.parent is not self:
+                    return
+                self.scroll_to(y=max(0, anchor_block.virtual_region.y - anchor_gap), animate=False)
+
+            self.call_after_refresh(restore_anchor)
+
+        self.call_after_refresh(settle_then_restore)
 
     def append_block(self, block: TranscriptBlock) -> None:
         """Mount ``block`` at the bottom.

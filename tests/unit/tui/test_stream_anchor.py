@@ -31,14 +31,17 @@ from local_operator.tui.events import (
     AssistantMessageEnd,
     AssistantMessageStart,
 )
+from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.subagent_view import SubagentView
 from local_operator.tui.widgets.transcript import (
+    GAP_CLASS,
     TAIL_TOLERANCE_ROWS,
     TailAnchor,
     TranscriptView,
     UserBlock,
 )
 
+from .conftest import StyledTranscriptApp
 from .test_app_pilot import FakeSession, _factory
 from .test_band_panels import FakeSession as BandFakeSession
 from .test_band_panels import _async_factory, _fake_jobs, _Job
@@ -501,3 +504,73 @@ async def test_paging_the_subagent_body_by_its_hint_arrow_releases_the_anchor() 
             await pilot.pause()
             await pilot.pause()
         assert float(body.scroll_offset.y) == parked
+
+
+# --- history prepend: the anchor survives gap settlement --------------------
+
+
+def _prose(text: str) -> AssistantBlock:
+    """An assistant block whose source text is set directly.
+
+    ``spans_multiple_rows`` is answered from ``_full_text`` rather than by
+    rendering, so this is the whole of what adaptive spacing reads.
+    """
+    block = AssistantBlock()
+    block._full_text = text
+    return block
+
+
+@pytest.mark.asyncio
+async def test_a_history_prepend_holds_the_readers_row_through_gap_settlement() -> None:
+    """The reader's row must not move when older history is mounted above it.
+
+    This pins the mechanism that made history paging drift, not merely that
+    *some* restoration happens. ``prepend_blocks`` mounts its batch while the
+    blocks are still unmounted, so ``spans_multiple_rows()`` has no width and
+    falls back to 80 columns; ``_settle_gaps`` then re-decides those gaps
+    against the real width on a LATER layout pass. Re-deciding removes margin
+    rows ABOVE the anchor, so any offset derived from ``virtual_size`` growth
+    sampled before that pass is stale by exactly the rows the settle reclaimed
+    — the reader came to rest up to 2 rows off their line.
+
+    The provisional gap classes are set here explicitly rather than raced for.
+    Waiting for the layout passes to interleave the wrong way reproduces the
+    drift only intermittently (measured 2/10 through the subagent view), which
+    is the timing bet this suite exists to remove. Setting the class states the
+    same precondition the 80-column fallback produces, so the settle-time
+    correction — and therefore the regression — is deterministic.
+
+    Two-sided by construction: with the fix the gap is held exactly, and with
+    the pre-fix growth formula restored it drifts by the reclaimed 2 rows.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 20)) as pilot:
+        view = app.query_one(TranscriptView)
+        for index in range(60):
+            view.append_block(_prose(f"tail {index}"))
+        for _ in range(20):
+            await pilot.pause()
+
+        # Mid-history, so the anchor is NOT flush with the top of the viewport:
+        # a gap of zero cannot show a drift of two rows.
+        view.scroll_to(y=25, animate=False)
+        for _ in range(20):
+            await pilot.pause()
+
+        anchor = view._blocks[0]
+        before_gap = anchor.virtual_region.y - view.scroll_y
+
+        older = [_prose(f"older {index}") for index in range(40)]
+        # The provisional decision an unmounted batch makes for itself, which
+        # `_settle_gaps` then reclaims once real widths exist.
+        for block in older[:2]:
+            block.add_class(GAP_CLASS)
+
+        view.prepend_blocks(older)
+        for _ in range(60):
+            await pilot.pause()
+
+        # The settle really did reclaim the provisional rows: without this the
+        # assertion below could pass on a batch that never moved.
+        assert not any(block.has_class(GAP_CLASS) for block in older)
+        assert anchor.virtual_region.y - view.scroll_y == before_gap
