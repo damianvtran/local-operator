@@ -111,6 +111,25 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         # Under-specified close, not a fault: relay the extension's message,
         # which already names the (redacted) live handles.
         return error.message
+    if error.code == ErrorCode.ORIGIN_NOT_ALLOWED:
+        # The teaching error of the approval flow: it must name the exact next
+        # actions, because the failure it replaces (blocking the navigation on
+        # a popup prompt) had agents misread the bridge as broken while the
+        # prompt expired unseen. The url is echoed back so the agent can paste
+        # it into the follow-up calls without re-deriving it. The agent is the
+        # PRIMARY notification channel — Chrome's own banner is best-effort
+        # (macOS frequently suppresses it without Notification Center
+        # authorization), so the instruction to message the user is load-
+        # bearing, not politeness.
+        origin = str(error.data.get("origin") or _origin(str(error.data.get("url", ""))))
+        url = str(error.data.get("url") or origin)
+        return (
+            f"site {origin or '(unknown origin)'} is not allowed yet. Call browser "
+            f"action='request_access' url={url} to raise the approval prompt, then NOTIFY "
+            "THE USER (via the ask tool or a message) to approve it in the Local Operator "
+            "extension popup — the popup badge alone is not reliably seen — and only then "
+            f"action='await_access' url={url} to wait for the decision."
+        )
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):
         return (
             f"the browser tab crashed while {action or 'the action'} was running. "

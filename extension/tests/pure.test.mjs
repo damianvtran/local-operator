@@ -173,6 +173,68 @@ test("origin decision acks render per decision, deny staying neutral", async () 
   } finally { await module.close(); }
 });
 
+test("access request verdicts: idempotent repeat, replace on new origin, deny cool-down", async () => {
+  const module = await load("src/access-flow.ts");
+  try {
+    const { requestVerdict, newRequest, ACCESS_REQUEST_TTL_MS } = module.loaded;
+    const now = 1_000_000;
+    const record = newRequest("https://a.example", "a.example", now);
+    // Already allowed (stored or once-grant) short-circuits without a prompt.
+    assert.equal(requestVerdict(undefined, true, false, "https://a.example", now), "allowed");
+    assert.equal(requestVerdict(undefined, false, true, "https://a.example", now), "allowed");
+    // No record: raise a fresh prompt.
+    assert.equal(requestVerdict(undefined, false, false, "https://a.example", now), "raise");
+    // Repeat for the SAME pending origin is idempotent — pending, TTL kept.
+    assert.equal(requestVerdict(record, false, false, "https://a.example", now + 1), "pending");
+    // A DIFFERENT origin replaces (single popup slot), never queues.
+    assert.equal(requestVerdict(record, false, false, "https://b.example", now + 1), "raise");
+    // A fresh deny answers denied without re-prompting (no nagging retries)...
+    const denied = { ...record, decision: "deny" };
+    assert.equal(requestVerdict(denied, false, false, "https://a.example", now + 1), "denied");
+    // ...until the TTL cool-down lapses, when a deliberate re-ask may raise.
+    assert.equal(
+      requestVerdict(denied, false, false, "https://a.example", now + ACCESS_REQUEST_TTL_MS),
+      "raise",
+    );
+  } finally { await module.close(); }
+});
+
+test("access state machine: pending, resolve paths, TTL expiry, grants", async () => {
+  const module = await load("src/access-flow.ts");
+  try {
+    const { accessState, activeRequest, newRequest, onceGrantActive, ACCESS_REQUEST_TTL_MS } =
+      module.loaded;
+    const now = 5_000_000;
+    const record = newRequest("https://a.example", "a.example", now);
+    // Undecided and live: pending — the only state await_access blocks on.
+    assert.equal(accessState(record, false, false, "https://a.example", now + 1), "pending");
+    // Each decision resolves to its terminal state.
+    assert.equal(
+      accessState({ ...record, decision: "once" }, false, false, "https://a.example", now),
+      "allowed",
+    );
+    assert.equal(
+      accessState({ ...record, decision: "always" }, false, false, "https://a.example", now),
+      "allowed",
+    );
+    assert.equal(
+      accessState({ ...record, decision: "deny" }, false, false, "https://a.example", now),
+      "denied",
+    );
+    // Past the TTL the record reads as absent — "none", never a stale pending.
+    const later = now + ACCESS_REQUEST_TTL_MS;
+    assert.equal(activeRequest(record, later), undefined);
+    assert.equal(accessState(record, false, false, "https://a.example", later), "none");
+    // A record for another origin is not this origin's request.
+    assert.equal(accessState(record, false, false, "https://b.example", now), "none");
+    // Once-grants: live inside their window, dead past it.
+    const grants = { "https://a.example": now + 60_000 };
+    assert.equal(onceGrantActive(grants, "https://a.example", now), true);
+    assert.equal(onceGrantActive(grants, "https://a.example", now + 60_000), false);
+    assert.equal(onceGrantActive(grants, "https://b.example", now), false);
+  } finally { await module.close(); }
+});
+
 test("origin render holds the ack through the decision round-trip race", async () => {
   const module = await load("src/popup/origin-flow.ts");
   try {

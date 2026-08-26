@@ -31,6 +31,13 @@ export interface PendingOrigin {
   requestId: string;
 }
 
+// Async access-request state (see access-flow.ts for the machine and the
+// incident that motivated it). Session-scoped on purpose: like `origins`
+// "once" grants, an approval should not outlive the browser session, and
+// session storage survives MV3 worker death, which worker memory does not —
+// a decision made between two await_access polls must still be readable.
+export type { AccessRequest, OnceGrants } from "./access-flow";
+
 export interface LocalState {
   token?: string;
   port?: number;
@@ -47,6 +54,8 @@ export interface SessionState {
   // not overwrite another's click targets mid-interaction.
   refs?: Record<string, Record<string, SnapshotRef>>;
   pendingOrigin?: PendingOrigin;
+  accessRequest?: import("./access-flow").AccessRequest;
+  onceGrants?: import("./access-flow").OnceGrants;
 }
 
 export async function getLocal(): Promise<LocalState> {
@@ -54,7 +63,13 @@ export async function getLocal(): Promise<LocalState> {
 }
 
 export async function getSession(): Promise<SessionState> {
-  return chrome.storage.session.get(["surfaces", "refs", "pendingOrigin"]);
+  return chrome.storage.session.get([
+    "surfaces",
+    "refs",
+    "pendingOrigin",
+    "accessRequest",
+    "onceGrants",
+  ]);
 }
 
 export async function getSurfaces(): Promise<Record<string, StoredSurface>> {

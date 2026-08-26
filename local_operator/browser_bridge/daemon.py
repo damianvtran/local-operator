@@ -492,7 +492,17 @@ class BridgeService:
         # Commands that name no tab (open, status, tabs) serialize on a shared
         # key so a fresh open cannot race another open past the surface cap, and
         # a listing cannot interleave with an open's map write.
-        tab_key = str(request.params.get("tab") or "__global__")
+        #
+        # The access-flow methods get their OWN key instead of joining the
+        # global one: they never touch a tab or the surface map, and on the
+        # global key an await_access slice (up to 20 s of polling a human's
+        # decision) would block every other session's open behind a wait on a
+        # human. Their own key still serializes them against each other, which
+        # the single pending-prompt slot wants anyway.
+        if request.method in ("request_access", "await_access"):
+            tab_key = "__access__"
+        else:
+            tab_key = str(request.params.get("tab") or "__global__")
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
         async with lock:
             response = await self._dispatch_locked(request)

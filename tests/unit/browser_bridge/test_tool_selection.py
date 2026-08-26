@@ -111,7 +111,9 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
     assert "scroll" in builtin.BROWSER_ACTIONS
     assert "logs" in builtin.BROWSER_ACTIONS
     assert "tabs" in builtin.BROWSER_ACTIONS
-    assert builtin.BRIDGE_ONLY_BROWSER_ACTIONS == frozenset({"scroll", "logs", "tabs"})
+    assert builtin.BRIDGE_ONLY_BROWSER_ACTIONS == frozenset(
+        {"scroll", "logs", "tabs", "request_access", "await_access"}
+    )
 
 
 @pytest.mark.parametrize(
@@ -361,3 +363,99 @@ async def test_bridge_open_recovers_from_a_dead_pinned_tab(monkeypatch) -> None:
     assert not result.is_error
     assert surface.surface_id == "bridge:33:fresh"
     assert len(calls) == 2 and "tab" in calls[0] and "tab" not in calls[1]
+
+# ---------------------------------------------------------------------------
+# Async site-approval flow (request_access / await_access)
+# ---------------------------------------------------------------------------
+
+async def test_request_access_works_without_a_surface(monkeypatch) -> None:
+    # The whole point of the flow: 'open' just FAILED, so no surface exists.
+    # Routing these through the "no browser surface open" guard would send the
+    # agent in a circle.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        assert action == "request_access"
+        assert params == {"url": "https://example.com"}
+        return {"origin": "https://example.com", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(browser=BrowserSurface())
+    result = await builtin.execute_browser(
+        "t", {"action": "request_access", "url": "https://example.com"}, None, None, context
+    )
+    # The result text is the agent's script for the next two steps.
+    assert "pending" in result.text
+    assert "extension popup" in result.text
+    assert "await_access" in result.text
+
+
+@pytest.mark.asyncio
+async def test_request_access_reports_already_allowed(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        return {"origin": "https://example.com", "state": "allowed"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "request_access", "url": "https://example.com"},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert "allowed" in result.text and "'open' or 'goto'" in result.text
+
+
+@pytest.mark.asyncio
+async def test_await_access_returns_decision_and_denied_warns_off_retry(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        assert action == "await_access"
+        # The tool slices the wait: each wire call carries a bounded budget.
+        assert params["timeout_ms"] <= builtin._BRIDGE_AWAIT_SLICE_MS
+        return {"origin": "https://example.com", "state": "denied"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "await_access", "url": "https://example.com"},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert "denied" in result.text and "Do not retry" in result.text
+
+
+@pytest.mark.asyncio
+async def test_access_actions_degrade_on_cmux_with_typed_error(monkeypatch) -> None:
+    # A cmux-pinned surface has no permission model to ask; the answer must be
+    # the same honest degrade pattern as scroll/logs, not a fake pending.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: False)
+    surface = BrowserSurface()
+    surface.surface_id = "surface:3"
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "request_access", "url": "https://example.com"},
+        None,
+        None,
+        ToolContext(browser=surface),
+    )
+    assert result.is_error
+    assert "not supported on the cmux backend" in result.text
+
+
+@pytest.mark.asyncio
+async def test_access_actions_require_a_url(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    result = await builtin.execute_browser(
+        "t", {"action": "await_access"}, None, None, ToolContext(browser=BrowserSurface())
+    )
+    assert result.is_error and "requires a URL" in result.text

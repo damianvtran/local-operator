@@ -4666,6 +4666,12 @@ BROWSER_ACTIONS = (
     # handle to close. Bridge-only like scroll/logs: cmux keeps no multi-surface
     # registry, so it degrades with the same typed "use the extension" error.
     "tabs",
+    # The async site-approval flow, extension-only like scroll/logs. open/goto
+    # to a not-yet-allowed origin fails EARLY with a typed error naming these
+    # two actions, because the old behaviour — blocking the navigation RPC on
+    # the popup prompt — expired unseen and read as "bridge unreachable".
+    "request_access",
+    "await_access",
 )
 
 #: Actions that only the Local Operator browser extension can serve. cmux has no
@@ -4673,7 +4679,9 @@ BROWSER_ACTIONS = (
 #: partial result these degrade with a clear, actionable error naming the
 #: extension. Kept as a set beside BROWSER_ACTIONS so the degrade check and the
 #: advertised action list can never drift apart.
-BRIDGE_ONLY_BROWSER_ACTIONS = frozenset({"scroll", "logs", "tabs"})
+BRIDGE_ONLY_BROWSER_ACTIONS = frozenset(
+    {"scroll", "logs", "tabs", "request_access", "await_access"}
+)
 
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
@@ -4764,9 +4772,15 @@ class BrowserParams(BaseModel):
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
         "(console + errors) | tabs (list all extension-driven tabs, other "
-        "sessions' included) | close (end YOUR tab when done with it)."
+        "sessions' included) | request_access (raise the site-approval prompt "
+        "for a not-yet-allowed origin; returns pending/allowed/denied/superseded "
+        "immediately) | await_access (wait for the user's decision on that "
+        "prompt) | close (end YOUR tab when done with it)."
     )
-    url: str = Field(default="", description="http(s) URL for 'open'/'goto'.")
+    url: str = Field(
+        default="",
+        description="http(s) URL for 'open'/'goto'/'request_access'/'await_access'.",
+    )
     path: str = Field(default="", description="Destination file for 'screenshot'.")
     selector: str = Field(
         default="",
@@ -4801,6 +4815,12 @@ class BrowserParams(BaseModel):
         default=None,
         description="'logs' max entries to return (most recent kept); 'scroll' "
         "ignores it. Omit for no cap.",
+    )
+    timeout_s: float | None = Field(
+        default=None,
+        description="'await_access' max seconds to wait for the user's decision "
+        "(default 120, max 240). Still pending after that? Tell the user, then "
+        "call await_access again.",
     )
 
 
@@ -5059,7 +5079,10 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     Googles a non-URL and still exits 0, and a flag-shaped value in a
     positional or ``--text`` slot is parsed as an option.
     """
-    if action in ("open", "goto"):
+    if action in ("open", "goto", "request_access", "await_access"):
+        # The access actions take the SAME url validation as open/goto: they
+        # exist to pre-approve exactly the navigation open/goto would make, so
+        # a value those verbs would refuse must be refused here too.
         return _validate_browser_url(params.url, action)
     if action in ("click", "type"):
         problem = _validate_selector(params.selector, action)
@@ -5646,6 +5669,105 @@ async def _bridge_open(
     )
 
 
+#: await_access defaults and cap. The cap exists because each slice is a real
+#: RPC and the human may simply be away: 240 s is long enough for "walk back to
+#: the desk", short enough that the agent gets a turn to re-notify the user
+#: rather than sitting silent for the extension's whole 10-minute request TTL.
+BROWSER_AWAIT_ACCESS_DEFAULT_S = 120.0
+BROWSER_AWAIT_ACCESS_MAX_S = 240.0
+
+#: One extension-side wait slice (mirrors access.ts AWAIT_SLICE_MS). The tool
+#: loops short slices instead of asking the daemon for one long wait so every
+#: entry in the daemon's COMMAND_TIMEOUTS stays an honest per-RPC bound — the
+#: deadline-extension special case is exactly what made the old blocking flow's
+#: failures unreadable.
+_BRIDGE_AWAIT_SLICE_MS = 20_000
+
+
+def _access_result_text(state: str, origin: str) -> str:
+    """One agent-facing line per access state, including the next step — the
+    agent discovers this flow through error/result text, not documentation."""
+    if state == "allowed":
+        return f"{origin} is allowed. 'open' or 'goto' the URL now."
+    if state == "denied":
+        return (
+            f"the user denied access to {origin}. Do not retry or re-request this "
+            "origin; ask the user directly if it is essential."
+        )
+    if state == "pending":
+        # NOTIFY-FIRST is load-bearing: Chrome's own notification banner is
+        # best-effort (macOS suppresses it without Notification Center
+        # authorization), so if the agent does not message the user the prompt
+        # sits unseen until its TTL — the exact incident this flow replaces.
+        return (
+            f"approval for {origin} is pending. FIRST notify the user (via the ask "
+            "tool or a message) to approve it in the Local Operator extension popup "
+            "(toolbar icon, badge '!') — the badge alone is not reliably seen — THEN "
+            "call action='await_access' with the same url to wait for the decision."
+        )
+    # "none": no live request — expired, superseded, or never raised.
+    return (
+        f"no live access request for {origin} (it may have expired unanswered). "
+        "Call action='request_access' with the url to raise a new prompt."
+    )
+
+
+async def _bridge_access(
+    tool_call_id: str,
+    action: str,
+    params: BrowserParams,
+) -> ToolResult:
+    """request_access / await_access — surface-free by design: they exist for
+    the moment when 'open' has just FAILED, so requiring an open surface here
+    would deadlock the recovery path."""
+    url = params.url.strip()
+    if action == "request_access":
+        result, problem = await _bridge_call(tool_call_id, "request_access", {"url": url})
+        if problem is not None:
+            return problem
+        assert result is not None
+        state_value = str(result.get("state", ""))
+        origin = str(result.get("origin", url))
+        return _text(
+            tool_call_id,
+            "browser",
+            _access_result_text(state_value, origin),
+            details={"origin": origin, "state": state_value},
+        )
+    # await_access: loop bounded extension-side slices until the decision, the
+    # caller's deadline, or a terminal state. Each slice is its own RPC well
+    # inside the daemon's command timeout, so a slow human can never make the
+    # bridge look broken again.
+    budget = params.timeout_s if params.timeout_s and params.timeout_s > 0 else None
+    total_s = min(budget or BROWSER_AWAIT_ACCESS_DEFAULT_S, BROWSER_AWAIT_ACCESS_MAX_S)
+    deadline = time.monotonic() + total_s
+    while True:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            return _text(
+                tool_call_id,
+                "browser",
+                f"still pending after {total_s:.0f}s: the user has not decided on {url} "
+                "yet. Remind them to check the Local Operator extension popup, then call "
+                "await_access again.",
+                details={"origin": url, "state": "pending"},
+            )
+        wire = {"url": url, "timeout_ms": min(remaining_ms, _BRIDGE_AWAIT_SLICE_MS)}
+        result, problem = await _bridge_call(tool_call_id, "await_access", wire)
+        if problem is not None:
+            return problem
+        assert result is not None
+        state_value = str(result.get("state", ""))
+        if state_value != "pending":
+            origin = str(result.get("origin", url))
+            return _text(
+                tool_call_id,
+                "browser",
+                _access_result_text(state_value, origin),
+                details={"origin": origin, "state": state_value},
+            )
+
+
 def _format_log_entry(entry: dict[str, Any]) -> str:
     """One buffered log line rendered for the model: ``[level] text (url:line)``.
 
@@ -6004,6 +6126,24 @@ async def execute_browser(
         return _error(tool_call_id, "browser", problem)
     state = _browser_state(context)
 
+    # The access actions are dispatched BEFORE any surface logic: they exist
+    # for the moment 'open' just failed with origin_not_allowed, so there is
+    # usually no surface to key on, and gating them behind "no browser surface
+    # open — use 'open' first" would send the agent in a circle. They need the
+    # bridge (cmux has no permission model), so a cmux-pinned surface or a
+    # bridge-less host degrades with the same typed error as scroll/logs.
+    if action in ("request_access", "await_access"):
+        if state.surface_id.startswith("surface:") or not bridge_available:
+            return _error(
+                tool_call_id,
+                "browser",
+                f"'{action}' is not supported on the cmux backend — cmux has no "
+                "site-permission prompts; navigation works directly. This action only "
+                "exists for the Local Operator browser extension ('lop browser status' / "
+                "'lop browser install').",
+            )
+        return await _bridge_access(tool_call_id, action, params)
+
     # Backend is selected only for an empty surface. A prefixed handle pins the
     # transport, so a browser opening or closing mid-session cannot silently
     # move the agent to a different surface.
@@ -6283,7 +6423,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "(handles are redacted: the listing is awareness-only and cannot "
             "drive or close anything), and 'close' "
             "ends your own tab when you are done with it. 'scroll', 'logs' and "
-            "'tabs' need the extension backend (cmux says so). Use it for every "
+            "'tabs' need the extension backend (cmux says so). On the extension, "
+            "'open'/'goto' to a site the user has not approved fails with "
+            "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
+            "user (ask tool or message) to approve the prompt in the extension popup, "
+            "and 'await_access' to wait for their decision before navigating again. "
+            "Use it for every "
             "screenshot and page interaction; never install or script a browser "
             "engine instead."
         ),

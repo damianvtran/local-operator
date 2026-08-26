@@ -1,6 +1,12 @@
 import { attach, BridgeCommandError, cdp, detach, pruneSurface, requireSurface } from "../cdp";
 import { dropLogCapture, startLogCapture } from "../log-capture";
-import { askOrigin, safeHttpUrl, withOriginGate } from "../origins";
+import {
+  askOrigin,
+  ensureTopLevelAccess,
+  safeHttpUrl,
+  withOriginGate,
+  type OriginAdmission,
+} from "../origins";
 import { settle } from "../settle";
 import {
   atSurfaceCap,
@@ -40,9 +46,17 @@ async function page(tabId: number): Promise<{ url: string; title: string }> {
   return { url: tab.url ?? "", title: tab.title ?? "" };
 }
 
-async function navigate(tabId: number, url: URL, requestId: string): Promise<{ url: string; title: string }> {
-  if (!(await askOrigin(url, requestId))) {
-    throw new BridgeCommandError("origin_denied", "site permission was denied", { origin: url.origin });
+async function navigate(tabId: number, url: URL, requestId: string, admission: OriginAdmission): Promise<{ url: string; title: string }> {
+  // The admission decision was made ONCE at command entry
+  // (ensureTopLevelAccess): a grant consumed there is already spent, so this
+  // function must NOT consult the grant map again — doing so would let the
+  // 10-min TTL lapse between entry and here and drop a granted navigation
+  // into the old 60 s prompt, the exact "prompt after the agent thinks it
+  // has access" surprise the async flow exists to kill (round-1 M1).
+  if (!admission.allowed) {
+    if (!(await askOrigin(url, requestId))) {
+      throw new BridgeCommandError("origin_denied", "site permission was denied", { origin: url.origin });
+    }
   }
   return withOriginGate(
     tabId,
@@ -70,13 +84,26 @@ async function navigate(tabId: number, url: URL, requestId: string): Promise<{ u
  */
 export async function open(params: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> {
   const url = safeHttpUrl(params.url);
+  // Fail EARLY on a not-yet-allowed top-level origin, before any tab exists
+  // and before any prompt is raised: the old behaviour (block this RPC inside
+  // the popup prompt) expired unseen because the agent never got a turn to
+  // point the user at the popup, and the resulting client timeout read as
+  // "bridge unreachable". The typed error teaches the agent the explicit
+  // request_access -> tell the user -> await_access flow instead. Redirect
+  // hops inside the navigation still take the synchronous prompt — the
+  // command is already running there, so an early fail is impossible. Runs
+  // BEFORE the cap check so a not-allowed open answers the actionable error
+  // even on a full browser, and admission CONSUMES the grant (see
+  // ensureTopLevelAccess) so the decision cannot lapse into the old 60 s
+  // prompt before navigate() runs.
+  const admission = await ensureTopLevelAccess(url, requestId);
   if (params.tab !== undefined && params.tab !== null && params.tab !== "") {
     const surface = await requireSurface(params.tab);
     // Re-arm log capture on the resumed surface: after a worker restart the
     // ring buffer was lost and the domains may need re-enabling, and
     // startLogCapture is idempotent when they are already on.
     await startLogCapture(surface.tabId, cdp);
-    const result = await navigate(surface.tabId, url, requestId);
+    const result = await navigate(surface.tabId, url, requestId, admission);
     // Same epoch bump as `goto`: resume navigates to a new document, so
     // pre-resume snapshot refs must fail the epoch gate rather than being
     // pushed against nodes that no longer exist (review finding m3).
@@ -98,9 +125,9 @@ export async function open(params: Record<string, unknown>, requestId: string): 
       { limit: MAX_SURFACES, tabs: Object.keys(surfaces).map(redactToken) },
     );
   }
-  if (!(await askOrigin(url, requestId))) {
-    throw new BridgeCommandError("origin_denied", "site permission was denied", { origin: url.origin });
-  }
+  // No separate pre-create gate: ensureTopLevelAccess above already refused a
+  // not-allowed origin, and gating again here would double-consume a once
+  // grant before navigate() (the single consumption point) ran.
   // Create about:blank first. Creating directly at the destination starts its
   // redirect chain before a debugger can attach, leaving a race where a second
   // origin could receive cookies before the permission gate exists.
@@ -120,13 +147,17 @@ export async function open(params: Record<string, unknown>, requestId: string): 
   // navigating, so the `logs` command captures output from the destination
   // page's very first script (finding: logs must be "since the surface opened").
   await startLogCapture(tab.id, cdp);
-  const live = await navigate(tab.id, url, requestId);
+  const live = await navigate(tab.id, url, requestId, admission);
   return { tab: surfaceToken(surface), ...live };
 }
 
 export async function goto(params: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
-  const result = await navigate(surface.tabId, safeHttpUrl(params.url), requestId);
+  const url = safeHttpUrl(params.url);
+  // Same early refusal as open — see the comment there. Consumption likewise
+  // happens HERE, once, bound to this command's request id.
+  const admission = await ensureTopLevelAccess(url, requestId);
+  const result = await navigate(surface.tabId, url, requestId, admission);
   surface.epoch += 1;
   await putSurface(surface);
   return result;

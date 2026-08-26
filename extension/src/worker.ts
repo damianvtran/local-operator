@@ -1,3 +1,4 @@
+import { awaitAccess, requestAccess } from "./commands/access";
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
@@ -6,7 +7,7 @@ import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
-import { resolveOrigin, setPendingObserver } from "./origins";
+import { expireAccessRequest, resolveOrigin, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
 import { ErrorCode, type DaemonMessage, type ExtensionEvent, type Response } from "./protocol.gen";
 
@@ -29,6 +30,11 @@ const HANDLERS: Record<
   tabs,
   scroll,
   logs,
+  // Async site-approval flow: request returns immediately after raising the
+  // prompt; await polls the stored decision in bounded slices (access.ts
+  // explains why slices, not a daemon long-poll).
+  request_access: requestAccess,
+  await_access: awaitAccess,
 };
 
 // How long a dial may sit unresolved before we force it closed and retry. A
@@ -51,9 +57,15 @@ function send(frame: object): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
 }
 
-// Raise a system notification when a site decision is pending, so a user who
-// does not already have the popup open still sees that the agent is blocked on
-// them rather than the command silently stalling toward a deny (finding U2).
+// Raise a system notification when a site decision is pending (finding U2).
+// BEST-EFFORT ONLY: on macOS this banner frequently never reaches the user —
+// Chrome needs its own Notification Center authorization (System Settings →
+// Notifications → Google Chrome) and on machines without it the notification
+// only renders inside Chrome's extensions menu, invisible in practice
+// (confirmed on a real machine). The PRIMARY signal is therefore the AGENT:
+// the origin_not_allowed error and the request_access result text both tell
+// it to message the user through the harness, which notifies reliably. This
+// banner stays because it costs nothing and helps the machines where it works.
 const PENDING_NOTIFICATION_ID = "lop-origin-pending";
 setPendingObserver((pending) => {
   if (pending) {
@@ -62,11 +74,27 @@ setPendingObserver((pending) => {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
       title: "Local Operator needs your OK",
-      message: `Allow the agent to open ${pending.hostname}? Click the extension to decide.`,
+      message: `Allow the agent to open ${pending.hostname}? Click the extension icon in the toolbar to decide.`,
       priority: 2,
     });
   } else {
     chrome.notifications?.clear(PENDING_NOTIFICATION_ID);
+  }
+});
+
+// Clicking the banner opens the consent popup directly — one click instead of
+// "find the toolbar icon". openPopup() historically demands a user gesture
+// and Chrome has moved the boundary between versions; a notification click
+// may or may not count as one, so failure is swallowed and the notification
+// text keeps pointing at the toolbar icon as the fallback path.
+chrome.notifications?.onClicked.addListener((id) => {
+  if (id !== PENDING_NOTIFICATION_ID) return;
+  try {
+    const opened = chrome.action.openPopup() as Promise<void> | undefined;
+    void opened?.catch(() => {});
+  } catch {
+    // No gesture credit for this click on this Chrome version — the toolbar
+    // icon named in the notification text remains the way in.
   }
 });
 
@@ -218,6 +246,11 @@ function scheduleReconnect(): void {
 chrome.alarms.create("lop-bridge-reconnect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "lop-bridge-reconnect" && !connected) void connect();
+  // TTL sweep for an async access request nobody is polling: without it an
+  // abandoned request would leave the "!" badge and popup prompt up until the
+  // next access RPC happened to run the lazy sweep. The alarm is created by
+  // request_access with the record's own expiry time.
+  if (alarm.name === "lop-access-expiry") void expireAccessRequest();
 });
 chrome.runtime.onStartup.addListener(() => {
   alive = true;
