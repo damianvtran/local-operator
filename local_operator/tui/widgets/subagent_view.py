@@ -48,6 +48,7 @@ down.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
@@ -207,6 +208,49 @@ def _normalized_prompt(text: str) -> str:
     return " ".join(strip_control_sequences(text).split())
 
 
+def _duration(value: Any) -> float | None:
+    """A trustworthy elapsed time, or ``None`` for malformed producer data.
+
+    JSON accepts numbers that Python also treats as booleans, while in-memory
+    trajectories can carry NaN or infinities that JSON would reject. None of
+    those values, nor a negative interval, describes elapsed wall time; letting
+    one reach ToolCard can print nonsense or fail while formatting a replay.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    duration = float(value)
+    return duration if math.isfinite(duration) and duration >= 0 else None
+
+
+def _matches_effective_prompt(candidate: str, prompt: str, agent_role: str) -> bool:
+    """Whether a durable user row is the launch prompt assembled for a child.
+
+    Exact text is the plain-task form. Prefixed matches are accepted only for
+    structures the launcher actually emits: bracketed role/scout/team preambles,
+    or a specialist's instruction blob separated from its task by a blank line.
+    An arbitrary later user row ending in the task text is not launch history.
+    """
+    candidate_plain = strip_control_sequences(candidate).strip()
+    prompt_plain = strip_control_sequences(prompt).strip()
+    if not prompt_plain:
+        return False
+    if _normalized_prompt(candidate_plain) == _normalized_prompt(prompt_plain):
+        return True
+    if not candidate_plain.endswith(prompt_plain):
+        return False
+    prefix = candidate_plain[: -len(prompt_plain)]
+    if not prefix.endswith("\n\n"):
+        return False
+    wrapper = prefix.rstrip()
+    if wrapper.startswith("[team: ") or wrapper.startswith("[scout mode:"):
+        return True
+    if agent_role and wrapper.startswith(f"[role: {agent_role}]"):
+        return True
+    # Specialist prompts have no synthetic marker; their non-role name plus
+    # the launcher's mandatory blank-line seam is the only stable structure.
+    return bool(agent_role and agent_role not in {"task", "scout"} and wrapper)
+
+
 @dataclass(frozen=True)
 class SubagentEntry:
     """One row of the folded child transcript.
@@ -290,12 +334,7 @@ def fold_transcript_entries(
                 provider_payload = payload.get("provider_payload")
                 metadata = provider_payload if isinstance(provider_payload, dict) else {}
                 details = metadata.get("details")
-                raw_duration = metadata.get("duration_s")
-                duration = (
-                    float(raw_duration)
-                    if isinstance(raw_duration, (int, float)) and not isinstance(raw_duration, bool)
-                    else None
-                )
+                duration = _duration(metadata.get("duration_s"))
                 # Tool result text is the model-facing payload; presentation
                 # metadata travels beside it so durable replay can restore the
                 # exact same ToolCard the live parent transcript painted.
@@ -479,6 +518,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             result = event.get("result")
             result = result if isinstance(result, dict) else {}
             details = result.get("details")
+            event_duration = _duration(event.get("duration_s"))
             tools[call_id] = SubagentEntry(
                 key=call_id,
                 kind="tool",
@@ -489,15 +529,9 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 result_text=_content_text(result),
                 details=details if isinstance(details, dict) else None,
                 duration_s=(
-                    float(event["duration_s"])
-                    if isinstance(event.get("duration_s"), (int, float))
-                    and not isinstance(event.get("duration_s"), bool)
-                    else (
-                        float(result["duration_s"])
-                        if isinstance(result.get("duration_s"), (int, float))
-                        and not isinstance(result.get("duration_s"), bool)
-                        else None
-                    )
+                    event_duration
+                    if event_duration is not None
+                    else _duration(result.get("duration_s"))
                 ),
             )
         elif etype == "notice":
@@ -1391,14 +1425,12 @@ class SubagentView(Vertical):
         durable_keys = {entry.key for entry in self._history_entries}
         history = list(self._history_entries)
         prompt_entry = self._known.get("__prompt__")
-        prompt_norm = _normalized_prompt(self._instruction)
         matched = None
-        if prompt_norm:
+        if self._instruction:
             for index in range(len(history) - 1, -1, -1):
                 candidate = history[index]
-                candidate_norm = _normalized_prompt(candidate.text)
-                if candidate.kind == "user" and (
-                    candidate_norm == prompt_norm or candidate_norm.endswith(prompt_norm)
+                if candidate.kind == "user" and _matches_effective_prompt(
+                    candidate.text, self._instruction, self._agent_role
                 ):
                     matched = index
                     break

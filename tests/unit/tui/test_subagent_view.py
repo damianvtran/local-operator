@@ -147,13 +147,26 @@ def test_fold_produces_prose_and_tool_rows_in_call_order() -> None:
     assert entries[2].result_text == "2 failed"
 
 
-@pytest.mark.parametrize("duration", [True, False, "1.25", {"seconds": 1.25}])
-def test_fold_rejects_bool_and_malformed_tool_durations(duration: object) -> None:
+@pytest.mark.parametrize(
+    "duration",
+    [True, False, "1.25", {"seconds": 1.25}, float("nan"), float("inf"), -float("inf"), -0.1],
+)
+def test_fold_rejects_invalid_tool_durations_without_crashing(duration: object) -> None:
     events = [
         _call("e1", "edit", path="a.py", old_text="old", new_text="new"),
         {**_result("e1", "edit", "Done!"), "duration_s": duration},
     ]
     assert fold_trajectory(events, settled=True)[0].duration_s is None
+
+
+def test_fold_uses_valid_result_duration_when_event_duration_is_invalid() -> None:
+    result = _result("e1", "edit", "Done!")
+    result["result"]["duration_s"] = 2.5
+    events = [
+        _call("e1", "edit", path="a.py", old_text="old", new_text="new"),
+        {**result, "duration_s": float("nan")},
+    ]
+    assert fold_trajectory(events, settled=True)[0].duration_s == 2.5
 
 
 def test_fold_preserves_tool_duration_diff_counts_and_diff_only_expansion() -> None:
@@ -529,7 +542,16 @@ async def test_durable_edit_and_write_restore_parent_diff_cards_and_durations(tm
 @pytest.mark.asyncio
 async def test_durable_tool_rejects_bool_and_malformed_duration(tmp_path) -> None:
     transcript = Transcript(tmp_path / "child")
-    for index, duration in enumerate((True, "1.25", {"seconds": 1.25})):
+    invalid = (
+        True,
+        "1.25",
+        {"seconds": 1.25},
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        -0.1,
+    )
+    for index, duration in enumerate(invalid):
         call_id = f"bad-duration-{index}"
         await transcript.append_message(
             Message.assistant(tool_calls=[ToolCall(id=call_id, name="write")])
@@ -553,7 +575,7 @@ async def test_durable_tool_rejects_bool_and_malformed_duration(tmp_path) -> Non
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         cards = [block for block in view._body.blocks() if isinstance(block, ToolCard)]
-        assert len(cards) == 3
+        assert len(cards) == len(invalid)
         assert all(card._duration is None for card in cards)
 
 
@@ -1333,16 +1355,29 @@ async def test_durable_history_cannot_move_the_delegation_after_child_work(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "durable_prompt",
-    ["Delegated parent instruction.", "[role: coder]\nDelegated parent instruction."],
+    ("agent_role", "durable_prompt"),
+    [
+        ("task", "Delegated parent instruction."),
+        ("coder", "[role: coder]\nRole guidance.\n\nDelegated parent instruction."),
+        ("scout", "[scout mode: read only.]\n\nDelegated parent instruction."),
+        (
+            "coder",
+            "[team: lopdev]\n\nYou are coder on this team.\n\n"
+            "[role: coder]\nRole guidance.\n\nDelegated parent instruction.",
+        ),
+        ("dashboard-specialist", "Specialist guidance.\n\nDelegated parent instruction."),
+    ],
 )
-async def test_durable_launch_turn_is_replaced_in_place(tmp_path, durable_prompt: str) -> None:
+async def test_durable_launch_turn_is_replaced_in_place(
+    tmp_path, agent_role: str, durable_prompt: str
+) -> None:
     transcript = Transcript(tmp_path / "child")
     await transcript.append_message(Message.assistant("Before launch row."))
     launch = await transcript.append_message(Message.user(durable_prompt))
     await transcript.append_message(Message.assistant("After launch row."))
     job = _job_with([], status="completed")
     job.prompt = "Delegated parent instruction."
+    job.agent_role = agent_role
     session = FakeSession()
     session.jobs = _fake_jobs(job)
     session._subagent_comms = type(
@@ -1362,13 +1397,16 @@ async def test_durable_launch_turn_is_replaced_in_place(tmp_path, durable_prompt
 
 
 @pytest.mark.asyncio
-async def test_latest_durable_launch_match_wins_without_suppressing_user_rows(tmp_path) -> None:
+async def test_unrecognized_suffix_cannot_replace_a_later_user_row(tmp_path) -> None:
     transcript = Transcript(tmp_path / "child")
-    first = await transcript.append_message(Message.user("Delegated parent instruction."))
+    launch = await transcript.append_message(Message.user("Delegated parent instruction."))
     await transcript.append_message(Message.assistant("Work happened."))
-    latest = await transcript.append_message(Message.user("wrapper\nDelegated parent instruction."))
+    collision = await transcript.append_message(
+        Message.user("Please quote:\n\nDelegated parent instruction.")
+    )
     job = _job_with([], status="completed")
     job.prompt = "Delegated parent instruction."
+    job.agent_role = "task"
     session = FakeSession()
     session.jobs = _fake_jobs(job)
     session._subagent_comms = type(
@@ -1379,10 +1417,11 @@ async def test_latest_durable_launch_match_wins_without_suppressing_user_rows(tm
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         entries = [entry for entry in view._pending if entry.key != "__working__"]
-        assert next(entry for entry in entries if entry.key == first.id).kind == "user"
-        replacement = next(entry for entry in entries if entry.key == latest.id)
+        replacement = next(entry for entry in entries if entry.key == launch.id)
         assert replacement.kind == "prompt"
-        assert replacement.text == job.prompt
+        later = next(entry for entry in entries if entry.key == collision.id)
+        assert later.kind == "user"
+        assert later.text == "Please quote:\n\nDelegated parent instruction."
         assert sum(entry.kind == "prompt" for entry in entries) == 1
 
 
