@@ -535,9 +535,15 @@ async def test_knowledge_selection_freezes_after_the_first_session_query() -> No
 
     index = CountingIndex()
     catalogue = ["first catalogue"]
+    catalogue_queries: list[str] = []
+
+    def render_catalogue(query: str) -> str:
+        catalogue_queries.append(query)
+        return catalogue[0]
+
     hooks = session_factory._KnowledgeHooks(
         index=index,  # type: ignore[arg-type]
-        mcp_catalogue=lambda: catalogue[0],
+        mcp_catalogue=render_catalogue,
     )
 
     first = await session_factory._select_knowledge_block(hooks, "first task")
@@ -546,6 +552,42 @@ async def test_knowledge_selection_freezes_after_the_first_session_query() -> No
 
     assert first == second == "first catalogue"
     assert index.queries == ["first task"]
+    assert catalogue_queries == ["first task"]
+
+
+def test_mcp_names_are_seeded_before_deferred_connection(monkeypatch) -> None:
+    hooks = session_factory._KnowledgeHooks()
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda cwd: ({"slack": object()}, {"slack": "config"}),
+    )
+
+    session_factory._seed_mcp_routing(hooks, "/workspace")
+
+    assert hooks.mcp_catalogue is not None
+    assert "mcp://slack" in hooks.mcp_catalogue("review the team Slack message")
+
+
+@pytest.mark.asyncio
+async def test_mcp_routing_reselects_on_compaction() -> None:
+    queries: list[str] = []
+    hooks = session_factory._KnowledgeHooks(
+        mcp_catalogue=lambda query: queries.append(query) or f"mcp:{query}"
+    )
+
+    first = await session_factory._select_knowledge_block(hooks, "Slack message")
+    assert first == "mcp:Slack message"
+    assert (
+        await session_factory._select_knowledge_block(hooks, "later code task")
+        == "mcp:Slack message"
+    )
+    assert (
+        await session_factory._select_knowledge_block(
+            hooks, "Datadog alert after compaction", compaction_id="compact-1"
+        )
+        == "mcp:Datadog alert after compaction"
+    )
+    assert queries == ["Slack message", "Datadog alert after compaction"]
 
 
 # --- MCP merge + dispose folding ------------------------------------------------------
@@ -759,8 +801,8 @@ async def test_mcp_detail_read_activates_exactly_one_schema_in_the_live_session(
 
     await wire_mcp_into_session(session, [builtin], ".", hooks)
     assert session.tools == [builtin]
-    block = await session_factory._select_knowledge_block(hooks, "")
-    assert "- linear: Remote MCP server at linear.example." in block
+    block = await session_factory._select_knowledge_block(hooks, "inspect the Linear issue")
+    assert "- linear: Issues, projects, product planning, and roadmaps." in block
     assert hooks.mcp_resolver is not None
 
     listing = hooks.mcp_resolver("mcp://linear")

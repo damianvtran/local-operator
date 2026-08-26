@@ -157,10 +157,10 @@ only account of your reasoning they get without reading the transcript —
 which is why a prose preamble restating it before the call is pure waste (see
 Narration).
 
-MCP servers appear separately in `<mcps>` with only bounded local summaries;
-their tool schemas are deliberately absent. Read `mcp://<server>` to inspect
-available tools, then read `mcp://<server>/<tool>` to enable only the tool
-needed for the task. Do not load every MCP tool speculatively.
+Relevant MCP servers may appear separately in `<mcps>` with trusted local
+summaries; their tool schemas are deliberately absent. Inspect a suggested MCP
+before browser, generic API, or local-config discovery. Read `mcp://<server>`
+for its tools, then `mcp://<server>/<tool>` to enable only the needed tool.
 
 Task-specific Local Operator procedures appear in `<guides>`, listed by name
 and description only — the body loads on demand. When a question is about
