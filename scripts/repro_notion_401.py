@@ -147,13 +147,17 @@ def _endpoints():
 
 
 def _build_provider(scratch: str, role: str, browser_events: list[str]):
-    """A refresh-coordinating provider over the SHARED auth.db.
+    """A refresh-coordinating provider over the SHARED auth.db, plus a fake
+    httpx send function standing in for the caller's client.
 
-    ``role`` is "A" (refresher) or "B" (adopter); only A's transport performs
-    the rotation. The provider is built NON-INTERACTIVE, so if the 401 ever
-    reaches the SDK's full authorization branch it raises McpAuthRequiredError
-    instead of opening a browser — which is precisely the bug being proven
-    absent for B."""
+    The provider is an httpx Auth: it only ever YIELDS requests; the CALLER's
+    httpx client sends them. Nothing in the SDK or local-operator sets a
+    transport on the provider, so this repro drives the flow exactly the way
+    httpx does — sending each yielded request through ``fake_send`` and feeding
+    the response back in. The provider is built NON-INTERACTIVE, so if the 401
+    ever reaches the SDK's full authorization branch it raises
+    McpAuthRequiredError instead of opening a browser — which is precisely the
+    bug being proven absent for B."""
     import httpx
 
     from local_operator.mcp.auth import build_oauth_provider
@@ -199,9 +203,7 @@ def _build_provider(scratch: str, role: str, browser_events: list[str]):
             return httpx.Response(200, json={"ok": True}, request=request)
         return httpx.Response(401, request=request)
 
-    provider._transport = httpx.AsyncHTTPTransport()
-    provider._transport.handle_async_request = fake_send
-    return provider
+    return provider, fake_send
 
 
 async def _process_a(scratch: str) -> None:
@@ -244,7 +246,7 @@ async def _process_b(scratch: str) -> int:
 
     browser_events: list[str] = []
 
-    provider = _build_provider(scratch, "B", browser_events)
+    provider, send = _build_provider(scratch, "B", browser_events)
 
     # Reconstruct B's exact multi-process state: B BOOTED before A's rotation,
     # so its in-memory token is the ORIGINAL one — locally valid (unexpired),
@@ -274,35 +276,17 @@ async def _process_b(scratch: str) -> int:
         flush=True,
     )
 
-    # Trace the adoption helper so we can see whether the 401 branch fires and
-    # what it returns, inside the real flow. The retry's response IS the
-    # request's final outcome when adoption ran — httpx hands THAT response
-    # (not the 401) to the caller — so capture it here.
-    outcome: dict[str, Any] = {}
-    _orig_adopt = getattr(provider, "_adopt_peer_token_once", None)
-    if _orig_adopt is not None:
-        # Post-fix: the retry's response IS the request's final outcome when
-        # adoption ran — httpx hands THAT response (not the 401) to the caller.
-        async def _traced_adopt(req, orig):
-            res = await _orig_adopt(req, orig)
-            if res is not None:
-                outcome["status"] = res.status_code
-                outcome["adopted"] = provider.context.current_tokens.access_token
-            return res
-
-        provider._adopt_peer_token_once = _traced_adopt
-    # Pre-fix there is no adoption helper: B's 401 drives the SDK's full
-    # authorization grant, which (non-interactive) raises McpAuthRequiredError —
-    # the bug this repro demonstrates.
-
     # Drive the auth flow the way httpx does: send each yielded request through
-    # the provider's transport and feed the response back in.
+    # the fake client and feed the response back in. With the fix, the adoption
+    # retry appears as a SECOND yield of the same request object bearing the
+    # adopted token; without it, the 401 drives the SDK's full authorization
+    # grant, which (non-interactive) raises McpAuthRequiredError — the bug.
     gen = provider.async_auth_flow(httpx.Request("POST", SERVER_URL, content=b'{"q":1}'))
     try:
         request = await gen.__anext__()
         final_status = None
         while True:
-            response = await provider._transport.handle_async_request(request)
+            response = await send(request)
             try:
                 request = await gen.asend(response)
             except StopAsyncIteration:
@@ -313,11 +297,6 @@ async def _process_b(scratch: str) -> int:
         return 1
     finally:
         await gen.aclose()
-
-    # When adoption ran, its retry response is the request's true outcome (what
-    # httpx would hand the caller); otherwise the last response stands.
-    if "status" in outcome:
-        final_status = outcome["status"]
 
     if browser_events:
         print(f"B: FAIL — browser/authorization grant ran: {browser_events}", flush=True)

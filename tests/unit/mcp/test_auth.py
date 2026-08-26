@@ -1872,9 +1872,12 @@ class TestInflightRefreshCoordination:
         the flow yields and answering each with ``responder(request)``.
 
         The responder's return value for the ORIGINAL request is normally a
-        401 (that is the case under test); the adoption retry is sent by the
-        provider itself through its ``_transport``, so it never appears in the
-        recorded yields.
+        401 (that is the case under test). With the fix, the flow RE-YIELDS the
+        original request (Authorization rewritten to an adopted token) as the
+        retry — the responder sees it as a second yield, exactly as the real
+        httpx client would. Without anything to adopt, the 401 passes through
+        to the SDK and its full-flow machinery (discovery etc.) shows up as
+        further yields.
         """
         import httpx
 
@@ -1892,37 +1895,13 @@ class TestInflightRefreshCoordination:
         finally:
             await gen.aclose()
 
-    def _adoption_transport(self, monkeypatch: pytest.MonkeyPatch, provider, records):
-        """Give the provider an httpx transport that emulates a resource server
-        which revokes the OLD token: a request bearing the revoked token gets a
-        401, one bearing the adopted token gets a 200. Returns the transport's
-        call log."""
-        import httpx
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            records.append(dict(request.headers))
-            if request.headers.get("Authorization") == "Bearer fresh-by-peer":
-                return httpx.Response(200, request=request)
-            return httpx.Response(401, request=request)
-
-        # A dedicated transport instance: patching ``handle_async_request`` on
-        # the CLASS-level ``_transport`` the SDK set would race other tests in
-        # this xdist worker — monkeypatch.undo() restores the class attribute
-        # but cannot remove the leaked lambda from a SHARED instance's
-        # ``__dict__``, and a stale lambda there would intercept this retry.
-        provider._transport = httpx.AsyncHTTPTransport()
-        monkeypatch.setattr(provider._transport, "handle_async_request", handler)
-        return records
-
     @pytest.mark.asyncio
-    async def test_401_adopts_peer_token_and_retries_original_request(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_401_adopts_peer_token_and_retries_original_request(self) -> None:
         """The residual Notion bug: a sibling process rotated the grant, which
         REVOKED our still-unexpired access token server-side. Our request 401s;
-        the flow must adopt the peer's token from the store and re-send the
-        ORIGINAL request with it — never yielding a discovery/registration/
-        browser-grant request to the caller."""
+        the flow must adopt the peer's token from the store and RE-YIELD the
+        original request with it (for the same httpx client to send) — never
+        yielding a discovery/registration/browser-grant request."""
         from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
         from local_operator.mcp.auth import build_oauth_provider
@@ -1950,47 +1929,47 @@ class TestInflightRefreshCoordination:
 
         # The sibling process rotated the grant after we loaded: the shared
         # store now holds a fresh token, and the old access token is revoked
-        # server-side (emulated by the transport below).
+        # server-side (emulated by the responder below).
         await storage.set_tokens(
             OAuthToken(access_token="fresh-by-peer", refresh_token="r2", expires_in=3600)
         )
 
-        transport_calls: list[dict[str, str]] = []
-        self._adoption_transport(monkeypatch, provider, transport_calls)
-
         import httpx
 
+        calls: list[tuple[httpx.Request, str]] = []
+
         def responder(request: httpx.Request) -> httpx.Response:
-            # The resource server answers the original (revoked-token) request
-            # with a 401; nothing else should be yielded to us at all.
+            calls.append((request, request.headers.get("Authorization", "")))
+            # The resource server 401s the revoked token; the retry carrying the
+            # adopted token succeeds.
+            if request.headers.get("Authorization") == "Bearer fresh-by-peer":
+                return httpx.Response(200, request=request)
             return httpx.Response(401, request=request)
 
         yielded = await self._drive_401_flow(provider, responder)
 
-        # Exactly ONE request was yielded to the caller (the original): the 401
-        # never reached the SDK, so its full-flow machinery (discovery,
-        # registration, authorization) never produced a request.
-        assert len(yielded) == 1
-        # The provider re-sent the request itself through the transport with the
-        # ADOPTED token, and the flow completed on that retry's 200. (Filter the
-        # log: other tests in this xdist worker can leak calls through a stale
-        # monkeypatch on the shared class transport. Header dict keys are
-        # lowercased by httpx.)
-        adopted = [h for h in transport_calls if h.get("authorization") == "Bearer fresh-by-peer"]
-        assert adopted, f"no adoption retry carried the peer's token: {transport_calls}"
+        # Exactly TWO requests reached the caller: the original (401) and the
+        # adoption retry. Nothing else — the 401 never reached the SDK, so its
+        # full-flow machinery (discovery, registration, authorization) never
+        # produced a request.
+        assert len(yielded) == 2
+        # The retry is the SAME request object re-yielded with the adopted
+        # token — the SDK's own end-of-flow retry contract, sent by the same
+        # httpx client that sent the original.
+        assert yielded[1] is yielded[0]
+        assert calls[0][1] == "Bearer revoked-but-unexpired"
+        assert calls[1][1] == "Bearer fresh-by-peer"
         # The adopted token is now the in-memory token too, so a later request
         # (or the SDK's own end-of-flow retry) uses it rather than the corpse.
         assert provider.context.current_tokens is not None
         assert provider.context.current_tokens.access_token == "fresh-by-peer"
 
     @pytest.mark.asyncio
-    async def test_401_with_identical_stored_token_passes_through_to_sdk(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_401_with_identical_stored_token_passes_through_to_sdk(self) -> None:
         """The store holds exactly the token that just 401'd: the grant is dead
         everywhere, not merely revoked for us. The 401 must pass through to the
         SDK unchanged (its full-flow branch becomes reachable, as before the
-        fix) and NO adoption retry may be sent."""
+        fix) and NO adoption retry may be re-yielded."""
         from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
         from local_operator.mcp.auth import build_oauth_provider
@@ -2009,25 +1988,13 @@ class TestInflightRefreshCoordination:
             self.URL, self._cfg(), store=store, endpoints=self._endpoints(), interactive=False
         )
 
-        # A DEDICATED transport instance (see _adoption_transport): nothing may
-        # be sent on it, because no adoption retry may happen — but a leaked
-        # class-level monkeypatch from another test must not be able to send
-        # either and confuse the assertion.
         import httpx
 
-        transport_calls: list[dict[str, str]] = []
-
-        async def counting_handler(request: httpx.Request) -> httpx.Response:
-            transport_calls.append(dict(request.headers))
-            return httpx.Response(200, request=request)
-
-        provider._transport = httpx.AsyncHTTPTransport()
-        monkeypatch.setattr(provider._transport, "handle_async_request", counting_handler)
-
-        sdk_yields_after_401: list[str] = []
+        yields: list[tuple[httpx.Request, str]] = []
         seen_401 = {"done": False}
 
         def responder(request: httpx.Request) -> httpx.Response:
+            yields.append((request, request.headers.get("Authorization", "")))
             if not seen_401["done"]:
                 # The original request: answer with the 401 challenge.
                 seen_401["done"] = True
@@ -2036,21 +2003,28 @@ class TestInflightRefreshCoordination:
             # (protected-resource discovery first) — proof the challenge
             # reached the SDK rather than being answered by an adoption retry.
             # Fail it so the flow terminates without a browser grant.
-            sdk_yields_after_401.append(str(request.url))
             return httpx.Response(404, request=request)
 
         with contextlib.suppress(Exception):
             # The failed discovery may or may not raise out of the flow (SDK
-            # version dependent); the yields above are the assertion.
+            # version dependent); the yields below are the assertion.
             await self._drive_401_flow(provider, responder)
 
-        assert sdk_yields_after_401, "the 401 never reached the SDK's full-flow branch"
-        assert transport_calls == []  # no adoption retry was attempted
+        # The FIRST yield is the original request, still bearing the dead token
+        # (adoption did NOT rewrite it — the stored token was identical).
+        assert yields[0][1] == "Bearer dead-token"
+        # The 401 reached the SDK: its full-flow branch yielded at least one
+        # discovery/registration request after the original.
+        assert len(yields) >= 2, "the 401 never reached the SDK's full-flow branch"
+        # No adoption retry: exactly ONE request went to the resource URL (the
+        # original). Everything after it is the SDK's own machinery on other
+        # URLs (discovery/registration), which the SDK may yield several of.
+        to_resource = [y for y in yields if str(y[0].url) == self.URL]
+        assert len(to_resource) == 1
+        assert yields[1][0].url != yields[0][0].url
 
     @pytest.mark.asyncio
-    async def test_second_401_after_adoption_retry_passes_through(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_second_401_after_adoption_retry_passes_through(self) -> None:
         """Adoption is bounded to ONE retry per flow: when the adopted token
         ALSO 401s (the grant is genuinely dead server-side), that second 401
         passes through to the SDK's full-flow branch — adoption never loops."""
@@ -2083,33 +2057,30 @@ class TestInflightRefreshCoordination:
 
         import httpx
 
-        transport_calls: list[dict[str, str]] = []
-
-        async def always_401(request: httpx.Request) -> httpx.Response:
-            transport_calls.append(dict(request.headers))
-            return httpx.Response(401, request=request)
-
-        provider._transport = httpx.AsyncHTTPTransport()
-        monkeypatch.setattr(provider._transport, "handle_async_request", always_401)
-
-        sdk_yields_after_401: list[str] = []
-        seen_401 = {"done": False}
+        yields: list[tuple[httpx.Request, str]] = []
 
         def responder(request: httpx.Request) -> httpx.Response:
-            if not seen_401["done"]:
-                seen_401["done"] = True
+            yields.append((request, request.headers.get("Authorization", "")))
+            # The resource server 401s every bearer token on this URL; the
+            # SDK's discovery sub-requests (a different URL) get a 404 so the
+            # flow terminates without a browser grant.
+            if str(request.url) == self.URL:
                 return httpx.Response(401, request=request)
-            # The SDK's full-flow branch (reached only if the retry's second
-            # 401 passed through): fail its discovery so the flow terminates.
-            sdk_yields_after_401.append(str(request.url))
             return httpx.Response(404, request=request)
 
         with contextlib.suppress(Exception):
             await self._drive_401_flow(provider, responder)
 
-        # Exactly ONE adoption retry was sent (with the adopted token); the
-        # retry's 401 then passed through to the SDK, whose full-flow branch
-        # yielded its discovery request.
-        assert len(transport_calls) == 1
-        assert transport_calls[0]["authorization"] == "Bearer also-dead"
-        assert sdk_yields_after_401, "the second 401 never reached the SDK's full-flow branch"
+        # The caller saw: the original (401), the ONE adoption retry (same
+        # object, adopted token, 401 again), and then the SDK's full-flow
+        # machinery (discovery requests on other URLs — possibly several) —
+        # proof the second 401 passed through and adoption did not loop.
+        assert yields[0][1] == "Bearer revoked-but-unexpired"
+        assert yields[1][0] is yields[0][0]  # the retry re-yields the original
+        assert yields[1][1] == "Bearer also-dead"
+        assert len(yields) >= 3
+        assert yields[2][0].url != yields[0][0].url  # SDK discovery, not a retry
+        # Exactly TWO requests went to the resource URL: original + one retry.
+        # A looping adoption would show a third.
+        to_resource = [y for y in yields if str(y[0].url) == self.URL]
+        assert len(to_resource) == 2

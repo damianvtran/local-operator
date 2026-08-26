@@ -59,11 +59,6 @@ from local_operator.callback_page import callback_response
 if TYPE_CHECKING:
     # The SDK is an optional extra: these names are needed for annotations
     # only, so importing them here keeps this module importable without it.
-    # NOTE: the SDK's auth flow is typed against its own vendored ``httpx2``
-    # (a separate distribution from ``httpx``), and ``gen.asend`` for the inner
-    # generator only accepts ``httpx2.Response`` — so the adoption retry's
-    # response annotation must be ``httpx2``'s, not ``httpx``'s.
-    import httpx2
     from mcp.shared.auth import (
         AuthorizationCodeResult,
         OAuthClientInformationFull,
@@ -1798,17 +1793,20 @@ def _make_refresh_coordinating_provider(
             # path when httpx closes the OUTER flow (its ``finally:
             # await auth_flow.aclose()``).
             inner = super().async_auth_flow(request)
-            # One 401-driven token adoption is allowed per flow invocation;
-            # ``None`` = the first yield has not arrived yet (the SDK re-auth
-            # machinery never yields the ORIGINAL request object again, so the
-            # guard can latch on identity), and anything True means the adoption
-            # budget is spent — a second 401 must pass through untouched.
-            original_request: Any = None
+            # One 401-driven token adoption is allowed per flow invocation.
+            # ``original_request`` is the caller's request object itself (NOT
+            # the first yield: when the loaded token is expired the SDK yields
+            # a refresh request first, and latching on the first yield would
+            # point the identity guard at the wrong object). The SDK re-auth
+            # machinery never yields this object again except its own end-of-flow
+            # retry, so ``outgoing is original_request`` reliably identifies the
+            # caller's request; ``adoption_attempted`` spends the one-retry
+            # budget — a second 401 must pass through untouched.
+            original_request: Any = request
             adoption_attempted = False
             try:
                 try:
                     outgoing = await inner.__anext__()
-                    original_request = outgoing
                 except StopAsyncIteration:
                     return
                 while True:
@@ -1863,16 +1861,33 @@ def _make_refresh_coordinating_provider(
                         # (stored token identical to ours, or none) also passes
                         # through unchanged on this first 401.
                         adoption_attempted = True
-                        retry_response = await self._adopt_peer_token_once(
-                            request, original_request
-                        )
-                        if retry_response is not None:
-                            # A peer's fresh token answered the request: feed the
-                            # retry's response into the SDK generator INSTEAD of
-                            # the 401, so its full browser-authorization branch
-                            # never sees a challenge. Mirrors the SDK's own
-                            # end-of-flow retry, which re-sends the same request
-                            # object after ``_add_auth_header`` mutates it.
+                        retry_request = await self._adopt_peer_token_once(original_request)
+                        if retry_request is not None:
+                            # Re-yield the retry request: the SAME httpx client
+                            # that sent the original sends this one (same
+                            # proxies, TLS, and event hooks), exactly matching
+                            # the SDK's own end-of-flow 401 retry, which
+                            # re-yields the request after ``_add_auth_header``.
+                            # Then feed the retry's response into the SDK
+                            # generator INSTEAD of the 401, so its full
+                            # browser-authorization branch never sees a
+                            # challenge.
+                            try:
+                                retry_response = yield retry_request
+                            except GeneratorExit:
+                                # The outer flow is closing: re-raise so the
+                                # ``finally`` below closes the inner generator
+                                # and the SDK unwinds its lock.
+                                raise
+                            except BaseException as exc:  # noqa: BLE001
+                                # A transport fault on the retry: deliver it into
+                                # the SDK generator so its ``finally`` runs and
+                                # the lock is released, then relay what it yields.
+                                try:
+                                    outgoing = await inner.athrow(exc)
+                                except StopAsyncIteration:
+                                    return
+                                continue
                             try:
                                 outgoing = await inner.asend(retry_response)
                             except StopAsyncIteration:
@@ -1894,24 +1909,22 @@ def _make_refresh_coordinating_provider(
                 # never left suspended. Idempotent if already exhausted/closed.
                 await inner.aclose()
 
-        async def _adopt_peer_token_once(
-            self, request: Any, original_request: Any
-        ) -> "httpx2.Response | None":
-            """Re-send the original request once with a peer-rotated token, if any.
+        async def _adopt_peer_token_once(self, original_request: Any) -> Any:
+            """Adopt a peer-rotated token and return the request to retry, if any.
 
-            Returns the retry's ``httpx.Response`` when the store held an access
-            token DIFFERENT from the one in memory and the re-send completed —
-            whatever status it came back with, success or failure, so the SDK
-            sees the truth about the adopted token. Returns ``None`` when there
-            is nothing to adopt (stored token identical to ours, or no row), in
-            which case the caller passes the original 401 through to the SDK.
+            Returns the ORIGINAL request with its Authorization header rewritten
+            to the adopted token when the store held an access token DIFFERENT
+            from the one in memory — the caller re-yields it so the SAME httpx
+            client that sent the original sends the retry (same proxies, TLS,
+            and event hooks). Returns ``None`` when there is nothing to adopt
+            (stored token identical to ours, or no row), in which case the
+            caller passes the original 401 through to the SDK.
 
-            ``request`` is the request object the SDK is driving; the adopted
-            token is installed into the context AND into that object's
-            Authorization header, because the SDK's end-of-flow retry re-sends
-            this same object after ``_add_auth_header`` — mutating it here keeps
-            the retry (and any later one) on the adopted token rather than
-            stamping the revoked one back over it.
+            Mutating the request object in place (rather than building a new
+            one) matches the SDK's own end-of-flow 401 retry contract:
+            ``_add_auth_header`` rewrites the same object's Authorization header
+            and re-yields it. Header mutation never touches the request
+            body/stream, so the re-send is body-safe.
             """
             try:
                 async with _oauth_refresh_lock(self._refresh_coord_server_url):
@@ -1928,8 +1941,9 @@ def _make_refresh_coordinating_provider(
                     self.context.token_expiry_time = (
                         self._refresh_coord_storage.stored_token_expiry()
                     )
-                    retry = original_request
-                    retry.headers["Authorization"] = f"Bearer {stored.access_token}"
+                    original_request.headers["Authorization"] = (
+                        f"Bearer {stored.access_token}"
+                    )
             except Exception:  # noqa: BLE001 — adoption is best-effort
                 # A failed re-read must not break the request: defer to the
                 # SDK's own 401 handling rather than inventing a new failure.
@@ -1939,39 +1953,11 @@ def _make_refresh_coordinating_provider(
                     exc_info=True,
                 )
                 return None
-            if retry is request:
-                # The SDK's first yield IS the request it was given, so this is
-                # the normal case and there is nothing to clone. A subclass that
-                # ever yielded a DIFFERENT object would make mutating it here an
-                # observable side effect; skipping the retry then is deliberate
-                # — the 401 passes through, which is the safe pre-fix behaviour.
-                logger.debug(
-                    "MCP 401 adoption retrying %s with a peer-rotated token",
-                    self._refresh_coord_server_url,
-                )
-                return await self._send_401_adoption_retry(retry)
-            return None
-
-        async def _send_401_adoption_retry(self, request: Any) -> "httpx2.Response | None":
-            """Send the re-authorized request through the SDK's own transport.
-
-            The auth flow only ever YIELDS requests for the caller to send, so
-            re-sending needs a real send path. The SDK wires its httpx transport
-            onto the provider as ``_transport`` (used by its internal discovery
-            and token-endpoint posts); routing the retry through the same
-            transport keeps proxies, TLS, and event hooks identical to the send
-            that produced the 401. The body is replay-safe: httpx ``Request``
-            content is materialized at construction, so a re-send re-reads the
-            bytes — the SDK's own end-of-flow retry relies on exactly this.
-            """
-            transport = getattr(self, "_transport", None)
-            if transport is None:
-                logger.debug(
-                    "MCP 401 adoption has no transport for %s; passing the 401 through",
-                    self._refresh_coord_server_url,
-                )
-                return None
-            return await transport.handle_async_request(request)
+            logger.debug(
+                "MCP 401 adoption retrying %s with a peer-rotated token",
+                self._refresh_coord_server_url,
+            )
+            return original_request
 
     return _RefreshCoordinatingOAuthProvider(**kwargs)
 
