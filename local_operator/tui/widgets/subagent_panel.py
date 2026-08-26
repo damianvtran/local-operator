@@ -1205,20 +1205,22 @@ class SubagentPanel(Container):
         yield self._list
         yield self._affordance
 
-    def toggle_expanded(self) -> None:
-        """Flip between the recent-child preview and the full scrollable roster."""
+    def toggle_expanded(self, *, enter_navigation: bool = False) -> None:
+        """Flip the roster, optionally entering its explicit keyboard mode."""
         if len(self._rows) <= _PREVIEW_JOB_ROWS:
             return
         self._expanded = not self._expanded
         self._apply_visibility()
         self._dirty = True
-        if self._expanded:
-            # Expansion entered from a keyboard shortcut must remain keyboard
-            # useful: focus starts at the oldest row and arrows traverse every
-            # retained child. Esc returns to the draft-bearing composer.
-            self.call_after_refresh(self._focus_oldest)
-        else:
-            self.exit_navigation()
+        if enter_navigation:
+            if self._expanded:
+                # ``ctrl+g`` is the explicit keyboard-navigation gesture: start
+                # at the oldest row so arrows can traverse every retained child.
+                # Pointer disclosure only changes visibility and must leave the
+                # draft-bearing composer's focus and next keystroke untouched.
+                self.call_after_refresh(self._focus_oldest)
+            else:
+                self.exit_navigation()
 
     def _focus_oldest(self) -> None:
         rows = [row for row in self._rows.values() if row.display]
@@ -1240,7 +1242,7 @@ class SubagentPanel(Container):
             pass
 
     def request_toggle(self) -> None:
-        """Toggle from either input path and settle the dock in the same frame."""
+        """Toggle from the pointer path and settle the dock in the same frame."""
         self.toggle_expanded()
         app = getattr(self, "app", None)
         refresh = getattr(app, "_refresh_band", None)

@@ -369,6 +369,43 @@ async def test_subagent_panel_bounds_to_newest_slice_and_expands_in_start_order(
 
 
 @pytest.mark.asyncio
+async def test_clicking_subagent_disclosure_preserves_composer_focus_and_input() -> None:
+    """Pointer disclosure is only a visibility gesture; unlike ``ctrl+g``, it
+    must not silently opt the user into keyboard roster navigation or divert
+    the next character away from their draft."""
+    session = FakeSession()
+    session.jobs = _fake_jobs(
+        *[_Job(f"sub-{index:02d}", f"task {index:02d}") for index in range(1, 13)]
+    )
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.text = "draft"
+        editor.move_cursor(editor._end_of_buffer())
+        editor.focus()
+
+        await pilot.click("#subagent-affordance")
+        await pilot.pause()
+        assert app.focused is editor
+        assert app.query_one(SubagentPanel)._expanded is True
+        await pilot.press("x")
+        assert editor.text == "draftx"
+
+        await pilot.click("#subagent-affordance")
+        await pilot.pause()
+        assert app.focused is editor
+        assert app.query_one(SubagentPanel)._expanded is False
+        await pilot.press("y")
+        assert editor.text == "draftxy"
+
+
+@pytest.mark.asyncio
 async def test_subagent_expansion_traverses_every_row_and_escape_restores_composer() -> None:
     session = FakeSession()
     session.jobs = _fake_jobs(

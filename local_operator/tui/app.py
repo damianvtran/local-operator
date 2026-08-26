@@ -10080,7 +10080,7 @@ class OperatorApp(App[None]):
     def action_toggle_subagents(self) -> None:
         """``ctrl+g`` — flip the dock roster between recent and complete."""
         if self._subagent_panel is not None and self._subagent_panel.display:
-            self._subagent_panel.toggle_expanded()
+            self._subagent_panel.toggle_expanded(enter_navigation=True)
             self._refresh_band()
 
     def action_toggle_todos(self) -> None:
