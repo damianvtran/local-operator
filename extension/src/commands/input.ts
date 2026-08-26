@@ -35,6 +35,14 @@ async function nodeIdFor(tabId: number, selector: unknown, epoch: number): Promi
   const ref = /^e\d+$/.test(selector) ? refs[selector] : undefined;
   if (ref) {
     if (ref.epoch !== epoch) throw new BridgeCommandError("element_not_found", "the page navigated since that snapshot");
+    // DOM.pushNodesByBackendIdsToFrontend requires the DOM agent to hold the
+    // document for this session first, or Chrome rejects with -32000
+    // "Document needs to be requested first". The CSS-selector branch below
+    // gets this for free from its own getDocument call; the ref branch must
+    // request it explicitly. Found live: every ref-based click failed while
+    // selector-based clicks worked (the pre-#319 snapshot bug meant refs were
+    // never exercised before). depth:0 keeps the payload minimal.
+    await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
     const pushed = await cdp<PushResult>(tabId, "DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: [ref.backendNodeId] });
     const node = pushed.nodeIds[0];
     if (!node) throw new BridgeCommandError("element_not_found", "snapshot ref is stale");
