@@ -122,13 +122,22 @@ export interface SubagentRow {
 	parent_job_id: string | null;
 	session_id: string | null;
 	prompt: string;
+	launch_message_id: string;
 	effort: string;
 	ancestors: string[];
+	ancestor_ids: string[];
 	child_ids: string[];
 	peer_ids: string[];
 	transcript: TranscriptEntry[];
 	todos: TodoPhase[];
 	activity: string;
+}
+
+/** Selected-child payload. Root snapshots remain compatible with the legacy
+    aggregate shape, but current daemons leave transcript/todos empty there and
+    serve these fields only for the active route. */
+export interface SubagentDetail extends SubagentRow {
+	version: number;
 }
 
 /** One selectable answer on an ask question. Carries the consequence line the
@@ -252,8 +261,7 @@ export interface PromptImage {
 }
 
 export type CommandOp =
-	| { op: "prompt"; command_id: string; text: string; images?: PromptImage[] }
-	| { op: "steer"; text: string; images?: PromptImage[] }
+	| { op: "prompt" | "steer"; command_id: string; text: string; images?: PromptImage[] }
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
 	| { op: "set_effort"; effort: string }

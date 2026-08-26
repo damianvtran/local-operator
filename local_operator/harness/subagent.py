@@ -250,6 +250,7 @@ def run_subagent(
         queued=queued,
     )
     job = jobs_manager.get(job_id)
+    launch_message_id = f"subagent-launch:{job_id}"
     if job is not None:
         # Recorded at REGISTRATION, not in the runner: a queued job has not
         # started and may never start, and a reader opening its panel still
@@ -272,6 +273,7 @@ def run_subagent(
             label,
             parent_job_id=getattr(parent_session, "_job_id", None),
             prompt=prompt,
+            launch_message_id=launch_message_id,
             agent_role=agent,
             effort=effort or "",
         )
@@ -402,7 +404,11 @@ def _make_runner(
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
             try:
-                await child.prompt(effective_prompt)
+                # The raw launch task and the role-expanded child prompt are two
+                # views of one turn. Persist a correlation id so projections can
+                # render that durable row once without text matching or hiding
+                # later user steering messages with similar content.
+                await child.prompt(effective_prompt, message_id=f"subagent-launch:{job_id}")
             finally:
                 bridge.cancel()
                 with contextlib.suppress(BaseException):

@@ -713,8 +713,11 @@ class ProjectionFold:
             row.parent_job_id = node.parent_job_id
             row.session_id = node.session_id
             row.prompt = node.prompt
+            row.launch_message_id = node.launch_message_id
             row.effort = node.effort
-            row.ancestors = [ancestor.label for ancestor in comms.ancestors(node.job_id)]
+            ancestors = comms.ancestors(node.job_id)
+            row.ancestors = [ancestor.label for ancestor in ancestors]
+            row.ancestor_ids = [ancestor.job_id for ancestor in ancestors]
             row.child_ids = [child.job_id for child in comms.children(node.job_id)]
             row.peer_ids = [peer.job_id for peer in comms.peers(node.job_id)]
             row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
@@ -735,8 +738,13 @@ class ProjectionFold:
                 else:
                     mobile_status = status
                 row.status = mobile_status  # type: ignore[assignment] -- normalized literals
-                row.result_text = _compact(str(lifecycle.result_text or ""), 200)
-                row.error_text = _compact(str(lifecycle.error_text or ""), 200)
+                # The roster renderer truncates visually; the detail route must
+                # retain the complete handoff or provider failure so opening a
+                # child never loses the actionable tail behind a summary cap.
+                row.result_text = str(lifecycle.result_text or "")
+                row.error_text = str(lifecycle.error_text or "")
+                if lifecycle.age_s is not None:
+                    row.elapsed_s = max(0.0, float(lifecycle.age_s))
             progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
             row.progress = progress if row.status == "running" else ""
             row.activity = row.progress or ("thinking" if row.status == "running" else "")
@@ -746,7 +754,9 @@ class ProjectionFold:
                     from local_operator.tools.builtin import todo_snapshot
 
                     transcript = Transcript(node.session_dir)
-                    row.transcript = fold_messages_to_entries(transcript.build_llm_history())
+                    row.transcript = self._cap_tail(
+                        fold_messages_to_entries(transcript.build_llm_history())
+                    )
                     if node.session_id:
                         raw_todos = todo_snapshot(node.session_id)
                     else:

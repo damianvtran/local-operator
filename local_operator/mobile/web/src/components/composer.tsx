@@ -10,6 +10,10 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCommands, sendCommand } from "../api";
+import {
+	getPendingContinuation,
+	submitContinuation,
+} from "../continuation-command";
 import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
 import { useDraft } from "../store";
@@ -214,6 +218,19 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
+const STEER_ERROR = "Couldn’t send this instruction. Try again.";
+/* U5: one vocabulary for the retained instruction across the alert, the retry
+   button, and the delivered acknowledgement — "earlier" throughout, matching
+   the "Earlier instruction delivered." success line. */
+const RETAINED_RETRY_ERROR =
+	"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
+const RETRY_BUTTON_LABEL = "Retry earlier instruction";
+/* D11: the positive acknowledgement is a SUCCESS, not a failure — it renders in
+   the neutral/success notice, never the danger alert container. */
+const RETRY_ACK_NOTICE = "Earlier instruction delivered. Your edited draft is ready to send.";
+/* U4: the reason the primary send is disabled while an uncertain envelope is
+   pending — stated inline so the dead control reads as intentional. */
+const RETRY_DISABLED_HINT = "Resolve the earlier instruction first.";
 const COMPOSER_PLACEHOLDER = "Message Local Operator…";
 
 export function Composer({
@@ -235,8 +252,17 @@ export function Composer({
 	const [text, setText] = useDraft(pid);
 	const [slashOpen, setSlashOpen] = useState(false);
 	const [sending, setSending] = useState(false);
-	const [error, setError] = useState("");
+	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
+	const retryPending = retryEnvelope !== null;
+	const [error, setError] = useState(() => retryPending ? RETAINED_RETRY_ERROR : "");
+	/* Success acknowledgement lives apart from `error` so it renders in the
+	   success token, not the danger alert (D11). */
+	const [notice, setNotice] = useState("");
 	const [images, setImages] = useState<AttachedImage[]>([]);
+	const textRef = useRef(text);
+	const imagesRef = useRef(images);
+	textRef.current = text;
+	imagesRef.current = images;
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -255,6 +281,18 @@ export function Composer({
 	}, [text]);
 
 	const disabled = false;
+
+	useEffect(() => {
+		/* Envelopes are scoped per session and survive navigation (U1): moving to
+		   another of my conversations must NOT delete this one's uncertain
+		   instruction. On mount for a route, restore its own pending envelope so
+		   returning to it re-shows the recovery affordance. Cross-session storage
+		   is bounded by count inside the continuation module, and logout/401 is
+		   what clears every route's private state — not navigation. */
+		const pending = getPendingContinuation(pid);
+		setRetryEnvelope(pending);
+		setError(pending ? RETAINED_RETRY_ERROR : "");
+	}, [pid]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		for (const f of files) {
@@ -283,9 +321,10 @@ export function Composer({
 
 	const send = async (raw: string, op?: "prompt" | "steer") => {
 		const trimmed = raw.trim();
-		if ((!trimmed && images.length === 0) || sending || disabled) return;
+		if ((!trimmed && images.length === 0 && !retryPending) || sending || disabled) return;
 		setSending(true);
 		setError("");
+		setNotice("");
 		try {
 			/* Slash input routes to the slash op rather than prompt — and only
 			   when there is no attachment, since a "/…" caption with an image
@@ -299,34 +338,57 @@ export function Composer({
 			} else {
 				const chosen =
 					op ?? (projection.streaming ? "steer" : "prompt");
-				const commandId =
-					localStorage.getItem(`lo-mobile-command:${pid}`) ?? crypto.randomUUID();
-				localStorage.setItem(`lo-mobile-command:${pid}`, commandId);
 				const payloadImages = images.length
 					? images.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
 					: undefined;
-				await sendCommand(
+				/* A retry's operation belongs to the immutable envelope. Streaming may
+				   change between admission and acknowledgement, so neither transport nor
+				   correlation may derive prompt/steer from the current repaint. */
+				const submittedEnvelope = retryEnvelope ?? {
+					op: chosen,
+					text: trimmed,
+					images: payloadImages,
+				};
+				const receipt = await submitContinuation(
 					pid,
-					chosen === "prompt"
-						? { op: "prompt", command_id: commandId, text: trimmed, images: payloadImages }
-						: { op: "steer", text: trimmed, images: payloadImages },
+					submittedEnvelope.op,
+					trimmed,
+					payloadImages,
 				);
-				if (chosen === "prompt") localStorage.removeItem(`lo-mobile-command:${pid}`);
-				images.forEach((i) => URL.revokeObjectURL(i.preview));
-				setImages([]);
+				setRetryEnvelope(null);
+				const currentPayloadImages = imagesRef.current.length
+					? imagesRef.current.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
+					: undefined;
+				const acknowledgedCurrentDraft =
+					receipt.envelope.op === submittedEnvelope.op &&
+					receipt.envelope.text === textRef.current.trim() &&
+					JSON.stringify(receipt.envelope.images) === JSON.stringify(currentPayloadImages);
+				if (acknowledgedCurrentDraft) {
+					imagesRef.current.forEach((i) => URL.revokeObjectURL(i.preview));
+					setImages([]);
+					setText("");
+				} else {
+					/* The acknowledged envelope predates the visible edit. Keep the edit
+					   as the next command rather than presenting an old idempotent ACK as
+					   delivery of content the owner never received. This is a positive
+					   outcome, so it renders in the success notice, not the danger alert
+					   (D11). */
+					setNotice(RETRY_ACK_NOTICE);
+				}
+				return;
 			}
 			setText("");
-		} catch (e) {
+		} catch {
 			/* Previous conversations can fail at every layer between fetch and
 			   provider construction. Those mechanics are intentionally invisible:
 			   retain the exact draft, images, and command id for a safe retry while
-			   giving every continuation failure one actionable product message. */
-			const continuingPrevious = projection.kind === "daemon" && !projection.streaming;
-			setError(
-				continuingPrevious
-					? CONTINUATION_ERROR
-					: String((e as Error).message ?? e),
-			);
+			   giving every failure one actionable, USER-facing product message.
+			   The raw fetch string ("Load failed") must never surface — that was
+			   the developer-worded first impression of U3. Every non-streaming
+			   send, tui-originated or daemon, reads as "couldn't send/continue";
+			   only a live steer uses the steer copy. */
+			setRetryEnvelope(getPendingContinuation(pid));
+			setError(projection.streaming ? STEER_ERROR : CONTINUATION_ERROR);
 		} finally {
 			setSending(false);
 		}
@@ -380,14 +442,32 @@ export function Composer({
 				</p>
 			) : null}
 
+			{notice ? (
+				/* D11: a delivered acknowledgement is a success — neutral/success
+				   token, never the danger container the failure alert uses. */
+				<div className="rounded-sm border border-success-border bg-success-wash px-3 py-2 text-body-sm text-success">
+					<p role="status" aria-live="polite">{notice}</p>
+				</div>
+			) : null}
+
 			{error ? (
-				<p
-					role="alert"
-					aria-live="assertive"
-					className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2 text-body-sm text-danger"
-				>
-					{error}
-				</p>
+				<div className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2 text-body-sm text-danger">
+					<p role="alert" aria-live="assertive">{error}</p>
+					{retryPending ? (
+						<>
+							<button
+								type="button"
+								onClick={() => void send(text)}
+								className="mt-2 min-h-11 rounded-sm border border-danger-border px-3"
+							>
+								{RETRY_BUTTON_LABEL}
+							</button>
+							{/* U4: name why the primary send is dead while the retry is
+							    unresolved, so the disabled ↑ reads as intentional. */}
+							<p className="mt-2 text-meta text-danger">{RETRY_DISABLED_HINT}</p>
+						</>
+					) : null}
+				</div>
 			) : null}
 
 			{images.length > 0 ? (
@@ -493,7 +573,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={() => void send(text)}
-					disabled={(!text.trim() && images.length === 0) || sending || disabled}
+					disabled={retryPending || (!text.trim() && images.length === 0) || sending || disabled}
 					aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
 					className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
 				>

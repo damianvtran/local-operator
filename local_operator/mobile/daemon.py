@@ -28,11 +28,13 @@ phone starting a session never stalls the SSE streams of the others.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,7 @@ from local_operator.mobile.types import (
     PROTOCOL_VERSION,
     SessionProjection,
     SessionRecord,
+    SubagentRow,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +69,29 @@ SSE_KEEPALIVE_S = 25.0
 
 #: Default daemon port. Loopback only; remote access is a tunnel's job.
 DEFAULT_PORT = 4098
+
+#: Projection summaries and their route detail are one cache unit. The daemon
+#: may see many historical sessions over its lifetime, so bound both together;
+#: evicting detail alone leaves a retained projection advertising dead routes.
+MAX_RETAINED_SESSION_PROJECTIONS = 64
+
+
+class _StaleProjection(Exception):
+    """A fenced owner frame with no retained payload to republish."""
+
+
+@dataclass
+class _ProjectionGeneration:
+    """Daemon-local ordering for one registrant generation's projection epochs."""
+
+    identity: tuple[int, float, str] | None
+    started_at: float | None
+    retired: tuple[tuple[int, float, str], ...]
+    local_version: int
+    offset: int
+    epoch: int
+    terminal: bool = False
+
 
 _WEB_DIR = Path(__file__).parent / "web"
 _DIST_DIR = _WEB_DIR / "dist"
@@ -225,10 +251,15 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 
 
 def _durable_projection(session_id: str) -> SessionProjection | None:
-    """Fold a user conversation from disk when no execution host exists."""
-    from local_operator.mobile.projection import ProjectionFold
+    """Fold a user conversation and its routable child lineage from disk."""
+    from local_operator.mobile.projection import (
+        ProjectionFold,
+        fold_messages_to_entries,
+    )
     from local_operator.resume import stored_session_title
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
     from local_operator.session.transcript import Transcript
+    from local_operator.tools.builtin import todo_snapshot
 
     directory = _durable_user_session_dir(session_id)
     if directory is None:
@@ -241,8 +272,72 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         cwd="",
         model_label="",
     )
+    transcript = Transcript(directory)
     fold = ProjectionFold(projection)
-    fold.fold_history(Transcript(directory).build_llm_history())
+    fold.fold_history(transcript.build_llm_history())
+
+    # The persisted roster is the restart-safe ownership record for child
+    # routes. Rebuilding from it keeps old session projections useful without
+    # retaining every child's unbounded transcript in daemon memory forever.
+    snapshot = transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE) or {}
+    jobs = {str(row.get("id") or ""): row for row in snapshot.get("jobs") or []}
+    records = [row for row in snapshot.get("records") or [] if row.get("job_id")]
+    by_parent: dict[str | None, list[str]] = {}
+    for record in records:
+        parent = str(record["parent_job_id"]) if record.get("parent_job_id") else None
+        by_parent.setdefault(parent, []).append(str(record["job_id"]))
+    for record in records:
+        job_id = str(record["job_id"])
+        job = jobs.get(job_id, {})
+        raw_dir = record.get("session_dir")
+        child_dir = Path(str(raw_dir)) if raw_dir else None
+        child_transcript = Transcript(child_dir) if child_dir and child_dir.is_dir() else None
+        status = str(record.get("outcome") or job.get("status") or "cancelled")
+        if status in ("queued", "starting", "running"):
+            status = "cancelled"
+        elif status in ("paused", "pausing") or record.get("paused"):
+            status = "parked"
+        elif status in ("interrupted", "gone"):
+            status = "cancelled"
+        parent_id = str(record["parent_job_id"]) if record.get("parent_job_id") else None
+        peers = [item for item in by_parent.get(parent_id, []) if item != job_id]
+        ancestors: list[str] = []
+        ancestor_ids: list[str] = []
+        cursor = parent_id
+        record_by_id = {str(item["job_id"]): item for item in records}
+        while cursor and cursor in record_by_id:
+            ancestor = record_by_id[cursor]
+            ancestor_ids.insert(0, cursor)
+            ancestors.insert(0, str(ancestor.get("label") or cursor))
+            cursor = str(ancestor["parent_job_id"]) if ancestor.get("parent_job_id") else None
+        raw_todos = todo_snapshot(child_dir.name) if child_dir else []
+        if not raw_todos and child_transcript is not None:
+            raw_todos = (child_transcript.latest_custom("todo_snapshot") or {}).get("items") or []
+        row = SubagentRow(
+            job_id=job_id,
+            label=str(record.get("label") or job_id),
+            agent=str(record.get("agent_role") or job.get("agent_role") or "task"),
+            status=status,  # type: ignore[arg-type] -- normalized persisted literals
+            model_label=str(job.get("model_label") or ""),
+            result_text=str(record.get("result_text") or ""),
+            error_text=str(record.get("error_text") or job.get("error_text") or ""),
+            parent_job_id=parent_id,
+            session_id=child_dir.name if child_dir else None,
+            prompt=str(record.get("prompt") or ""),
+            launch_message_id=str(record.get("launch_message_id") or ""),
+            effort=str(record.get("effort") or job.get("effort") or ""),
+            ancestors=ancestors,
+            ancestor_ids=ancestor_ids,
+            child_ids=list(by_parent.get(job_id, [])),
+            peer_ids=peers,
+            transcript=(
+                fold._cap_tail(fold_messages_to_entries(child_transcript.build_llm_history()))
+                if child_transcript is not None
+                else []
+            ),
+            todos=fold._todo_phases(raw_todos),
+        )
+        projection.subagents.append(row)
     projection.ended = False
     projection.degraded = False
     return projection
@@ -292,16 +387,22 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
             if op in ("projection", "welcome"):
                 try:
                     data = frame.get("data") or {}
-                    entry.projection = _projection_from_json(data, record)
+                    incoming = _projection_from_json(data, record)
                 except (TypeError, ValueError, KeyError):
                     # A malformed push (mid-upgrade registrant, renamed field)
                     # must not tear the dial loop down to the reconnect path —
                     # the NEXT push is a full repaint that repairs the view.
                     logger.debug("mobile daemon: dropping malformed projection", exc_info=True)
                     continue
-                entry.projection.degraded = False
-                entry.projection.ended = False
-                daemon.session_projections[entry.record.session_id] = entry.projection
+                incoming.degraded = False
+                incoming.ended = False
+                try:
+                    captured = daemon.capture_subagent_details(incoming, record=record)
+                except _StaleProjection:
+                    # A predecessor frame can arrive after its payload cache entry
+                    # was evicted. Its identity remains fenced by the epoch ledger.
+                    continue
+                entry.projection = captured
                 daemon.table.provisional_active.discard(entry.record.session_id)
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
@@ -543,6 +644,13 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # The session repaint carries only roster summaries. Full child state is
+        # retained separately and fetched for the active route, otherwise one
+        # busy descendant makes every root token repaint resend every transcript.
+        # Dict insertion order is the LRU clock for projection/detail cache
+        # units. A detail route must live exactly as long as the projection that
+        # advertises it, never under an independent bound.
+        self.subagent_details: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_reqs: dict[tuple[int, Any], asyncio.Future[dict[str, Any]]] = {}
         self._dial_tasks: dict[int, asyncio.Task[None]] = {}
         self._slash_commands: list[dict[str, Any]] | None = None
@@ -552,7 +660,211 @@ class MobileDaemon:
         # A session route outlives every process generation. Retain its latest
         # repaint so an open phone remains a normal conversation while idle.
         self.session_projections: dict[str, SessionProjection] = {}
+        # ProjectionFold versions restart at zero with every owner. Ordering is
+        # deliberately NOT part of the bounded payload cache: an open route or
+        # live registrant may outlive cache pressure, and its browser has already
+        # observed this epoch. The ledger is retired only after payload, process,
+        # and subscriber ownership are all gone.
+        self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def _projection_route_owned(self, session_id: str) -> bool:
+        """Whether an epoch can still be observed by a process or browser."""
+        return bool(self.table.session_subscribers.get(session_id)) or any(
+            entry.record.session_id == session_id and not entry.ended
+            for entry in self.table.entries.values()
+        )
+
+    def _prune_projection_generation(self, session_id: str) -> None:
+        """Retire ordering only when no durable in-memory route can emit again."""
+        if session_id in self.session_projections or self._projection_route_owned(session_id):
+            return
+        self._projection_generations.pop(session_id, None)
+
+    def capture_subagent_details(
+        self,
+        projection: SessionProjection,
+        *,
+        record: SessionRecord | None = None,
+        terminal: bool = False,
+    ) -> SessionProjection:
+        """Cache full descendant state and return a lightweight aggregate copy.
+
+        ``SessionRecord.started_at`` plus its per-registration control key forms
+        the process birth identity: PID alone can be reused, while the key is
+        regenerated for every registrant. The birth timestamp orders replacements;
+        a bounded retired set fences a late predecessor even on a clock collision.
+        """
+        session_id = projection.session_id
+        previous_projection = self.session_projections.get(session_id)
+        state = self._projection_generations.get(session_id)
+        retained_recapture = projection is previous_projection
+        identity = (
+            (record.pid, record.started_at, record.control_key) if record is not None else None
+        )
+        started_at = record.started_at if record is not None else None
+        generation_changed = False
+
+        if previous_projection is not None and retained_recapture:
+            # Wake and reconnect deliberately republish this stripped object. It
+            # is already stamped with the daemon epoch and cannot be a new frame.
+            self.session_projections.pop(session_id)
+            self.session_projections[session_id] = previous_projection
+            return previous_projection
+
+        if state is not None and identity is not None and identity != state.identity:
+            if identity in state.retired or (
+                state.started_at is not None
+                and started_at is not None
+                and started_at < state.started_at
+            ):
+                # A predecessor socket may still have a decoded frame queued when
+                # its replacement registers. Payload eviction must not make that
+                # stale identity publishable; its caller drops the fenced frame.
+                if previous_projection is None:
+                    raise _StaleProjection
+                self.session_projections.pop(session_id)
+                self.session_projections[session_id] = previous_projection
+                return previous_projection
+            generation_changed = True
+        elif state is not None and identity is not None and state.identity is None:
+            # A disk-only repaint has no process identity. The first registrant is
+            # authoritative even when its ProjectionFold counter starts lower.
+            generation_changed = True
+
+        # A durable fold carries no process identity (``record is None``). It is a
+        # reconstruction of the session from disk, never a live registrant frame,
+        # so it can never reopen or advance a generation — it only republishes the
+        # retained epoch the browser already observed. This is the seam the whole
+        # lifecycle contract turns on: an evicted payload on a still-owned route
+        # must rematerialize here, while a genuine late predecessor frame (which
+        # DOES carry its identity) stays fenced below.
+        durable_rematerialize = False
+        if state is not None and not generation_changed:
+            stale = (
+                (state.terminal and not terminal)
+                or (terminal and state.terminal and projection.version <= state.local_version)
+                or (not terminal and projection.version < state.local_version)
+            )
+            if stale:
+                if previous_projection is not None:
+                    self.session_projections.pop(session_id)
+                    self.session_projections[session_id] = previous_projection
+                    return previous_projection
+                if identity is None:
+                    # Payload cache pressure evicted this route's only payload
+                    # while its generation ledger survived (a live/subscribed or
+                    # durably reconstructable route keeps it). Rebuild the payload
+                    # at the retained epoch instead of fencing detail/history/SSE
+                    # reconstruction to an HTTP 500. Only a truly-gone session —
+                    # whose ledger was already pruned — reaches ``state is None``.
+                    durable_rematerialize = True
+                else:
+                    # A predecessor socket frame whose payload is gone: it must
+                    # not become publishable, so its caller drops the fenced frame.
+                    raise _StaleProjection
+
+        if state is None:
+            epoch = projection.version
+            offset = 0
+        elif durable_rematerialize:
+            # Republish at exactly the observed epoch; the generation ledger is
+            # left intact so a subsequent live owner frame still advances it.
+            epoch = state.epoch
+            offset = state.offset
+        elif generation_changed or terminal:
+            epoch = max(state.epoch + 1, projection.version)
+            offset = epoch - projection.version
+        else:
+            offset = state.offset
+            epoch = offset + projection.version
+
+        retired = state.retired if state is not None else ()
+        if generation_changed and state is not None and state.identity is not None:
+            # A socket can only race a small number of replacements. Bounding the
+            # fence avoids turning a frequently resumed route into an append-only
+            # process history while still covering every plausible late frame.
+            retired = (*retired, state.identity)[-8:]
+        # A durable rematerialization only rebuilds the evicted payload; it must
+        # leave the ledger's fencing fields exactly as the last live owner set
+        # them. Writing the low durable version into ``local_version`` (or
+        # clearing ``terminal``) would open a window for a genuine late old frame.
+        self._projection_generations[session_id] = _ProjectionGeneration(
+            identity=identity if identity is not None else (state.identity if state else None),
+            started_at=(
+                started_at if started_at is not None else (state.started_at if state else None)
+            ),
+            retired=retired,
+            local_version=(
+                state.local_version if durable_rematerialize and state else projection.version
+            ),
+            offset=offset,
+            epoch=epoch,
+            terminal=(state.terminal if durable_rematerialize and state else terminal),
+        )
+        # Root transcript and todo state are immutable during this call; copying
+        # only descendant rows avoids duplicating the whole repaint per token.
+        summary = copy.copy(projection)
+        summary.subagents = copy.deepcopy(projection.subagents)
+        summary.version = epoch
+        # Reinsert on every repaint so active/reconnected routes are most recent.
+        self.session_projections.pop(session_id, None)
+        self.session_projections[session_id] = summary
+        while len(self.session_projections) > MAX_RETAINED_SESSION_PROJECTIONS:
+            expired = next(iter(self.session_projections))
+            self.session_projections.pop(expired, None)
+            for key in [key for key in self.subagent_details if key[0] == expired]:
+                self.subagent_details.pop(key, None)
+            self._prune_projection_generation(expired)
+        # Every summary published in the roster must resolve through the detail
+        # route. The process already bounds concurrent jobs; settled lineage is
+        # intentionally durable, so a second arbitrary 256-row cache bound made
+        # older rendered rows deterministic 404s in long-lived sessions.
+        published_ids = {row.job_id for row in projection.subagents}
+        for key in [
+            key
+            for key in self.subagent_details
+            if key[0] == session_id and key[1] not in published_ids
+        ]:
+            self.subagent_details.pop(key, None)
+        for row, summary_row in zip(projection.subagents, summary.subagents, strict=True):
+            key = (session_id, row.job_id)
+            incoming = row.to_json()
+            existing = None if generation_changed else self.subagent_details.get(key)
+            if existing is not None:
+                # Summary fields are real lifecycle updates even when empty.
+                # Detail-only empties are ambiguous after projection stripping,
+                # so only nonempty values replace the richer cached payload.
+                for field in ("prompt", "launch_message_id", "transcript", "todos"):
+                    if not incoming[field]:
+                        incoming[field] = existing.get(field, incoming[field])
+                if retained_recapture:
+                    # Only the retained aggregate is known to have had these
+                    # lifecycle payloads stripped. A fresh host repaint owns
+                    # empty values too, which clears stale terminal outcomes
+                    # when a child is resumed or settles without result text.
+                    for field in ("result_text", "error_text"):
+                        if not incoming[field]:
+                            incoming[field] = existing.get(field, incoming[field])
+                if row.status == "completed":
+                    incoming["error_text"] = ""
+                elif row.status == "failed":
+                    incoming["result_text"] = ""
+                elif not retained_recapture:
+                    incoming["result_text"] = ""
+                    incoming["error_text"] = ""
+            incoming["version"] = epoch
+            self.subagent_details[key] = incoming
+            # The aggregate needs enough to paint and route rows, not the launch
+            # prompt or terminal payload. Those can each be many kilobytes and
+            # belong to selected detail exactly like transcript and todos.
+            summary_row.prompt = ""
+            summary_row.launch_message_id = ""
+            summary_row.result_text = ""
+            summary_row.error_text = ""
+            summary_row.transcript = []
+            summary_row.todos = []
+        return summary
 
     # -- scanning --------------------------------------------------------------
 
@@ -570,7 +882,20 @@ class MobileDaemon:
         for record, state in await asyncio.to_thread(registry.scan):
             seen.add(record.pid)
             entry = self.table.entries.get(record.pid)
-            if entry is None:
+            registration_changed = entry is not None and (
+                entry.record.started_at,
+                entry.record.control_key,
+            ) != (record.started_at, record.control_key)
+            if entry is None or registration_changed:
+                if entry is not None:
+                    # PID reuse must replace every process-scoped flag and request
+                    # sequence. Reusing the ended/degraded entry would make the
+                    # new registrant permanently ineligible for adoption.
+                    if entry.writer is not None:
+                        entry.writer.close()
+                    old_dial = self._dial_tasks.pop(record.pid, None)
+                    if old_dial is not None and not old_dial.done():
+                        old_dial.cancel()
                 entry = SessionEntry(record)
                 self.table.entries[record.pid] = entry
                 changed = True
@@ -601,7 +926,9 @@ class MobileDaemon:
                 self.table.provisional_active.discard(record.session_id)
                 projection = await asyncio.to_thread(_durable_projection, record.session_id)
                 if projection is not None:
-                    self.session_projections[record.session_id] = projection
+                    projection = self.capture_subagent_details(
+                        projection, record=record, terminal=True
+                    )
                     for queue in self.table.session_subscribers.get(record.session_id, set()):
                         try:
                             queue.put_nowait(projection.to_json())
@@ -611,6 +938,7 @@ class MobileDaemon:
                                 queue.put_nowait(projection.to_json())
                             except asyncio.QueueEmpty:
                                 pass
+                self._prune_projection_generation(record.session_id)
             elif state == "wedged":
                 entry.degraded = True
             # Degraded is precisely "we owe this session a redial" — the only
@@ -633,7 +961,9 @@ class MobileDaemon:
                     self.table.provisional_active.discard(session_id)
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        self.session_projections[session_id] = projection
+                        projection = self.capture_subagent_details(
+                            projection, record=entry.record, terminal=True
+                        )
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
                                 queue.put_nowait(projection.to_json())
@@ -643,6 +973,7 @@ class MobileDaemon:
                                     queue.put_nowait(projection.to_json())
                                 except asyncio.QueueEmpty:
                                     pass
+                    self._prune_projection_generation(session_id)
         if changed:
             self.table.notify_list_changed()
 
@@ -660,7 +991,7 @@ class MobileDaemon:
                     self.table.provisional_active.discard(session_id)
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        self.session_projections[session_id] = projection
+                        projection = self.capture_subagent_details(projection, terminal=True)
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
                                 queue.put_nowait(projection.to_json())
@@ -879,6 +1210,10 @@ def build_app(daemon: MobileDaemon):
     async def logout(request: Request) -> Response:
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie(COOKIE_NAME)
+        # Drafts and uncertain command bodies are private authenticated state.
+        # The browser, not JavaScript lifecycle guesses, owns complete cleanup
+        # when this cookie's user signs out.
+        response.headers["Clear-Site-Data"] = '"storage"'
         return response
 
     async def mark_png(request: Request) -> Response:
@@ -942,7 +1277,14 @@ def build_app(daemon: MobileDaemon):
                 if projection is None:
                     projection = await asyncio.to_thread(_durable_projection, session_id)
                     if projection is not None:
-                        daemon.session_projections[session_id] = projection
+                        try:
+                            projection = daemon.capture_subagent_details(projection)
+                        except _StaleProjection:
+                            # A subscribed but payload-less route whose owner is
+                            # mid-replacement: skip the seed frame rather than
+                            # tearing down the handshake. The next live repaint or
+                            # keepalive carries the view.
+                            projection = None
                 if projection is not None:
                     yield _sse("projection", projection.to_json())
                 while True:
@@ -960,6 +1302,7 @@ def build_app(daemon: MobileDaemon):
                         live = _entry_for_session(daemon, session_id)
                         if live is not None:
                             daemon.notify_watch_transition(live.record.pid, watching=False)
+                        daemon._prune_projection_generation(session_id)
 
         return StreamingResponse(
             stream(),
@@ -996,6 +1339,67 @@ def build_app(daemon: MobileDaemon):
             stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        )
+
+    async def api_subagent_detail(request: Request) -> Response:
+        """Full state for the one descendant named by the active phone route."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        job_id = str(request.path_params["job_id"])
+        detail = daemon.subagent_details.get((session_id, job_id))
+        if detail is None:
+            projection = await asyncio.to_thread(_durable_projection, session_id)
+            if projection is not None:
+                try:
+                    daemon.capture_subagent_details(projection)
+                except _StaleProjection:
+                    # Reconstruction races a live owner replacement: the fence is
+                    # correct, but a still-durable route must not 500. The next
+                    # request rebuilds once the ledger settles.
+                    pass
+                detail = daemon.subagent_details.get((session_id, job_id))
+        if detail is None:
+            return JSONResponse({"error": "unknown subagent"}, status_code=404)
+        return JSONResponse(detail)
+
+    async def api_subagent_history(request: Request) -> Response:
+        """Page one child's transcript, never the root conversation.
+
+        The selected detail proves the child session id belongs to this root
+        lineage before the route reaches disk. That isolation matters because
+        child transcripts intentionally do not qualify as public root routes.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        job_id = str(request.path_params["job_id"])
+        detail = daemon.subagent_details.get((session_id, job_id))
+        if detail is None:
+            projection = await asyncio.to_thread(_durable_projection, session_id)
+            if projection is not None:
+                try:
+                    daemon.capture_subagent_details(projection)
+                except _StaleProjection:
+                    # See api_subagent_detail: a fenced reconstruction is not an
+                    # error; fall through to the durable 404 rather than a 500.
+                    pass
+                detail = daemon.subagent_details.get((session_id, job_id))
+        child_session_id = detail.get("session_id") if detail else None
+        if not isinstance(child_session_id, str) or not child_session_id:
+            return JSONResponse({"error": "subagent history unavailable"}, status_code=404)
+        before = request.query_params.get("before")
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
+        except ValueError:
+            limit = 80
+        page, has_more = await asyncio.to_thread(
+            _history_page, child_session_id, before, limit, durable_only=False
+        )
+        return JSONResponse(
+            {"entries": [_transcript_entry_json(entry) for entry in page], "has_more": has_more}
         )
 
     async def api_session_history(request: Request) -> Response:
@@ -1134,9 +1538,16 @@ def build_app(daemon: MobileDaemon):
                 if projection is not None:
                     projection.ended = False
                     projection.degraded = False
-                    daemon.session_projections[session_id] = projection
-                    for target in daemon.table.session_subscribers.get(session_id, set()):
-                        target.put_nowait(projection.to_json())
+                    try:
+                        projection = daemon.capture_subagent_details(projection)
+                    except _StaleProjection:
+                        # The optimistic wake repaint is a courtesy; a fenced
+                        # reconstruction just means the live owner's frame wins.
+                        # The wake itself proceeds regardless.
+                        projection = None
+                    if projection is not None:
+                        for target in daemon.table.session_subscribers.get(session_id, set()):
+                            target.put_nowait(projection.to_json())
                 try:
                     client, detail = await continue_command(config_dir(), command)
                 except BaseException:
@@ -1320,6 +1731,11 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/resume", api_resume_session, methods=["POST"]),
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{session_id:str}/events", api_session_events),
+        Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
+        Route(
+            "/api/sessions/{session_id:str}/agents/{job_id:str}/history",
+            api_subagent_history,
+        ),
         Route("/api/sessions/{session_id:str}/history", api_session_history),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),
@@ -1630,6 +2046,33 @@ _LOGIN_HTML = """<!doctype html>
   </div>
   <button type="submit">sign in</button>
 </form>
+<script>
+  /* U2: clear private authenticated state (uncertain command envelopes and
+     drafts) whenever the unauthenticated login screen is shown. This is the
+     one reachable, WebKit-safe cleanup path: logout, an expired cookie, and a
+     401-driven reload ALL land here, and this runs in the page's own engine
+     rather than depending on the `Clear-Site-Data` response header, which
+     WebKit (the iOS phone target) may ignore. It deliberately does NOT touch
+     theme or other non-private preferences — only the two private prefixes,
+     kept in sync with web/src/private-storage.ts. */
+  (function () {
+    try {
+      var prefixes = ["lo-mobile-command:", "lo-mobile-draft:"];
+      for (var i = localStorage.length - 1; i >= 0; i--) {
+        var key = localStorage.key(i);
+        if (!key) continue;
+        for (var p = 0; p < prefixes.length; p++) {
+          if (key.indexOf(prefixes[p]) === 0) {
+            localStorage.removeItem(key);
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      /* Private mode or a storage-disabled engine has nothing to clear. */
+    }
+  })();
+</script>
 </body>
 </html>
 """
