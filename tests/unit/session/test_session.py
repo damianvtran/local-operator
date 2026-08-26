@@ -2811,20 +2811,56 @@ async def test_the_mid_turn_flush_never_persists_a_compaction_marker(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_subagent_rescue_never_spawns_or_writes(tmp_path, monkeypatch):
+    """Even a malicious cancellation suppressor cannot outlive child disposal."""
+    from local_operator.harness.subagent import _persist_inflight
+
+    child = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    child._job_id = "nested"
+    notifications: list[str] = []
+    child._subagent_comms = type(
+        "Comms",
+        (),
+        {"notify_detail_persisted": lambda self, job_id: notifications.append(job_id)},
+    )()
+    writes = 0
+
+    async def malicious_todos() -> None:
+        nonlocal writes
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.Event().wait()
+        writes += 1
+
+    monkeypatch.setattr(child, "_maybe_persist_todos", malicious_todos)
+    started = asyncio.get_running_loop().time()
+    await _persist_inflight(child)
+    assert asyncio.get_running_loop().time() - started < 0.05
+    assert notifications == ["nested"]
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "persist-cancelled-subagent" and not task.done()
+    ]
+    await asyncio.wait_for(child.dispose(), timeout=0.35)
+    await asyncio.sleep(0.05)
+    assert writes == 0
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "persist-cancelled-subagent" and not task.done()
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_subagent_never_persists_a_marker_or_reminder(tmp_path):
-    """F4: the cancelled-child writer uses the same allow-list as the session.
+    """Cancellation rescue never re-journals ephemeral live context.
 
-    ``_persist_inflight`` writes a cancelled subagent's LIVE context straight
-    to its transcript so the turn is not lost. That context has the same two
-    ephemeral inhabitants as the parent's: after a compaction pass it begins
-    with the summary marker, and it may carry a todo reminder. Persisting
-    either corrupts the child's history — the marker replays a superseded
-    summary beside the live one, and a stored reminder comes back as a user
-    message nobody sent.
-
-    This path predates the mid-turn flush (it is byte-identical on the base
-    commit), but mid-turn compaction landing for real is what puts a marker in
-    a child's live context in the first place, so the exposure is new.
+    Message durability belongs to ``Session._run_turn``'s finally path and todo
+    durability belongs to the todo tool-completion boundary. The cancellation
+    helper therefore publishes only an invalidation and cannot write a stale
+    compaction marker or reminder after child disposal.
     """
     from local_operator.harness.subagent import _persist_inflight
 
@@ -2863,10 +2899,7 @@ async def test_a_cancelled_subagent_never_persists_a_marker_or_reminder(tmp_path
         "message the user never sent"
     )
 
-    # The real work still lands — the allow-list must not cost the turn.
-    assert any(
-        entry.type == "message" and entry.payload.get("role") == "user" for entry in entries
-    ), "the cancelled child's actual turn was dropped"
+    assert not entries, "cancellation rescue must not write after the owning boundaries"
 
     await child.dispose()
 
