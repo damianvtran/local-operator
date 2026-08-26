@@ -438,6 +438,48 @@ def test_live_fold_bounds_subagent_prompt_and_outcome_on_the_wire() -> None:
     assert wire_row["error_text"] == ""
 
 
+def test_live_fold_keeps_failed_child_error_text_generous() -> None:
+    """A failed child's ``error_text`` must survive on the wire, unlike result.
+
+    ``error_text`` is ``str(exc)`` from the parent runner and is never in the
+    child transcript, so the lazy /history fetch cannot recover it — the wire
+    value is the only copy the phone's Outcome panel renders. Capping it at the
+    200-char ``result_text`` preview would truncate the failure tail everywhere
+    with no recovery (F1), so the live lifecycle merge must carry it generously
+    (``SUBAGENT_ERROR_CHARS``) while still bounding it. Pins that behaviour and
+    that a multi-line trace keeps its line breaks.
+    """
+    from local_operator.mobile.projection import (
+        SUBAGENT_ERROR_CHARS,
+        SUBAGENT_OUTCOME_CHARS,
+    )
+
+    error = "Traceback (most recent call last):\n" + "\n".join(
+        f"  frame {i}: boom in module_{i}" for i in range(200)
+    )
+    assert len(error) > SUBAGENT_ERROR_CHARS  # long enough to exercise the cap
+    job = SimpleNamespace(
+        status="running",
+        agent_role="reviewer",
+        model_label="test/model",
+        latest_details={"progress": "checking"},
+        result_text=None,
+        error_text=None,
+    )
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: job))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("child", "child")
+    comms.record_outcome("child", "failed", error_text=error)
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    wire_row = fold.projection.to_json()["subagents"][0]
+    # NOT clipped to the 200-char result preview; the failure tail rides.
+    assert len(wire_row["error_text"]) > SUBAGENT_OUTCOME_CHARS
+    assert len(wire_row["error_text"]) <= SUBAGENT_ERROR_CHARS
+    assert "\n" in wire_row["error_text"]  # multi-line structure preserved
+
+
 def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
     """The runner records terminal state before the manager stamps its row."""
 

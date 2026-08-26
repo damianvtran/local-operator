@@ -911,6 +911,68 @@ def test_durable_fold_bounds_prompt_and_outcome_on_the_wire(tmp_path, monkeypatc
     assert len(row.result_text) <= SUBAGENT_OUTCOME_CHARS
 
 
+def test_durable_fold_keeps_failed_child_error_text_generous(tmp_path, monkeypatch) -> None:
+    """A FAILED child's ``error_text`` must survive to the phone in full.
+
+    ``error_text`` is ``str(exc)`` from the parent runner and is NEVER written
+    into the child transcript, so the phone's lazy /history fetch cannot recover
+    it: the durable wire value is the only copy the Outcome panel can render.
+    Capping it at the 200-char ``result_text`` preview would truncate the
+    failure tail everywhere on the phone with no recovery path (F1), so the
+    durable fold must carry it generously (``SUBAGENT_ERROR_CHARS``). This pins
+    that the error tail is not clipped to the result preview length, and that a
+    multi-line trace keeps its line breaks.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.mobile.daemon import _durable_projection
+    from local_operator.mobile.projection import (
+        SUBAGENT_ERROR_CHARS,
+        SUBAGENT_OUTCOME_CHARS,
+    )
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    # A realistic multi-line provider failure well past the 200-char result cap.
+    error = "Traceback (most recent call last):\n" + "\n".join(
+        f"  frame {i}: boom in module_{i}" for i in range(60)
+    )
+    assert len(error) > SUBAGENT_OUTCOME_CHARS
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "failed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "session_dir": str(child_dir),
+                        "outcome": "failed",
+                        "error_text": error,
+                    }
+                ],
+            },
+        )
+    )
+
+    projection = _durable_projection("root-session")
+    assert projection is not None
+    row = projection.subagents[0]
+    assert row.status == "failed"
+    # NOT truncated to the 200-char result preview: the whole failure tail rides.
+    assert len(row.error_text) > SUBAGENT_OUTCOME_CHARS
+    assert len(row.error_text) <= SUBAGENT_ERROR_CHARS
+    assert row.error_text.count("\n") > 1  # multi-line structure preserved
+    assert "frame 59" in row.error_text  # the tail survives, not just the head
+
+
 def test_http_command_requires_auth_and_rejects_empty_steer_before_dispatch() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     record = SessionRecord(

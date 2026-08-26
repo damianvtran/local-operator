@@ -253,10 +253,12 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 def _durable_projection(session_id: str) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk."""
     from local_operator.mobile.projection import (
+        SUBAGENT_ERROR_CHARS,
         SUBAGENT_OUTCOME_CHARS,
         SUBAGENT_PROMPT_PREVIEW_CHARS,
         ProjectionFold,
         _compact,
+        _compact_multiline,
     )
     from local_operator.resume import stored_session_title
     from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
@@ -321,14 +323,20 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             agent=str(record.get("agent_role") or job.get("agent_role") or "task"),
             status=status,  # type: ignore[arg-type] -- normalized persisted literals
             model_label=str(job.get("model_label") or ""),
-            # Bound the settled text on the wire to match the live fold. A
-            # durable rebuild must not reintroduce the unbounded frame the live
-            # caps prevent — the FULL text is still retained by the daemon in
-            # ``subagent_details`` and served through getSubagentDetail.
-            result_text=_compact(str(record.get("result_text") or ""), SUBAGENT_OUTCOME_CHARS),
-            error_text=_compact(
+            # Bound the settled text on the wire to match the live fold, and for
+            # the same reasons the two fields differ there (see
+            # SUBAGENT_OUTCOME_CHARS / SUBAGENT_ERROR_CHARS): ``result_text`` is a
+            # preview recoverable from the child transcript the phone fetches
+            # lazily, while ``error_text`` is the parent runner's ``str(exc)``,
+            # never in that transcript, so the wire value is the only copy the
+            # Outcome panel can render and it is carried generously. Newlines
+            # preserved so a multi-line handoff or stack trace stays legible.
+            result_text=_compact_multiline(
+                str(record.get("result_text") or ""), SUBAGENT_OUTCOME_CHARS
+            ),
+            error_text=_compact_multiline(
                 str(record.get("error_text") or job.get("error_text") or ""),
-                SUBAGENT_OUTCOME_CHARS,
+                SUBAGENT_ERROR_CHARS,
             ),
             parent_job_id=parent_id,
             session_id=child_dir.name if child_dir else None,
