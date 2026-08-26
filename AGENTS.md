@@ -93,7 +93,7 @@ improvement a user would notice and adopt, so that going from `0.N.x` to
   features bundled together are still patches unless one of them clears this
   bar on its own.
 
-- **Major (`0.x` → higher, or `1.0`) — only on explicit request.** Bump the
+- **Major (`X.y.z` → `(X+1).0.0`) — only on explicit request.** Bump the
   major version *only* when the developer explicitly asks for it, in the rare
   case where the new version is considered a distinct product from its
   predecessor. Never decide a major bump on your own judgement.
