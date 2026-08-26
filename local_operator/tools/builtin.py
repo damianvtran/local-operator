@@ -7362,6 +7362,9 @@ async def _execute_hub_parent(
             "\n".join(lines),
             details={
                 "op": "resume",
+                # Unlike the send/steer/cancel block below, where "job_ids" is the
+                # target list, a resume spawns fresh jobs: "job_ids" here holds the
+                # NEW successfully-spawned ids, with their sources in "resumed_from".
                 "job_ids": [new_id for _from, new_id, error in resumed if error is None],
                 "resumed_from": [from_id for from_id, _new, error in resumed if error is None],
                 "acted": len(acted),
