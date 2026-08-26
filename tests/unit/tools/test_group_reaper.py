@@ -496,6 +496,117 @@ def test_sweep_missing_dir_is_noop(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# lock-husk cleanup (R4)
+# --------------------------------------------------------------------------- #
+def test_sweep_removes_dead_owner_lock_spares_live_owner(tmp_path):
+    """A dead owner's ``.lock`` is reaped with its ledger; a live owner's is not.
+
+    Two owners each have a ledger AND its ``.lock`` sidecar. The dead owner's
+    pair must both be gone after the sweep (the husk cleanup the reaper's whole
+    purpose demands); the LIVE owner's ledger and lock must both survive
+    untouched — the live-trainer guarantee extended to the lock file.
+    """
+    # DEAD owner: fabricate a ledger keyed on a surely-dead pid, plus its lock.
+    dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+    dead.wait()
+    dead_ledger = _write_ledger(
+        tmp_path,
+        dead.pid,
+        "dead-start",
+        [
+            {
+                "pgid": 999_999,  # a pgid with no live leader: dropped, no kill
+                "owner_pid": dead.pid,
+                "owner_start": "dead-start",
+                "grp_leader_start": None,
+                "cmd": "sleep 600",
+                "ts": 1.0,
+            }
+        ],
+    )
+    dead_lock = group_reaper._lock_path(dead_ledger)
+    dead_lock.write_text("")
+
+    # LIVE owner: our own pid, registered through the real path so the sweep's
+    # owner-liveness check (not a pid shortcut) is what protects it.
+    my_pid = os.getpid()
+    my_start = group_reaper._self_start_token(my_pid)
+    assert my_start is not None
+    register_group(123456, "sleep 600", config_dir=tmp_path, owner_pid=my_pid)
+    live_ledger = group_reaper._ledger_path(tmp_path, my_pid, my_start)
+    live_lock = group_reaper._lock_path(live_ledger)
+    live_lock.write_text("")
+
+    # Sweep from a different self_pid so the "skip my own pid" shortcut is not
+    # what spares the live owner — its liveness must be.
+    sweep_orphan_groups(tmp_path, self_pid=my_pid + 10_000_000)
+
+    assert not dead_ledger.exists()
+    assert not dead_lock.exists()  # dead owner's husk reaped
+    assert live_ledger.exists()
+    assert live_lock.exists()  # live owner's lock untouched
+
+
+def test_sweep_removes_orphan_lock_of_dead_owner(tmp_path):
+    """A ``.lock`` with no ledger (clean-exit husk) whose pid is dead is reaped.
+
+    The common accumulation path: a graceful shutdown compacts the ledger away
+    but leaves the lock sidecar behind. There is no ledger to key on, so this is
+    reaped by the orphan-lock pass on the pid-gone signal alone.
+    """
+    dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+    dead.wait()
+    groups = _groups_dir(tmp_path)
+    groups.mkdir(parents=True, exist_ok=True)
+    orphan = groups / f"{dead.pid}-dead-start.jsonl.lock"
+    orphan.write_text("")
+
+    sweep_orphan_groups(tmp_path)
+
+    assert not orphan.exists()
+
+
+def test_sweep_spares_orphan_lock_of_live_owner(tmp_path):
+    """A ledger-less ``.lock`` whose pid is still alive is NEVER removed."""
+    groups = _groups_dir(tmp_path)
+    groups.mkdir(parents=True, exist_ok=True)
+    # Our own pid is unambiguously alive.
+    orphan = groups / f"{os.getpid()}-live-start.jsonl.lock"
+    orphan.write_text("")
+
+    sweep_orphan_groups(tmp_path)
+
+    assert orphan.exists()  # possibly-live owner's lock left in place
+
+
+def test_sweep_leaves_unparseable_lock_name(tmp_path):
+    """A ``.lock`` whose leading segment is not an integer is left untouched."""
+    groups = _groups_dir(tmp_path)
+    groups.mkdir(parents=True, exist_ok=True)
+    weird = groups / "not-a-pid.jsonl.lock"
+    weird.write_text("")
+
+    sweep_orphan_groups(tmp_path)
+
+    assert weird.exists()
+
+
+def test_sweep_never_treats_lock_as_ledger(tmp_path):
+    """The ledger glob (``*.jsonl``) must not pick up a ``.lock`` as a ledger."""
+    groups = _groups_dir(tmp_path)
+    groups.mkdir(parents=True, exist_ok=True)
+    # A lone lock husk for a DEAD owner and nothing else: scanned_ledgers must be
+    # zero (no ledger scanned) even though the lock is reaped.
+    dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+    dead.wait()
+    (groups / f"{dead.pid}-x.jsonl.lock").write_text("")
+
+    result = sweep_orphan_groups(tmp_path)
+
+    assert result.scanned_ledgers == 0  # the lock was never counted as a ledger
+
+
+# --------------------------------------------------------------------------- #
 # soft death
 # --------------------------------------------------------------------------- #
 def test_kill_own_groups_reaps_self_and_spares_sibling(tmp_path):

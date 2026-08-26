@@ -161,6 +161,14 @@ def _owner_start_token(pid: int) -> str | None:
 #: ``ps`` fork/exec per command just to re-derive a constant). ``None`` means
 #: "not yet resolved" — a transient ``ps`` failure is NOT cached, so a later
 #: call retries rather than poisoning the process with a permanent ``None``.
+#:
+#: Fork-staleness assumption: this memo is process-global, so a
+#: fork-WITHOUT-exec child would inherit the PARENT's token under its own
+#: (different) pid and read a stale identity. That is latent only and
+#: unreachable on the install path — the reaper installs solely on the
+#: interactive TUI / headless entry, which never forks without a following exec
+#: (a fork+exec child re-imports this module and starts again at ``None``). If a
+#: future entry point ever forks without exec, reset this in the child.
 _SELF_START_TOKEN: str | None = None
 
 
@@ -193,6 +201,42 @@ def _ledger_path(config_dir: Path, owner_pid: int, owner_start: str) -> Path:
     """
     safe_start = "".join(c if c.isalnum() else "-" for c in owner_start)
     return config_dir / PROC_GROUPS_DIRNAME / f"{owner_pid}-{safe_start}.jsonl"
+
+
+#: Suffix appended to a ledger's name to form its advisory-lock sidecar. A
+#: single named constant so the lock CREATOR (``_ledger_lock``) and the lock
+#: HUSK reaper (the startup sweep) can never disagree on the name and leave a
+#: file one of them cannot see.
+_LOCK_SUFFIX = ".lock"
+
+
+def _lock_path(ledger_path: Path) -> Path:
+    """The advisory-lock sidecar path for ``ledger_path``.
+
+    ``_ledger_lock`` creates ``<ledger>.lock`` next to the ledger; the sweep
+    removes that husk when the owner is proven dead. Both go through here so the
+    name is defined in exactly one place.
+    """
+    return ledger_path.parent / (ledger_path.name + _LOCK_SUFFIX)
+
+
+def _owner_pid_from_lock(lock_path: Path) -> int | None:
+    """Parse the owner pid out of a ``<pid>-<start>.jsonl.lock`` husk name.
+
+    The sweep needs the owner pid to ask ``_process_alive`` before removing an
+    ORPHAN lock (one with no surviving ledger to read the identity from). Only
+    the pid is recoverable: the start token was sanitised into the filename
+    (non-alphanumerics collapsed to ``-``), so it cannot be reversed — which is
+    exactly why the orphan-lock pass reaps ONLY on the pid-gone row of the owner
+    truth table (no token needed) and never on the recycle row. ``None`` for any
+    name whose leading segment is not an integer, so an unexpected file is left
+    alone rather than guessed at.
+    """
+    prefix = lock_path.name.split("-", 1)[0]
+    try:
+        return int(prefix)
+    except ValueError:
+        return None
 
 
 def _resolve_config_dir(config_dir: Path | None) -> Path | None:
@@ -337,7 +381,7 @@ def _ledger_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
             import fcntl
 
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            lock_path = path.parent / (path.name + ".lock")
+            lock_path = _lock_path(path)
             fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         except (OSError, ImportError) as exc:
@@ -548,17 +592,66 @@ def sweep_orphan_groups(
             skipped_live += 1
             continue
         # Owner is provably dead: reap each still-ours group, then drop the
-        # ledger.
+        # ledger AND its lock husk. Removing the lock here (rather than via a
+        # separate liveness check) ties husk cleanup to the exact moment this
+        # sweep has already PROVEN the owner dead — no new liveness logic, and
+        # never a live owner's lock, since a live owner's ledger is skipped
+        # above before this point is reached.
         for entry in entries:
             if _reap_if_still_ours(entry):
                 reaped += 1
         _safe_unlink(ledger)
+        _safe_unlink(_lock_path(ledger))
+    # Second pass: reap ORPHAN lock husks — ``*.jsonl.lock`` files whose ledger
+    # was already unlinked by a clean-exit compaction (unregister/kill_own_groups
+    # remove the ledger but leave the lock sidecar behind) or by the loop above.
+    # This is the husk source that actually accumulates: the common path is a
+    # graceful shutdown, which never leaves a ledger for the loop above to key
+    # on. Guarded on the SINGLE unambiguous owner-death signal recoverable from a
+    # lock name alone — the pid is gone (``_process_alive`` false) — because the
+    # start token cannot be reversed out of the sanitised filename. A lock whose
+    # pid is still alive, or whose name is not pid-parseable, is left untouched:
+    # every ambiguous case errs toward NOT touching a possibly-live owner's lock.
+    errors += _sweep_orphan_locks(groups_dir)
     return ReaperSweepResult(
         scanned_ledgers=scanned,
         reaped_groups=reaped,
         skipped_live_owners=skipped_live,
         errors=errors,
     )
+
+
+def _sweep_orphan_locks(groups_dir: Path) -> int:
+    """Unlink ``*.jsonl.lock`` husks whose owner pid is provably gone.
+
+    Called after the ledger loop so any lock paired with a still-present ledger
+    has already been handled (a live owner's ledger — and thus its lock — was
+    skipped; a dead owner's ledger and lock were removed together). What remains
+    are ORPHAN locks: sidecars left behind when a clean shutdown compacted the
+    ledger away but not its lock file. Reap one ONLY when its parsed owner pid is
+    no longer a live process; a pid still alive, or a name that does not start
+    with an integer, is left in place. Returns the count of errors swallowed so
+    the caller can fold them into the sweep result. Best-effort throughout: a
+    stray husk is cosmetic, never worth failing a session start over.
+    """
+    errors = 0
+    try:
+        locks = sorted(groups_dir.glob("*" + _LOCK_SUFFIX))
+    except OSError as exc:
+        logger.debug("group reaper: cannot list locks in %s: %s", groups_dir, exc)
+        return errors
+    for lock in locks:
+        owner_pid = _owner_pid_from_lock(lock)
+        if owner_pid is None:
+            # Unparseable name — not ours to guess at. Leave it.
+            continue
+        if _process_alive(owner_pid):
+            # Owner pid still live: this lock may belong to a running session's
+            # ledger that simply has no groups registered right now. Never touch
+            # a possibly-live owner's lock.
+            continue
+        _safe_unlink(lock)
+    return errors
 
 
 def _owner_is_dead(owner_pid: int, owner_start: str) -> bool | None:
