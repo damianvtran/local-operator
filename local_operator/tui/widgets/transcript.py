@@ -2001,7 +2001,11 @@ class TranscriptView(ScrollableContainer):
         self._remeasure_empty_state()
 
     def prepend_blocks(
-        self, blocks: Sequence[TranscriptBlock], *, anchor_offset: float | None = None
+        self,
+        blocks: Sequence[TranscriptBlock],
+        *,
+        anchor_offset: float | None = None,
+        before: TranscriptBlock | None = None,
     ) -> None:
         """Mount older blocks above the viewport without moving its content.
 
@@ -2010,6 +2014,17 @@ class TranscriptView(ScrollableContainer):
         The optional offset is captured by the caller before asynchronous I/O
         starts; using the later value would apply the prepend to wherever the
         user moved meanwhile.
+
+        ``before`` names the block the additions mount ahead of, and it doubles
+        as the anchor. It defaults to the current first block — the true front
+        — which is the plain history-paging case. But the subagent view PINS a
+        delegation-prompt block at index 0 (a STABLE PREFIX that is not part of
+        the paged history), so older rows there must land AFTER that prompt, not
+        at the true front, or the prefix accounting double-counts and the prompt
+        remounts. Passing the current first *history* block as ``before`` keeps
+        the insertion below the pin and picks an anchor at or below the fold
+        rather than the pinned prompt (which sits above the viewport and must
+        not be treated as the reader's row).
 
         The anchor is expressed as a BLOCK and that block's offset from the top
         of the viewport, not as ``virtual_size`` growth. Growth is the obvious
@@ -2031,7 +2046,13 @@ class TranscriptView(ScrollableContainer):
         if not additions:
             return
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
-        before = self._blocks[0] if self._blocks else None
+        if before is None:
+            before = self._blocks[0] if self._blocks else None
+        # Splice at the anchor's ledger position, not always 0: with a pinned
+        # prefix above it the additions belong after that prefix, and
+        # ``.index`` is robust to any block (e.g. the truncation note) mounted
+        # outside the caller's own list.
+        insert_index = self._blocks.index(before) if before is not None else len(self._blocks)
         # The row the reader is looking at, and where it sits in the viewport.
         # Prepending never moves this block within the ledger, so it survives
         # the mount and every gap re-decision above it.
@@ -2041,7 +2062,7 @@ class TranscriptView(ScrollableContainer):
             self.mount(*additions)
         else:
             self.mount(*additions, before=before)
-        self._blocks[0:0] = additions
+        self._blocks[insert_index:insert_index] = additions
         self._name_col_cache = None
 
         def settle_then_restore() -> None:
