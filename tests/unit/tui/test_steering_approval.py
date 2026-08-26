@@ -2313,7 +2313,9 @@ async def test_esc_with_no_children_says_nothing_about_subagents() -> None:
         await pilot.pause()
 
         assert session.aborts == ["interrupted"]
-        assert not any("subagent" in row for row in rows(app))
+        # Inspect the ladder state, not every screen cell: the cwd or branch may
+        # legitimately contain the word "subagent" and is unrelated chrome.
+        assert app._stop_notice is None
         assert app._stop_offered_at is None
 
 

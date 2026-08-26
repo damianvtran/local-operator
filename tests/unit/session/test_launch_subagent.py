@@ -381,6 +381,46 @@ def test_subagent_only_loads_explicit_specialist_instructions(tmp_path):
     assert _specialist_instructions("dashboard-release", parent) == "Follow the release checklist."
 
 
+@pytest.mark.asyncio
+async def test_specialist_launch_records_the_exact_effective_prompt(tmp_path, monkeypatch):
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "agents")
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="dashboard-release",
+            description="Release the dashboard",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(specialist.id, "Follow the release checklist.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    job_id = parent._launch_subagent(
+        label="release", prompt="Deploy dashboard.", agent="dashboard-release"
+    )
+    job = parent.jobs.get(job_id)
+    assert job is not None
+    assert job.prompt == "Deploy dashboard."
+    assert job.effective_prompt == "Follow the release checklist.\n\nDeploy dashboard."
+    assert job.launch_message_id
+    node = parent.subagent_comms.node(job_id)
+    assert node is not None
+    assert node.effective_prompt == job.effective_prompt
+    assert node.launch_message_id == job.launch_message_id
+
+    await wait_for(lambda: job.status == "completed")
+    session_dir = parent.subagent_comms.session_dir_of(job_id)
+    assert session_dir is not None
+    transcript_entries = Transcript(session_dir).entries()
+    assert any(entry.id == job.launch_message_id for entry in transcript_entries)
+    [snapshot] = parent.subagent_comms.snapshot()
+    assert snapshot["effective_prompt"] == job.effective_prompt
+    assert snapshot["launch_message_id"] == job.launch_message_id
+    await parent.dispose()
+
+
 def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatch):
     from datetime import datetime, timezone
 

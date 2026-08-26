@@ -1517,14 +1517,23 @@ async def test_a_resumed_child_replays_the_stopped_ones_transcript(tmp_path, mon
     await wait_for(lambda: status_of(parent, job_id) == "cancelled")
     await wait_for(lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) >= 2)
     before = Transcript(comms.session_dir_of(job_id)).build_llm_history()
+    original = parent.jobs.get(job_id)
+    assert original is not None and original.launch_message_id == before[0].id
 
     new_id, error = comms.resume(job_id, "You were interrupted. Wrap up.")
 
     assert error is None and new_id is not None
+    continuation = parent.jobs.get(new_id)
+    assert continuation is not None and continuation.launch_message_id
+    assert continuation.launch_message_id != original.launch_message_id
     await wait_for(lambda: status_of(parent, new_id) != "running")
     assert comms.session_dir_of(new_id) == comms.session_dir_of(job_id)
     after = Transcript(comms.session_dir_of(new_id)).build_llm_history()
     assert len(after) > len(before)
+    assert any(message.id == continuation.launch_message_id for message in after)
+    resumed_node = comms.node(new_id)
+    assert resumed_node is not None
+    assert resumed_node.launch_message_id == continuation.launch_message_id
     assert first_text(after) == first_text(before) == "Update the docs."
     assert status_of(parent, new_id) == "completed"
     await parent.dispose()
