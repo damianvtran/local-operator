@@ -471,3 +471,93 @@ async def test_access_actions_require_a_url(monkeypatch) -> None:
         "t", {"action": "await_access"}, None, None, ToolContext(browser=BrowserSurface())
     )
     assert result.is_error and "requires a URL" in result.text
+
+
+@pytest.mark.asyncio
+async def test_session_identity_is_stable_across_the_whole_flow(monkeypatch) -> None:
+    """Round-2 M4: the REAL plumbing — ToolContext.session_id →
+    execute_browser → _browser_requester → the wire params of every access and
+    navigation call — must present ONE stable identity across different tool
+    call ids, or grants bind to something no later navigation can match.
+    Asserted through execute_browser (the public tool path), not by injecting
+    requester strings."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    seen: list[tuple[str, str]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        seen.append((action, str(params.get("requester", "<missing>"))))
+        if action == "request_access":
+            return {"origin": "https://example.com", "state": "pending"}, None
+        if action == "await_access":
+            return {"origin": "https://example.com", "state": "allowed"}, None
+        # open
+        return {"tab": "bridge:5:n0nce", "url": "https://example.com/", "title": "x"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(session_id="sess-42", browser=BrowserSurface())
+    # Three DIFFERENT tool call ids — the per-command fallback would produce
+    # three different identities and silently break grant consumption.
+    await builtin.execute_browser(
+        "call-1", {"action": "request_access", "url": "https://example.com"}, None, None, context
+    )
+    await builtin.execute_browser(
+        "call-2", {"action": "await_access", "url": "https://example.com"}, None, None, context
+    )
+    await builtin.execute_browser(
+        "call-3", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert [entry[0] for entry in seen] == ["request_access", "await_access", "open"]
+    identities = {entry[1] for entry in seen}
+    assert identities == {"session:sess-42"}, f"identity drifted: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_parallel_contexts_present_distinct_identities(monkeypatch) -> None:
+    """Round-2 M4: two ToolContexts (two sessions) must reach the wire as two
+    different requesters — the property the extension's fail-closed grant
+    check depends on."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    seen: list[str] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        seen.append(str(params.get("requester", "<missing>")))
+        return {"origin": "https://example.com", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    for session_id in ("sess-A", "sess-B"):
+        context = ToolContext(session_id=session_id, browser=BrowserSurface())
+        await builtin.execute_browser(
+            "t", {"action": "request_access", "url": "https://example.com"}, None, None, context
+        )
+    assert seen == ["session:sess-A", "session:sess-B"]
+
+
+@pytest.mark.asyncio
+async def test_goto_carries_the_session_identity(monkeypatch) -> None:
+    """Round-2 M4: goto (the other admission-bearing navigation) must carry
+    the same session identity; a reversion to per-call identity here would
+    strand every grant minted for the session."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    captured: dict[str, Any] = {}
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        captured["action"] = action
+        captured["requester"] = params.get("requester")
+        return {"url": "https://example.com/", "title": "x"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:nonce"
+    context = ToolContext(session_id="sess-42", browser=surface)
+    await builtin.execute_browser(
+        "some-other-call-id",
+        {"action": "goto", "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+    assert captured["action"] == "goto"
+    assert captured["requester"] == "session:sess-42"

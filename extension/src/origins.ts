@@ -3,6 +3,7 @@ import {
   consumableGrant,
   newRequest,
   ONCE_GRANT_TTL_MS,
+  receiptKey,
   TOMBSTONE_CAP,
   tombstoneFor,
   type AccessRequest,
@@ -11,7 +12,7 @@ import {
 import { BridgeCommandError, cdp } from "./cdp";
 import { safeHttpUrl, storedOriginAllowed } from "./origin-policy";
 import { ORIGIN_PROMPT_TIMEOUT_MS } from "./protocol.gen";
-import { getLocal, getSession } from "./state";
+import { getLocal, getSession, withSessionMutation } from "./state";
 
 export { safeHttpUrl } from "./origin-policy";
 export { ORIGIN_PROMPT_TIMEOUT_MS } from "./protocol.gen";
@@ -55,15 +56,20 @@ export interface OriginAdmission {
  * Fails CLOSED on a requester mismatch: a grant minted for session A's flow
  * is not session B's to spend (see the multi-surface constraint in
  * access-flow.ts). */
-export async function consumeOnceGrant(url: URL, requester: string): Promise<boolean> {
-  const { onceGrants = {} } = await getSession();
-  const grant = consumableGrant(onceGrants, url.origin, requester, Date.now());
-  if (!grant) return false;
-  const remaining = { ...onceGrants };
-  delete remaining[url.origin];
-  await chrome.storage.session.set({ onceGrants: remaining });
-  await clearConsumedRequest(url.origin, grant.requester);
-  return true;
+export function consumeOnceGrant(url: URL, requester: string): Promise<boolean> {
+  // Atomic under the session-mutation queue: read-check-delete as one unit,
+  // or two concurrent navigations could both read the grant before either
+  // delete landed and double-spend a one-shot approval (round-2 B2).
+  return withSessionMutation(async () => {
+    const { onceGrants = {} } = await getSession();
+    const grant = consumableGrant(onceGrants, url.origin, requester, Date.now());
+    if (!grant) return false;
+    const remaining = { ...onceGrants };
+    delete remaining[url.origin];
+    await chrome.storage.session.set({ onceGrants: remaining });
+    await clearConsumedRequest(url.origin, grant.requester);
+    return true;
+  });
 }
 
 /** Whether a top-level open/goto to this origin may START, making the
@@ -100,22 +106,28 @@ export async function ensureTopLevelAccess(
 /** Consume a grant on behalf of a NAVIGATION command: the caller's session
  * identity must equal the grant's requester, or the command's own id must
  * equal the grant's handoff (see recordAccessDecision). */
-async function consumeGrantFor(
+function consumeGrantFor(
   url: URL,
   sessionRequester: string,
   commandId: string,
 ): Promise<boolean> {
-  const { onceGrants = {} } = await getSession();
-  const grant = onceGrants[url.origin];
-  if (!grant || Date.now() >= grant.expiresAt) return false;
-  const ownsBySession = sessionRequester !== "" && grant.requester === sessionRequester;
-  const ownsByHandoff = !!grant.handoff && grant.handoff === commandId;
-  if (!ownsBySession && !ownsByHandoff) return false;
-  const remaining = { ...onceGrants };
-  delete remaining[url.origin];
-  await chrome.storage.session.set({ onceGrants: remaining });
-  await clearConsumedRequest(url.origin, grant.requester);
-  return true;
+  // Same atomicity as consumeOnceGrant (round-2 B2): #321 gives different
+  // tabs different daemon locks and the worker dispatches frames
+  // concurrently, so two same-session navigations genuinely race here.
+  // Exactly one caller may win the delete.
+  return withSessionMutation(async () => {
+    const { onceGrants = {} } = await getSession();
+    const grant = onceGrants[url.origin];
+    if (!grant || Date.now() >= grant.expiresAt) return false;
+    const ownsBySession = sessionRequester !== "" && grant.requester === sessionRequester;
+    const ownsByHandoff = !!grant.handoff && grant.handoff === commandId;
+    if (!ownsBySession && !ownsByHandoff) return false;
+    const remaining = { ...onceGrants };
+    delete remaining[url.origin];
+    await chrome.storage.session.set({ onceGrants: remaining });
+    await clearConsumedRequest(url.origin, grant.requester);
+    return true;
+  });
 }
 
 /** A resolved "once" request is the receipt await_access reads while its grant
@@ -138,14 +150,21 @@ async function clearConsumedRequest(origin: string, requester: string): Promise<
  * and — via the worker's observer — the system notification and the daemon's
  * awaiting_origin event. Shared by the in-command prompt and the async
  * request_access path so the popup renders both identically. */
-async function raisePrompt(url: URL, requestId: string): Promise<void> {
+async function raisePrompt(url: URL, requestId: string): Promise<string> {
+  // Every (re)raise mints a fresh prompt generation. The popup binds its
+  // rendered view AND its decision message to this id, and resolveOrigin
+  // rejects a decision carrying a stale one — the guard that stops a popup
+  // still showing origin A from approving whatever origin B replaced the
+  // slot with (round-2 B1).
+  const promptId = crypto.randomUUID().replaceAll("-", "");
   await chrome.storage.session.set({
-    pendingOrigin: { origin: url.origin, hostname: url.hostname, requestId },
+    pendingOrigin: { origin: url.origin, hostname: url.hostname, requestId, promptId },
   });
   await chrome.action.setBadgeBackgroundColor({ color: "#e96042" });
   await chrome.action.setBadgeText({ text: "!" });
   await chrome.action.setTitle({ title: `Local Operator wants to open ${url.hostname}` });
   onPendingChange?.({ origin: url.origin, hostname: url.hostname });
+  return promptId;
 }
 
 async function clearPrompt(): Promise<void> {
@@ -186,52 +205,77 @@ export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
  * must land on BOTH an in-command wait (resolveOrigin's map) and the async
  * record, because the agent may be waiting either way and the popup cannot
  * tell which. Persisting "always" and minting the "once" grant happen here
- * for the async path — there is no askOrigin continuation to do it. */
-async function recordAccessDecision(origin: string, decision: OriginDecision): Promise<void> {
-  const now = Date.now();
-  const session = await getSession();
-  const live = activeRequest(session.accessRequest, now);
-  if (!live || live.origin !== origin || live.decision) return;
-  await chrome.storage.session.set({ accessRequest: { ...live, decision } });
-  if (decision === "once") {
-    // The grant is bound to the REQUEST's requester AND to the command that
-    // raised the request: an async "Allow once" is earned by the flow that
-    // asked, so the handoff records BOTH identities. A navigation spends it
-    // if it carries EITHER — the session identity (normal path: the same
-    // session's next open/goto) or the exact command id (a raw-RPC caller
-    // whose navigation reuses the request_access id). A third session
-    // carries neither and is refused (fail-closed; see access-flow.ts).
-    const grants = session.onceGrants ?? {};
-    await chrome.storage.session.set({
-      onceGrants: {
-        ...grants,
-        [origin]: {
-          expiresAt: now + ONCE_GRANT_TTL_MS,
-          requester: live.requester,
-          handoff: session.pendingOrigin?.requestId ?? "",
+ * for the async path — there is no askOrigin continuation to do it. Runs
+ * under the session-mutation queue: it read-modify-writes the same keys the
+ * consume paths do. */
+function recordAccessDecision(origin: string, decision: OriginDecision): Promise<void> {
+  return withSessionMutation(async () => {
+    const now = Date.now();
+    const session = await getSession();
+    const live = activeRequest(session.accessRequest, now);
+    if (!live || live.origin !== origin || live.decision) return;
+    await chrome.storage.session.set({ accessRequest: { ...live, decision } });
+    if (decision === "once") {
+      // The grant is bound to the REQUEST's requester AND to the command that
+      // raised the request: an async "Allow once" is earned by the flow that
+      // asked, so the handoff records BOTH identities. A navigation spends it
+      // if it carries EITHER — the session identity (normal path: the same
+      // session's next open/goto) or the exact command id (a raw-RPC caller
+      // whose navigation reuses the request_access id). A third session
+      // carries neither and is refused (fail-closed; see access-flow.ts).
+      const grants = session.onceGrants ?? {};
+      await chrome.storage.session.set({
+        onceGrants: {
+          ...grants,
+          [origin]: {
+            expiresAt: now + ONCE_GRANT_TTL_MS,
+            requester: live.requester,
+            handoff: session.pendingOrigin?.requestId ?? "",
+          },
         },
-      },
-    });
-  }
-  if (decision === "always") {
-    const { origins = {} } = await getLocal();
-    await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
-  }
-  // The async prompt has no waiting command to clean up after itself; clear
-  // the badge/notification here so the "!" does not outlive the decision.
-  await clearPrompt();
+      });
+    }
+    if (decision === "always") {
+      const { origins = {} } = await getLocal();
+      await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
+    }
+    // The async prompt has no waiting command to clean up after itself; clear
+    // the badge/notification here so the "!" does not outlive the decision.
+    await clearPrompt();
+  });
 }
 
-export function resolveOrigin(origin: string, decision: OriginDecision): void {
+/** Apply the popup's decision — IF it names the live prompt generation.
+ *
+ * Returns a promise that settles only when the decision is durably recorded
+ * (record + grant + allowlist + prompt teardown), so the worker's message
+ * listener can keep the MV3 event alive until persistence completes instead
+ * of racing worker suspension (round-2 M2). Resolves true when applied,
+ * false when rejected as stale.
+ *
+ * Stale rejection (round-2 B1): the popup binds its click to the promptId it
+ * RENDERED. If another request replaced the slot after that render, the ids
+ * differ, nothing resolves, no grant is minted — the user's click was an
+ * answer to a question that is no longer being asked. A missing promptId
+ * (legacy popup / health-fallback render) still requires the ORIGIN to match
+ * the live prompt, the pre-generation guard. */
+export async function resolveOrigin(
+  origin: string,
+  decision: OriginDecision,
+  promptId: string = "",
+): Promise<boolean> {
+  const { pendingOrigin } = await getSession();
+  if (!pendingOrigin || pendingOrigin.origin !== origin) return false;
+  if (promptId && pendingOrigin.promptId && promptId !== pendingOrigin.promptId) return false;
+  // In-command wait first (synchronous handoff into the promise), then the
+  // durable async record.
   const resolve = waiting.get(origin);
   if (resolve) {
     waiting.delete(origin);
     resolve(decision);
   }
-  // Fire-and-forget: the in-command resolution above must stay synchronous
-  // (the worker's onMessage listener is not awaited), and the async record
-  // update has no caller to report to.
-  void recordAccessDecision(origin, decision);
+  await recordAccessDecision(origin, decision);
+  return true;
 }
 
 /** Lazy TTL cleanup, called from the worker's expiry alarm and on every
@@ -240,15 +284,19 @@ export function resolveOrigin(origin: string, decision: OriginDecision): void {
  * Returns the record it swept so callers can re-arm the expiry alarm for
  * whatever is next (round-1 m2: a replace-don't-queue overwrite used to drop
  * the OLD request's alarm entirely). */
-export async function expireAccessRequest(): Promise<void> {
-  const session = await getSession();
-  const record = session.accessRequest;
-  if (!record || activeRequest(record, Date.now())) return;
-  await chrome.storage.session.remove("accessRequest");
-  const { pendingOrigin } = session;
-  // Only clear the prompt if it is OURS — an in-command prompt for another
-  // origin may be live and owns its own cleanup.
-  if (pendingOrigin && pendingOrigin.origin === record.origin) await clearPrompt();
+export function expireAccessRequest(): Promise<void> {
+  // Under the mutation queue: the sweep read-modify-writes the same record
+  // the decision and consume paths do.
+  return withSessionMutation(async () => {
+    const session = await getSession();
+    const record = session.accessRequest;
+    if (!record || activeRequest(record, Date.now())) return;
+    await chrome.storage.session.remove("accessRequest");
+    const { pendingOrigin } = session;
+    // Only clear the prompt if it is OURS — an in-command prompt for another
+    // origin may be live and owns its own cleanup.
+    if (pendingOrigin && pendingOrigin.origin === record.origin) await clearPrompt();
+  });
 }
 
 /** Raise a fresh async request, tombstoning any live one it replaces.
@@ -258,7 +306,8 @@ export async function expireAccessRequest(): Promise<void> {
  * prompt slot back and forth forever (round-1 B1b). The new prompt's surfaces
  * are raised immediately, overwriting the replaced one's badge/record
  * atomically (round-1 m2: a dead prompt's badge must not outlive it). */
-export async function raiseAccessRequest(url: URL, requester: string): Promise<AccessRequest> {
+export function raiseAccessRequest(url: URL, requester: string): Promise<AccessRequest> {
+  return withSessionMutation(async () => {
   const now = Date.now();
   const session = await getSession();
   const previous = activeRequest(session.accessRequest, now);
@@ -268,11 +317,13 @@ export async function raiseAccessRequest(url: URL, requester: string): Promise<A
   // its old supersession receipt. Leaving it behind made this NEW request's
   // eventual TTL expiry read as "superseded" instead of "none" — the stale
   // receipt outlived the event it described.
-  if (tombs[record.origin]?.requester === requester) delete tombs[record.origin];
+  delete tombs[receiptKey(record.origin, requester)];
   if (previous && (previous.origin !== record.origin || previous.requester !== record.requester)) {
     // Different origin OR same origin from a different requester: both
-    // displace the pending prompt, both leave the receipt.
-    tombs[previous.origin] = tombstoneFor(previous);
+    // displace the pending prompt, both leave a receipt. Keyed per
+    // origin+requester so an A→B→C chain preserves EVERY displaced
+    // requester's receipt instead of overwriting A's with B's (round-2 M1).
+    tombs[receiptKey(previous.origin, previous.requester)] = tombstoneFor(previous);
     // Drop expired/oldest beyond the cap so a churny fleet cannot grow the
     // map unbounded — a receipt that old describes a prompt nobody remembers.
     const entries = Object.entries(tombs)
@@ -293,6 +344,7 @@ export async function raiseAccessRequest(url: URL, requester: string): Promise<A
   // alarm covers the only live prompt now, and expireAccessRequest's lazy
   // sweep handles anything older.
   return record;
+  });
 }
 
 interface PausedRequest {

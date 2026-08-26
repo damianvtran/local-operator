@@ -104,7 +104,7 @@ test("one popup decision resolves the in-command wait AND the async record", asy
     let inCommand = null;
     const hop = origins.askOrigin(urlOf(), "cmd-9").then((ok) => { inCommand = ok; });
     await flush();
-    origins.resolveOrigin(ORIGIN, "once");
+    await origins.resolveOrigin(ORIGIN, "once");
     await hop;
     assert.equal(inCommand, true, "the in-command wait must resolve from the same click");
     await flush();
@@ -125,8 +125,7 @@ test("a once-grant is consumed exactly once, and only by its requester", async (
   try {
     const origins = await bundle.import();
     await origins.raiseAccessRequest(urlOf(), "req-A");
-    origins.resolveOrigin(ORIGIN, "once");
-    await flush();
+    await origins.resolveOrigin(ORIGIN, "once");
     // Another session cannot spend it (fail-closed, not fail-shared).
     assert.equal(await origins.consumeOnceGrant(urlOf(), "req-B"), false);
     // An anonymous caller cannot spend it either.
@@ -151,8 +150,7 @@ test("admission consumes the grant once and navigate never re-consults it (M1)",
   try {
     const origins = await bundle.import();
     await origins.raiseAccessRequest(urlOf(), "session:A");
-    origins.resolveOrigin(ORIGIN, "once");
-    await flush();
+    await origins.resolveOrigin(ORIGIN, "once");
     // Session A's own navigation (session identity matches the grant).
     const admission = await origins.ensureTopLevelAccess(urlOf(), "cmd-nav-1", "session:A");
     assert.deepEqual(admission, { allowed: true, viaOnceGrant: true });
@@ -174,8 +172,7 @@ test("a parallel session's navigation cannot spend the grant (B1a)", async () =>
   try {
     const origins = await bundle.import();
     await origins.raiseAccessRequest(urlOf(), "session:A");
-    origins.resolveOrigin(ORIGIN, "once");
-    await flush();
+    await origins.resolveOrigin(ORIGIN, "once");
     // Session B's open carries B's identity and its own command id: neither
     // the grant's requester nor its handoff — refused, and the grant is NOT
     // consumed by the attempt (fail-closed, not fail-shared).
@@ -198,8 +195,7 @@ test("a raw-RPC caller spends its grant via the command-id handoff", async () =>
     const origins = await bundle.import();
     // No session identity (raw caller): requester IS the command id.
     await origins.raiseAccessRequest(urlOf(), "r-abc123");
-    origins.resolveOrigin(ORIGIN, "once");
-    await flush();
+    await origins.resolveOrigin(ORIGIN, "once");
     // The SAME command id navigating (the handoff) is admitted; a different
     // id with no session identity is not.
     const admission = await origins.ensureTopLevelAccess(urlOf(), "r-abc123");
@@ -216,8 +212,7 @@ test("deny persists across a worker restart via session storage", async () => {
   try {
     let origins = await bundle.import();
     await origins.raiseAccessRequest(urlOf(), "req-A");
-    origins.resolveOrigin(ORIGIN, "deny");
-    await flush();
+    await origins.resolveOrigin(ORIGIN, "deny");
     // "Worker restart": re-import resets module-level state (the `waiting`
     // map) but the record must still gate — the whole reason the record
     // lives in session storage, not memory.
@@ -247,14 +242,152 @@ test("a replaced request leaves a tombstone its owner reads as superseded", asyn
     await flush();
     const record = chrome.session("accessRequest");
     assert.equal(record.origin, "https://other.example");
+    const keyA = `${ORIGIN}\nreq-A`;
     let tombs = chrome.session("accessTombstones");
-    assert.equal(tombs[ORIGIN].requester, "req-A", "the receipt names the displaced requester");
+    assert.equal(tombs[keyA].requester, "req-A", "the receipt names the displaced requester");
     // A deliberately fresh request by displaced A consumes that receipt. If
     // it survived, the NEW request's later TTL expiry would incorrectly read
     // "superseded" rather than "none" (also caught by the real E2E).
     await origins.raiseAccessRequest(urlOf(), "req-A");
     tombs = chrome.session("accessTombstones");
-    assert.equal(tombs[ORIGIN], undefined);
+    assert.equal(tombs[keyA], undefined);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("a stale prompt generation cannot approve the replacement origin (B1)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    // Session A's prompt renders; the popup captures ITS generation.
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    const stale = chrome.session("pendingOrigin");
+    assert.ok(stale.promptId, "every prompt carries a generation id");
+    // Session B replaces the slot with a DIFFERENT origin before the click.
+    await origins.raiseAccessRequest(urlOf("https://other.example/x"), "session:B");
+    const live = chrome.session("pendingOrigin");
+    assert.notEqual(live.promptId, stale.promptId);
+    // The user clicks Allow on the popup still showing A: the decision names
+    // A's origin and A's generation. Origin no longer matches the live
+    // prompt -> rejected; nothing resolves, no grant is minted for EITHER.
+    const applied = await origins.resolveOrigin(ORIGIN, "once", stale.promptId);
+    assert.equal(applied, false, "stale-generation decision must be rejected");
+    assert.equal(chrome.session("onceGrants"), undefined, "no grant minted");
+    const record = chrome.session("accessRequest");
+    assert.equal(record.origin, "https://other.example");
+    assert.equal(record.decision, undefined, "B's request is still undecided");
+    // Same-origin replacement: B re-raises A's origin (new generation). The
+    // old generation still must not decide the new prompt.
+    await origins.raiseAccessRequest(urlOf(), "session:B");
+    const applied2 = await origins.resolveOrigin(ORIGIN, "once", stale.promptId);
+    assert.equal(applied2, false, "old generation rejected even on same origin");
+    // The CURRENT generation decides normally.
+    const current = chrome.session("pendingOrigin");
+    const applied3 = await origins.resolveOrigin(ORIGIN, "once", current.promptId);
+    assert.equal(applied3, true);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("two concurrent navigations cannot double-spend one grant (B2)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    await origins.resolveOrigin(ORIGIN, "once");
+    // The reviewer's reproduction: two same-session navigations dispatched
+    // concurrently (different #321 tabs -> different daemon locks). Exactly
+    // ONE may consume; the loser takes the typed early-fail.
+    const results = await Promise.allSettled([
+      origins.ensureTopLevelAccess(urlOf(), "cmd-1", "session:A"),
+      origins.ensureTopLevelAccess(urlOf(), "cmd-2", "session:A"),
+    ]);
+    const admitted = results.filter((r) => r.status === "fulfilled");
+    const refused = results.filter(
+      (r) => r.status === "rejected" && r.reason.code === "origin_not_allowed",
+    );
+    assert.equal(admitted.length, 1, `exactly one winner, got ${admitted.length}`);
+    assert.equal(refused.length, 1, "the loser fails typed, not silently");
+    assert.deepEqual(admitted[0].value, { allowed: true, viaOnceGrant: true });
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("A->B->C same-origin supersession keeps every displaced receipt (M1)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    // Three sessions race the SAME origin's single prompt slot.
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    await origins.raiseAccessRequest(urlOf(), "session:B");
+    await origins.raiseAccessRequest(urlOf(), "session:C");
+    const tombs = chrome.session("accessTombstones");
+    // A per-origin key overwrote A's receipt with B's; per origin+requester
+    // keys keep both (round-2 M1).
+    assert.ok(tombs[`${ORIGIN}\nsession:A`], "A's receipt survives C's raise");
+    assert.ok(tombs[`${ORIGIN}\nsession:B`], "B's receipt exists");
+    const record = chrome.session("accessRequest");
+    assert.equal(record.requester, "session:C", "C owns the live prompt");
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("A->B->C different-origin chain also keeps both receipts (M1)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    await origins.raiseAccessRequest(urlOf("https://b.example/"), "session:B");
+    await origins.raiseAccessRequest(urlOf("https://c.example/"), "session:C");
+    const tombs = chrome.session("accessTombstones");
+    assert.ok(tombs[`${ORIGIN}\nsession:A`]);
+    assert.ok(tombs["https://b.example\nsession:B"]);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("resolveOrigin settles only after the decision is durable (M2)", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "session:A");
+    // Worker-suspension-shaped delay: every storage WRITE lands late, the
+    // way a busy event loop orders them just before MV3 suspension. The
+    // promise the message listener keeps alive must not settle until those
+    // writes are actually applied.
+    const realSet = chrome.areas.session.set;
+    globalThis.chrome.storage.session.set = async (obj) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const changes = {};
+      for (const [key, value] of Object.entries(obj)) {
+        changes[key] = { newValue: value };
+        chrome.areas.session.set(key, value);
+      }
+    };
+    const applied = await origins.resolveOrigin(ORIGIN, "once");
+    assert.equal(applied, true);
+    // The moment resolveOrigin settles, the decision and grant are READABLE:
+    // nothing is still in flight for suspension to lose.
+    assert.equal(chrome.session("accessRequest").decision, "once", "decision durably recorded");
+    const grants = chrome.session("onceGrants");
+    assert.ok(grants && grants[ORIGIN], "grant durably minted before settle");
+    assert.equal(grants[ORIGIN].requester, "session:A");
+    void realSet;
   } finally {
     await bundle.close();
     chrome.restore();

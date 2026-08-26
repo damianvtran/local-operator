@@ -493,16 +493,38 @@ class BridgeService:
         # key so a fresh open cannot race another open past the surface cap, and
         # a listing cannot interleave with an open's map write.
         #
-        # The access-flow methods get their OWN key instead of joining the
-        # global one: they never touch a tab or the surface map, and on the
-        # global key an await_access slice (up to 20 s of polling a human's
-        # decision) would block every other session's open behind a wait on a
-        # human. Their own key still serializes them against each other, which
-        # the single pending-prompt slot wants anyway.
-        if request.method in ("request_access", "await_access"):
-            tab_key = "__access__"
-        else:
-            tab_key = str(request.params.get("tab") or "__global__")
+        # The access-flow methods never join the global key: they touch no tab
+        # and no surface map, and on the global key an await_access slice (up
+        # to 20 s of polling a human's decision) would block every session's
+        # open behind a wait on a human.
+        #
+        # await_access takes NO shared lock at all (a per-request key that
+        # nothing else uses): its extension side only READS state, and every
+        # extension-side mutation is serialized by the worker's own session-
+        # mutation queue (state.ts withSessionMutation), so daemon-side
+        # serialization adds nothing. Sharing __access__ with request_access
+        # was round-2 M3: one waiting session queued every other session's
+        # request/replace behind its 20 s slice, defeating the supersession
+        # design and stacking waiters toward the HTTP timeout.
+        #
+        # request_access keeps a shared short key: raise/replace is a
+        # read-modify-write of the single prompt slot, and two concurrent
+        # raises interleaving daemon-side would make the supersession receipts
+        # nondeterministic. It never waits on a human, so the hold is ms.
+        return await self._dispatch_serialized(request)
+
+    @staticmethod
+    def lock_key_for(request: Request) -> str:
+        """The serialization key one RPC dispatches under (see the comment
+        above; a separate method so the lock topology is directly testable)."""
+        if request.method == "await_access":
+            return f"__await__:{request.id}"
+        if request.method == "request_access":
+            return "__access__"
+        return str(request.params.get("tab") or "__global__")
+
+    async def _dispatch_serialized(self, request: Request) -> JSONResponse:
+        tab_key = self.lock_key_for(request)
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
         async with lock:
             response = await self._dispatch_locked(request)
@@ -512,6 +534,11 @@ class BridgeService:
         # unlocked-and-unwaited means a later command for the same (now dead)
         # handle can safely mint a fresh Lock.
         if request.method == "close" and tab_key != "__global__" and not lock.locked():
+            self._tab_locks.pop(tab_key, None)
+        # A per-request await key is used exactly once (request ids are
+        # unique); without eviction every await_access would leave a Lock in
+        # the map for the daemon's lifetime.
+        if request.method == "await_access":
             self._tab_locks.pop(tab_key, None)
         return response
 

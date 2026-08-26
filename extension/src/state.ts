@@ -29,6 +29,13 @@ export interface PendingOrigin {
   origin: string;
   hostname: string;
   requestId: string;
+  // Immutable per-PROMPT generation token, minted every time the prompt slot
+  // is (re)written. The popup binds its rendered view and its decision message
+  // to this id, and the worker rejects a decision whose id is no longer the
+  // live one — without it, a popup still showing origin A could click through
+  // to whatever origin B had replaced the slot with (round-2 B1: a consent UI
+  // must never approve something the user was not looking at).
+  promptId: string;
 }
 
 // Async access-request state (see access-flow.ts for the machine and the
@@ -91,6 +98,19 @@ function withStore<T>(op: () => Promise<T>): Promise<T> {
   const run = storeQueue.catch(() => {}).then(op);
   storeQueue = run;
   return run;
+}
+
+/** The same serialized-mutation queue, exported for the access-flow state
+ * (grants/requests/receipts in chrome.storage.session). Grant consumption is
+ * a read-check-delete; two concurrent navigations (different tabs = different
+ * daemon locks, and the worker dispatches frames concurrently) could both
+ * read the grant before either delete landed and DOUBLE-SPEND a one-shot
+ * approval (round-2 B2, reproduced by review). One queue for every session
+ * mutation makes each read-modify-write atomic with respect to the others;
+ * the ops are tiny, so a single queue beats a per-key lock map that would
+ * need its own eviction story. */
+export function withSessionMutation<T>(op: () => Promise<T>): Promise<T> {
+  return withStore(op);
 }
 
 export function putSurface(surface: StoredSurface): Promise<void> {

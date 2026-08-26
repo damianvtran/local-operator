@@ -96,7 +96,18 @@ export interface SupersededTombstone {
    * than the request it stands for. */
   expiresAt: number;
 }
+
+/** Keyed by origin AND requester (see receiptKey): an A→B→C chain on one
+ * origin displaces two DIFFERENT requesters, and a per-origin key made C's
+ * receipt overwrite A's so A read "none" instead of "superseded" (round-2
+ * M1, reproduced by review). Each displaced requester owns its own receipt. */
 export type AccessTombstones = Record<string, SupersededTombstone>;
+
+export function receiptKey(origin: string, requester: string): string {
+  // \n cannot appear in an origin or a requester id, so the composite is
+  // collision-free without a structured key.
+  return `${origin}\n${requester}`;
+}
 
 /** Cap on retained tombstones: a churny fleet must not grow the map without
  * bound; the oldest beyond the cap are dropped (a tombstone that old is
@@ -167,9 +178,15 @@ export function requestVerdict(
   if (storedAllowed || onceGrant) return "allowed";
   const live = activeRequest(record, now);
   if (!live || live.origin !== origin) return "raise";
+  // A resolved record only answers ITS OWN requester (round-2 M1: B reading
+  // A's "once" as allowed told B it could navigate a grant it cannot spend,
+  // and B reading A's deny as denied hid that B never asked). Another
+  // requester's resolved record is displaced by a fresh raise; an undecided
+  // one is also displaced (replace-don't-queue), leaving a receipt.
+  if (live.requester !== requester) return "raise";
   if (live.decision === "deny") return "denied";
   if (live.decision) return "allowed";
-  return live.requester === requester ? "pending" : "raise";
+  return "pending";
 }
 
 /** What await_access answers WITHOUT waiting. "pending" is the only state the
@@ -187,12 +204,16 @@ export function accessState(
 ): AccessState {
   if (storedAllowed || onceGrant) return "allowed";
   const live = activeRequest(record, now);
-  if (live && live.origin === origin) {
+  // Only the record's OWN requester reads its live state (round-2 M1): after
+  // B replaces A on the same origin, A must read its receipt (superseded),
+  // not B's pending; after A's once-decision, B must not read allowed for a
+  // grant only A can spend.
+  if (live && live.origin === origin && live.requester === requester) {
     if (!live.decision) return "pending";
     return live.decision === "deny" ? "denied" : "allowed";
   }
-  const tomb = tombstones?.[origin];
-  if (tomb && now < tomb.expiresAt && tomb.requester === requester) return "superseded";
+  const tomb = tombstones?.[receiptKey(origin, requester)];
+  if (tomb && now < tomb.expiresAt) return "superseded";
   return "none";
 }
 

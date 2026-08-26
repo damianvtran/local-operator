@@ -266,8 +266,20 @@ void connect();
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.pendingOrigin) void chrome.runtime.sendMessage({ event: "origin_prompt", pending: changes.pendingOrigin.newValue });
 });
-chrome.runtime.onMessage.addListener((message) => {
-  // Decisions are keyed by ORIGIN now (finding A6): one command can pause on
-  // several origins in a redirect chain, and each resolves independently.
-  if (message?.event === "origin_decision") resolveOrigin(String(message.origin), message.decision);
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  // Decisions are keyed by ORIGIN (finding A6) and carry the prompt
+  // GENERATION the popup rendered (round-2 B1): resolveOrigin rejects a
+  // decision for a prompt that was replaced after the popup drew it.
+  if (message?.event === "origin_decision") {
+    // sendResponse + `return true` keeps the MV3 event alive until the
+    // decision is DURABLY recorded (record, grant, allowlist, prompt
+    // teardown). A fire-and-forget here let Chrome settle the popup's
+    // sendMessage and suspend this worker mid-persistence, losing the
+    // user's approval (round-2 M2).
+    resolveOrigin(String(message.origin), message.decision, String(message.promptId ?? ""))
+      .then((applied) => sendResponse({ applied }))
+      .catch(() => sendResponse({ applied: false }));
+    return true;
+  }
+  return undefined;
 });

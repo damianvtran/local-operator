@@ -211,7 +211,8 @@ test("access state machine: pending, resolve paths, TTL expiry, grants, superses
   const module = await load("src/access-flow.ts");
   try {
     const {
-      accessState, activeRequest, newRequest, consumableGrant, tombstoneFor, ACCESS_REQUEST_TTL_MS,
+      accessState, activeRequest, newRequest, consumableGrant, tombstoneFor, receiptKey,
+      ACCESS_REQUEST_TTL_MS,
     } = module.loaded;
     const now = 5_000_000;
     const record = newRequest("https://a.example", "a.example", "req-A", now);
@@ -244,14 +245,20 @@ test("access state machine: pending, resolve paths, TTL expiry, grants, superses
     assert.equal(consumableGrant(grants, "https://a.example", "req-B", now), undefined);
     assert.equal(consumableGrant(grants, "https://a.example", "", now), undefined);
     assert.equal(consumableGrant(grants, "https://b.example", "req-A", now), undefined);
-    // Supersession: the displaced requester reads "superseded" from the
-    // tombstone; anyone else reads the neutral "none"; past the tombstone's
-    // TTL the receipt is gone too.
+    // Supersession: the displaced requester reads "superseded" from its OWN
+    // receipt (keyed origin+requester — round-2 M1); anyone else reads the
+    // neutral "none"; past the tombstone's TTL the receipt is gone too.
     const tomb = tombstoneFor(record);
-    const tombs = { "https://a.example": tomb };
+    const tombs = { [receiptKey("https://a.example", "req-A")]: tomb };
     assert.equal(accessState(undefined, tombs, false, false, "https://a.example", "req-A", now), "superseded");
     assert.equal(accessState(undefined, tombs, false, false, "https://a.example", "req-B", now), "none");
     assert.equal(accessState(undefined, tombs, false, false, "https://a.example", "req-A", later), "none");
+    // Requester-aware live verdicts (round-2 M1): a record resolved by A
+    // answers ONLY A. B asking about the same origin gets its receipt or
+    // none — never A's pending/allowed/denied.
+    const resolvedByA = { ...record, decision: "once" };
+    assert.equal(accessState(resolvedByA, undefined, false, false, "https://a.example", "req-B", now), "none");
+    assert.equal(accessState(record, undefined, false, false, "https://a.example", "req-B", now), "none");
   } finally { await module.close(); }
 });
 
