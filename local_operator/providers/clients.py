@@ -1146,6 +1146,13 @@ class OpenAICompatClient:
             "input": _messages_to_openai_responses(request.messages),
         }
         if request.system_blocks:
+            # The stable system prefix rides top-level ``instructions``, exactly
+            # as real Codex does (client.rs: ``instructions = base_instructions``).
+            # We deliberately do NOT move it into ``developer`` messages or attach
+            # ``prompt_cache_breakpoint`` markers: the ChatGPT-subscription Codex
+            # backend rejects both ``prompt_cache_breakpoint`` and
+            # ``prompt_cache_options`` with HTTP 400 (matches OpenAI Codex bug
+            # #35300), and that OAuth backend is the only path in use here.
             body["instructions"] = "\n\n".join(request.system_blocks)
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
@@ -1159,6 +1166,22 @@ class OpenAICompatClient:
         effort = _reasoning_effort(request)
         if effort is not None:
             body["reasoning"] = {"effort": effort}
+            # Defect #2: mirror OpenAI Codex (client.rs L720-724), which requests
+            # encrypted reasoning items whenever reasoning is enabled. On the
+            # ``store:false`` codex backend these ``reasoning.encrypted_content``
+            # items are what let the SAME response reuse its reasoning KV state,
+            # and they cost nothing when reasoning is off — so this is gated on
+            # reasoning being present, not on the model version. See
+            # ``_stream_responses`` for how the resulting reasoning items are
+            # handled on the wire (safely skipped; we do not yet replay them).
+            #
+            # Extend rather than assign: nothing else sets ``include`` on this
+            # path today, but a future include-bearing field must not be
+            # silently clobbered by this line (review round 1, N1). Dedupe so a
+            # re-entry cannot list the same value twice.
+            include = body.setdefault("include", [])
+            if "reasoning.encrypted_content" not in include:
+                include.append("reasoning.encrypted_content")
         if request.model.supports_prompt_cache and request.prompt_cache_key:
             # The 24h policy is meaningful only with a stable key. SessionStreamFn
             # supplies one per transcript, and retries preserve it on ChatRequest.
@@ -1167,10 +1190,23 @@ class OpenAICompatClient:
         return body
 
     def _build_codex_responses_body(self, request: ChatRequest) -> dict[str, Any]:
-        """ChatGPT Codex body: Responses-shaped, with public-API-only keys removed."""
+        """ChatGPT Codex body: Responses-shaped, on the ``store:false`` backend.
+
+        Reuses the public Responses body, then strips the fields the codex
+        backend does not take. Note that ``prompt_cache_key`` is deliberately
+        NOT stripped any more: an earlier version popped it under a comment
+        calling it "public-API-only", which was a wrong assumption. Real Codex
+        (client.rs, ``build_responses_request``) sets ``prompt_cache_key``
+        UNCONDITIONALLY on this same ``store:false`` backend for routing
+        stickiness, and the model's ~89-90% cache-read rate versus ~97-98% for
+        OpenAI-shaped peers was traced to us stripping it. ``prompt_cache_key``
+        and ``include`` (defect #2's encrypted reasoning) flow through from
+        ``_build_responses_body``. Only ``prompt_cache_retention`` is popped:
+        the codex backend is ``store:false``, so public retention does not
+        apply.
+        """
         body = self._build_responses_body(request)
         body["store"] = False
-        body.pop("prompt_cache_key", None)
         body.pop("prompt_cache_retention", None)
         body.pop("max_output_tokens", None)
         body.pop("temperature", None)
@@ -1370,8 +1406,26 @@ class OpenAICompatClient:
                 except json.JSONDecodeError:
                     continue
                 event_type = payload.get("type", "")
+                # Requesting ``include: ["reasoning.encrypted_content"]`` (defect
+                # #2) makes the stream carry ``reasoning`` output items and their
+                # ``response.reasoning*`` deltas that a non-reasoning include
+                # never produced. We deliberately DROP them: the harness has no
+                # channel to replay an OpenAI encrypted reasoning item back on
+                # the next turn's ``input`` (unlike Anthropic's thinking blocks,
+                # which ride ``provider_payload``), and wiring that state through
+                # the loop is out of this fix's scope. The include still earns
+                # its keep — encrypted reasoning improves SAME-response cache
+                # reuse — but cross-turn reasoning replay is intentionally not
+                # attempted here. Skipping is explicit rather than incidental so
+                # a future ``else`` branch cannot accidentally render a reasoning
+                # item's encrypted blob as assistant text. (Called out for review.)
+                if event_type.startswith("response.reasoning"):
+                    continue
                 if event_type == "response.output_item.added":
                     item = payload.get("item") or {}
+                    if item.get("type") == "reasoning":
+                        # Same rationale as above: acknowledge the item, drop it.
+                        continue
                     if item.get("type") == "function_call":
                         index = tool_call_count
                         tool_call_count += 1

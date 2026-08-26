@@ -2926,3 +2926,190 @@ def test_tool_call_turns_do_not_ship_whitespace_only_text() -> None:
 
     items = _messages_to_openai_responses([message])
     assert [i.get("type") for i in items] == ["function_call"]
+
+
+# ---------------------------------------------------------------------------
+# GPT-5.6 prompt-caching (defects #1/#2 only): prompt_cache_key kept on the
+# Codex ``store:false`` path, and encrypted-reasoning ``include`` requested when
+# reasoning is on. Defect #3 (prompt_cache_breakpoint / prompt_cache_options /
+# moving the stable prefix into developer messages) was REJECTED by the ChatGPT
+# subscription Codex backend with HTTP 400 (OpenAI Codex bug #35300) and removed
+# entirely; these tests are regression guards against it coming back.
+# ---------------------------------------------------------------------------
+
+
+def _gpt_5_6_spec(model_id: str = "gpt-5.6-sol") -> ModelSpec:
+    """A reasoning GPT-5.6 Responses spec with prompt caching enabled."""
+    return ModelSpec(
+        provider="openai",
+        model_id=model_id,
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        reasoning=True,
+        reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high"),
+        supports_sampling_params=False,
+    )
+
+
+def _has_breakpoint(items: list[dict[str, Any]]) -> bool:
+    """Whether any content block in ``items`` carries a prompt_cache_breakpoint.
+
+    Used purely as a regression guard: after defect #3 was removed, NO body we
+    build may contain this field (the Codex backend 400s on it).
+    """
+    for item in items:
+        for key in ("content", "output"):
+            blocks = item.get(key)
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if isinstance(block, dict) and "prompt_cache_breakpoint" in block:
+                    return True
+    return False
+
+
+def test_codex_5_6_body_keeps_cache_key_and_include() -> None:
+    """Defects #1/#2 on the Codex ``store:false`` path: prompt_cache_key is kept
+    (Codex parity), encrypted reasoning is requested, and the public-retention
+    field is stripped. The stable prefix stays in top-level ``instructions`` and
+    NONE of the rejected defect-#3 fields appear."""
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    request = ChatRequest(
+        model=_gpt_5_6_spec(),
+        system_blocks=["Stable instructions.", "Tool inventory.", "Volatile env + date."],
+        messages=[Message.user("hi")],
+        prompt_cache_key="session-abc",
+    )
+    body = client._build_codex_responses_body(request)
+
+    # #1: the key that was wrongly stripped is present; retention is not.
+    assert body["prompt_cache_key"] == "session-abc"
+    assert "prompt_cache_retention" not in body
+    assert body["store"] is False
+    # #2: reasoning is on, so encrypted reasoning content is requested.
+    assert body["include"] == ["reasoning.encrypted_content"]
+    # Stable prefix rides top-level ``instructions`` exactly as real Codex sends
+    # it; nothing is moved into an injected developer message.
+    assert body["instructions"] == "Stable instructions.\n\nTool inventory.\n\nVolatile env + date."
+    assert not any(i.get("role") == "developer" for i in body["input"])
+    # Defect #3 regression guard: the backend 400s on both of these.
+    assert "prompt_cache_options" not in body
+    assert not _has_breakpoint(body["input"])
+
+
+def test_codex_5_6_body_no_include_when_reasoning_off() -> None:
+    """Defect #2 is gated on reasoning: a 5.6 model with no effort ladder must
+    not request encrypted reasoning content."""
+    spec = _gpt_5_6_spec()
+    spec = spec.model_copy(update={"reasoning_efforts": (), "reasoning_effort": None})
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_codex_responses_body(
+        ChatRequest(model=spec, system_blocks=["a", "b"], messages=[Message.user("hi")])
+    )
+    assert "include" not in body
+    # #1 still holds regardless of reasoning: the codex path keeps the key.
+    # Defect #3 fields never appear.
+    assert "prompt_cache_options" not in body
+    assert not _has_breakpoint(body["input"])
+    assert body["instructions"] == "a\n\nb"
+
+
+def test_public_5_6_body_keeps_original_shape_plus_include() -> None:
+    """The public Responses path returns its ORIGINAL body plus only defect #2's
+    ``include``: top-level instructions, prompt_cache_key, and the 24h retention
+    are all present, and none of the rejected defect-#3 fields appear."""
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_responses_body(
+        ChatRequest(
+            model=_gpt_5_6_spec(),
+            system_blocks=["Stable.", "Volatile."],
+            messages=[Message.user("hi")],
+            prompt_cache_key="pub-1",
+        )
+    )
+    assert body["prompt_cache_key"] == "pub-1"
+    assert body["prompt_cache_retention"] == "24h"
+    assert body["instructions"] == "Stable.\n\nVolatile."
+    assert body["include"] == ["reasoning.encrypted_content"]
+    assert "prompt_cache_options" not in body
+    assert not _has_breakpoint(body["input"])
+
+
+def test_public_pre_5_6_body_unchanged() -> None:
+    """Regression guard: a non-reasoning model keeps top-level instructions,
+    prompt_cache_retention, no ``include``, and no breakpoints."""
+    spec = ModelSpec(
+        provider="openai",
+        model_id="gpt-5.4",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+    )
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_responses_body(
+        ChatRequest(
+            model=spec,
+            system_blocks=["Stable.", "Volatile."],
+            messages=[Message.user("hi")],
+            prompt_cache_key="pub-2",
+        )
+    )
+    assert body["instructions"] == "Stable.\n\nVolatile."
+    assert body["prompt_cache_retention"] == "24h"
+    assert "include" not in body
+    assert "prompt_cache_options" not in body
+    assert not _has_breakpoint(body["input"])
+
+
+async def test_codex_5_6_stream_skips_reasoning_items() -> None:
+    """Defect #2 stream side: encrypted ``reasoning`` output items and their
+    deltas are dropped, never rendered as assistant text, and do not crash the
+    parser."""
+    events_sse = _sse(
+        [
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "gAAAAAB-opaque-blob",
+                },
+            },
+            {"type": "response.reasoning_summary_text.delta", "delta": "ignored thinking"},
+            {"type": "response.output_text.delta", "delta": "Answer"},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_r",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "input_tokens_details": {"cached_tokens": 5},
+                    },
+                },
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=events_sse, headers={"content-type": "text/event-stream"}
+        )
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    access = OAuthAccess(
+        access_token="chatgpt-token", credential_id=2, org_id="acct-42", kind="oauth"
+    )
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_gpt_5_6_spec(), messages=[Message.user("hi")]),
+            "chatgpt-token",
+            oauth_access=access,
+        )
+    )
+    texts = [e.delta for e in events if isinstance(e, StreamTextDelta)]
+    assert texts == ["Answer"]  # the encrypted blob never became text
+    assert events[-1].stop_reason == "stop"
