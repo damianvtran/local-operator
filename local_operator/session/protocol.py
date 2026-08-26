@@ -141,7 +141,8 @@ class SessionProtocol(Protocol):
         """Set or clear the standing objective; returns what was stored.
 
         Backs ``/goal``. The objective rides the system prompt's volatile
-        tail, so it applies from the next turn onward.
+        tail, so it applies from the next model step (or the next turn when
+        the session is idle).
         """
         ...
 

@@ -838,7 +838,7 @@ async def test_setting_the_goal_writes_the_users_words_to_the_ledger() -> None:
         painted = _painted(app)
     assert rows == ["/goal land the OAuth refresh fix"], rows
     assert session.goal == "land the OAuth refresh fix"
-    assert "goal set — applies from the next turn" in painted, painted
+    assert "goal set — applies from the next step" in painted, painted
 
 
 @pytest.mark.asyncio

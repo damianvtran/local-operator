@@ -2027,8 +2027,8 @@ class Session:
     def model_label(self) -> str:
         return f"{self._model.provider}/{self._model.model_id}"
 
-    def _system_blocks(self) -> list[str] | Awaitable[list[str]]:
-        """Invoke the block provider with the live model label.
+    def _system_blocks(self, model: ModelSpec | None = None) -> list[str] | Awaitable[list[str]]:
+        """Invoke the block provider with one internally consistent model label.
 
         The provider gained an optional ``model_label`` argument so the env
         block can name the running model (see ``build_system_blocks``). A
@@ -2037,17 +2037,22 @@ class Session:
         probed by catching ``TypeError``, which would mask a genuine TypeError
         raised INSIDE a one-arg provider and re-invoke it) and it is called with
         no argument. The label is therefore strictly additive: no caller is
-        forced to grow a parameter it does not use.
+        forced to grow a parameter it does not use. ``model`` is supplied by the
+        loop before an async block build so that build and the request use the
+        same snapshot; other callers omit it and read the session's live model.
         """
+        model_label = (
+            f"{model.provider}/{model.model_id}" if model is not None else self.model_label
+        )
         if not self._blocks_provider_takes_label:
             return self._system_blocks_provider()
         if self._blocks_provider_arity_certain:
             # Signature was readable and takes the label: any TypeError from here
             # is a genuine bug inside the provider and must surface, not be
             # swallowed by a zero-arg retry.
-            return self._system_blocks_provider(self.model_label)
+            return self._system_blocks_provider(model_label)
         try:
-            return self._system_blocks_provider(self.model_label)
+            return self._system_blocks_provider(model_label)
         except TypeError:
             # Unreadable signature guessed one-arg and guessed wrong: this
             # provider is genuinely zero-arg. Remember it and call the
@@ -2392,9 +2397,11 @@ class Session:
     def set_goal(self, text: str) -> str:
         """Set (or clear, with an empty string) the standing objective.
 
-        Returns what was actually stored (trimmed and length-capped). The
-        goal rides the system prompt's volatile tail, so it applies from the
-        next turn and only invalidates that tail — never the cached prefix.
+        Returns what was actually stored (trimmed and length-capped). The goal
+        rides the system prompt's volatile tail, which is re-read before every
+        provider call: idle changes apply to the next turn, and mid-turn changes
+        apply to the next model step. Only that tail changes — never the cached
+        prefix or an in-flight request.
         """
         stored = self._goal_state.set(text)
         # Same tail, same fate on resume as the team/agent briefs, so the goal
@@ -4016,6 +4023,12 @@ class Session:
                 # this turn is running reaches its NEXT call instead of
                 # waiting for the turn to end (see ``set_model``).
                 get_model=lambda: self._model,
+                # The volatile tail contains the live /goal, /team and /agent
+                # instructions. Re-read it per provider step so a setting changed
+                # while a tool runs reaches the next call in THIS turn rather than
+                # waiting for another user message. The loop keeps the turn-start
+                # snapshot as a fallback if this host resolver ever fails.
+                get_system_blocks=self._system_blocks,
                 convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,

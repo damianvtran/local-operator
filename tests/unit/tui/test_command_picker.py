@@ -2087,6 +2087,21 @@ async def test_recognized_command_word_gets_the_slash_command_style() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text, token", [("/goal improve recall", "/goal"), ("/loop 3", "/loop")])
+async def test_goal_and_loop_get_the_recognized_command_style(text: str, token: str) -> None:
+    """Prompt-like commands must give the same pre-submit recognition cue as /team."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.set_editor_text(text)
+        await pilot.pause()
+        cells = _slash_ink(app.editor)
+        signal = theme_mod.semantic_color("signal").lower()
+        assert _ink_of(cells, token) == signal
+
+
+@pytest.mark.asyncio
 async def test_unknown_command_word_gets_the_unknown_style_when_picker_closed() -> None:
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:

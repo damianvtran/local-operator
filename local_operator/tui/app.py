@@ -10468,11 +10468,11 @@ class OperatorApp(App[None]):
             # it was at least system-attributed while doing it.
             notice(
                 f"goal set — shortened to the {MAX_GOAL_CHARS}-character cap, "
-                "applies from the next turn",
+                "applies from the next step",
                 "warning",
             )
             return
-        notice("goal set — applies from the next turn")
+        notice("goal set — applies from the next step")
 
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
         """``/loop [n]`` — iterate toward the goal; ``/loop stop`` cancels.

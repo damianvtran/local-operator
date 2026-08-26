@@ -882,7 +882,7 @@ def _make_system_blocks_provider(
     that prefix anyway (see :func:`_select_knowledge_block`).
 
     ``goal_state`` is the SAME holder the session facade exposes through
-    ``set_goal``, which is how a ``/goal`` edit reaches the next turn's
+    ``set_goal``, which is how a ``/goal`` edit reaches the next model step's
     prompt without rebuilding the session. ``variable_store`` is the same
     store the session injects into every tool context, so a ``/credential``
     store reaches the next turn's ``<session-credentials>`` block the same
@@ -896,11 +896,10 @@ def _make_system_blocks_provider(
     """
 
     async def provider(model_label: str = "") -> list[str]:
-        # ``model_label`` is passed live by the Session each turn (its own
-        # ``model_label``), so a deliberate ``set_model`` or a failover fallback
-        # that changed the model is reflected in the env block on the next turn
-        # without rebuilding this closure. The benchmark/preflight caller passes
-        # the spec label directly; both keep the block byte-stable within a turn.
+        # ``model_label`` is passed live by the Session on each provider step, so
+        # a deliberate ``set_model`` or a failover fallback is reflected in the
+        # env block at the next safe call boundary without rebuilding this
+        # closure. The benchmark/preflight caller passes the spec label directly.
         from local_operator.prompts_api import build_system_blocks
 
         query = _latest_user_query(transcript)
@@ -1183,7 +1182,7 @@ async def _prepare(
 
     transcript = Transcript(transcript_dir)
     # One holder shared by the prompt provider and the session facade, so a
-    # ``/goal`` change lands in the next turn without a session rebuild.
+    # ``/goal`` change lands in the next model step without a session rebuild.
     goal_state = GoalState()
     # Read once, at session construction: see the provider's docstring for why
     # this must not be re-read per turn. A profile's own prompt is layered on
