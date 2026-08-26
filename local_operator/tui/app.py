@@ -8729,6 +8729,13 @@ class OperatorApp(App[None]):
             job = lookup(job_id) if callable(lookup) else manager.get(job_id) if manager else None
         except Exception:
             job = manager.get(job_id) if manager is not None else None
+        # Comms accepts durable predecessor IDs, but the panel contains only the
+        # current attempt. Canonicalize as soon as resolution succeeds so the
+        # page state, selected row, ancestry, and later refreshes all speak one
+        # identity instead of leaving an invisible historical row selected.
+        resolved_job_id = str(getattr(job, "id", "") or "")
+        if resolved_job_id:
+            job_id = resolved_job_id
         try:
             transcript_directory = comms.session_dir_of(job_id) if comms is not None else None
         except Exception:

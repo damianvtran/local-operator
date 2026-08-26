@@ -1494,9 +1494,8 @@ def test_the_roster_marks_a_child_whose_transcript_is_gone(tmp_path):
     assert comms.resume("job-1", "carry on")[0] is None
 
 
-def test_the_roster_refuses_to_offer_a_second_resume_of_one_transcript(tmp_path):
-    """Two children on one transcript directory destroy each other's history,
-    so the roster must not advertise a resume that ``resume`` would refuse."""
+def test_the_roster_replaces_a_terminal_attempt_with_its_continuation(tmp_path):
+    """A resumed transcript is one logical child, not one row per attempt."""
     comms, jobs, _child, _parent = wire()
     (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
     comms.attach("job-1", FakeChild(), tmp_path)
@@ -1508,10 +1507,10 @@ def test_the_roster_refuses_to_offer_a_second_resume_of_one_transcript(tmp_path)
     comms.record_launch("job-2", "parser")
     comms.attach("job-2", FakeChild(), tmp_path)
 
-    rows = {row.job_id: row for row in comms.roster()}
+    rows = comms.roster()
 
-    assert rows["job-1"].resumable is False
-    assert "already resumed as job job-2" in (rows["job-1"].detail or "")
+    assert [row.job_id for row in rows] == ["job-2"]
+    assert comms.session_dir_of("job-1") == tmp_path
 
 
 @pytest.mark.asyncio
