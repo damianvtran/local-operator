@@ -1508,6 +1508,48 @@ async def test_legacy_duplicate_prompt_is_left_ambiguous_and_synthetic(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_paged_legacy_duplicates_never_replace_history_or_move_anchor(tmp_path) -> None:
+    """A tail page cannot prove an apparent match is unique in older history."""
+    transcript = Transcript(tmp_path / "child")
+    earlier = await transcript.append_message(Message.user("Delegated parent instruction."))
+    for index in range(118):
+        await transcript.append_message(Message.assistant(f"older {index}"))
+    later = await transcript.append_message(Message.user("Delegated parent instruction."))
+    for index in range(20):
+        await transcript.append_message(Message.assistant(f"tail {index}"))
+    job = _job_with([], status="completed")
+    job.prompt = "Delegated parent instruction."
+    job.effective_prompt = ""
+    job.launch_message_id = ""
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        initial = [entry for entry in view._pending if entry.key != "__working__"]
+        assert initial[0].key == "__prompt__"
+        assert next(entry for entry in initial if entry.key == later.id).kind == "user"
+
+        view._body.scroll_home(animate=False)
+        await pilot.pause()
+        anchor = view._body.scroll_y
+        while not view._history_exhausted:
+            view.action_home()
+            await _wait_history(pilot, view)
+        complete = [entry for entry in view._pending if entry.key != "__working__"]
+        assert complete[0].key == "__prompt__"
+        assert next(entry for entry in complete if entry.key == earlier.id).kind == "user"
+        assert next(entry for entry in complete if entry.key == later.id).kind == "user"
+        # Prepending older pages retains the reader's content-relative anchor;
+        # the offset grows rather than snapping back to the synthetic head.
+        assert view._body.scroll_y >= anchor
+
+
+@pytest.mark.asyncio
 async def test_a_job_with_no_recorded_prompt_spends_no_row_on_one() -> None:
     """`AsyncJob.prompt` is populated by the subagent launcher only, so a job
     from anywhere else has none — and an empty user block would read as an

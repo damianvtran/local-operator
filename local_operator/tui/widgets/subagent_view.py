@@ -1388,8 +1388,9 @@ class SubagentView(Vertical):
         A resumed child's durable transcript already contains the launch turn.
         New jobs carry its exact Message/TranscriptEntry ID, so replay replaces
         only that row even when later turns repeat the same words. Legacy records
-        have no ID; they may use an exact plain-text match only when it is unique,
-        because choosing among duplicates would silently rewrite user history.
+        have no identity and keep the synthetic prompt at the head: duplicating
+        old wrapper text is safer than rewriting a user row from a paged window
+        that cannot prove what matching rows still exist before it.
         """
         live = [self._known[key] for key in self._order]
         durable_keys = {entry.key for entry in self._history_entries}
@@ -1405,17 +1406,6 @@ class SubagentView(Vertical):
                 ),
                 None,
             )
-        else:
-            # Compatibility for snapshots written before launch IDs existed.
-            # Exact PLAIN matching only: uniqueness is what makes replacing the
-            # row conservative when user turns repeat the same words.
-            candidates = [
-                index
-                for index, candidate in enumerate(history)
-                if candidate.kind == "user" and candidate.text == self._instruction
-            ]
-            if self._instruction and len(candidates) == 1:
-                matched = candidates[0]
         if matched is not None:
             original = history[matched]
             history[matched] = SubagentEntry(original.key, "prompt", text=self._instruction)
