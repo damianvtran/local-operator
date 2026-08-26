@@ -492,8 +492,55 @@ class BridgeService:
         # Commands that name no tab (open, status, tabs) serialize on a shared
         # key so a fresh open cannot race another open past the surface cap, and
         # a listing cannot interleave with an open's map write.
-        tab_key = str(request.params.get("tab") or "__global__")
+        #
+        # The access-flow methods never join the global key: they touch no tab
+        # and no surface map, and on the global key an await_access slice (up
+        # to 20 s of polling a human's decision) would block every session's
+        # open behind a wait on a human.
+        #
+        # await_access takes NO shared lock at all (a per-request key that
+        # nothing else uses): its extension side only READS state, and every
+        # extension-side mutation is serialized by the worker's own session-
+        # mutation queue (state.ts withSessionMutation), so daemon-side
+        # serialization adds nothing. Sharing __access__ with request_access
+        # was round-2 M3: one waiting session queued every other session's
+        # request/replace behind its 20 s slice, defeating the supersession
+        # design and stacking waiters toward the HTTP timeout.
+        #
+        # request_access keeps a shared short key: raise/replace is a
+        # read-modify-write of the single prompt slot, and two concurrent
+        # raises interleaving daemon-side would make the supersession receipts
+        # nondeterministic. It never waits on a human, so the hold is ms.
+        return await self._dispatch_serialized(request)
+
+    @staticmethod
+    def lock_key_for(request: Request) -> str:
+        """The serialization key one RPC dispatches under (see the comment
+        above; a separate method so the lock topology is directly testable)."""
+        if request.method == "await_access":
+            return f"__await__:{request.id}"
+        if request.method == "request_access":
+            return "__access__"
+        return str(request.params.get("tab") or "__global__")
+
+    async def _dispatch_serialized(self, request: Request) -> JSONResponse:
+        tab_key = self.lock_key_for(request)
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
+        # A per-request await key is used exactly once (request ids are
+        # unique) and MUST be evicted on every exit path — success, typed
+        # error, timeout, AND cancellation (client disconnect surfaces as
+        # CancelledError inside the HTTP handler). Evicting only after a
+        # normal return was round-3 M1: a cancelled parked await propagated
+        # past the eviction line and permanently retained its unique key, so
+        # repeated disconnects grew the lock map without bound. The `finally`
+        # block covers all exits; the pop is unconditional because no other
+        # request can ever share a per-request key.
+        if request.method == "await_access":
+            try:
+                async with lock:
+                    return await self._dispatch_locked(request)
+            finally:
+                self._tab_locks.pop(tab_key, None)
         async with lock:
             response = await self._dispatch_locked(request)
         # Per-tab keys used to be near-singleton; with every opened tab minting

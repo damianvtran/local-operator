@@ -40,8 +40,20 @@ export function ackForDecision(decision: OriginDecision): DecisionAck {
       check: false,
     };
   }
-  // "always" is a standing grant, so its ack must say it outlives this moment
-  // and where to take it back — the consent prompt's own revocability promise.
+  // "once" is a standing grant for the agent's NEXT navigation, not an
+  // in-flight pass: in the async approval flow the navigation happens a turn
+  // or two after the click, so the ack names what the grant actually covers
+  // and its bound (10 min unconsumed — see ONCE_GRANT_TTL_MS). The button
+  // label stays "Allow once": it is the one-shot consent vocabulary the
+  // store listing already promises, and the ack carries the nuance (n2).
+  if (decision === "once") {
+    return {
+      title: "Site allowed.",
+      sub: "The agent's next visit to this site goes through (once, within 10 minutes).",
+      tone: "success",
+      check: true,
+    };
+  }
   const standing =
     decision === "always" ? " Always-allowed sites can be taken back any time in Settings." : "";
   return {

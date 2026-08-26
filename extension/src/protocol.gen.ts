@@ -14,6 +14,7 @@ export enum ErrorCode {
   ELEMENT_NOT_FOUND = 'element_not_found',
   ORIGIN_DENIED = 'origin_denied',
   ORIGIN_PROMPT_PENDING = 'origin_prompt_pending',
+  ORIGIN_NOT_ALLOWED = 'origin_not_allowed',
   DEBUGGER_CONFLICT = 'debugger_conflict',
   TAB_LIMIT = 'tab_limit',
   TAB_AMBIGUOUS = 'tab_ambiguous',
@@ -22,7 +23,7 @@ export enum ErrorCode {
   INTERNAL = 'internal',
 }
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught

@@ -82,3 +82,27 @@ def test_generated_ts_emits_origin_prompt_timeout() -> None:
     # A3: the chain extension deny < daemon window < client timeout is what
     # turns a mid-prompt wait into a typed answer instead of "unreachable").
     assert "export const ORIGIN_PROMPT_TIMEOUT_MS = 60000 as const;" in gen_ts_render()
+
+
+def test_access_flow_methods_are_wired_end_to_end() -> None:
+    # The approval flow only helps if every layer knows the methods: wire
+    # protocol, daemon timeout table, and generated TS union. A miss in any of
+    # them reproduces the original incident class (a call that times out
+    # opaquely instead of failing typed).
+    from local_operator.browser_bridge.daemon import COMMAND_TIMEOUTS
+
+    for method in ("request_access", "await_access"):
+        assert method in METHODS
+        assert method in COMMAND_TIMEOUTS
+    rendered = gen_ts_render()
+    assert "'request_access'" in rendered and "'await_access'" in rendered
+    assert "ORIGIN_NOT_ALLOWED" in rendered
+
+
+def test_await_access_daemon_timeout_covers_the_extension_slice() -> None:
+    # The extension caps one await slice at 20s (access.ts AWAIT_SLICE_MS);
+    # the daemon's bound must sit above it or a full slice would race the
+    # daemon timeout and lose — recreating the misleading-timeout incident.
+    from local_operator.browser_bridge.daemon import COMMAND_TIMEOUTS
+
+    assert COMMAND_TIMEOUTS["await_access"] > 20.0

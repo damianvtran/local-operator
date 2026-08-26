@@ -47,6 +47,12 @@ let decidedOrigin: DecidedOrigin | null = null;
 // key its latch) against THAT origin, or the click lands on the one branch
 // where the missing-feedback bug survives (review finding m1).
 let shownPromptOrigin: string | undefined;
+// The prompt GENERATION the visible buttons belong to. The click sends THIS
+// id — never a re-read of current state — so a prompt replaced after render
+// cannot be approved by a click aimed at the old one (round-2 B1). Empty for
+// a /health-fallback render (worker restarted, no session record); the worker
+// then still requires the ORIGIN to match its live prompt.
+let shownPromptId = "";
 
 interface Health {
   extension_connected: boolean;
@@ -123,6 +129,7 @@ async function render(): Promise<void> {
     const host = document.getElementById("origin-host");
     if (host) host.textContent = pendingHost;
     shownPromptOrigin = pendingOriginValue;
+    shownPromptId = pendingOrigin?.promptId ?? "";
     // A fresh prompt must arrive with live buttons even if a previous
     // decision's lock is still set.
     setOriginBusy(false);
@@ -337,11 +344,12 @@ function showOriginAck(decision: OriginDecision): void {
 
 async function decide(decision: OriginDecision): Promise<void> {
   setOriginBusy(true);
-  const { pendingOrigin } = await getSession();
-  // Fall back to the origin the prompt actually rendered from: after a worker
-  // restart the session record is gone and only /health carried the origin
-  // (finding m1) — the click must acknowledge either way.
-  const origin = pendingOrigin?.origin ?? shownPromptOrigin;
+  // The click answers what the user SAW — shownPromptOrigin/shownPromptId
+  // captured at render — never a re-read of current state: re-reading was
+  // round-2 B1's consent hole, where a prompt replaced after render made the
+  // click approve an origin the user never looked at. The worker validates
+  // the generation and rejects a stale one.
+  const origin = shownPromptOrigin;
   if (origin) {
     // Acknowledge from the CLICK alone, before the worker round-trip: session
     // storage and /health keep echoing this prompt until `origin_decision`
@@ -351,15 +359,43 @@ async function decide(decision: OriginDecision): Promise<void> {
     // once the echo clears.
     decidedOrigin = { origin, decision };
     showOriginAck(decision);
-    // Decisions are keyed by ORIGIN so a redirect chain resolves each hop
-    // independently (finding A6).
-    await chrome.runtime.sendMessage({
+    const response = (await chrome.runtime.sendMessage({
       event: "origin_decision",
       origin,
       decision,
-    });
+      promptId: shownPromptId,
+    })) as { applied?: boolean } | undefined;
+    if (!response?.applied) {
+      // The worker refused the decision: the prompt was replaced (or expired)
+      // after this popup rendered it. Say so instead of pretending the click
+      // took effect, clear the latch, and re-render — which shows the CURRENT
+      // prompt, whose buttons are live again.
+      decidedOrigin = null;
+      showOriginNotice(
+        "Request changed.",
+        "The site request was replaced while this window was open. Review the new request.",
+      );
+      setOriginBusy(false);
+      // Hold the notice long enough to read (same shape as the pairing
+      // success hold), then fall through to render(), which draws the
+      // CURRENT prompt with live buttons.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
   }
   await render();
+}
+
+/** A neutral informational card in the ack slot — used when a decision could
+ * NOT be applied (stale prompt generation). No check mark: nothing was
+ * granted or denied. */
+function showOriginNotice(title: string, sub: string): void {
+  const titleEl = document.getElementById("origin-ack-title");
+  const subEl = document.getElementById("origin-ack-sub");
+  if (titleEl) titleEl.textContent = title;
+  if (subEl) subEl.textContent = sub;
+  document.getElementById("origin-ack-check")?.classList.add("hidden");
+  show("origin-ack");
+  document.getElementById("card")?.style.setProperty("--tone", "var(--hairline-strong)");
 }
 
 // Re-render whenever the worker changes connection state: the worker learns a
@@ -368,7 +404,7 @@ async function decide(decision: OriginDecision): Promise<void> {
 // popup (review finding m3). connState flips exactly when something the popup
 // shows has changed, so this is cheaper and quieter than polling /health.
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "session" && changes.connState) void render();
+  if (area === "session" && (changes.connState || changes.pendingOrigin)) void render();
 });
 
 void render();
