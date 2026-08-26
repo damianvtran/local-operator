@@ -135,6 +135,10 @@ test("a once-grant is consumed exactly once, and only by its requester", async (
     assert.equal(await origins.consumeOnceGrant(urlOf(), "req-A"), true);
     // Exactly once.
     assert.equal(await origins.consumeOnceGrant(urlOf(), "req-A"), false);
+    // A spent grant's resolved request receipt is gone too: otherwise a later
+    // request_access would read decision="once" as allowed and silently turn
+    // one approval into a second admission (caught by the real E2E).
+    assert.equal(chrome.session("accessRequest"), undefined);
   } finally {
     await bundle.close();
     chrome.restore();
@@ -243,8 +247,14 @@ test("a replaced request leaves a tombstone its owner reads as superseded", asyn
     await flush();
     const record = chrome.session("accessRequest");
     assert.equal(record.origin, "https://other.example");
-    const tombs = chrome.session("accessTombstones");
+    let tombs = chrome.session("accessTombstones");
     assert.equal(tombs[ORIGIN].requester, "req-A", "the receipt names the displaced requester");
+    // A deliberately fresh request by displaced A consumes that receipt. If
+    // it survived, the NEW request's later TTL expiry would incorrectly read
+    // "superseded" rather than "none" (also caught by the real E2E).
+    await origins.raiseAccessRequest(urlOf(), "req-A");
+    tombs = chrome.session("accessTombstones");
+    assert.equal(tombs[ORIGIN], undefined);
   } finally {
     await bundle.close();
     chrome.restore();

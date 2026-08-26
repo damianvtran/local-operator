@@ -57,10 +57,12 @@ export interface OriginAdmission {
  * access-flow.ts). */
 export async function consumeOnceGrant(url: URL, requester: string): Promise<boolean> {
   const { onceGrants = {} } = await getSession();
-  if (!consumableGrant(onceGrants, url.origin, requester, Date.now())) return false;
+  const grant = consumableGrant(onceGrants, url.origin, requester, Date.now());
+  if (!grant) return false;
   const remaining = { ...onceGrants };
   delete remaining[url.origin];
   await chrome.storage.session.set({ onceGrants: remaining });
+  await clearConsumedRequest(url.origin, grant.requester);
   return true;
 }
 
@@ -112,7 +114,24 @@ async function consumeGrantFor(
   const remaining = { ...onceGrants };
   delete remaining[url.origin];
   await chrome.storage.session.set({ onceGrants: remaining });
+  await clearConsumedRequest(url.origin, grant.requester);
   return true;
+}
+
+/** A resolved "once" request is the receipt await_access reads while its grant
+ * waits to be spent. Once the grant is consumed, remove that matching receipt:
+ * otherwise a later request_access to the same origin sees decision="once"
+ * and answers allowed even though no grant remains — silently turning "once"
+ * into a second admission. A newer request is preserved by the full match. */
+async function clearConsumedRequest(origin: string, requester: string): Promise<void> {
+  const { accessRequest } = await getSession();
+  if (
+    accessRequest?.origin === origin &&
+    accessRequest.decision === "once" &&
+    accessRequest.requester === requester
+  ) {
+    await chrome.storage.session.remove("accessRequest");
+  }
 }
 
 /** Raise the pending-approval surfaces: session record (popup prompt), badge,
@@ -244,10 +263,15 @@ export async function raiseAccessRequest(url: URL, requester: string): Promise<A
   const session = await getSession();
   const previous = activeRequest(session.accessRequest, now);
   const record = newRequest(url.origin, url.hostname, requester, now);
+  const tombs = { ...(session.accessTombstones ?? {}) };
+  // A deliberate fresh request by the requester that was displaced consumes
+  // its old supersession receipt. Leaving it behind made this NEW request's
+  // eventual TTL expiry read as "superseded" instead of "none" — the stale
+  // receipt outlived the event it described.
+  if (tombs[record.origin]?.requester === requester) delete tombs[record.origin];
   if (previous && (previous.origin !== record.origin || previous.requester !== record.requester)) {
     // Different origin OR same origin from a different requester: both
     // displace the pending prompt, both leave the receipt.
-    const tombs = { ...(session.accessTombstones ?? {}) };
     tombs[previous.origin] = tombstoneFor(previous);
     // Drop expired/oldest beyond the cap so a churny fleet cannot grow the
     // map unbounded — a receipt that old describes a prompt nobody remembers.
@@ -256,6 +280,10 @@ export async function raiseAccessRequest(url: URL, requester: string): Promise<A
       .sort((a, b) => b[1].expiresAt - a[1].expiresAt)
       .slice(0, TOMBSTONE_CAP);
     await chrome.storage.session.set({ accessTombstones: Object.fromEntries(entries) });
+  } else {
+    // Persist the consumed stale receipt even when this request displaced
+    // nothing live.
+    await chrome.storage.session.set({ accessTombstones: tombs });
   }
   await chrome.storage.session.set({ accessRequest: record });
   await raisePrompt(url, requester);
