@@ -631,7 +631,9 @@ def build_screenshot_action(path: str):
 
 def build_screenshot_options(path: str):
     """(e) Options / allowed sites — everything stays on your machine."""
-    W, H = 1280, 800
+    # Unlike the popup screenshots, this frame never needs the canvas size:
+    # _split_canvas owns the 1280x800 geometry and the options capture is
+    # fitted purely by max_h/max_w below.
     im = Image.open(evid("options-populated.png")).convert("RGB")
     box = content_bbox(im, POPUP_BG)
     # Trim the bottom so the card ends after the first full allowed-site row
