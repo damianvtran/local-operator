@@ -52,6 +52,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     NoticeEvent,
+    PeerMessageDeliveredEvent,
     RetryEndEvent,
     RetryStartEvent,
     SteeringDeliveredEvent,
@@ -211,6 +212,22 @@ class WakeDelivered(Message):
         self.catchup = catchup
         self.wake_id = wake_id
         self.occurrence = occurrence
+
+
+class PeerMessageDelivered(Message):
+    """A message from another local lop session (`lop send`) was delivered.
+
+    Carries the raw body and the advisory sender identity so the app can paint
+    the cross-session indicator immediately, even while the session is idle.
+    ``message_id`` is the persisted transcript row's id, recorded by the app so
+    a later history replay does not mount a second copy of the same delivery.
+    """
+
+    def __init__(self, body: str, sender: dict[str, Any], message_id: str = "") -> None:
+        super().__init__()
+        self.body = body
+        self.sender = sender
+        self.message_id = message_id
 
 
 class NoticePosted(Message):
@@ -601,6 +618,12 @@ class EventController:
         # a superseded turn cannot invalidate it.
         self._post(WakeDelivered(event.text, event.catchup, event.wake_id, event.occurrence))
 
+    def _handle_peer_message_delivered(self, event: PeerMessageDeliveredEvent) -> None:
+        # No generation guard: a peer delivery is a state fact about the
+        # session (this message landed), not a turn-scoped boundary, so a
+        # superseded turn cannot invalidate it — same rationale as a wake.
+        self._post(PeerMessageDelivered(event.body, dict(event.sender), event.message_id))
+
     def _handle_steering_delivered(self, event: SteeringDeliveredEvent) -> None:
         # No generation guard, deliberately: the drain belongs to whichever turn
         # is running, and the app settles a row it is holding a direct reference
@@ -674,6 +697,7 @@ class EventController:
         "tool_execution_end": _handle_tool_end,
         "notice": _handle_notice,
         "wake_delivered": _handle_wake_delivered,
+        "peer_message_delivered": _handle_peer_message_delivered,
         "steering_delivered": _handle_steering_delivered,
         "compaction_start": _handle_compaction_start,
         "compaction_end": _handle_compaction_end,

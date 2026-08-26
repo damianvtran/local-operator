@@ -63,6 +63,7 @@ from local_operator.mobile.types import (
     TodoPhase,
     TranscriptEntry,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 
 #: How much of a tool result's text the expand payload carries. The phone's
 #: expanded row is a readable window, not a log file — beyond this the right
@@ -184,6 +185,21 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                         )
                     )
                 continue
+            if message.custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+                # A cross-session `lop send` delivery. The phone renders the raw
+                # body plus the sender identity (from details["sender"]); the
+                # model-facing wrapped envelope in details["text"] never travels.
+                body = str(message.details.get("body") or "").strip()
+                if body:
+                    entries.append(
+                        TranscriptEntry(
+                            id=message.id,
+                            kind="peer_message",
+                            text=body,
+                            details={"sender": message.details.get("sender") or {}},
+                        )
+                    )
+                continue
             text = _message_text(message)
             if text:
                 entries.append(
@@ -288,6 +304,21 @@ class ProjectionFold:
         entries: list[TranscriptEntry] = []
         for message in history:
             if isinstance(message, CustomMessage):
+                if message.custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+                    # A cross-session `lop send` delivery renders as its own
+                    # inbound card (never a bare notice), so an attaching phone
+                    # sees the same peer affordance the TUI paints.
+                    body = str(message.details.get("body") or "").strip()
+                    if body:
+                        entries.append(
+                            TranscriptEntry(
+                                id=message.id,
+                                kind="peer_message",
+                                text=body,
+                                details={"sender": message.details.get("sender") or {}},
+                            )
+                        )
+                    continue
                 text = _message_text(message)
                 if text:
                     entries.append(
@@ -543,6 +574,24 @@ class ProjectionFold:
                 id=f"user-{time.time_ns()}",
                 kind="steer" if steer else "user",
                 text=text,
+                final=True,
+            )
+        )
+        self._bump()
+
+    def note_peer_message(self, text: str, *, sender: dict[str, Any] | None = None) -> None:
+        """Optimistic echo of an inbound cross-session (`lop send`) message.
+
+        Same reason as ``note_user_message``: the handle calls this the instant
+        it delivers a peer message so an attached phone paints the peer card
+        immediately, rather than waiting for the next full projection repaint.
+        The row carries the sender identity in ``details`` for the label."""
+        self._append(
+            TranscriptEntry(
+                id=f"peer-{time.time_ns()}",
+                kind="peer_message",
+                text=text,
+                details={"sender": sender or {}},
                 final=True,
             )
         )

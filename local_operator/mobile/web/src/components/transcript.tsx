@@ -144,6 +144,25 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
 				</div>
 			);
+		case "peer_message": {
+			/* An inbound message from another local lop session (`lop send`).
+			   It must read as cross-session (not the user's own turn and not a
+			   hub parent): a ↔ glyph and a sender label name who reached in.
+			   The sender fields are advisory, so the label degrades to a bare
+			   "Peer session" when the sender omitted them. */
+			const sender = entry.details?.sender ?? {};
+			const parts: string[] = [];
+			if (sender.conversation_name) parts.push(sender.conversation_name);
+			if (sender.pid != null) parts.push(`pid ${sender.pid}`);
+			if (sender.model_label) parts.push(sender.model_label);
+			const label = parts.length > 0 ? parts.join(" · ") : "Peer session";
+			return (
+				<div className="min-w-0 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+					<span className="block text-meta text-ink-dim">↔ {label}</span>
+					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
+				</div>
+			);
+		}
 		case "assistant":
 			/* No per-row caret: the aggregate WorkingLine at the foot of the
 			   transcript is the turn's ONE in-progress indicator (branding §7 —

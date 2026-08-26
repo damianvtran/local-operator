@@ -622,6 +622,28 @@ class OwnedSessionHandle(SessionHandle):
         self._notify()
         return "steering queued"
 
+    async def receive_peer_message(
+        self,
+        text: str,
+        *,
+        mode: str = "mailbox",
+        wake: bool = False,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        # This handle owns an in-process Session on the registrant's own loop,
+        # so the coroutine can be awaited directly (unlike the TUI handle, which
+        # must hop to the owner loop). Session.receive_peer_message does its own
+        # transcript/context persistence; we only mirror the phone fold the way
+        # steer() does, so an attached phone paints the peer card immediately
+        # rather than waiting for the next MessageStartEvent.
+        self._check_loop_thread()
+        detail = await self._session.receive_peer_message(
+            text, mode=mode, wake=wake, sender=sender or {}
+        )
+        self._fold.note_peer_message(text, sender=sender or {})
+        self._notify()
+        return detail
+
     async def abort(self) -> str:
         self._check_loop_thread()
         self._session.abort("stopped from mobile")

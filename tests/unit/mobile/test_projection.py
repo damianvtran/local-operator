@@ -14,6 +14,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
     AgentStartEvent,
+    CustomMessage,
     ImageContent,
     Message,
     MessageEndEvent,
@@ -402,6 +403,35 @@ def test_history_fold_pairs_tool_calls_with_results() -> None:
     assert tool_row.tool_state == "done"
     assert tool_row.summary == "/x.py"
     assert tool_row.details["output"] == "file body"
+
+
+def test_history_fold_maps_peer_message_to_its_own_kind() -> None:
+    from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
+
+    fold = make_fold()
+    sender = {"pid": 42, "conversation_name": "peer", "model_label": "test/model"}
+    peer = CustomMessage(
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        attribution="user",
+        details={"text": "<wrapped>hi</wrapped>", "body": "hi there", "sender": sender},
+    )
+    fold.fold_history([peer])
+    rows = fold.projection.transcript
+    assert len(rows) == 1
+    # The phone renders the raw body, never the model-facing wrapped envelope,
+    # and carries the sender for the card label.
+    assert rows[0].kind == "peer_message"
+    assert rows[0].text == "hi there"
+    assert rows[0].details["sender"] == sender
+
+
+def test_note_peer_message_appends_optimistic_row() -> None:
+    fold = make_fold()
+    fold.note_peer_message("live echo", sender={"pid": 7, "conversation_name": "peer"})
+    row = fold.projection.transcript[-1]
+    assert row.kind == "peer_message"
+    assert row.text == "live echo"
+    assert row.details["sender"]["pid"] == 7
 
 
 def test_transcript_is_capped_from_the_front() -> None:

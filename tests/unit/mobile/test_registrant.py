@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -70,6 +70,14 @@ class FakeHandle:
 
     async def recall_steer(self, command_id):  # noqa: ANN001, ANN202
         return await self._record("recall_steer", command_id)
+
+    async def receive_peer_message(  # noqa: ANN001, ANN202
+        self, text, *, mode="mailbox", wake=False, sender=None
+    ):
+        self.calls.append(
+            ("receive_peer_message", (text,), {"mode": mode, "wake": wake, "sender": sender})
+        )
+        return "delivered to the mailbox (will be read on the next turn)"
 
     async def abort(self):  # noqa: ANN202
         return await self._record("abort")
@@ -309,6 +317,78 @@ async def test_recall_steer_dispatches_by_command_id() -> None:
         await writer.drain()
         assert (await _until(reader, "ack", 8))["detail"] == "recall_steer ok"
         assert handle.calls[-1][0:2] == ("recall_steer", ("m1",))
+    finally:
+        if writer is not None:
+            writer.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_message_dispatches_with_parsed_args() -> None:
+    """A `lop send` peer_message reaches the handle with mode/wake/sender parsed."""
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "peer_message",
+                    "req": 11,
+                    "text": "gates are green",
+                    "mode": "mailbox",
+                    "wake": True,
+                    "sender": {"pid": 4242, "conversation_name": "peer-send design"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        ack = await _until(reader, "ack", 11)
+        assert "mailbox" in ack["detail"]
+        name, args, kwargs = handle.calls[-1]
+        assert name == "receive_peer_message"
+        assert args == ("gates are green",)
+        assert kwargs["mode"] == "mailbox"
+        assert kwargs["wake"] is True
+        sender = cast("dict[str, Any]", kwargs["sender"])
+        assert sender["pid"] == 4242
+    finally:
+        if writer is not None:
+            writer.close()
+        registrant.close()
+
+
+class NoPeerHandle(FakeHandle):
+    """An owner host that predates peer messaging: no receive_peer_message.
+
+    The dispatch probes the capability with getattr, so a handle that simply
+    lacks the method must surface the clear "cannot receive" error rather than
+    an AttributeError — exactly the optional-capability contract recall_steer
+    documents."""
+
+    receive_peer_message = None  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_peer_message_on_handle_without_capability_errors_cleanly() -> None:
+    handle = NoPeerHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "peer_message", "req": 12, "text": "hi", "mode": "mailbox"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        err = await _until(reader, "error", 12)
+        assert "cannot receive peer messages" in err["message"]
     finally:
         if writer is not None:
             writer.close()
