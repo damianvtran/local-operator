@@ -97,6 +97,32 @@ def test_restore_preserves_a_failure_outcome(tmp_path) -> None:
     assert info.detail is not None and "boom" in info.detail
 
 
+def test_restore_collapses_legacy_resume_records_and_preserves_aliases(tmp_path) -> None:
+    session_dir = tmp_path / "child"
+    rows = [
+        {"job_id": "old", "label": "same", "session_dir": str(session_dir)},
+        {"job_id": "new", "label": "same", "session_dir": str(session_dir)},
+    ]
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.restore(rows)
+
+    assert [item.job_id for item in comms.roster()] == ["new"]
+    assert comms.session_dir_of("old") == session_dir
+    assert comms.label_of("old") == "same"
+    assert comms.snapshot()[0]["attempt_aliases"] == ["old"]
+
+
+def test_identical_labels_with_distinct_transcripts_remain_distinct(tmp_path) -> None:
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.restore(
+        [
+            {"job_id": "one", "label": "same", "session_dir": str(tmp_path / "one")},
+            {"job_id": "two", "label": "same", "session_dir": str(tmp_path / "two")},
+        ]
+    )
+    assert [item.job_id for item in comms.roster()] == ["one", "two"]
+
+
 def test_restore_skips_an_id_that_is_already_live(tmp_path) -> None:
     """A stale snapshot must not overwrite a running child of this session."""
     jobs = FakeJobs()

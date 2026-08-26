@@ -27,7 +27,11 @@ from local_operator.harness.comms import (
     HUB_MESSAGE_TYPE,
     SubagentComms,
 )
-from local_operator.harness.jobs import CANCELLED_BEFORE_START
+from local_operator.harness.jobs import (
+    CANCELLED_BEFORE_START,
+    AsyncJob,
+    AsyncJobManager,
+)
 from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
@@ -753,6 +757,54 @@ async def test_the_page_renders_the_childs_messages_and_tool_calls() -> None:
         page = " ".join(view.rendered_rows())
         assert "audit the ingest path" in page  # the title names the subagent
         assert "Two tests fail on the retry budget." in page
+
+
+@pytest.mark.asyncio
+async def test_historical_attempt_opens_and_selects_the_current_visible_row() -> None:
+    session = FakeSession()
+    manager = AsyncJobManager()
+    current = AsyncJob(
+        id="current",
+        type="task",
+        status="completed",
+        start_time=1.0,
+        settled_at=2.0,
+        label="continued child",
+        logical_id="/tmp/child",
+        attempt_aliases=["historical"],
+    )
+    manager.restore([current])
+    session.jobs = manager
+    comms = SubagentComms(session)  # type: ignore[arg-type]
+    comms.restore(
+        [
+            {
+                "job_id": "current",
+                "label": "continued child",
+                "session_dir": "/tmp/child",
+                "attempt_aliases": ["historical"],
+            }
+        ]
+    )
+    session._subagent_comms = comms
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        app._open_subagent_view("historical")
+        await pilot.pause()
+
+        view = app.query_one(SubagentView)
+        panel = app._subagent_panel
+        assert view.job_id == "current"
+        assert panel is not None
+        assert list(panel._rows) == ["current"]
+        assert panel._rows["current"].current is True
 
 
 @pytest.mark.asyncio
