@@ -1,6 +1,6 @@
 # Privacy Policy for the Local Operator Browser Extension
 
-**Effective date:** [ASSUMPTION: set to the public launch date before publishing]
+**Effective date:** August 25, 2026
 
 **Publisher:** Radient, Inc.
 
@@ -19,9 +19,11 @@ Radient, Inc. or any other remote service. It does not run analytics, show
 ads, or sell data.
 
 The extension sends page content, accessibility information, screenshots,
-and the results of browser actions only to the Local Operator browser bridge
-running on `127.0.0.1` on your own computer. This is the loopback interface:
-it does not leave the device.
+and browser-action results only to the Local Operator browser bridge on
+`127.0.0.1`; that extension-to-app connection never leaves the device. The
+separate Local Operator app may send browser results needed for your task to
+the AI model you choose, under the app privacy policy and that model
+provider's terms. Choose a local model to keep that processing on-device too.
 
 ## What the extension accesses
 
@@ -131,7 +133,6 @@ Questions about this extension or this policy can be sent to:
 
 **Radient, Inc.**
 
-Email: **[ASSUMPTION: insert the public privacy/support email before hosting;
-neither source document supplies one]**
+Email: **damian@radienthq.com**
 
 Website: https://local-operator.com

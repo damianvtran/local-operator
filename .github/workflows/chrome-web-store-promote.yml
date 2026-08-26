@@ -1,0 +1,72 @@
+name: Promote staged Chrome Web Store release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Approved staged extension version to publish
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  # Required by verify-release-environment.sh: reading environment protection
+  # rules and environment-scoped variables needs Actions read scope, and the
+  # default token here is otherwise stripped to the two scopes above.
+  actions: read
+
+concurrency:
+  group: chrome-web-store-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    # Promotion is a distinct, explicit launch decision. Keep this environment
+    # protected even if staging already required approval so review completion
+    # cannot make a public release happen automatically.
+    environment: chrome-web-store-production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Require the workflow commit from main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          # Promotion runs the token-bearing client from the checked-out commit;
+          # refusing non-main ancestry prevents dispatching altered release code.
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::promotion must run from a commit on main"
+            exit 1
+          }
+      - name: Verify protected environment configuration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+        run: |
+          extension/scripts/verify-release-environment.sh chrome-web-store-production \
+            CWS_PUBLISHER_ID "$CWS_PUBLISHER_ID" \
+            CWS_EXTENSION_ID "$CWS_EXTENSION_ID" \
+            GCP_WIF_PROVIDER "$GCP_WIF_PROVIDER" \
+            CWS_SERVICE_ACCOUNT "$CWS_SERVICE_ACCOUNT"
+      - name: Authenticate without a service-account key
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          create_credentials_file: false
+      - name: Verify and publish the reviewed staged version
+        working-directory: extension
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: bash scripts/chrome-web-store.sh promote "$EXPECTED_VERSION"
