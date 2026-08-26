@@ -1132,6 +1132,20 @@ KeyPromptBlock:focus {
  * the height, which `.band-body` already declares the same way.) */
 #subagent-rows {
     height: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+/* Pinned below the scrollable roster so the way back never disappears. It is
+ * a separate widget for the same reason as the todo control: only the actual
+ * affordance gets pointer/hover treatment, never a child row beside it. */
+#subagent-affordance {
+    height: 1;
+    pointer: pointer;
+}
+
+#subagent-affordance:hover {
+    background: $lo-overlay;
 }
 
 /* A row is a live surface: hover lights it, and a running row's trailing cell
