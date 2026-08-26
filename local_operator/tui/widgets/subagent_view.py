@@ -1166,9 +1166,7 @@ class SubagentView(Vertical):
                 self._known[entry.key] = entry
             elif _supersedes(entry, known):
                 self._known[entry.key] = entry
-        live = [self._known[key] for key in self._order]
-        durable_keys = {entry.key for entry in self._history_entries}
-        body = [*self._history_entries, *(entry for entry in live if entry.key not in durable_keys)]
+        body = self._merge_body()
 
         tail = self._tail_entry(gone, progress)
         if tail is not None:
@@ -1354,12 +1352,7 @@ class SubagentView(Vertical):
     def _reconcile_current_body(
         self, *, anchor: float | None = None, prepend: bool = False
     ) -> None:
-        live = [self._known[key] for key in self._order]
-        durable_keys = {entry.key for entry in self._history_entries}
-        entries = [
-            *self._history_entries,
-            *(entry for entry in live if entry.key not in durable_keys),
-        ]
+        entries = self._merge_body()
         tail = self._tail_entry(self._status == "gone", "")
         if tail is not None:
             entries.append(tail)
@@ -1380,6 +1373,36 @@ class SubagentView(Vertical):
                 return
         self._pending = entries
         self._sync_body(entries, self._pending_head)
+
+    def _merge_body(self) -> list[SubagentEntry]:
+        """The page body: prompt, then disk history, then surviving live rows.
+
+        The `"__prompt__"` entry is PINNED to the head of the merged body, ahead
+        of `self._history_entries`, and both assembly sites (`show` and
+        `_reconcile_current_body`) go through here so they cannot drift apart.
+
+        Why the pin is load-bearing: the prompt is the delegation instruction,
+        recorded at REGISTRATION (`harness/subagent.py`), so it is always the
+        first message chronologically — the USER turn of this conversation. But
+        `self._history_entries` is the child's real transcript paged in from
+        disk, and every live trajectory key matches a durable key and folds out,
+        leaving `"__prompt__"` as the one live key disk history never produces.
+        A naive `[*history, *live]` merge therefore stranded the prompt AFTER
+        all durable rows — at the bottom of the page — the moment async history
+        loaded and reconciled (the two-frame "prompt jumps to the bottom" bug).
+        Separating it out and prepending keeps it first whether or not durable
+        history is present and whether the job is running or settled, and it
+        stays deduped: it is one keyed entry in `self._order`, mounted once by
+        the same keyed diff as every other row.
+        """
+        live = [self._known[key] for key in self._order]
+        durable_keys = {entry.key for entry in self._history_entries}
+        prompt = next((entry for entry in live if entry.key == "__prompt__"), None)
+        rest = [
+            entry for entry in live if entry.key != "__prompt__" and entry.key not in durable_keys
+        ]
+        head: list[SubagentEntry] = [prompt] if prompt is not None else []
+        return [*head, *self._history_entries, *rest]
 
     def _tail_entry(self, gone: bool, progress: str) -> SubagentEntry | None:
         """The row that TERMINATES the page, when the page needs one.

@@ -361,6 +361,45 @@ async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_prompt_leads_the_body_ahead_of_durable_history(tmp_path) -> None:
+    """The delegated instruction is the first message chronologically, so it
+    must lead the merged body even after async disk history loads.
+
+    Regression guard: `_merge_body` used to append surviving live entries AFTER
+    all of `self._history_entries`, and the prompt is the one live key disk
+    history never produces, so it was stranded at the BOTTOM of the page the
+    moment `_apply_history_page` reconciled the body. The instruction must sit
+    at index 0, ahead of every durable row."""
+    transcript = Transcript(tmp_path / "child")
+    for index in range(8):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with(TRAJECTORY, status="completed")
+    job.prompt = "Audit the ingest path and report the retry-budget regression."
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        # Both the model (_entries) and the mounted blocks must agree: prompt
+        # first, then the disk-loaded rows.
+        assert view._entries[0].key == "__prompt__"
+        assert view._history_entries, "durable history must be present for the guard"
+        durable_keys = {entry.key for entry in view._history_entries}
+        prompt_pos = next(i for i, e in enumerate(view._entries) if e.key == "__prompt__")
+        first_durable = next(i for i, e in enumerate(view._entries) if e.key in durable_keys)
+        assert prompt_pos < first_durable, [e.key for e in view._entries]
+        first = view._body.blocks()[0]
+        assert isinstance(first, UserBlock), [type(b).__name__ for b in view._body.blocks()]
+        assert first.text().startswith("Audit the ingest path")
+        # Deduped: the instruction is mounted exactly once across the reconcile.
+        assert sum(1 for b in view._body.blocks() if isinstance(b, UserBlock)) == 1
+
+
+@pytest.mark.asyncio
 async def test_history_home_key_lands_on_newly_loaded_page(tmp_path) -> None:
     """The binding path must not sample the old tail before Home settles."""
     transcript = Transcript(tmp_path / "child")
