@@ -212,6 +212,19 @@ class AsyncJob(BaseModel):
     # priced calls preserves exact provider bills without letting one receipt
     # suppress estimates for its siblings.
     descendant_usage: list[Usage] = Field(default_factory=list)
+    # Settled predecessor attempts folded out of the visible roster. This is
+    # separate from descendant_usage because the current process's manager
+    # already owns these components in its settled accumulator; treating them as
+    # current live subtree spend would count them twice. The persisted copy is
+    # what lets a replacement process rebuild the accumulator from the sole
+    # surviving row.
+    prior_attempt_usage: list[Usage] = Field(default_factory=list)
+    # Runtime ownership marker for prior_attempt_usage. bind_logical_identity()
+    # folds a predecessor whose accounting is already in this manager, whereas
+    # restore() starts with an empty accumulator and must ingest the durable
+    # components. Excluding the marker keeps that process-local distinction out
+    # of the authoritative sidecar.
+    prior_attempt_usage_owned: bool = Field(default=False, exclude=True)
     # A live edge exists only while the child can still mutate its own ledger.
     # It is runtime-only and deliberately cleared after the final settlement
     # snapshot, otherwise one retained observability row pins the disposed child
@@ -474,6 +487,21 @@ class AsyncJobManager:
                     f"logical task {logical_id!r} is already running as job {prior.id}"
                 )
             inherited = [*prior.attempt_aliases, prior.id, *inherited]
+            grouped: dict[tuple[str | None, str | None, bool], Usage] = {}
+            for component in [
+                *current.prior_attempt_usage,
+                *prior.prior_attempt_usage,
+                *_usage_components(prior.usage, prior.model_label),
+                *prior.descendant_usage,
+            ]:
+                _merge_accounting_component(grouped, component)
+            current.prior_attempt_usage = [
+                component.model_copy(deep=True) for component in grouped.values()
+            ]
+            # Every foldable predecessor is terminal and was therefore already
+            # transferred to this manager, either by settle() or restore(). Keep
+            # the durable copy off this process's live and settlement totals.
+            current.prior_attempt_usage_owned = True
             self._jobs.pop(prior.id, None)
         aliases = list(dict.fromkeys(alias for alias in inherited if alias != job_id))
         current.attempt_aliases = aliases
@@ -997,6 +1025,8 @@ class AsyncJobManager:
     def _record_settled_accounting(self, job: AsyncJob) -> None:
         """Transfer one terminal subtree exactly once into manager ownership."""
         components = [*_usage_components(job.usage, job.model_label), *job.descendant_usage]
+        if not job.prior_attempt_usage_owned:
+            components.extend(job.prior_attempt_usage)
         child_manager = job.child_jobs
         if isinstance(child_manager, AsyncJobManager):
             components.extend(child_manager.accounting_components())

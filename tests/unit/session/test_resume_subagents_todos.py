@@ -34,6 +34,7 @@ from local_operator.harness.types import (
     StreamTextDelta,
     TextContent,
     ToolResult,
+    Usage,
 )
 from local_operator.session.session import (
     SUBAGENT_ROSTER_CUSTOM_TYPE,
@@ -225,10 +226,51 @@ async def test_live_continuation_persists_one_logical_row_before_restart(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_path, monkeypatch):
+    """A folded predecessor's settled usage must live in the authoritative row."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    old_id = parent._launch_subagent(label="accounted", prompt="first attempt")
+    await wait_for(lambda: _status(parent, old_id) == "completed")
+    old_row = parent.jobs.get(old_id)
+    assert old_row is not None
+    old_row.usage = Usage(input_tokens=4, provider="test", model_id="m")
+    parent.jobs.note_usage_changed()
+    await parent._persist_subagent_roster()
+    await parent.dispose()
+
+    hanging = HangingStream()
+    resumed = _session(tmp_path, hanging)
+    await resumed.async_init()
+    new_id, error = resumed.subagent_comms.resume(old_id, "continue")
+    assert error is None and new_id is not None
+    await hanging.started.wait()
+    await wait_for(
+        lambda: resumed.jobs.get(new_id) is not None
+        and resumed.jobs.get(new_id).logical_id is not None  # type: ignore[union-attr]
+    )
+    assert sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 4
+    await resumed._persist_subagent_roster()
+
+    restarted = _session(tmp_path, IdleStream())
+    await restarted.async_init()
+    current = restarted.jobs.get(new_id)
+    assert current is not None
+    assert [row.id for row in restarted.jobs.list() if row.type == "task"] == [new_id]
+    assert restarted.jobs.get(old_id) is current
+    assert sum(item.input_tokens for item in restarted.jobs.accounting_components()) == 4
+    assert sum(item.input_tokens for item in restarted.jobs.accounting_components()) == 4
+
+    await restarted.dispose()
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
 async def test_descendant_accounting_survives_process_resume(tmp_path, monkeypatch):
     """Nested spend lives on the owning row, not an in-process child manager."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    from local_operator.harness.types import Usage
 
     parent = _session(tmp_path, OneShotStream())
     await parent.async_init()

@@ -925,6 +925,10 @@ _ROSTER_ROW_FIELDS = frozenset(
         # count. This is the durable half of nested accounting after a child
         # manager is disposed and therefore must survive process resume.
         "descendant_usage",
+        # Folded attempts no longer have visible rows. Their bounded accounting
+        # components must travel with the winner so the sidecar can reconstruct
+        # the full logical child after a process restart.
+        "prior_attempt_usage",
         "restored",
         # Small bounded strings, stamped at registration: a restored row must
         # still say what kind of child it was ("task"/"scout") and at what

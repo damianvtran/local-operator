@@ -153,6 +153,47 @@ async def test_repeated_resume_attempts_replace_one_logical_row_and_alias_ids() 
 
 
 @pytest.mark.asyncio
+async def test_repeated_live_folds_carry_prior_usage_without_double_counting() -> None:
+    manager = AsyncJobManager(max_running=3)
+    manager.restore(
+        [
+            _row(
+                "old",
+                logical_id="/tmp/child",
+                usage=Usage(input_tokens=4, provider="test", model_id="m"),
+            )
+        ]
+    )
+
+    async def runner(job_id, signal, report_progress):
+        await asyncio.sleep(5)
+
+    middle = manager.register("task", "same", runner)
+    await asyncio.sleep(0)
+    manager.bind_logical_identity(middle, "/tmp/child")
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 4
+    middle_row = manager.get(middle)
+    assert middle_row is not None
+    middle_row.usage = Usage(input_tokens=3, provider="test", model_id="m")
+    middle_row.status = "completed"
+    manager._settle(middle_row)
+
+    newest = manager.register("task", "same", runner)
+    await asyncio.sleep(0)
+    manager.bind_logical_identity(newest, "/tmp/child")
+    current = manager.get(newest)
+    assert current is not None
+    assert current.attempt_aliases == ["old", middle]
+    assert sum(item.input_tokens for item in current.prior_attempt_usage) == 7
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 7
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 7
+    await manager.dispose()
+    # Cancelling the newest attempt settles it. Its durable predecessor ledger
+    # remains metadata in this process rather than entering the accumulator again.
+    assert sum(item.input_tokens for item in manager.accounting_components()) == 7
+
+
+@pytest.mark.asyncio
 async def test_legacy_duplicate_snapshot_keeps_newest_and_all_aliases() -> None:
     manager = AsyncJobManager()
     manager.restore(
