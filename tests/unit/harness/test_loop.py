@@ -2033,6 +2033,67 @@ async def test_queue_timeout_cancels_and_awaits_its_pending_getter():
     assert queue.get_nowait() is item
 
 
+@pytest.mark.asyncio
+async def test_caller_cancellation_leaves_a_dequeued_item_in_the_queue():
+    """A cancelled caller must not consume an item and drop it.
+
+    The helper's whole purpose is that an item it takes off the queue is either
+    returned or put back. The first version held that only for the TIMEOUT
+    path: its cleanup cancelled and joined both contestants unconditionally, so
+    a caller cancelled in the same turn a delivery landed discarded the item the
+    getter had already dequeued. That is a silent divergence from the
+    ``wait_for`` this replaced, which never touches an already-completed getter
+    and so leaves the item in the queue (R1-1, agent review round 1).
+
+    Unreachable as damage from today's sole caller — the abort drain is already
+    unwinding and abandons the queue — but the divergence is exactly the class
+    of bug this helper exists to prevent, so the invariant gets a test rather
+    than an argument about reachability.
+
+    Deterministic, not probabilistic: the loop below advances the event loop one
+    turn at a time and cancels only once the getter has provably dequeued the
+    item (``queue.empty()``), which is the precise state the old cleanup
+    mishandled. Against the pre-fix helper this fails 200/200; after, 200/200
+    preserve the item.
+    """
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    item = object()
+    current = asyncio.current_task()
+    tasks_before = {task for task in asyncio.all_tasks() if task is not current}
+
+    # A timeout far past any scheduling jitter: the timer must never be the
+    # reason this call ends, or the test would prove the already-covered path.
+    caller = asyncio.create_task(_get_before_timeout(queue, timeout=30))
+    await asyncio.sleep(0)  # Let the helper create and register its contestants.
+    await asyncio.sleep(0)
+    queue.put_nowait(item)
+
+    # Spin until the getter has taken the item but the caller has not yet
+    # resumed to receive it. Bounded so a helper that never dequeues fails here
+    # rather than hanging.
+    for _ in range(50):
+        if queue.empty():
+            break
+        await asyncio.sleep(0)
+    else:  # pragma: no cover - a helper that never dequeues is already broken
+        pytest.fail("the getter never dequeued the item")
+    assert not caller.done(), "caller resumed before it could be cancelled mid-delivery"
+
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    # The item is back, and it is THE item: a reclaim that put back something
+    # else would satisfy a bare length check.
+    assert queue.qsize() == 1
+    assert queue.get_nowait() is item
+
+    # And the reclaim did not come at the cost of the property the timeout path
+    # already had: no contestant survives this call.
+    tasks_after = {task for task in asyncio.all_tasks() if task is not current}
+    assert tasks_after == tasks_before
+
+
 # ---------------------------------------------------------------------------
 # Refusal terminal: the model said no, and the run must end saying WHY
 # ---------------------------------------------------------------------------

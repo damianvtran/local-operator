@@ -175,26 +175,76 @@ async def _get_before_timeout(queue: asyncio.Queue[_QueueItemT], timeout: float)
     final queue flush. Racing explicit tasks lets delivery win every tie; if the
     timer wins alone, the getter is cancelled and joined before control returns,
     so it cannot consume a later item in the background.
+
+    THE INVARIANT, on every exit path including the caller being cancelled: an
+    item this call took off the queue is either returned to the caller or put
+    back. Nothing is consumed and dropped. The first version of this helper held
+    only the timeout half of that promise, which made it a silent behavioural
+    divergence from the ``wait_for`` it replaced — ``wait_for`` never touches an
+    already-completed getter, so a caller cancelled in the delivery turn left
+    the item in the queue, while this helper's cleanup discarded it (R1-1, agent
+    review round 1). In a helper whose entire reason to exist is event loss at a
+    cancellation boundary, only the full invariant is worth stating.
+
+    A reclaimed item returns at the TAIL. The promise is that it is still in the
+    queue for the next reader, not that FIFO order survives a cancelled read;
+    the abort drain that calls this abandons the queue on that path anyway.
     """
     getter = asyncio.create_task(queue.get())
     timer = asyncio.create_task(asyncio.sleep(timeout))
+
+    def reclaim() -> None:
+        """Hand back an item the getter dequeued that no caller will receive.
+
+        A completed, uncancelled getter is the ONLY shape that can strand an
+        item: ``Queue.get`` removes nothing until its task has run to
+        completion, and a getter cancelled while still suspended re-wakes the
+        next waiter on its way out, so the item never left the queue.
+        """
+        if getter.done() and not getter.cancelled() and getter.exception() is None:
+            queue.put_nowait(getter.result())
+
+    # Decided INSIDE the try, because the cleanup below runs before any return
+    # and has to know whether a dequeued item is still on its way to the caller
+    # or has been stranded. Computing it after the fact would reclaim the item
+    # on the success path too, handing the caller a copy that is also back in
+    # the queue. ``not cancelled`` rather than a result check so a getter that
+    # somehow failed re-raises its own exception below, as ``wait_for`` did.
+    delivered = False
     try:
         await asyncio.wait({getter, timer}, return_when=asyncio.FIRST_COMPLETED)
-        if getter.done():
-            return getter.result()
-        getter.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await getter
-        raise TimeoutError
+        delivered = getter.done() and not getter.cancelled()
     finally:
-        # Caller cancellation must not leave either contestant alive: a leaked
-        # getter could silently consume an event after this drain has unwound.
+        # Stop both contestants SYNCHRONOUSLY, before any await in this block.
+        # A join is a suspension point, so a contestant still running while we
+        # are parked in one could take a further item off the queue.
         for task in (getter, timer):
             if not task.done():
                 task.cancel()
-        for task in (getter, timer):
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        # A caller cancelled during ``wait`` lands here with ``delivered``
+        # still False and the getter possibly already holding an item nobody
+        # will receive. Hand it back before the joins, since a join is also
+        # where a pending cancellation gets delivered and the rest of this
+        # block skipped. On the timeout path the getter is still suspended and
+        # holds nothing, so ``reclaim`` is a no-op.
+        if not delivered:
+            reclaim()
+        try:
+            for task in (getter, timer):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        except BaseException:
+            # Cancelled DURING the join, after the success path below was
+            # already committed to returning this item. The joins are the only
+            # awaits between taking the item and the caller receiving it, so
+            # this is the last window in which the item can be stranded.
+            if delivered:
+                reclaim()
+            raise
+
+    if delivered:
+        return getter.result()
+    raise TimeoutError
 
 
 def _consume_claim(claimed: Counter[str], call_id: str) -> bool:
