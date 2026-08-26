@@ -990,6 +990,12 @@ async def _build_child_session(
             handled = mcp.resolve(url)
             if handled is not None:
                 return handled
+        # The parent's resolver also ends in its MCP resolver. Falling through
+        # for a restricted child would therefore bypass the child's capability
+        # boundary and activate schemas in the parent inventory. Reject only
+        # this namespace here so guide:// and skill:// remain inherited.
+        if not mcp_allowed and url.startswith("mcp://"):
+            return None
         return parent_resolver(url) if parent_resolver is not None else None
 
     # The child context carries no subagent_launcher, jobs or wake scheduler,

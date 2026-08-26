@@ -32,35 +32,58 @@ MCP_ROUTE_THRESHOLD = 0.25
 # These routing signals are release-owned capability facts, not server metadata.
 # Config files and remote servers are both untrusted prompt inputs, so neither
 # may supply text that influences semantic selection or system instructions.
-_CAPABILITY_HINTS: dict[str, tuple[str, str]] = {
+_CAPABILITY_HINTS: dict[str, str] = {
+    "slack": "Team messages, channels, threads, and workplace conversations.",
+    "notion": "Workspace pages, notes, databases, and knowledge.",
+    "linear": "Issues, projects, product planning, and roadmaps.",
+    "google-workspace": "Email, calendars, meetings, Drive files, and documents.",
+    "datadog": "Monitoring, logs, metrics, traces, alerts, and incidents.",
+    "hubspot": "CRM contacts, companies, deals, marketing, and sales.",
+    "cloudflare": "DNS, domains, edge services, Workers, tunnels, and security.",
+}
+
+# Several short intent-shaped examples avoid the dilution of one vocabulary
+# catalogue: the local embedder is lexical, so "meetings today" cannot match a
+# long service summary reliably. These examples remain harness-owned, bounded,
+# and offline; adding recall never admits config or remote-authored prose.
+_ROUTING_EXAMPLES: dict[str, tuple[str, ...]] = {
     "slack": (
-        "Slack workplace team customer support communication post updates messages "
-        "conversations channels threads replies coworkers",
-        "Team messages, channels, threads, and workplace conversations.",
+        "send a team chat message",
+        "review the team chat",
+        "post in a customer support channel",
+        "read a coworker conversation",
     ),
     "notion": (
-        "Notion workspace document page note database knowledge wiki project page notes",
-        "Workspace pages, notes, databases, and knowledge.",
+        "search the company wiki",
+        "find a workspace note",
+        "open a knowledge base document",
     ),
     "linear": (
-        "Linear issue tracking ticket issue projects product planning bug roadmap sprint",
-        "Issues, projects, product planning, and roadmaps.",
+        "check the sprint backlog",
+        "update a product ticket",
+        "find a bug in the roadmap",
     ),
     "google-workspace": (
-        "Google Workspace Gmail email calendar meetings Drive documents " "spreadsheets",
-        "Email, calendars, meetings, Drive files, and documents.",
+        "send someone an email with Gmail",
+        "what meetings are on my calendar today",
+        "find a Drive document",
+        "open a spreadsheet",
     ),
     "datadog": (
-        "Datadog monitoring observability logs metrics traces alerts incidents dashboards",
-        "Monitoring, logs, metrics, traces, alerts, and incidents.",
+        "show recent traces",
+        "inspect service metrics",
+        "check monitoring alerts",
+        "search production logs",
     ),
     "hubspot": (
-        "HubSpot customer relationship management CRM contacts companies deals marketing sales",
-        "CRM contacts, companies, deals, marketing, and sales.",
+        "find the deal",
+        "look up a customer contact in the CRM",
+        "update a sales company record",
     ),
     "cloudflare": (
-        "Cloudflare DNS domains zones edge network workers pages tunnels security",
-        "DNS, domains, edge services, Workers, tunnels, and security.",
+        "change the DNS record",
+        "manage a domain zone",
+        "inspect an edge worker or tunnel",
     ),
 }
 
@@ -69,12 +92,13 @@ _CAPABILITY_HINTS: dict[str, tuple[str, str]] = {
 # operator explicitly names the configured server, which always wins.
 _TECHNICAL_CONTEXT_RE = re.compile(
     r"\b(?:websocket|socket|protocol|implementation|implement|refactor|class|function|"
-    r"unit tests?|code|api endpoint|database schema)\b",
+    r"unit tests?|code|api endpoint|database schema|debug|rendering|parse|log files?)\b",
     re.IGNORECASE,
 )
 _ROUTER = LocalEmbedder()
 _HINT_VECTORS = {
-    name: _ROUTER.embed_one(semantic) for name, (semantic, _line) in _CAPABILITY_HINTS.items()
+    name: tuple(_ROUTER.embed_one(example) for example in examples)
+    for name, examples in _ROUTING_EXAMPLES.items()
 }
 MAX_INDEX_SERVERS = 500
 MAX_SERVER_TOOLS = 500
@@ -143,6 +167,11 @@ def _explicit_name(query: str, names: Sequence[str]) -> str | None:
     """Find an explicitly typed configured name with token-safe boundaries."""
     folded = query.casefold()
     for name in sorted(names, key=lambda item: (-len(item), item.casefold(), item)):
+        # Notion is also an ordinary noun. This narrow grammatical use is not a
+        # service invocation; every other exact safe name, and service-shaped
+        # uses such as "search Notion", continue to bypass semantic scoring.
+        if name.casefold() == "notion" and re.search(r"\bnotion\s+of\b", folded):
+            continue
         escaped = re.escape(name.casefold())
         if re.search(rf"(?<![A-Za-z0-9_.:-]){escaped}(?![A-Za-z0-9_.:-])", folded):
             return name
@@ -172,9 +201,9 @@ def select_mcp_suggestions(names: Sequence[str], query: str) -> list[str]:
     candidates: list[tuple[float, str]] = []
     for name in safe:
         canonical = name.casefold()
-        vector = _HINT_VECTORS.get(canonical)
-        if vector is not None:
-            candidates.append((_cosine(query_vector, vector), name))
+        vectors = _HINT_VECTORS.get(canonical)
+        if vectors is not None:
+            candidates.append((max(_cosine(query_vector, vector) for vector in vectors), name))
     candidates.sort(key=lambda item: (-item[0], item[1].casefold(), item[1]))
     if not candidates or candidates[0][0] < MCP_ROUTE_THRESHOLD:
         return []
@@ -193,7 +222,7 @@ def render_mcp_suggestions(names: Sequence[str], query: str) -> str:
         return "<mcps>Read `mcp://` to discover configured MCP servers.</mcps>"
 
     name = selected[0]
-    capability = _CAPABILITY_HINTS.get(name.casefold(), ("", "Configured MCP server."))[1]
+    capability = _CAPABILITY_HINTS.get(name.casefold(), "Configured MCP server.")
     # Top-k=1 bounds both context cost and the authority granted to suggestions;
     # URLs percent-encode canonical validated names even though today's allowed
     # alphabet is URL-safe, preserving resolver compatibility if it expands.

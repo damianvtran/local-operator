@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from local_operator.harness.types import AgentTool, ToolResult
 from local_operator.mcp.resources import (
     MAX_PROMPT_SERVERS,
@@ -75,35 +77,44 @@ COMMON_NAMES = [
 ]
 
 
-def test_explicit_and_conversational_slack_queries_route() -> None:
-    assert select_mcp_suggestions(COMMON_NAMES, "review Sal’s message in Slack") == ["slack"]
-    assert select_mcp_suggestions(
-        COMMON_NAMES, "what did the team say in the customer channel conversation?"
-    ) == ["slack"]
-    assert select_mcp_suggestions(
-        COMMON_NAMES, "post an update in the customer support channel"
-    ) == ["slack"]
+POSITIVE_ROUTING_CASES = [
+    ("slack", "review Sal’s message in the minerva-koho Slack channel"),
+    ("slack", "what did the team say in the customer channel conversation?"),
+    ("slack", "post an update in the customer support channel"),
+    ("slack", "review the team chat"),
+    ("notion", "search the company wiki"),
+    ("notion", "find our workspace notes"),
+    ("linear", "check the sprint backlog"),
+    ("linear", "update the product ticket"),
+    ("google-workspace", "send Damian an email"),
+    ("google-workspace", "what meetings do I have today?"),
+    ("datadog", "show recent traces"),
+    ("datadog", "check the service metrics"),
+    ("hubspot", "find the deal"),
+    ("hubspot", "look up the customer contact"),
+    ("cloudflare", "change the DNS record"),
+    ("cloudflare", "manage the domain zone"),
+]
+
+NEGATIVE_ROUTING_CASES = [
+    "refactor the parser and add unit tests",
+    "implement a WebSocket channel for technical messages",
+    "search the application log files",
+    "debug trace rendering in the terminal",
+    "explain the notion of eventual consistency",
+    "fix issue pagination in the API client",
+    "change page rendering in the browser",
+]
 
 
-def test_common_service_families_route_locally() -> None:
-    queries = {
-        "notion": "open the project page notes",
-        "linear": "find the project issue and update its status",
-        "google-workspace": "email the meeting attendees",
-        "datadog": "look up our monitoring alert logs",
-        "hubspot": "find the CRM contact and sales deal",
-        "cloudflare": "update DNS for the domain zone",
-    }
-    for expected, query in queries.items():
-        assert select_mcp_suggestions(COMMON_NAMES, query) == [expected]
+@pytest.mark.parametrize(("expected", "query"), POSITIVE_ROUTING_CASES)
+def test_representative_service_intents_route(expected: str, query: str) -> None:
+    assert select_mcp_suggestions(COMMON_NAMES, query) == [expected]
 
 
-def test_unrelated_code_and_technical_channels_do_not_route() -> None:
-    assert select_mcp_suggestions(COMMON_NAMES, "refactor the parser and add unit tests") == []
-    assert (
-        select_mcp_suggestions(COMMON_NAMES, "implement a WebSocket channel for technical messages")
-        == []
-    )
+@pytest.mark.parametrize("query", NEGATIVE_ROUTING_CASES)
+def test_technical_and_common_noun_intents_do_not_route(query: str) -> None:
+    assert select_mcp_suggestions(COMMON_NAMES, query) == []
 
 
 def test_exact_custom_server_name_routes_without_a_semantic_hint() -> None:

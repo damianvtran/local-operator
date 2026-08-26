@@ -1179,6 +1179,55 @@ async def test_grandchild_cannot_fan_out_but_polls_its_own_background_bash(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_restricted_child_cannot_fall_through_to_parent_mcp(tmp_path, monkeypatch):
+    """A restricted role keeps guide/skill resolution but cannot list or
+    activate MCP through the parent's combined resolver chain."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+    from local_operator.mcp.resources import make_mcp_resolver
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager = FakeMcpManager({"slack": ["post_message"]})
+    parent_activations: list[tuple[str, str]] = []
+
+    def parent_resolver(url: str) -> str | None:
+        if url == "guide://safe":
+            return "safe guide"
+        return make_mcp_resolver(
+            manager, lambda server, tool: parent_activations.append((server, tool))
+        )(url)
+
+    parent = make_session(
+        tmp_path,
+        OneShotStream(),
+        skill_resolver=parent_resolver,
+    )
+    attach_manager(parent, manager)
+    profile = AgentProfile(
+        name="reviewer",
+        description="reviews without MCP access",
+        tools=("read", "grep"),
+    )
+    child = await subagent_mod._build_child_session(
+        label="review",
+        prompt="review the Slack integration",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-restricted",
+        agent="reviewer",
+        profile=profile,
+    )
+
+    assert resolve(child, "guide://safe") == "safe guide"
+    assert resolve(child, "mcp://slack") is None
+    assert resolve(child, "mcp://slack/post_message") is None
+    assert parent_activations == []
+    assert all(not tool.name.startswith("mcp__") for tool in child._tools)
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatch):
     """The scout tier: tool inventory filtered to lookups (allowlist, not
     tier — no bash, no eval-style execution, no MCP calls, no delegation),
