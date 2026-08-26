@@ -82,18 +82,28 @@ POSITIVE_ROUTING_CASES = [
     ("slack", "what did the team say in the customer channel conversation?"),
     ("slack", "post an update in the customer support channel"),
     ("slack", "review the team chat"),
+    ("slack", "reply to that thread"),
     ("notion", "search the company wiki"),
     ("notion", "find our workspace notes"),
+    ("notion", "find the onboarding page"),
+    ("notion", "update my meeting notes"),
     ("linear", "check the sprint backlog"),
     ("linear", "update the product ticket"),
+    ("linear", "move this issue to done"),
     ("google-workspace", "send Damian an email"),
     ("google-workspace", "what meetings do I have today?"),
+    ("google-workspace", "schedule a meeting tomorrow"),
     ("datadog", "show recent traces"),
     ("datadog", "check the service metrics"),
+    ("datadog", "investigate the latency metrics"),
+    ("datadog", "open the observability dashboard"),
     ("hubspot", "find the deal"),
     ("hubspot", "look up the customer contact"),
+    ("hubspot", "show the Acme account in the CRM"),
     ("cloudflare", "change the DNS record"),
     ("cloudflare", "manage the domain zone"),
+    ("cloudflare", "update the example.com DNS"),
+    ("cloudflare", "inspect the domain settings"),
 ]
 
 NEGATIVE_ROUTING_CASES = [
@@ -104,6 +114,9 @@ NEGATIVE_ROUTING_CASES = [
     "explain the notion of eventual consistency",
     "fix issue pagination in the API client",
     "change page rendering in the browser",
+    "write a Slack clone",
+    "add Slack-compatible message classes",
+    "parse the custom.server response in code",
 ]
 
 
@@ -117,10 +130,16 @@ def test_technical_and_common_noun_intents_do_not_route(query: str) -> None:
     assert select_mcp_suggestions(COMMON_NAMES, query) == []
 
 
-def test_exact_custom_server_name_routes_without_a_semantic_hint() -> None:
-    assert select_mcp_suggestions(["acme:records_v2"], "check acme:records_v2 today") == [
-        "acme:records_v2"
-    ]
+@pytest.mark.parametrize(
+    "query",
+    ["inspect mcp://custom.server", "use custom.server MCP"],
+)
+def test_explicit_custom_server_use_routes_without_a_semantic_hint(query: str) -> None:
+    assert select_mcp_suggestions(["custom.server"], query) == ["custom.server"]
+
+
+def test_incidental_custom_server_code_mention_does_not_route() -> None:
+    assert select_mcp_suggestions(["custom.server"], "parse custom.server in code") == []
 
 
 def test_prompt_rejects_malicious_names_and_remote_or_config_text() -> None:

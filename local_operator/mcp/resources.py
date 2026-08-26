@@ -42,64 +42,105 @@ _CAPABILITY_HINTS: dict[str, str] = {
     "cloudflare": "DNS, domains, edge services, Workers, tunnels, and security.",
 }
 
-# Several short intent-shaped examples avoid the dilution of one vocabulary
-# catalogue: the local embedder is lexical, so "meetings today" cannot match a
-# long service summary reliably. These examples remain harness-owned, bounded,
-# and offline; adding recall never admits config or remote-authored prose.
-_ROUTING_EXAMPLES: dict[str, tuple[str, ...]] = {
-    "slack": (
-        "send a team chat message",
-        "review the team chat",
-        "post in a customer support channel",
-        "read a coworker conversation",
+# Intent terms are release-owned routing policy, not examples copied from user
+# prompts. Requiring an operation/object combination gives short paraphrases
+# deterministic recall without lowering one cosine threshold until unrelated
+# services collide. The tuples stay small enough to audit as prompt authority.
+_OPERATION_TERMS = frozenset(
+    {
+        "change",
+        "check",
+        "find",
+        "inspect",
+        "investigate",
+        "look",
+        "manage",
+        "move",
+        "open",
+        "post",
+        "read",
+        "reply",
+        "review",
+        "schedule",
+        "search",
+        "send",
+        "show",
+        "update",
+        "what",
+    }
+)
+_SERVICE_OBJECTS: dict[str, frozenset[str]] = {
+    "slack": frozenset({"channel", "chat", "conversation", "message", "thread"}),
+    "notion": frozenset(
+        {"database", "knowledge", "notes", "onboarding", "page", "wiki", "workspace"}
     ),
-    "notion": (
-        "search the company wiki",
-        "find a workspace note",
-        "open a knowledge base document",
+    "linear": frozenset({"backlog", "bug", "done", "issue", "roadmap", "sprint", "ticket"}),
+    "google-workspace": frozenset(
+        {"calendar", "drive", "email", "gmail", "meeting", "meetings", "spreadsheet"}
     ),
-    "linear": (
-        "check the sprint backlog",
-        "update a product ticket",
-        "find a bug in the roadmap",
+    "datadog": frozenset(
+        {
+            "alert",
+            "dashboard",
+            "latency",
+            "metric",
+            "metrics",
+            "monitoring",
+            "observability",
+            "trace",
+            "traces",
+        }
     ),
-    "google-workspace": (
-        "send someone an email with Gmail",
-        "what meetings are on my calendar today",
-        "find a Drive document",
-        "open a spreadsheet",
-    ),
-    "datadog": (
-        "show recent traces",
-        "inspect service metrics",
-        "check monitoring alerts",
-        "search production logs",
-    ),
-    "hubspot": (
-        "find the deal",
-        "look up a customer contact in the CRM",
-        "update a sales company record",
-    ),
-    "cloudflare": (
-        "change the DNS record",
-        "manage a domain zone",
-        "inspect an edge worker or tunnel",
-    ),
+    "hubspot": frozenset({"account", "company", "contact", "crm", "customer", "deal", "sales"}),
+    "cloudflare": frozenset({"dns", "domain", "edge", "settings", "tunnel", "worker", "zone"}),
+}
+# Service-specific nouns outrank generic cross-service nouns such as customer,
+# company, and dashboard. The weights resolve known collisions explicitly
+# instead of depending on alphabetical order or an opaque embedding score.
+_OBJECT_WEIGHTS = {
+    "channel": 3,
+    "chat": 3,
+    "conversation": 2,
+    "thread": 3,
+    "wiki": 3,
+    "onboarding": 2,
+    "page": 2,
+    "backlog": 3,
+    "issue": 2,
+    "sprint": 2,
+    "calendar": 3,
+    "email": 3,
+    "gmail": 3,
+    "meeting": 2,
+    "meetings": 2,
+    "latency": 2,
+    "metrics": 2,
+    "observability": 3,
+    "trace": 2,
+    "traces": 2,
+    "crm": 3,
+    "deal": 2,
+    "dns": 3,
+    "domain": 2,
+    "zone": 2,
 }
 
-# Lexical implementation contexts reuse words such as channel, message, page,
-# and issue heavily. They are negative evidence for service intent unless the
-# operator explicitly names the configured server, which always wins.
+# Product-building contexts outrank a coincidental service name. A clear service
+# operation ("read Slack messages") may override this; "write a Slack clone"
+# may not. This guard runs before both lexical and semantic routing.
 _TECHNICAL_CONTEXT_RE = re.compile(
-    r"\b(?:websocket|socket|protocol|implementation|implement|refactor|class|function|"
+    r"\b(?:clone|websocket|socket|protocol|implementation|implement|refactor|class|function|"
     r"unit tests?|code|api endpoint|database schema|debug|rendering|parse|log files?)\b",
     re.IGNORECASE,
 )
+_WORD_RE = re.compile(r"[a-z0-9]+")
 _ROUTER = LocalEmbedder()
-_HINT_VECTORS = {
-    name: tuple(_ROUTER.embed_one(example) for example in examples)
-    for name, examples in _ROUTING_EXAMPLES.items()
+_SEMANTIC_VECTORS = {
+    name: _ROUTER.embed_one(f"{name} {capability}")
+    for name, capability in _CAPABILITY_HINTS.items()
 }
+_SEMANTIC_THRESHOLD = 0.42
+_SEMANTIC_MARGIN = 0.08
 MAX_INDEX_SERVERS = 500
 MAX_SERVER_TOOLS = 500
 MAX_TOOL_DESCRIPTION_CHARS = 240
@@ -163,17 +204,29 @@ def _safe_prompt_names(names: Sequence[str]) -> list[str]:
     return sorted({name for name in names if SERVER_NAME_RE.fullmatch(name)})
 
 
-def _explicit_name(query: str, names: Sequence[str]) -> str | None:
-    """Find an explicitly typed configured name with token-safe boundaries."""
+def _explicit_name(query: str, names: Sequence[str], *, technical: bool) -> str | None:
+    """Find deliberate configured-server use, excluding incidental code mentions."""
     folded = query.casefold()
+    words = frozenset(_WORD_RE.findall(folded))
+    clear_operation = bool(words & _OPERATION_TERMS)
     for name in sorted(names, key=lambda item: (-len(item), item.casefold(), item)):
-        # Notion is also an ordinary noun. This narrow grammatical use is not a
-        # service invocation; every other exact safe name, and service-shaped
-        # uses such as "search Notion", continue to bypass semantic scoring.
-        if name.casefold() == "notion" and re.search(r"\bnotion\s+of\b", folded):
+        canonical = name.casefold()
+        escaped = re.escape(canonical)
+        present = re.search(rf"(?<![A-Za-z0-9_.:-]){escaped}(?![A-Za-z0-9_.:-])", folded)
+        if not present:
             continue
-        escaped = re.escape(name.casefold())
-        if re.search(rf"(?<![A-Za-z0-9_.:-]){escaped}(?![A-Za-z0-9_.:-])", folded):
+        if canonical == "notion" and re.search(r"\bnotion\s+of\b", folded):
+            continue
+        if canonical in _CAPABILITY_HINTS:
+            if technical and not clear_operation:
+                continue
+            return name
+        # Custom names have no trusted capability terms. Require URI syntax or
+        # an explicit MCP construction instead of treating a code mention as
+        # authority to advertise and activate that server.
+        if re.search(rf"mcp://{escaped}(?:\b|/|$)", folded) or re.search(
+            rf"\b(?:use|inspect|read)\s+{escaped}\s+mcp\b", folded
+        ):
             return name
     return None
 
@@ -191,23 +244,55 @@ def select_mcp_suggestions(names: Sequence[str], query: str) -> list[str]:
     configuration into structural system-prompt authorship.
     """
     safe = _safe_prompt_names(names)
-    explicit = _explicit_name(query, safe)
+    query = query.strip()
+    if not query:
+        return []
+    technical = bool(_TECHNICAL_CONTEXT_RE.search(query))
+    explicit = _explicit_name(query, safe, technical=technical)
     if explicit is not None:
         return [explicit]
-    if not query.strip() or _TECHNICAL_CONTEXT_RE.search(query):
+    if technical:
         return []
 
+    words = frozenset(_WORD_RE.findall(query.casefold()))
+    operations = words & _OPERATION_TERMS
+    lexical: list[tuple[int, str]] = []
+    if operations:
+        for name in safe:
+            objects = words & _SERVICE_OBJECTS.get(name.casefold(), frozenset())
+            if not objects:
+                continue
+            score = sum(_OBJECT_WEIGHTS.get(term, 1) for term in objects)
+            # "meeting notes" is document work, while scheduling/Calendar owns
+            # meetings otherwise. This explicit collision rule is deterministic
+            # and auditable rather than an accidental cosine winner.
+            if name.casefold() == "notion" and {"meeting", "notes"} <= words:
+                score += 3
+            if name.casefold() == "google-workspace" and "meeting" in objects:
+                score += 3 if "schedule" in operations else 0
+            lexical.append((score, name))
+    if lexical:
+        lexical.sort(key=lambda item: (-item[0], item[1].casefold(), item[1]))
+        return [lexical[0][1]]
+
+    # Conservative fallback only: high absolute confidence plus a winner margin.
+    # This retains local semantic help for longer phrasings without deciding
+    # close cross-service collisions or weakening deterministic negatives.
     query_vector = _ROUTER.embed_one(query)
-    candidates: list[tuple[float, str]] = []
-    for name in safe:
-        canonical = name.casefold()
-        vectors = _HINT_VECTORS.get(canonical)
-        if vectors is not None:
-            candidates.append((max(_cosine(query_vector, vector) for vector in vectors), name))
-    candidates.sort(key=lambda item: (-item[0], item[1].casefold(), item[1]))
-    if not candidates or candidates[0][0] < MCP_ROUTE_THRESHOLD:
+    semantic = sorted(
+        (
+            (_cosine(query_vector, vector), name)
+            for name in safe
+            if (vector := _SEMANTIC_VECTORS.get(name.casefold())) is not None
+        ),
+        key=lambda item: (-item[0], item[1].casefold(), item[1]),
+    )
+    if not semantic or semantic[0][0] < _SEMANTIC_THRESHOLD:
         return []
-    return [candidates[0][1]]
+    runner_up = semantic[1][0] if len(semantic) > 1 else 0.0
+    if semantic[0][0] - runner_up < _SEMANTIC_MARGIN:
+        return []
+    return [semantic[0][1]]
 
 
 def render_mcp_catalogue(manager: McpResourceManager, query: str = "") -> str:
