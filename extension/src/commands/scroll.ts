@@ -67,6 +67,11 @@ async function nodeObjectId(tabId: number, selector: string, epoch: number): Pro
     if (ref.epoch !== epoch) {
       throw new BridgeCommandError("element_not_found", "the page navigated since that snapshot");
     }
+    // Same constraint as input.ts nodeIdFor: pushNodesByBackendIdsToFrontend
+    // rejects with -32000 "Document needs to be requested first" unless this
+    // debugger session has requested the document. See input.ts for the full
+    // rationale (found live once #319 made refs reachable at all).
+    await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
     const pushed = await cdp<PushResult>(tabId, "DOM.pushNodesByBackendIdsToFrontend", {
       backendNodeIds: [ref.backendNodeId],
     });
