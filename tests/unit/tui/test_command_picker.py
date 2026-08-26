@@ -1372,7 +1372,16 @@ async def test_clicking_a_login_row_runs_it() -> None:
         app.set_editor_text("/login ")
         await pilot.pause()
         await pilot.click(CommandPicker, offset=(4, 1))
-        await pilot.pause()
+        # Wait for the SUBMISSION, not for one tick. A click travels through the
+        # picker's row handler and is submitted by a posted message, so the
+        # single ``pause()`` this replaced was a bet on that landing within one
+        # idle tick — a bet the census watched lose on a contended xdist worker
+        # (``assert [] == ['/login alibaba']``). The ceiling is a deadlock
+        # guard: a click that never runs the row still fails the assertion below.
+        for _ in range(200):
+            if app.submissions:
+                break
+            await pilot.pause()
         assert app.submissions == ["/login alibaba"]
 
 

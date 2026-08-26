@@ -190,6 +190,28 @@ async def _settled_rows(pilot: Any, app: OperatorApp, ceiling: int = 200) -> lis
     return previous
 
 
+async def _wait_for_row(pilot: Any, app: OperatorApp, needle: str, ceiling: int = 200) -> None:
+    """Wait until ``needle`` appears in the painted frame.
+
+    A settled approval future does NOT mean its receipt is on screen. The card
+    resolves its own future first and the transcript row is written by a later
+    frame, so a test that presses a key, awaits the future and then reads
+    ``rows(app)`` is asserting one frame too early. It usually wins that race
+    and loses it under load: the census caught exactly this as
+    ``assert any("denied" in row ...)`` failing on a contended xdist worker,
+    where the sibling ``y`` test survived only because its focus poll happened
+    to spend the extra ticks.
+
+    The ceiling is a deadlock guard rather than a timing assumption, so a slow
+    machine costs nothing while a receipt that never paints still fails.
+    """
+    for _ in range(ceiling):
+        if any(needle in row for row in rows(app)):
+            return
+        await pilot.pause()
+    raise AssertionError(f"{needle!r} never appeared in the painted frame")
+
+
 async def _boot(pilot: Any, app: OperatorApp) -> None:
     """Wait for the session to be ADOPTED, rather than for a fixed duration.
 
@@ -374,12 +396,18 @@ async def test_n_denies_one_tool_and_lets_the_turn_continue() -> None:
         ask = await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(ask("write", "write: /etc/hosts"))
-        await pilot.pause()
+        # Same condition wait the ``y`` sibling makes: mounting the card and
+        # moving focus to it is a mount round trip, so a single pause is a bet
+        # on that costing one frame. Pressing early types into the composer.
+        for _ in range(100):
+            if isinstance(app.screen.focused, ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
 
         await pilot.press("n")
         assert await asyncio.wait_for(pending, 2) is False
         assert session.aborts == []  # only the tool was refused
-        assert any("denied" in row for row in rows(app))
+        await _wait_for_row(pilot, app, "denied")
 
 
 @pytest.mark.asyncio

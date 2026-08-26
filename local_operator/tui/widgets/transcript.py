@@ -2006,18 +2006,37 @@ class TranscriptView(ScrollableContainer):
         """Mount older blocks above the viewport without moving its content.
 
         History paging is the only prepend path. Textual cannot preserve the
-        visual anchor automatically because mounting changes ``virtual_size``
-        before the next layout pass, so remember the old virtual height and add
-        exactly its growth to ``scroll_y`` after refresh. The optional offset is
-        captured by the caller before asynchronous I/O starts; using the later
-        value would apply the prepend to wherever the user moved meanwhile.
+        visual anchor automatically, so the anchor is restored explicitly here.
+        The optional offset is captured by the caller before asynchronous I/O
+        starts; using the later value would apply the prepend to wherever the
+        user moved meanwhile.
+
+        The anchor is expressed as a BLOCK and that block's offset from the top
+        of the viewport, not as ``virtual_size`` growth. Growth is the obvious
+        formulation and it is subtly wrong: the batch is mounted with its gaps
+        decided while its blocks were still unmounted, where
+        ``spans_multiple_rows()`` has no width to measure against and falls back
+        to 80 columns, and :meth:`_settle_gaps` then re-decides them against real
+        widths. Re-deciding rewrites margin classes, which changes the heights of
+        the blocks ABOVE the anchor, which changes ``virtual_size`` on a LATER
+        layout pass than the one that restored the scroll. Any offset derived
+        from a height sampled before that pass is stale by exactly the rows the
+        settle reclaimed, so the reader's row came to rest up to 2 rows off
+        (measured on a 140-message history page: 142 rows pre-settle, 140 after).
+        A block's own ``virtual_region`` is re-derived by the same layout pass
+        that resizes it, so reading the position back afterwards is correct
+        whichever pass wins the race.
         """
         additions = list(blocks)
         if not additions:
             return
-        old_height = self.virtual_size.height
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
         before = self._blocks[0] if self._blocks else None
+        # The row the reader is looking at, and where it sits in the viewport.
+        # Prepending never moves this block within the ledger, so it survives
+        # the mount and every gap re-decision above it.
+        anchor_block = before
+        anchor_gap = (before.virtual_region.y - old_scroll) if before is not None else 0.0
         if before is None:
             self.mount(*additions)
         else:
@@ -2025,13 +2044,21 @@ class TranscriptView(ScrollableContainer):
         self._blocks[0:0] = additions
         self._name_col_cache = None
 
-        def restore_anchor() -> None:
-            growth = max(0, self.virtual_size.height - old_height)
-            self.scroll_to(y=max(0, old_scroll + growth), animate=False)
+        def settle_then_restore() -> None:
+            # Settle FIRST so the heights above the anchor are final, then let
+            # the layout pass that applied them publish new positions before the
+            # anchor is read back.
             self._settle_gaps(additions)
             self._remeasure_empty_state()
 
-        self.call_after_refresh(restore_anchor)
+            def restore_anchor() -> None:
+                if anchor_block is None or anchor_block.parent is not self:
+                    return
+                self.scroll_to(y=max(0, anchor_block.virtual_region.y - anchor_gap), animate=False)
+
+            self.call_after_refresh(restore_anchor)
+
+        self.call_after_refresh(settle_then_restore)
 
     def append_block(self, block: TranscriptBlock) -> None:
         """Mount ``block`` at the bottom.

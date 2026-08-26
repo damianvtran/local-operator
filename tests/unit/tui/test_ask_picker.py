@@ -1343,6 +1343,18 @@ async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> N
 
     Reachable by one ordinary mouse click, since a single-select click both
     answers and advances.
+
+    The property under test is the ``still_aimed_at`` guard in
+    ``_commit_held_answer_key``, NOT the length of the hold window — so the
+    window is stretched here and the commit is fired by hand at the point the
+    test cares about. Racing the real 180 ms timer was the flake: under CPU
+    contention the timer fired BEFORE ``action_accept()`` advanced the card,
+    the key committed while still legitimately aimed at question 1, and the
+    test failed reporting the very bug it exists to catch
+    (``{'drop_table': ['Keep it'], 'rollout': ['Canary']}``) when nothing was
+    wrong. Stretching the hold makes "the key is still parked when the card
+    advances" a fact rather than a bet; calling the timer's own callback
+    afterwards exercises the identical guard the real timer would reach.
     """
     from local_operator.tui.widgets.editor import Editor
 
@@ -1364,27 +1376,37 @@ async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> N
         card = app._ask_screen
         assert card is not None
 
-        # The fixed pauses in THIS test are deliberate and must not be converted
-        # to idle-waits. It probes a wall-clock ordering race: a key parked in the
-        # composer must not commit once the card has advanced past the question it
-        # was aimed at. The `pause(0.1)` after the click lets focus/routing settle
-        # so the press is held rather than dropped; `action_accept()` must run
-        # while the key is still parked (before the ~180 ms ANSWER_KEY_HOLD_S timer
-        # fires); and the trailing pump outlasts that window so any wrong commit
-        # would already have happened. An idle-wait cannot express "before a real
-        # timer fires" and made this test commit the stale key under CPU
-        # contention — the exact bug it exists to catch.
         await pilot.click(Editor)
-        await pilot.pause(0.1)
+        # Wait for the click's focus/routing to settle, so the press below is
+        # HELD by the composer rather than dropped, instead of betting a fixed
+        # 0.1s that it has.
+        for _ in range(100):
+            if isinstance(app.screen.focused, Editor):
+                break
+            await pilot.pause()
+
         await pilot.press("2")  # aimed at question 1: "Canary"
-        assert app._held_answer_key is not None, "the key was not held"
+        held = app._held_answer_key
+        assert held is not None, "the key was not held"
+        # Take the real timer out of the race entirely. Stopping it cannot mask
+        # a regression: the commit path is invoked explicitly below, so the
+        # guard still runs — it just runs at a moment the test controls.
+        held.timer.stop()
 
         # The card advances to question 2 while the key is still parked.
         card.focus()
-        await pilot.pause(0.02)
-        card.action_accept()
-        for _ in range(20):
-            await pilot.pause(0.03)
+        for _ in range(100):
+            if app._live_prompt() is card and card.question_index == 1:
+                break
+            if card.question_index == 0:
+                card.action_accept()
+            await pilot.pause()
+        assert card.question_index == 1, "the card never advanced to question 2"
+        assert app._held_answer_key is held, "the key was released before the advance"
+
+        # Now fire exactly what the expired hold would have called.
+        app._commit_held_answer_key()
+        await pilot.pause()
 
         # The stale key answered nothing: question 2 is still being asked.
         assert not asked.done(), "a parked key answered a question it was not aimed at"

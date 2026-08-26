@@ -1144,3 +1144,47 @@ async def test_the_splash_holds_completely_still_under_the_animation_gate() -> N
             await asyncio.sleep(0.5)
             await pilot.pause()
             assert _styled_rows(app) == before
+
+
+@pytest.mark.asyncio
+async def test_a_late_splash_resize_does_not_crash_a_torn_down_app() -> None:
+    """Quitting during boot must not raise out of the message pump.
+
+    The splash resizes asynchronously: ``WelcomeView._poll`` posts
+    ``BlockResized`` once the model label is known, and the model label lands
+    when the session factory resolves. A quit that beats the factory home
+    therefore leaves that message queued against a screen stack that is already
+    gone, and every boot-layout pass reaches ``self.screen``, which RAISES
+    ``ScreenStackError`` on an empty stack instead of returning ``None``.
+
+    Observed as a real crash on exit, from the pump rather than from anything
+    the user did: ``on_welcome_view_block_resized`` -> ``_sync_boot_layout`` ->
+    ``_sync_boot_card`` -> ``ScreenStackError: No screens on stack``.
+
+    Driven by emptying the stack and dispatching the handler exactly as the
+    pump would, because reproducing the wall-clock ordering by racing a real
+    quit against a real poll is the coin flip that hid the bug in the first
+    place. The state is what matters, and the state is "this message arrived
+    with no screens left".
+    """
+    app = _make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        screen = app.screen
+        card_up_before = screen.has_class(BOOT_CARD_CLASS)
+
+        # Exactly the teardown state: a BlockResized is in the pump's hand and
+        # the screen stack has already been emptied.
+        stack = app._screen_stacks[app._current_mode]
+        stack.clear()
+        assert not app.screen_stack, "the race under test needs an empty stack"
+
+        app.on_welcome_view_block_resized(WelcomeView.BlockResized())
+
+        # The guard skips the pass; it does not swallow a failure. Put the
+        # screen back and the identical message reconciles the layout as
+        # before, so what was added is a teardown check and not a mute.
+        stack.append(screen)
+        app.on_welcome_view_block_resized(WelcomeView.BlockResized())
+        assert app.screen.has_class(BOOT_CARD_CLASS) == card_up_before
