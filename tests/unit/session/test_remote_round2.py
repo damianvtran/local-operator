@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import (
+    AgentStartEvent,
     CustomMessage,
     ImageContent,
     Message,
@@ -584,6 +585,235 @@ async def test_prompt_during_recovery_still_queues_and_delivers(
             assert any(call[0] == "prompt" for call in handle.calls)
         finally:
             replacement.close()
+    finally:
+        if remote is not None:
+            await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_delivers_gap_delta_before_live_frames_buffered_mid_parse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MAJOR-1 (review round 4): durable gap rows paint ABOVE the in-flight turn.
+
+    The replacement owner is mid-turn and streaming; a live relay frame lands
+    during the threaded transcript parse. Before the fix the buffer became
+    [live frame…, delta] and ``_finish_sync`` front-inserted the seed, so
+    delivery order was seed, live frame, THEN the durable gap — the recovered
+    rows painted below the in-flight turn, which no cold boot of the same
+    transcript can look like. The delta must sit at the buffer's head
+    (positionally, never by timing) so delivered order is history_delta,
+    then the seeded in-flight turn, then the buffered live frame.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    transcript = Transcript(tmp_path / "sessions" / "s1")
+    await transcript.append_message(Message.user("visible before disconnect"))
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    parse_opened = asyncio.Event()
+    release_parse = asyncio.Event()
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        events: list[Any] = []
+        remote.subscribe(events.append)
+
+        registrant.close()
+        import os
+
+        (tmp_path / "sessions" / "s1" / ".session.pid").write_text(str(os.getpid()))
+        for _ in range(100):
+            if remote._recovering:
+                break
+            await asyncio.sleep(0.02)
+        assert remote._recovering is True
+
+        gap_user = Message.user("durable while disconnected")
+        await transcript.append_message(gap_user)
+        gap_assistant = Message.assistant("answer while disconnected")
+        await transcript.append_message(gap_assistant)
+
+        # Instrument the threaded parse so a live relay frame lands AFTER the
+        # socket is up and BEFORE the delta is emitted — the exact window
+        # MAJOR-1 reproduced through the production recovery path.
+        real_read = RemoteSession._read_transcript
+
+        async def gated_read(self_inner: RemoteSession) -> Any:
+            if self_inner is not remote or parse_opened.is_set():
+                return await real_read(self_inner)
+            parse_opened.set()
+            await release_parse.wait()
+            return await real_read(self_inner)
+
+        replacement_handle = FakeHandle()
+        replacement = Registrant(replacement_handle, kind="tui")
+        replacement.start()
+        try:
+            from unittest.mock import patch as _patch
+
+            with _patch.object(RemoteSession, "_read_transcript", gated_read):
+                # The replacement owner is mid-turn (streaming generation 3)
+                # and emits one live frame the moment the follower's reader
+                # task is attached but the parse has not finished.
+                for _ in range(200):
+                    if parse_opened.is_set():
+                        break
+                    await asyncio.sleep(0.02)
+                assert parse_opened.is_set()
+                replacement_handle.emit_event(AgentStartEvent(generation=3))
+                replacement_handle.emit_event(NoticeEvent(text="mid-parse live frame", kind="info"))
+                await asyncio.sleep(0.05)
+                release_parse.set()
+
+                deadline = asyncio.get_running_loop().time() + 15
+                while asyncio.get_running_loop().time() < deadline:
+                    types = [event.type for event in events]
+                    if not remote._recovering and "history_delta" in types and "notice" in types:
+                        break
+                    await asyncio.sleep(0.02)
+
+            assert remote._recovering is False
+            types = [event.type for event in events]
+            delta_index = types.index("history_delta")
+            notice_index = types.index("notice")
+            # The durable gap delta is delivered BEFORE the live frame that
+            # landed mid-parse — durable rows paint above the in-flight turn.
+            assert delta_index < notice_index
+            deltas = [event for event in events if event.type == "history_delta"]
+            assert [str(m.id) for m in deltas[0].messages] == [gap_user.id, gap_assistant.id]
+        finally:
+            replacement.close()
+    finally:
+        if remote is not None:
+            await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_tool_result_only_gap_settles_painted_card(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MINOR-1 (review round 4): a results-only gap is delivered, not dropped.
+
+    The tool call painted LIVE before the disconnect; the owner recorded the
+    result and then died. Before the fix the gap replay early-returned on a
+    results-only gap, so the delta never emitted and the painted card stayed
+    ``interrupted`` forever while ``history()`` carried the real output. The
+    gap must emit ONE delta carrying the result so the settled renderer can
+    resolve it onto the painted card.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    transcript = Transcript(tmp_path / "sessions" / "s1")
+    await transcript.append_message(Message.user("visible before disconnect"))
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        events: list[Any] = []
+        remote.subscribe(events.append)
+
+        # The call's assistant row is durable BEFORE the disconnect (so the
+        # gap replay does not re-claim it), but its live-paint id must be in
+        # the painted set — which the connect's history bind already seeded.
+        call = ToolCall(id="call-live-1", name="read", arguments={"path": "/tmp/x"})
+        assistant_row = Message(
+            role="assistant",
+            content=[TextContent(text="reading the file")],
+            tool_calls=[call],
+        )
+        await transcript.append_message(assistant_row)
+        # Re-load so the assistant row's id joins _history_ids / painted set,
+        # mimicking a follower that painted the call live before the drop.
+        await remote._load_history()
+        painted_ids = {str(m.id) for m in remote.history()}
+
+        registrant.close()
+        import os
+
+        (tmp_path / "sessions" / "s1" / ".session.pid").write_text(str(os.getpid()))
+        for _ in range(100):
+            if remote._recovering:
+                break
+            await asyncio.sleep(0.02)
+        assert remote._recovering is True
+
+        # The owner records ONLY the tool result during the gap, then dies.
+        gap_result = Message.tool_result(
+            ToolResult(
+                tool_call_id="call-live-1",
+                tool_name="read",
+                content=[TextContent(text="real tool output")],
+            )
+        )
+        await transcript.append_message(gap_result)
+        assert str(gap_result.id) not in painted_ids
+
+        replacement = Registrant(handle, kind="tui")
+        replacement.start()
+        try:
+            deadline = asyncio.get_running_loop().time() + 15
+            while asyncio.get_running_loop().time() < deadline:
+                deltas = [event for event in events if event.type == "history_delta"]
+                if not remote._recovering and deltas:
+                    break
+                await asyncio.sleep(0.02)
+            assert remote._recovering is False
+            # The results-only gap is NOT dropped: ONE delta carries the
+            # settled result so the painted card can be resolved.
+            deltas = [event for event in events if event.type == "history_delta"]
+            assert len(deltas) == 1
+            replayed = deltas[0].messages
+            assert [str(getattr(m, "id", "")) for m in replayed] == [gap_result.id]
+            assert replayed[0].role == "tool"
+            assert replayed[0].tool_call_id == "call-live-1"
+            assert str(gap_result.id) in {str(m.id) for m in remote.history()}
+        finally:
+            replacement.close()
+    finally:
+        if remote is not None:
+            await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compact_now_during_recovery_refuses_in_user_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """NIT-1 (review round 4): /compact during recovery never leaks transport terms."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        registrant.close()
+        import os
+
+        (tmp_path / "sessions" / "s1" / ".session.pid").write_text(str(os.getpid()))
+        for _ in range(100):
+            if remote._recovering:
+                break
+            await asyncio.sleep(0.02)
+        assert remote._recovering is True
+        outcome = await remote.compact_now()
+        assert outcome.ran is False
+        assert outcome.reason == "unavailable"
+        assert "reconnecting" in outcome.detail
+        assert "attach" not in outcome.detail.lower()
     finally:
         if remote is not None:
             await remote.dispose()

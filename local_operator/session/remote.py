@@ -433,13 +433,36 @@ class RemoteSession:
                 continue
             claimed.append(message_id)
             gap.append(message)
-        if not any(getattr(message, "role", None) != "tool" for message in gap):
-            # Tool results ride their call's assistant row, so a gap of ONLY
-            # results (their calls already painted) mounts nothing — claim
-            # nothing and emit nothing rather than sending an empty delta.
+        if not gap:
+            # Nothing new became durable in the gap.
             return
+        # A gap of ONLY tool results still delivers: the calls painted live
+        # before the disconnect (their cards sit in ``_tool_cards`` marked
+        # ``interrupted``), and the settled renderer now resolves each
+        # recovered result back onto its painted card rather than painting a
+        # new row (review round 4, MINOR-1). The old early-return dropped the
+        # gap entirely, leaving those cards interrupted forever while
+        # ``history()`` carried their real output.
         self._message_events.update(claimed)
-        self._emit_or_buffer(HistoryDeltaEvent(messages=gap))
+        # Durable-before-live is a DELIVERY invariant, not just a seed-vs-delta
+        # one. The recovery sequence dials, then awaits the frontend sync (a
+        # network round trip) and the threaded transcript parse before this
+        # method runs — and the reader task keeps buffering live relay frames
+        # throughout, so a reconnect to a streaming replacement owner leaves
+        # the buffer as [live frames…, delta]. A plain append delivers those
+        # frames first and paints the durable gap rows BELOW the in-flight
+        # turn (review round 4, MAJOR-1), which no cold boot of the same
+        # transcript can ever look like. Placing the delta at the buffer's
+        # head — after any delta already sitting there, the mirror of
+        # ``_finish_sync``'s skip loop, so multiple recovery cycles keep their
+        # own order — makes the guarantee positional, never a timing
+        # accident. Initial connect buffers no delta, so nothing changes there.
+        insert_at = 0
+        while insert_at < len(self._buffered_events) and isinstance(
+            self._buffered_events[insert_at], HistoryDeltaEvent
+        ):
+            insert_at += 1
+        self._buffered_events[insert_at:insert_at] = [HistoryDeltaEvent(messages=gap)]
 
     def _is_duplicate(self, event: AgentEvent[Any]) -> bool:
         """Whether this event is a true replay duplicate, never a lifecycle peer.
@@ -972,9 +995,16 @@ class RemoteSession:
 
     async def compact_now(self) -> CompactionOutcome:
         client = self._client
-        if client is None:
+        if client is None or self._recovering or not client.connected:
             return CompactionOutcome(False, "unavailable", "session owner is reconnecting")
-        detail = await client.slash("compact", "")
+        try:
+            detail = await client.slash("compact", "")
+        except ConnectionError:
+            # The disconnect can land mid-request (review round 4, NIT-1): the
+            # transport's own ``not attached`` must never surface as a
+            # compaction receipt, so race the same rewrite the routed-slash
+            # seam performs above.
+            return CompactionOutcome(False, "unavailable", "session owner is reconnecting")
         return CompactionOutcome(True, detail=detail)
 
     # -- driving turns ------------------------------------------------------

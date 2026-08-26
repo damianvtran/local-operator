@@ -2658,6 +2658,7 @@ class OperatorApp(App[None]):
         # Indexing first is what lets each call render WITH its outcome instead
         # of as a second, orphaned row.
         results: dict[str, Any] = {}
+        settled_results: set[str] = set()
         # Harness chrome the LIVE path never paints as a user row, so replay
         # must not either (see the `role == "user"` branch). Deferred once to
         # the top of this method rather than inside the loop, matching the
@@ -2665,15 +2666,27 @@ class OperatorApp(App[None]):
         from local_operator.session.session import _CONTINUATION_PROMPT
 
         for message in history:
-            if getattr(message, "role", None) == "tool":
-                call_id = getattr(message, "tool_call_id", None)
-                if call_id:
-                    results[call_id] = message
+            if getattr(message, "role", None) != "tool":
+                continue
+            call_id = getattr(message, "tool_call_id", None)
+            if not call_id:
+                continue
+            results[call_id] = message
+            # A result whose call painted LIVE before a disconnect must
+            # settle the card already on screen — the disconnect marked it
+            # ``interrupted``, and replaying it as a new row would double the
+            # card (review round 4, MINOR-1). The disconnect retired the card
+            # out of ``_tool_cards`` but left it mounted, so scan the
+            # transcript for the painted card carrying this call id.
+            painted = self._painted_tool_card(call_id)
+            if painted is not None:
+                self._settle_painted_tool_card(painted, message)
+                settled_results.add(call_id)
         # Fresh batch, fresh pairing: a flag left by an earlier replay (or a
         # truncated one) must not open a card in this conversation.
         self._replay_bang_pending = False
 
-        appended = False
+        appended = bool(settled_results)
         transcript = self._transcript_view()
         # ONE mount for the whole conversation. Per-block mounting made Textual
         # re-walk its stylesheet, invalidate the container and schedule a settle
@@ -2817,6 +2830,59 @@ class OperatorApp(App[None]):
             # off the bottom of a viewport pinned to the replay's last frame.
             transcript.follow_tail()
         return appended
+
+    def _painted_tool_card(self, call_id: str) -> ToolCard | None:
+        """The ToolCard on screen for ``call_id``, whether live or retired.
+
+        ``_tool_cards`` holds only cards still claiming to be live; a card the
+        disconnect marked ``interrupted`` was retired out of that dictionary
+        but stays mounted in the transcript. A recovered result for the same
+        call must settle THAT row, not paint a second one (review round 4,
+        MINOR-1), so the lookup falls back to a transcript scan by the call id
+        every ToolCard carries.
+        """
+        card = self._tool_cards.get(call_id)
+        if card is not None:
+            return card
+        for block in self._transcript_view().blocks():
+            if isinstance(block, ToolCard) and block.tool_call_id == call_id:
+                return block
+        return None
+
+    def _settle_painted_tool_card(self, card: ToolCard, result: Any) -> None:
+        """Settle a live-painted tool card with the result recovered from the gap.
+
+        The card was painted by the live relay (or the sync seed) before the
+        disconnect and marked ``interrupted`` by the disconnect handler. Its
+        call's result landed durably during the gap, so the settled renderer
+        now hands the real outcome back to the SAME card instead of painting
+        a new row (review round 4, MINOR-1). Same state derivation as
+        ``_replay_tool_call`` — a call killed mid-execution persists as an
+        error result whose text starts with ``aborted (``, which the live
+        frame renders as ``interrupted``, not an error.
+        """
+        result_text = getattr(result, "text", "") or ""
+        payload = getattr(result, "provider_payload", None) or {}
+        details = payload.get("details") if isinstance(payload, dict) else None
+        if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
+            card.restore(state="interrupted")
+            return
+        if getattr(result, "is_error", False):
+            card.restore(
+                state="error",
+                result_text=result_text,
+                details=details,
+                error=_first_line(result_text),
+            )
+        else:
+            card.restore(state="success", result_text=result_text, details=details)
+        self._append_image_blocks(
+            [
+                block
+                for block in (getattr(result, "content", None) or [])
+                if isinstance(block, ImageContent)
+            ]
+        )
 
     def _replay_tool_call(
         self, call: Any, results: dict[str, Any], *, user_run: bool = False
@@ -9495,6 +9561,10 @@ class OperatorApp(App[None]):
         # command the owner advertises as ``authoritative_session`` in its
         # capability list runs on the owner through the routing seam below —
         # the owner's capability scope, not a hardcoded command list, decides.
+        from local_operator.session.frontend_state import (
+            _FRONTEND_LOCAL_SLASHES as _FOLLOWER_LOCAL_SLASHES,
+        )
+
         remote_route = getattr(self._session, "route_shared_slash", None)
         remote_capabilities = {
             f"/{cap.command}": cap
@@ -9539,6 +9609,29 @@ class OperatorApp(App[None]):
                     self._render_authoritative_slash(command, arg, outcome)
 
             self.run_worker(run_remote_slash(), thread=False, group="session")
+            return
+
+        if (
+            callable(remote_route)
+            and remote_capability is None
+            and remote_capabilities
+            and entry is not None
+            and entry.name not in _FOLLOWER_LOCAL_SLASHES
+        ):
+            # A command the registry classifies as shared (not follower-local)
+            # that the owner's capability list does NOT advertise would fall
+            # through to the local handler and mutate only this follower's
+            # process — an effect that never reaches the owner (UX round 4,
+            # U10). Production owners advertise the full registry, so an
+            # unadvertised shared command means a version-skewed or reduced
+            # owner; refuse rather than silently diverge. An EMPTY capability
+            # list (a reduced test double) still falls through, matching the
+            # pre-guard behaviour the round-4 walk established.
+            self._system_notice(
+                f"/{entry.name} is not available from this session's owner; "
+                "run it in the owner's terminal",
+                "warning",
+            )
             return
 
         if command == "/exit":

@@ -1033,6 +1033,75 @@ async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager
 
 
 @pytest.mark.asyncio
+async def test_unadvertised_shared_slash_refuses_instead_of_running_locally() -> None:
+    """U10 (UX round 4): a shared command the owner's capability list omits
+    must not silently run on the follower — it would mutate only this
+    process and never reach the owner."""
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+    )
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append(command)
+            return {"kind": "noop"}
+
+    routed: list[str] = []
+    session = RoutedSession()
+    # The owner advertises /rename as authoritative but NOT /goal — the
+    # version-skew/reduced-owner shape U10 walked.
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command="rename", scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+            )
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        app._run_slash_command("/goal ship it")
+        for _ in range(60):
+            await pilot.pause()
+            if any(
+                "not available from this session's owner" in (b.text() or "")
+                for b in app.query(NoticeBlock)
+            ):
+                break
+        # The shared slash was REFUSED in clear copy — it did not route (the
+        # owner never advertised it) and it did not run locally (the
+        # follower's goal is untouched).
+        assert any(
+            "not available from this session's owner" in (b.text() or "")
+            for b in app.query(NoticeBlock)
+        )
+        assert routed == []
+        assert session.goal == ""
+
+        # A command the owner DID advertise still routes.
+        app._run_slash_command("/rename New title")
+        for _ in range(60):
+            await pilot.pause()
+            if routed:
+                break
+        assert routed == ["rename"]
+
+        # A follower-local command (not in the capability list at all) still
+        # runs locally — the guard only refuses SHARED commands.
+        app._run_slash_command("/help")
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
 async def test_owner_slash_result_producers_match_local_handler_vocabulary() -> None:
     """The owner's typed-result producers say what the local handlers say —
     goal, rename, context, effort — so a follower's receipt is identical."""
