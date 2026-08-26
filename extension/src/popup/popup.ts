@@ -1,10 +1,29 @@
 import { DEFAULT_PORT, getLocal, getSession } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
+import {
+  ackForDecision,
+  originPromptView,
+  type DecidedOrigin,
+  type OriginDecision,
+} from "./origin-flow";
 
-type State = "connected" | "paired" | "pairing" | "disconnected" | "incompatible" | "origin";
-const sections = ["connected", "paired", "pairing", "disconnected", "incompatible", "origin"].map(
-  (id) => document.getElementById(id),
-);
+type State =
+  | "connected"
+  | "paired"
+  | "pairing"
+  | "disconnected"
+  | "incompatible"
+  | "origin"
+  | "origin-ack";
+const sections = [
+  "connected",
+  "paired",
+  "pairing",
+  "disconnected",
+  "incompatible",
+  "origin",
+  "origin-ack",
+].map((id) => document.getElementById(id));
 
 // True once THIS popup saw pair_result.ok. The daemon confirms pairing on the
 // popup's own socket before /health reports paired (the worker still has to
@@ -13,6 +32,14 @@ const sections = ["connected", "paired", "pairing", "disconnected", "incompatibl
 // form invites re-submitting the consumed one-time code, which then fails with
 // a misleading "No live pairing code". See pair-flow.ts.
 let locallyPaired = false;
+
+// The origin decision THIS popup already made — the consent flow's copy of the
+// same race: `origin_decision` goes to the worker, but session storage and
+// /health keep echoing the prompt until that round-trip lands, so a render in
+// the window would resurrect the three buttons over a click that already took
+// effect. Keyed by origin so a different pending origin still prompts (A6).
+// See origin-flow.ts.
+let decidedOrigin: DecidedOrigin | null = null;
 
 interface Health {
   extension_connected: boolean;
@@ -35,6 +62,9 @@ const TONE: Record<State, string> = {
   disconnected: "var(--hairline-strong)",
   incompatible: "var(--danger)",
   origin: "var(--hairline-strong)",
+  // Placeholder only: the ack's real tone is per-decision (success for allow,
+  // neutral for deny) and showOriginAck overrides it right after show().
+  "origin-ack": "var(--hairline-strong)",
 };
 
 function show(state: State): void {
@@ -63,6 +93,19 @@ async function render(): Promise<void> {
   // shows it even after a worker restart.
   const { pendingOrigin } = await getSession();
   const health = await daemonHealth();
+  // Compare by ORIGIN (not display hostname): the latch must match exactly the
+  // key the decision was sent under (A6).
+  const pendingOriginValue = pendingOrigin?.origin || health?.pending_origin;
+  const originView = originPromptView(pendingOriginValue, decidedOrigin);
+  if (originView === "none") {
+    // Round-trip landed and the prompt is gone: clear the latch so a future
+    // prompt for the SAME origin (a retry after deny) is not swallowed.
+    decidedOrigin = null;
+  } else if (originView === "ack") {
+    // Stale echo of the decided prompt — hold the acknowledgement.
+    showOriginAck(decidedOrigin!.decision);
+    return;
+  }
   const pendingHost = pendingOrigin?.hostname || hostnameOf(health?.pending_origin);
   if (pendingHost) {
     // The heading is fixed prose; the host — the string the user must verify
@@ -71,6 +114,9 @@ async function render(): Promise<void> {
     // heading id stays constant, so no per-host text in the serif face.
     const host = document.getElementById("origin-host");
     if (host) host.textContent = pendingHost;
+    // A fresh prompt must arrive with live buttons even if a previous
+    // decision's lock is still set.
+    setOriginBusy(false);
     show("origin");
     return;
   }
@@ -217,9 +263,47 @@ document.getElementById("origin-allow")?.addEventListener("click", () => void de
 document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
 
-async function decide(decision: "once" | "always" | "deny"): Promise<void> {
+// Lock the three consent buttons the moment one is clicked: the session-storage
+// read below is async, and a second click in that window would double-send the
+// decision. render()'s prompt path unlocks for the next genuine prompt.
+function setOriginBusy(busy: boolean): void {
+  for (const id of ["origin-allow", "origin-always", "origin-deny"]) {
+    const button = document.getElementById(id) as HTMLButtonElement | null;
+    if (button) button.disabled = busy;
+  }
+}
+
+function showOriginAck(decision: OriginDecision): void {
+  const ack = ackForDecision(decision);
+  const title = document.getElementById("origin-ack-title");
+  const sub = document.getElementById("origin-ack-sub");
+  if (title) title.textContent = ack.title;
+  if (sub) sub.textContent = ack.sub;
+  document.getElementById("origin-ack-check")?.classList.toggle("hidden", !ack.check);
+  show("origin-ack");
+  // Per-decision tone override: allow is a real success (the agent proceeds),
+  // deny is a completed choice — neutral, never danger, which is reserved for
+  // states the user must recover from.
+  document
+    .getElementById("card")
+    ?.style.setProperty(
+      "--tone",
+      ack.tone === "success" ? "var(--success)" : "var(--hairline-strong)",
+    );
+}
+
+async function decide(decision: OriginDecision): Promise<void> {
+  setOriginBusy(true);
   const { pendingOrigin } = await getSession();
   if (pendingOrigin) {
+    // Acknowledge from the CLICK alone, before the worker round-trip: session
+    // storage and /health keep echoing this prompt until `origin_decision`
+    // lands, and a render in that window would put the three buttons back with
+    // no sign the click worked — the same race as pairing success. The latch
+    // holds the ack through stale echoes; render() takes over to Connected
+    // once the echo clears.
+    decidedOrigin = { origin: pendingOrigin.origin, decision };
+    showOriginAck(decision);
     // Decisions are keyed by ORIGIN so a redirect chain resolves each hop
     // independently (finding A6).
     await chrome.runtime.sendMessage({

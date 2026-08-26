@@ -89,3 +89,39 @@ test("health render holds the success view during the pair/health race", async (
     assert.equal(viewForHealth(false, false), "pairing");
   } finally { await module.close(); }
 });
+
+test("origin decision acks render per decision, deny staying neutral", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { ackForDecision } = module.loaded;
+    const once = ackForDecision("once");
+    assert.equal(once.title, "Site allowed.");
+    assert.equal(once.sub, "The agent is continuing.");
+    assert.deepEqual([once.tone, once.check], ["success", true]);
+    // "always" is a standing grant: the ack must say it persists and where to
+    // revoke it.
+    const always = ackForDecision("always");
+    assert.equal(always.tone, "success");
+    assert.match(always.sub, /Always-allowed sites can be taken back any time in Settings\./);
+    // Deny is a completed choice, not a failure: neutral, no check.
+    const deny = ackForDecision("deny");
+    assert.deepEqual([deny.title, deny.tone, deny.check], ["Site denied.", "neutral", false]);
+  } finally { await module.close(); }
+});
+
+test("origin render holds the ack through the decision round-trip race", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { originPromptView } = module.loaded;
+    const decided = { origin: "https://example.com", decision: "always" };
+    // The race: the prompt is still echoed after the click — hold the ack, do
+    // not resurrect the buttons.
+    assert.equal(originPromptView("https://example.com", decided), "ack");
+    // A DIFFERENT pending origin is a new prompt even mid-settle (A6).
+    assert.equal(originPromptView("https://other.example", decided), "prompt");
+    // Round-trip landed: nothing pending, caller clears its latch.
+    assert.equal(originPromptView(undefined, decided), "none");
+    // Never decided in this popup: the prompt is correct.
+    assert.equal(originPromptView("https://example.com", null), "prompt");
+  } finally { await module.close(); }
+});

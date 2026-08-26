@@ -101,6 +101,30 @@
           </div>
         </section>
 
+        <!-- Origin-decision acknowledgement, shown from the click alone
+             (popup.ts): session storage and /health echo the prompt until the
+             worker round-trip lands, and a prompt left up with live buttons
+             reads as the click not working. Title/sub/tone/check are set per
+             decision by showOriginAck — allow is a success (check + success
+             tone), deny a completed neutral choice (no check, never danger). -->
+        <section id="origin-ack" class="state hidden" role="status">
+          <svg
+            id="origin-ack-check"
+            class="check"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M4 12.5 L9.5 18 L20 6.5" stroke-width="2.5" />
+          </svg>
+          <h1 class="title" id="origin-ack-title"></h1>
+          <p class="sub" id="origin-ack-sub"></p>
+        </section>
+
         <section
           id="origin"
           class="state hidden"
