@@ -981,6 +981,101 @@ def test_resume_refuses_when_the_transcript_is_gone_from_disk(tmp_path):
     assert "gone from disk" in (error or "")
 
 
+def test_a_resume_carries_the_childs_role_and_tier_forward(tmp_path, monkeypatch):
+    """A resumed child comes back as WHAT IT WAS, not as a generic task.
+
+    ``run_subagent`` defaults ``agent`` to ``"task"``, so a resume that omits
+    it silently rebuilt every reviewer, designer, scout and specialist as a
+    no-role child. That is a capability regression and not a cosmetic one: the
+    role decides the tool ALLOWLIST, so a resumed reviewer regained ``edit``
+    and could rewrite the code it was reviewing, and a resumed scout lost its
+    read-only promise. It also decides the preamble, the MCP exclusion, and
+    the ``agent`` re-stamped into ``origin.json``.
+
+    Asserted at the ``run_subagent`` seam because that is where the fact is
+    lost; the end-to-end consequences are exercised in the subagent tests.
+    """
+    from local_operator.harness import comms as comms_mod
+
+    seen: dict[str, object] = {}
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return "job-2"
+
+    monkeypatch.setattr("local_operator.harness.subagent.run_subagent", spy)
+    jobs = FakeJobs()
+    parent = FakeParent(jobs)
+    # The parent prices the tier exactly as the LAUNCH path does; a resume is
+    # a second launch and has to perform the same resolution, or the child
+    # comes back on the parent's model while the panel still says `hi`.
+    resolved = comms_mod.ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    parent._resolve_subagent_model = lambda agent, effort: resolved  # type: ignore[attr-defined]
+    comms = SubagentComms(parent)  # type: ignore[arg-type]
+    jobs.add("job-1", status="cancelled")
+    comms.record_launch("job-1", "review-301-r2", agent_role="reviewer", effort="hi")
+    comms.attach("job-1", FakeChild(), tmp_path / "child")
+    (tmp_path / "child").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "child" / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    comms.detach("job-1")
+
+    new_id, error = comms.resume("job-1", "carry on")
+
+    assert error is None and new_id == "job-2"
+    assert seen["agent"] == "reviewer"
+    assert seen["effort"] == "hi"
+    assert seen["model_spec"] is resolved
+    assert seen["resume_dir"] == tmp_path / "child"
+
+
+def test_a_resume_of_a_plain_child_stays_a_plain_child(tmp_path, monkeypatch):
+    """The no-role default round-trips as the default rather than as ``""``."""
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.run_subagent",
+        lambda **kwargs: (seen.update(kwargs), "job-2")[1],
+    )
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1", status="cancelled")
+    comms.record_launch("job-1", "docs")
+    comms.attach("job-1", FakeChild(), tmp_path / "child")
+    (tmp_path / "child").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "child" / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    comms.detach("job-1")
+
+    new_id, error = comms.resume("job-1", "carry on")
+
+    assert error is None and new_id == "job-2"
+    assert seen["agent"] == "task"
+    assert seen["effort"] is None
+    # A parent that cannot price a tier still resumes, on its own model.
+    assert seen["model_spec"] is None
+
+
+def test_a_restored_record_still_knows_what_its_child_was(tmp_path):
+    """The role has to survive the PROCESS, not just the job row.
+
+    ``_ChildRecord`` is in memory, so a parent session that is itself resumed
+    rebuilds its children from the persisted snapshot. If the role did not
+    round-trip there, resuming a child after a restart would hit exactly the
+    same defect from the other side.
+    """
+    jobs = FakeJobs()
+    first = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1", status="cancelled")
+    first.record_launch("job-1", "review-301-r2", agent_role="reviewer", effort="hi")
+    first.attach("job-1", FakeChild(), tmp_path / "child")
+    first.detach("job-1")
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(first.snapshot())
+
+    record = restored._records["job-1"]
+    assert record.agent_role == "reviewer"
+    assert record.effort == "hi"
+
+
 # --- the hub tool surface -----------------------------------------------------
 
 
