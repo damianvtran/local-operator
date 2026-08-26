@@ -80,6 +80,9 @@ def test_explicit_and_conversational_slack_queries_route() -> None:
     assert select_mcp_suggestions(
         COMMON_NAMES, "what did the team say in the customer channel conversation?"
     ) == ["slack"]
+    assert select_mcp_suggestions(
+        COMMON_NAMES, "post an update in the customer support channel"
+    ) == ["slack"]
 
 
 def test_common_service_families_route_locally() -> None:

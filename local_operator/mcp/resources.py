@@ -34,8 +34,8 @@ MCP_ROUTE_THRESHOLD = 0.25
 # may supply text that influences semantic selection or system instructions.
 _CAPABILITY_HINTS: dict[str, tuple[str, str]] = {
     "slack": (
-        "Slack workplace team communication messages conversations channels threads "
-        "replies coworkers",
+        "Slack workplace team customer support communication post updates messages "
+        "conversations channels threads replies coworkers",
         "Team messages, channels, threads, and workplace conversations.",
     ),
     "notion": (
