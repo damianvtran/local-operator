@@ -419,16 +419,19 @@ async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
         view._body.scroll_home(animate=False)
         await pilot.pause()
         view._initial_tail_pending = False
-        before_max = view._body.max_scroll_y
         before = view._body.scroll_y
+        anchor = next(
+            block for block in view._body.blocks() if block.virtual_region.bottom > before
+        )
+        anchor_offset = anchor.virtual_region.y - before
         view.action_home()
         view.action_home()
         await _wait_history(pilot, view)
         for _ in range(5):
             await pilot.pause()
         assert calls == 1
-        growth = view._body.max_scroll_y - before_max
-        assert abs(view._body.scroll_y - (before + growth)) <= 1
+        assert anchor in view._body.blocks()
+        assert abs((anchor.virtual_region.y - view._body.scroll_y) - anchor_offset) <= 1
 
 
 @pytest.mark.asyncio

@@ -1867,8 +1867,15 @@ class TranscriptView(ScrollableContainer):
         if not additions:
             return
         index = max(0, min(index, len(self._blocks)))
-        old_max_scroll = self.max_scroll_y
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
+        # Identity plus intra-block offset is the invariant the reader sees.
+        # Height/range deltas are only proxies and diverge when the viewport or
+        # adaptive gaps remeasure during the same insertion.
+        anchor_block = next(
+            (block for block in self._blocks if block.virtual_region.bottom > old_scroll),
+            self._blocks[-1] if self._blocks else None,
+        )
+        anchor_inset = old_scroll - anchor_block.virtual_region.y if anchor_block else 0.0
         before = self._blocks[index] if index < len(self._blocks) else None
         if before is None:
             self.mount(*additions)
@@ -1878,20 +1885,16 @@ class TranscriptView(ScrollableContainer):
         self._name_col_cache = None
 
         def settle_then_restore() -> None:
-            # Gap classes can add rows after the mount's first layout. Sampling
-            # growth before they settle restored against an intermediate range,
-            # then Textual shifted the content again under xdist timing. Settle
-            # first and restore on the following refresh. The scroll RANGE, not
-            # virtual height, is the content-relative coordinate: a simultaneous
-            # viewport remeasure otherwise contributes two phantom rows.
+            # The mount barrier has laid out every new block. Settle adaptive
+            # gaps before reading the retained block's final region, then restore
+            # that SAME block to the SAME viewport-relative row immediately.
             self._settle_gaps(additions)
             self._remeasure_empty_state()
-
-            def restore_anchor() -> None:
-                growth = max(0, self.max_scroll_y - old_max_scroll)
-                self.scroll_to(y=max(0, old_scroll + growth), animate=False)
-
-            self.call_after_refresh(restore_anchor)
+            if anchor_block is not None:
+                self.scroll_to(
+                    y=max(0, anchor_block.virtual_region.y + anchor_inset),
+                    animate=False,
+                )
 
         self.call_after_refresh(settle_then_restore)
 
