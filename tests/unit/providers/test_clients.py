@@ -2926,3 +2926,274 @@ def test_tool_call_turns_do_not_ship_whitespace_only_text() -> None:
 
     items = _messages_to_openai_responses([message])
     assert [i.get("type") for i in items] == ["function_call"]
+
+
+# ---------------------------------------------------------------------------
+# GPT-5.6 prompt-caching (defects #1/#2/#3): prompt_cache_key kept on codex,
+# encrypted-reasoning include, explicit developer-message breakpoints, and the
+# four-cache-write cap. See OpenAICompatClient._apply_gpt_5_6_prompt_cache.
+# ---------------------------------------------------------------------------
+
+
+def _gpt_5_6_spec(model_id: str = "gpt-5.6-sol") -> ModelSpec:
+    """A reasoning GPT-5.6 Responses spec with prompt caching enabled."""
+    return ModelSpec(
+        provider="openai",
+        model_id=model_id,
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        reasoning=True,
+        reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high"),
+        supports_sampling_params=False,
+    )
+
+
+def _find_breakpoints(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every content block in ``items`` carrying a prompt_cache_breakpoint."""
+    found: list[dict[str, Any]] = []
+    for item in items:
+        content = item.get("content")
+        blocks = content if isinstance(content, list) else []
+        for block in blocks:
+            if isinstance(block, dict) and "prompt_cache_breakpoint" in block:
+                found.append(block)
+        # function_call_output carries its blocks under ``output``.
+        output = item.get("output")
+        out_blocks = output if isinstance(output, list) else []
+        for block in out_blocks:
+            if isinstance(block, dict) and "prompt_cache_breakpoint" in block:
+                found.append(block)
+    return found
+
+
+def test_is_gpt_5_6_or_later_predicate() -> None:
+    """The gate parses the ``gpt-5.<minor>`` family number and is conservative
+    about anything it cannot confidently read as 5.6+ (defect gating)."""
+    from local_operator.providers.clients import _is_gpt_5_6_or_later
+
+    assert _is_gpt_5_6_or_later("gpt-5.6-sol")
+    assert _is_gpt_5_6_or_later("gpt-5.6")
+    assert _is_gpt_5_6_or_later("GPT-5.7-codex")
+    assert _is_gpt_5_6_or_later("gpt-5.10")  # 10 >= 6, not lexical
+    # Older / unparseable -> NOT 5.6+, preserving today's behaviour.
+    assert not _is_gpt_5_6_or_later("gpt-5.4")
+    assert not _is_gpt_5_6_or_later("gpt-5")
+    assert not _is_gpt_5_6_or_later("gpt-4o")
+    assert not _is_gpt_5_6_or_later("o4-mini")
+    assert not _is_gpt_5_6_or_later("")
+
+
+def test_codex_5_6_body_keeps_cache_key_and_adds_breakpoint_and_include() -> None:
+    """Defects #1/#2/#3 on the Codex ``store:false`` path: prompt_cache_key is
+    kept (Codex parity), encrypted reasoning is requested, the stable system
+    prefix moves into a developer message with an explicit breakpoint, and the
+    public-retention field is gone."""
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    request = ChatRequest(
+        model=_gpt_5_6_spec(),
+        system_blocks=["Stable instructions.", "Tool inventory.", "Volatile env + date."],
+        messages=[Message.user("hi")],
+        prompt_cache_key="session-abc",
+    )
+    body = client._build_codex_responses_body(request)
+
+    # #1: the key that was wrongly stripped is present; retention is not.
+    assert body["prompt_cache_key"] == "session-abc"
+    assert "prompt_cache_retention" not in body
+    assert body["store"] is False
+    # #2: reasoning is on, so encrypted reasoning content is requested.
+    assert body["include"] == ["reasoning.encrypted_content"]
+    # #3: GPT-5.6 explicit caching mode + a developer-message breakpoint.
+    assert body["prompt_cache_options"] == {"mode": "implicit"}
+    assert "instructions" not in body  # stable head must not sit top-level
+    breakpoints = _find_breakpoints(body["input"])
+    assert len(breakpoints) == 1
+    # The breakpoint ends the STABLE prefix (block[-2]), not the volatile tail.
+    marked = breakpoints[0]
+    assert marked["text"] == "Tool inventory."
+    assert marked["prompt_cache_breakpoint"] == {"mode": "explicit"}
+    # The volatile tail rides its own developer message AFTER the breakpoint.
+    dev_items = [i for i in body["input"] if i.get("role") == "developer"]
+    assert dev_items[-1]["content"][-1]["text"] == "Volatile env + date."
+    assert "prompt_cache_breakpoint" not in dev_items[-1]["content"][-1]
+
+
+def test_codex_5_6_body_no_include_when_reasoning_off() -> None:
+    """Defect #2 is gated on reasoning: a 5.6 model with no effort ladder must
+    not request encrypted reasoning content."""
+    spec = _gpt_5_6_spec()
+    spec = spec.model_copy(update={"reasoning_efforts": (), "reasoning_effort": None})
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_codex_responses_body(
+        ChatRequest(model=spec, system_blocks=["a", "b"], messages=[Message.user("hi")])
+    )
+    assert "include" not in body
+    # #3 still applies (it is version-gated, not reasoning-gated).
+    assert body["prompt_cache_options"] == {"mode": "implicit"}
+
+
+def test_codex_non_5_6_reasoning_model_gets_no_breakpoints() -> None:
+    """Gating guard: a hypothetical non-5.6 reasoning model on the codex path
+    keeps the old shape — no breakpoints, no prompt_cache_options, stable prefix
+    stays in top-level ``instructions``."""
+    spec = ModelSpec(
+        provider="openai",
+        model_id="gpt-5.4-codex",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        reasoning=True,
+        reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high"),
+        supports_sampling_params=False,
+    )
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_codex_responses_body(
+        ChatRequest(
+            model=spec,
+            system_blocks=["Stable.", "Volatile."],
+            messages=[Message.user("hi")],
+            prompt_cache_key="s1",
+        )
+    )
+    assert "prompt_cache_options" not in body
+    assert body["instructions"] == "Stable.\n\nVolatile."
+    assert _find_breakpoints(body["input"]) == []
+    # #1 still holds pre-5.6: the codex path keeps prompt_cache_key.
+    assert body["prompt_cache_key"] == "s1"
+    # #2 still holds: reasoning is on, so the include is requested regardless of
+    # version (it mirrors Codex, which sends it broadly).
+    assert body["include"] == ["reasoning.encrypted_content"]
+
+
+def test_public_5_6_body_shape() -> None:
+    """Defect #3 on the public ``store:true`` Responses path: breakpoints and
+    options are added, retention stays absent (5.6 uses prompt_cache_options.ttl
+    for lifetime), and prompt_cache_key is preserved."""
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_responses_body(
+        ChatRequest(
+            model=_gpt_5_6_spec(),
+            system_blocks=["Stable.", "Volatile."],
+            messages=[Message.user("hi")],
+            prompt_cache_key="pub-1",
+        )
+    )
+    assert body["prompt_cache_key"] == "pub-1"
+    assert "prompt_cache_retention" not in body  # 5.6 dropped this field
+    assert body["prompt_cache_options"] == {"mode": "implicit"}
+    assert body["include"] == ["reasoning.encrypted_content"]
+    assert len(_find_breakpoints(body["input"])) == 1
+
+
+def test_public_pre_5_6_body_unchanged() -> None:
+    """Regression guard: the pre-5.6 public path keeps top-level instructions,
+    prompt_cache_retention, and no breakpoints."""
+    spec = ModelSpec(
+        provider="openai",
+        model_id="gpt-5.4",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+    )
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_responses_body(
+        ChatRequest(
+            model=spec,
+            system_blocks=["Stable.", "Volatile."],
+            messages=[Message.user("hi")],
+            prompt_cache_key="pub-2",
+        )
+    )
+    assert body["instructions"] == "Stable.\n\nVolatile."
+    assert body["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_options" not in body
+    assert _find_breakpoints(body["input"]) == []
+
+
+def test_tool_result_breakpoints_capped_at_four_total() -> None:
+    """Defect #3 budget: with many tool results, the total explicit cache-write
+    breakpoints never exceed OpenAI's limit of four (one for the stable prefix,
+    the rest on the MOST RECENT tool results)."""
+    history: list[Message] = []
+    for i in range(6):
+        history.append(
+            Message(
+                role="assistant",
+                content=[TextContent(text="")],
+                tool_calls=[ToolCall(id=f"t{i}", name="do", arguments={})],
+            )
+        )
+        history.append(
+            Message(role="tool", tool_call_id=f"t{i}", content=[TextContent(text=f"result {i}")])
+        )
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    body = client._build_codex_responses_body(
+        ChatRequest(
+            model=_gpt_5_6_spec(),
+            system_blocks=["Stable.", "Volatile."],
+            messages=history,
+            prompt_cache_key="s",
+        )
+    )
+    breakpoints = _find_breakpoints(body["input"])
+    assert len(breakpoints) <= 4
+    # One stable-prefix breakpoint + two most-recent tool results = 3 (implicit
+    # holds the fourth write slot, so we deliberately do not spend it here).
+    tool_marks = [b for b in breakpoints if b["text"].startswith("result ")]
+    # The two MOST RECENT tool results carry the marker (order here is document
+    # order from the input list, not the newest-first order we mark them in).
+    assert {b["text"] for b in tool_marks} == {"result 5", "result 4"}
+
+
+async def test_codex_5_6_stream_skips_reasoning_items() -> None:
+    """Defect #2 stream side: encrypted ``reasoning`` output items and their
+    deltas are dropped, never rendered as assistant text, and do not crash the
+    parser."""
+    events_sse = _sse(
+        [
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "gAAAAAB-opaque-blob",
+                },
+            },
+            {"type": "response.reasoning_summary_text.delta", "delta": "ignored thinking"},
+            {"type": "response.output_text.delta", "delta": "Answer"},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_r",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "input_tokens_details": {"cached_tokens": 5},
+                    },
+                },
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=events_sse, headers={"content-type": "text/event-stream"}
+        )
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    access = OAuthAccess(
+        access_token="chatgpt-token", credential_id=2, org_id="acct-42", kind="oauth"
+    )
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_gpt_5_6_spec(), messages=[Message.user("hi")]),
+            "chatgpt-token",
+            oauth_access=access,
+        )
+    )
+    texts = [e.delta for e in events if isinstance(e, StreamTextDelta)]
+    assert texts == ["Answer"]  # the encrypted blob never became text
+    assert events[-1].stop_reason == "stop"

@@ -512,6 +512,42 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
     }
 
 
+# Matches an OpenAI ``gpt-5.<minor>`` model id, capturing the minor version. The
+# id may carry a suffix (``-sol``, ``-codex``, a date) which we ignore; only the
+# ``5.<minor>`` family number decides GPT-5.6-era cache semantics. A bare
+# ``gpt-5`` (no minor) is deliberately NOT matched: it predates the 5.6 implicit
+# caching change and must keep the older behaviour.
+_GPT_5_MINOR_RE = re.compile(r"^gpt-5\.(\d+)(?:[-.].*)?$")
+
+
+def _is_gpt_5_6_or_later(model_id: str) -> bool:
+    """Whether ``model_id`` is GPT-5.6 or a later 5.x that shares its caching.
+
+    GPT-5.6 changed OpenAI's implicit prompt-cache breakpoint to sit at the end
+    of the latest eligible user/tool message, which writes THROUGH the volatile
+    turn tail and loses hits on a large stable prefix followed by a changing
+    suffix (OpenAI Codex bug #35300). The remedies for that regression —
+    explicit ``prompt_cache_breakpoint`` markers and ``prompt_cache_options`` —
+    are GPT-5.6+ only; older Responses models (``gpt-5``, ``gpt-5.4`` …) 400 or
+    behave differently on them. This predicate gates those changes.
+
+    Conservative by construction: anything we cannot confidently parse as
+    ``gpt-5.N`` with ``N >= 6`` is treated as NOT 5.6+, which preserves today's
+    behaviour rather than risk sending a breakpoint to a model that rejects it.
+    """
+    match = _GPT_5_MINOR_RE.match(model_id.strip().lower())
+    if not match:
+        return False
+    return int(match.group(1)) >= 6
+
+
+# OpenAI caps a single request at four cache-WRITE breakpoints (guide: "Each
+# request can create up to four cache writes"). We spend one on the stable
+# system/developer prefix and reserve the rest for the most recent tool
+# results; never emit more than this many explicit markers in one body.
+_MAX_CACHE_BREAKPOINTS = 4
+
+
 def _reasoning_effort(request: ChatRequest) -> str | None:
     """The effort level to send, or ``None`` when the key must not appear.
 
@@ -772,6 +808,49 @@ def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str,
                 )
         items.append({"role": message.role, "content": content})
     return items
+
+
+def _mark_recent_tool_result_breakpoints(input_items: list[dict[str, Any]], budget: int) -> None:
+    """Add ``prompt_cache_breakpoint`` to the last ``budget`` tool results.
+
+    The guide's multi-turn-agent example marks each ``function_call_output``'s
+    last ``input_text`` block so a forked thread can reuse the shared prefix up
+    to that tool result. We only mark the MOST RECENT few, newest-first, to stay
+    within OpenAI's four-cache-write cap (the caller passes the remaining
+    budget after the implicit and stable-prefix writes). A string-valued output
+    is promoted to an ``input_text`` block so it can carry the marker; an
+    already-block output gets the marker on its final text block. Outputs with
+    no text block (image-only) are skipped rather than forced into a shape the
+    model would not read.
+    """
+    if budget <= 0:
+        return
+    marked = 0
+    for item in reversed(input_items):
+        if marked >= budget:
+            break
+        if item.get("type") != "function_call_output":
+            continue
+        output = item.get("output")
+        if isinstance(output, str):
+            item["output"] = [
+                {
+                    "type": "input_text",
+                    "text": output,
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                }
+            ]
+            marked += 1
+            continue
+        if isinstance(output, list):
+            text_blocks = [
+                block
+                for block in output
+                if isinstance(block, dict) and block.get("type") == "input_text"
+            ]
+            if text_blocks:
+                text_blocks[-1]["prompt_cache_breakpoint"] = {"mode": "explicit"}
+                marked += 1
 
 
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
@@ -1139,13 +1218,24 @@ class OpenAICompatClient:
         )
 
     def _build_responses_body(self, request: ChatRequest) -> dict[str, Any]:
-        """Public Responses body using native input items and flat tools."""
+        """Public Responses body using native input items and flat tools.
+
+        On GPT-5.6 and later this also carries the prompt-cache breakpoints the
+        model needs to stay warm; see ``_apply_gpt_5_6_prompt_cache`` for why.
+        """
+        # Gate the GPT-5.6-era cache controls once: ``prompt_cache_breakpoint``,
+        # ``prompt_cache_options`` and the developer-message prefix are 5.6+ only
+        # (older Responses models 400 or behave differently on them).
+        is_gpt_5_6 = _is_gpt_5_6_or_later(request.model.model_id)
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
             "input": _messages_to_openai_responses(request.messages),
         }
-        if request.system_blocks:
+        if request.system_blocks and not is_gpt_5_6:
+            # Pre-5.6: the whole stable prefix rides top-level ``instructions``.
+            # It cannot carry a breakpoint, but pre-5.6 implicit caching does not
+            # write through the turn tail, so a breakpoint is unnecessary here.
             body["instructions"] = "\n\n".join(request.system_blocks)
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
@@ -1159,18 +1249,115 @@ class OpenAICompatClient:
         effort = _reasoning_effort(request)
         if effort is not None:
             body["reasoning"] = {"effort": effort}
+            # Defect #2: mirror OpenAI Codex (client.rs L720-724), which requests
+            # encrypted reasoning items whenever reasoning is enabled. On the
+            # ``store:false`` codex backend these ``reasoning.encrypted_content``
+            # items are what let the SAME response reuse its reasoning KV state,
+            # and they cost nothing when reasoning is off — so this is gated on
+            # reasoning being present, not on the model version. See
+            # ``_stream_responses`` for how the resulting reasoning items are
+            # handled on the wire (safely skipped; we do not yet replay them).
+            body["include"] = ["reasoning.encrypted_content"]
         if request.model.supports_prompt_cache and request.prompt_cache_key:
-            # The 24h policy is meaningful only with a stable key. SessionStreamFn
-            # supplies one per transcript, and retries preserve it on ChatRequest.
+            # A stable key routes same-prefix requests to the same warm cache.
+            # SessionStreamFn supplies one per transcript, and retries preserve
+            # it on ChatRequest.
             body["prompt_cache_key"] = request.prompt_cache_key
-            body["prompt_cache_retention"] = "24h"
+            if not is_gpt_5_6:
+                # Pre-5.6 lifetime control is ``prompt_cache_retention``. GPT-5.6
+                # replaced it with ``prompt_cache_options.ttl`` (guide migration),
+                # so 5.6+ must NOT send retention — it is set below instead.
+                body["prompt_cache_retention"] = "24h"
+        if is_gpt_5_6:
+            self._apply_gpt_5_6_prompt_cache(request, body)
         return body
 
+    def _apply_gpt_5_6_prompt_cache(self, request: ChatRequest, body: dict[str, Any]) -> None:
+        """Place GPT-5.6 explicit cache breakpoints on ``body`` (defect #3).
+
+        GPT-5.6 moved the implicit cache breakpoint to the end of the latest
+        eligible user/tool message (OpenAI Codex bug #35300), writing THROUGH
+        the volatile turn tail: a large stable prefix followed by a changing
+        suffix stops matching, collapsing the cache-read rate. The guide's fix
+        (0% -> 98.6% on a 9k-token prefix) is to end the stable prefix with an
+        explicit ``prompt_cache_breakpoint`` in an ``input_text`` block inside a
+        developer message — top-level ``instructions`` CANNOT carry a breakpoint,
+        which is exactly why the stable head has to move out of it here.
+
+        We mirror the guide's multi-turn-agent shape (reported >90%): implicit
+        mode kept on so the latest message still caches, plus explicit
+        breakpoints after the stable system prefix and after the most recent
+        tool results (helps forked threads reuse the shared prefix). Every
+        request is capped at four cache writes; implicit spends one slot, the
+        stable-prefix breakpoint one, leaving two for tool results.
+        """
+        # ``prompt_cache_options.mode = implicit`` keeps OpenAI's automatic
+        # breakpoint on the latest message while still honouring our explicit
+        # markers (guide: an implicit breakpoint uses one of the four write
+        # slots, leaving three for explicit ones).
+        body["prompt_cache_options"] = {"mode": "implicit"}
+
+        blocks = request.system_blocks
+        if blocks:
+            # system_blocks is ordered most-stable -> most-volatile (see
+            # prompts_api.build_system_blocks): block 0 instructions, tool
+            # inventory/skills next, the env/date/goal tail LAST. The breakpoint
+            # goes after the stable head but before the volatile tail, so a
+            # change in the tail never invalidates the stable prefix's cache.
+            if len(blocks) >= 2:
+                stable, volatile = blocks[:-1], blocks[-1]
+            else:
+                # A lone block has no stable/volatile split to exploit; treat it
+                # as the stable prefix and end it with the breakpoint.
+                stable, volatile = blocks, None
+            stable_content: list[dict[str, Any]] = [
+                {"type": "input_text", "text": text} for text in stable
+            ]
+            stable_content[-1]["prompt_cache_breakpoint"] = {"mode": "explicit"}
+            developer_items: list[dict[str, Any]] = [
+                {"role": "developer", "content": stable_content}
+            ]
+            if volatile is not None:
+                # The volatile tail rides its OWN developer message AFTER the
+                # breakpoint (no marker) so its churn stays out of the cached
+                # prefix — the guide's "keep changing content after the
+                # breakpoint" shape. It must sit in ``input`` rather than
+                # top-level ``instructions``, which would render BEFORE the
+                # breakpoint and pull the volatile bytes back into the prefix.
+                developer_items.append(
+                    {
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": volatile}],
+                    }
+                )
+            body["input"] = [*developer_items, *body["input"]]
+
+        # Explicit breakpoints after the most recent tool results, as in the
+        # guide's multi-turn-agent example. Budget: four total writes minus one
+        # for implicit and one for the stable-prefix breakpoint above = two.
+        stable_breakpoints = 1 if blocks else 0
+        tool_result_budget = max(0, _MAX_CACHE_BREAKPOINTS - 1 - stable_breakpoints)
+        _mark_recent_tool_result_breakpoints(body["input"], tool_result_budget)
+
     def _build_codex_responses_body(self, request: ChatRequest) -> dict[str, Any]:
-        """ChatGPT Codex body: Responses-shaped, with public-API-only keys removed."""
+        """ChatGPT Codex body: Responses-shaped, on the ``store:false`` backend.
+
+        Reuses the public Responses body, then strips the fields the codex
+        backend does not take. Note that ``prompt_cache_key`` is deliberately
+        NOT stripped any more: an earlier version popped it under a comment
+        calling it "public-API-only", which was a wrong assumption. Real Codex
+        (client.rs, ``build_responses_request``) sets ``prompt_cache_key``
+        UNCONDITIONALLY on this same ``store:false`` backend for routing
+        stickiness, and the model's ~89-90% cache-read rate versus ~97-98% for
+        OpenAI-shaped peers was traced to us stripping it. ``prompt_cache_key``,
+        ``include``, ``prompt_cache_options`` and the developer-message
+        breakpoints all flow through from ``_build_responses_body``. Only
+        ``prompt_cache_retention`` is popped: the codex backend is
+        ``store:false`` (public retention does not apply) and GPT-5.6 controls
+        lifetime through ``prompt_cache_options.ttl`` instead.
+        """
         body = self._build_responses_body(request)
         body["store"] = False
-        body.pop("prompt_cache_key", None)
         body.pop("prompt_cache_retention", None)
         body.pop("max_output_tokens", None)
         body.pop("temperature", None)
@@ -1370,8 +1557,26 @@ class OpenAICompatClient:
                 except json.JSONDecodeError:
                     continue
                 event_type = payload.get("type", "")
+                # Requesting ``include: ["reasoning.encrypted_content"]`` (defect
+                # #2) makes the stream carry ``reasoning`` output items and their
+                # ``response.reasoning*`` deltas that a non-reasoning include
+                # never produced. We deliberately DROP them: the harness has no
+                # channel to replay an OpenAI encrypted reasoning item back on
+                # the next turn's ``input`` (unlike Anthropic's thinking blocks,
+                # which ride ``provider_payload``), and wiring that state through
+                # the loop is out of this fix's scope. The include still earns
+                # its keep — encrypted reasoning improves SAME-response cache
+                # reuse — but cross-turn reasoning replay is intentionally not
+                # attempted here. Skipping is explicit rather than incidental so
+                # a future ``else`` branch cannot accidentally render a reasoning
+                # item's encrypted blob as assistant text. (Called out for review.)
+                if event_type.startswith("response.reasoning"):
+                    continue
                 if event_type == "response.output_item.added":
                     item = payload.get("item") or {}
+                    if item.get("type") == "reasoning":
+                        # Same rationale as above: acknowledge the item, drop it.
+                        continue
                     if item.get("type") == "function_call":
                         index = tool_call_count
                         tool_call_count += 1
