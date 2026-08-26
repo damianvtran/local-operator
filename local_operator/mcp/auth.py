@@ -1941,9 +1941,7 @@ def _make_refresh_coordinating_provider(
                     self.context.token_expiry_time = (
                         self._refresh_coord_storage.stored_token_expiry()
                     )
-                    original_request.headers["Authorization"] = (
-                        f"Bearer {stored.access_token}"
-                    )
+                    original_request.headers["Authorization"] = f"Bearer {stored.access_token}"
             except Exception:  # noqa: BLE001 — adoption is best-effort
                 # A failed re-read must not break the request: defer to the
                 # SDK's own 401 handling rather than inventing a new failure.
