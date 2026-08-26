@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
+// The expected version is DERIVED from package.json rather than hardcoded so a
+// release bump is a two-file change (manifest + package) that cannot silently
+// break these tests: every fixture below follows the real version, and the
+// mismatch guard keeps using a literal impossible version (9.9.9).
+const VERSION = JSON.parse(
+  await readFile(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 const extensionId = "omibaecbjdhgbbcedbnnnmjpmopfheof";
 const itemPath = `/v2/publishers/test-publisher/items/${extensionId}`;
 
@@ -48,10 +56,10 @@ async function runRelease(args, handlers) {
 
 test("store zip is allowlisted, source-map-free, and version-aligned", async () => {
   await run("node", ["build.mjs", "--zip"], { cwd: import.meta.dirname + "/.." });
-  const validated = await run("bash", ["scripts/validate-store-zip.sh", "local-operator-extension.zip", "0.1.0"], {
+  const validated = await run("bash", ["scripts/validate-store-zip.sh", "local-operator-extension.zip", VERSION], {
     cwd: import.meta.dirname + "/..",
   });
-  assert.match(validated.stdout, /validated Chrome Web Store package v0\.1\.0/);
+  assert.match(validated.stdout, new RegExp(`validated Chrome Web Store package v${VERSION.replaceAll(".", "\\.")}`));
   await assert.rejects(
     run("bash", ["scripts/validate-store-zip.sh", "local-operator-extension.zip", "9.9.9"], {
       cwd: import.meta.dirname + "/..",
@@ -62,7 +70,7 @@ test("store zip is allowlisted, source-map-free, and version-aligned", async () 
 
 test("publisher refuses any item except the permanent extension ID", async () => {
   await assert.rejects(
-    run("bash", ["scripts/chrome-web-store.sh", "promote", "0.1.0"], {
+    run("bash", ["scripts/chrome-web-store.sh", "promote", VERSION], {
       cwd: import.meta.dirname + "/..",
       env: {
         ...process.env,
@@ -76,13 +84,13 @@ test("publisher refuses any item except the permanent extension ID", async () =>
 });
 
 test("stage uploads the validated zip and requests deferred publication", async () => {
-  const result = await runRelease(["stage", "local-operator-extension.zip", "0.1.0"], [
+  const result = await runRelease(["stage", "local-operator-extension.zip", VERSION], [
     (request, body) => {
       assert.equal(request.method, "POST");
       assert.equal(request.url, `/upload${itemPath}:upload`);
       assert.equal(request.headers["content-type"], "application/zip");
       assert.ok(body.length > 1_000);
-      return { itemId: extensionId, uploadState: "SUCCEEDED", crxVersion: "0.1.0" };
+      return { itemId: extensionId, uploadState: "SUCCEEDED", crxVersion: VERSION };
     },
     (request, body) => {
       assert.equal(request.method, "POST");
@@ -100,13 +108,13 @@ test("stage uploads the validated zip and requests deferred publication", async 
 
 test("asynchronous upload fails closed instead of trusting global upload status", async () => {
   await assert.rejects(
-    runRelease(["stage", "local-operator-extension.zip", "0.1.0"], [
+    runRelease(["stage", "local-operator-extension.zip", VERSION], [
       (request) => {
         assert.equal(request.method, "POST");
         return { itemId: extensionId, uploadState: "IN_PROGRESS" };
       },
     ]),
-    /asynchronous upload cannot be bound to version 0\.1\.0/,
+    new RegExp(`asynchronous upload cannot be bound to version ${VERSION.replaceAll(".", "\\.")}`),
   );
 });
 
@@ -115,10 +123,10 @@ test("promotion verifies the approved version at 100 percent before making it pu
     itemId: extensionId,
     submittedItemRevisionStatus: {
       state: "STAGED",
-      distributionChannels: [{ crxVersion: "0.1.0", deployPercentage: 100 }],
+      distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
     },
   };
-  const result = await runRelease(["promote", "0.1.0"], [
+  const result = await runRelease(["promote", VERSION], [
     (request) => {
       assert.equal(request.method, "GET");
       assert.equal(request.url, `${itemPath}:fetchStatus`);
@@ -139,26 +147,26 @@ test("promotion verifies the approved version at 100 percent before making it pu
         itemId: extensionId,
         publishedItemRevisionStatus: {
           state: "PUBLISHED",
-          distributionChannels: [{ crxVersion: "0.1.0", deployPercentage: 100 }],
+          distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
         },
       };
     },
   ]);
-  assert.match(result.stdout, /v0\.1\.0 to PUBLISHED/);
+  assert.match(result.stdout, new RegExp(`v${VERSION.replaceAll(".", "\\.")} to PUBLISHED`));
 });
 
 test("promotion refuses a staged revision below 100 percent", async () => {
   await assert.rejects(
-    runRelease(["promote", "0.1.0"], [
+    runRelease(["promote", VERSION], [
       () => ({
         itemId: extensionId,
         submittedItemRevisionStatus: {
           state: "STAGED",
-          distributionChannels: [{ crxVersion: "0.1.0", deployPercentage: 50 }],
+          distributionChannels: [{ crxVersion: VERSION, deployPercentage: 50 }],
         },
       }),
     ]),
-    /must contain version 0\.1\.0 at 100% deployment/,
+    new RegExp(`must contain version ${VERSION.replaceAll(".", "\\.")} at 100% deployment`),
   );
 });
 
