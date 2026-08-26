@@ -116,6 +116,32 @@ def _run(argv: list[str]) -> bool:
     return True
 
 
+def _capture(argv: list[str]) -> str | None:
+    """Run a multiplexer command and return its stdout, or None on failure.
+
+    The readback half of a scoped retire: unlike :func:`_run` the ANSWER is
+    the payload, so a non-zero exit or a spawn failure is "unreadable"
+    (None) rather than False, and every caller treats None as "do not clear".
+    Never raises, by the same best-effort contract as `_run`.
+    """
+    try:
+        completed = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=CALL_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("multiplexer readback failed to spawn: %s", argv[0], exc_info=True)
+        return None
+    if completed.returncode != 0:
+        logger.debug(
+            "%s readback exited %s: %s", argv[0], completed.returncode, completed.stderr[:200]
+        )
+        return None
+    return completed.stdout
+
+
 def _which(binary: str) -> str | None:
     """Resolve a multiplexer binary, or None.
 
@@ -129,13 +155,30 @@ def _which(binary: str) -> str | None:
 
 
 class _OptionBackend:
-    """Shared body for multiplexers with a native per-pane option store."""
+    """Shared body for multiplexers with a native per-pane option store.
+
+    Retire here is SCOPED to the binding this backend itself published, where
+    the multiplexer offers a way to read a pane option back. An unscoped clear
+    would race a ``/new``/``/resume`` swap: the outgoing binding's withdrawal
+    and the incoming binding's publish both name the same pane, and whichever
+    lands second wins — an unscoped clear landing second deletes the fresh
+    binding and the pane advertises nothing, which is the failure this
+    package exists to prevent. :class:`WezTermBackend` cannot scope (see its
+    class comment) and relies on the swap sequencing in ``SessionBroadcast``
+    instead.
+    """
 
     #: Subclass fills these in. ``binary`` is what must exist on PATH;
     #: ``pane_env`` is the variable naming this pane.
     name = ""
     binary = ""
     pane_env = ""
+
+    #: Whether :meth:`retire` can read the stored session id back and clear
+    #: only its own binding. False on multiplexers whose option store is
+    #: write-only; those keep the unconditional clear and are protected by
+    #: the swap sequencing instead.
+    scoped_retire = False
 
     def detect(self, env: EnvMap) -> bool:
         if not (env.get(self.pane_env) or "").strip():
@@ -147,6 +190,14 @@ class _OptionBackend:
 
     def _unset_option(self, pane: str, option: str) -> bool:
         raise NotImplementedError
+
+    def _read_option(self, pane: str, option: str) -> str | None:
+        """The value currently stored on ``pane``, or None when unreadable.
+
+        Only implemented where the multiplexer can answer; the default keeps
+        ``scoped_retire`` False everywhere it is not overridden.
+        """
+        return None
 
     def publish(self, binding: SessionBinding, env: EnvMap) -> bool:
         pane = (env.get(self.pane_env) or "").strip()
@@ -164,6 +215,15 @@ class _OptionBackend:
         pane = (env.get(self.pane_env) or "").strip()
         if not pane or _which(self.binary) is None:
             return False
+        if self.scoped_retire:
+            # Read back BEFORE clearing: the pane may already have been
+            # re-bound by a /new or /resume swap, and clearing a session id we
+            # did not publish is how a pane ends up advertising nothing. A
+            # mismatch means the successor's publish already won the pane and
+            # the right action is to withdraw nothing.
+            stored = self._read_option(pane, SESSION_OPTION)
+            if stored != binding.session_id:
+                return False
         # Both are unset even if the first fails: a pane left advertising a
         # session id with no command (or vice versa) is a half-marker a
         # restore script has to special-case.
@@ -181,6 +241,9 @@ class TmuxBackend(_OptionBackend):
     #: names no pane, and the option must be set on the pane holding THIS
     #: session or a second session in the same window would overwrite it.
     pane_env = "TMUX_PANE"
+    #: tmux pane options can be read back, so a retire can be scoped to the
+    #: binding this backend itself published.
+    scoped_retire = True
 
     def detect(self, env: EnvMap) -> bool:
         # Both markers: TMUX is what proves a live server (TMUX_PANE alone
@@ -198,9 +261,42 @@ class TmuxBackend(_OptionBackend):
         # rather than as absence.
         return _run([self.binary, "set-option", "-p", "-t", pane, "-u", option])
 
+    def _read_option(self, pane: str, option: str) -> str | None:
+        # ``display-message`` and not ``show-option``: an ABSENT user option
+        # makes ``show-option`` exit non-zero, which reads as "unreadable",
+        # while ``display-message -p`` renders an unset option as the empty
+        # string with exit 0 — the one spelling that distinguishes "the pane
+        # holds some other session" from "tmux would not answer".
+        #
+        # ``option[1:]`` drops the ``@``: a tmux format reference is
+        # ``#{@name}`` and the option constant already carries the ``@``.
+        completed = _capture(
+            [self.binary, "display-message", "-p", "-t", pane, "#{@" + option[1:] + "}"]
+        )
+        if completed is None:
+            return None
+        value = completed.strip()
+        # An unset option renders as the empty string; reporting it as "" (a
+        # real value) would compare unequal against every session id and skip
+        # the clear, so absence is normalised to None.
+        return value or None
+
 
 class WezTermBackend(_OptionBackend):
-    """wezterm, via ``cli set-user-var`` (per-pane user variables)."""
+    """wezterm, via ``cli set-user-var`` (per-pane user variables).
+
+    ``scoped_retire`` stays False here, and that is a constraint of the
+    multiplexer rather than a choice: wezterm user vars are write-only from a
+    pane process — there is no ``cli`` readback, only Lua's
+    ``pane:get_user_vars()`` inside the wezterm config — so a retire cannot
+    compare the stored session id against its own. The unconditional clear
+    is therefore correct ONLY because the swap is sequenced elsewhere: the
+    successor broadcast waits for this withdrawal before it publishes (see
+    ``SessionBroadcast``), which keeps a late wezterm clear from deleting the
+    fresh binding. The clear is also self-limiting in the crash case it
+    exists for: a quit-with-no-successor leaves the pane holding nothing but
+    this binding, so there is nothing else to delete.
+    """
 
     name = "wezterm"
     binary = "wezterm"
@@ -223,6 +319,17 @@ class _FileBackend:
     neither offers anywhere to hang a value off it, so the marker goes in a
     file named for that identity.
     """
+
+    #: Read back by :meth:`retire` to decide whether the file on disk is still
+    #: OURS. A retire must never remove a binding some other session published
+    #: into this pane after us — on a ``/new`` or ``/resume`` swap the
+    #: withdrawal of the outgoing binding races the publish of the incoming
+    #: one, both name the same pane, and an unscoped unlink deletes the NEW
+    #: session's marker (see ``SessionBroadcast`` for the sequencing and this
+    #: scoping's role in it). cmux gets the same guarantee from its server by
+    #: sending ``checkpoint_id`` as an expectation; the file backends have no
+    #: server, so the comparison happens here on the payload we wrote.
+    _MARKER_FIELDS = ("backend", "pane", "session_id")
 
     name = ""
     #: Environment variables that identify this pane, in preference order.
@@ -282,12 +389,49 @@ class _FileBackend:
         pane = self._pane_id(env)
         if pane is None:
             return False
+        path = self._path(pane)
+        # Scoped to the binding WE published. The swap races mean this file
+        # may already name the successor session, and unlinking it would leave
+        # the pane advertising nothing after every /new — the exact failure
+        # this feature exists to prevent. Removing nothing when the file is
+        # not ours is the correct outcome, not a degraded one: the marker that
+        # IS there belongs to a live session.
+        #
+        # Unreadable-but-present is treated as not-ours rather than removed:
+        # a corrupt or foreign marker is not evidence this binding owns the
+        # pane, and deleting state we cannot identify is the same mistake the
+        # scoping exists to prevent.
+        if not self._marker_is_ours(path, pane, binding):
+            return False
         try:
-            self._path(pane).unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
         except OSError:
             logger.debug("%s marker removal failed", self.name, exc_info=True)
             return False
         return True
+
+    def _marker_is_ours(self, path: Path, pane: str, binding: SessionBinding) -> bool:
+        """Whether the marker on disk still describes ``binding``.
+
+        Best-effort and total: every failure to answer reads as "not ours",
+        because the only decision this feeds is whether to DELETE, and a
+        no-op retire leaves a stale marker (the package's allowed failure)
+        where an unscoped one deletes a live binding.
+        """
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return all(
+            payload.get(field) == value
+            for field, value in (
+                ("backend", self.name),
+                ("pane", pane),
+                ("session_id", binding.session_id),
+            )
+        )
 
 
 class ZellijBackend(_FileBackend):

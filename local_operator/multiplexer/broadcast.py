@@ -11,10 +11,13 @@ backend and no call site has to re-derive them:
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import sys
 import threading
+import time
+import weakref
 from pathlib import Path
 
 from local_operator.multiplexer.cmux import REASSERT_INTERVAL_S
@@ -41,11 +44,29 @@ logger = logging.getLogger(__name__)
 #: its pane advertising a resume command, so it is deliberately short.
 _PENDING_POLL_S = 5.0
 
-#: Default grace for :meth:`SessionBroadcast.join`, which is a TEST and
-#: teardown-diagnostic helper rather than part of the stop path. Long enough
-#: for a backend call already inside a subprocess to finish and see the retire
-#: latch. ``stop`` itself never waits this out — see :meth:`SessionBroadcast.stop`.
+#: Default grace for :meth:`SessionBroadcast.join`, which a SWAP (the
+#: successor broadcast waiting out its predecessor's withdrawal) and the
+#: tests both use. Long enough for a backend call already inside a subprocess
+#: to finish and see the retire latch. ``stop`` itself never waits this out —
+#: see :meth:`SessionBroadcast.stop`.
 CALL_JOIN_TIMEOUT_S = 6.0
+
+#: Bound on how long the successor broadcast waits for the OUTGOING
+#: session's withdrawal before publishing anyway. This is the swap ordering
+#: made safe: without a wait, a ``/new``/``/resume`` publishes the new binding
+#: while the old one's retire is still in a subprocess, and whichever lands
+#: last wins the pane — the pane then advertises nothing, which is the exact
+#: failure this package exists to prevent.
+#
+#: It is a bound and not a join because the wait runs on the SUCCESSOR's own
+#: timer thread, off the event loop, and must not become a hang there either:
+#: a wedged multiplexer socket that ignores ``CALL_TIMEOUT_S``-bounded
+#: subprocesses entirely (or a retire queued behind a publish already parked
+#: in one) can outwait any fixed number, and the successor has to publish
+#: eventually. What the timeout trades away is the wezterm corner case below,
+#: and a publish that wins the pane late is recoverable by the re-assert — an
+#: unreachable socket is refusing the successor's writes too.
+SWAP_DRAIN_TIMEOUT_S = CALL_JOIN_TIMEOUT_S
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE`` in
 #: ``tui/terminal_title.py``. Wanted by anything that must not rewrite a pane's
@@ -212,17 +233,31 @@ class SessionBroadcast:
         *,
         env: EnvMap | None = None,
         interval_s: float = REASSERT_INTERVAL_S,
+        predecessor: SessionBroadcast | None = None,
     ) -> None:
         self._binding = binding
         self._backend = backend
         self._env = env_or_process(env)
         self._interval_s = interval_s
+        # The broadcast this one REPLACES in the same pane, if any. Not read
+        # after `start()` returns: the successor's timer thread drains it once
+        # (below) and then the reference is dropped, so a chain of swaps can
+        # never accumulate handles. Ordering the swap through the successor
+        # rather than the app keeps the event loop out of it entirely — the
+        # app calls `stop()` (prompt, returns immediately) and `start()`, and
+        # the sequencing happens on a thread neither of them is waiting on.
+        self._predecessor = predecessor
+        self._drained = threading.Event()
+        # Signals the timer to wake and exit. Also the mechanism that makes
+        # `stop()` prompt rather than waiting out a 90s sleep.
+        self._stopped = threading.Event()
         # Signals the timer to wake and exit. Also the mechanism that makes
         # `stop()` prompt rather than waiting out a 90s sleep.
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
-        # Survives `stop()` clearing `_thread`, purely so `join()` has
-        # something to wait on. Never read by a production path.
+        # Survives `stop()` clearing `_thread`, so `join()` can still settle
+        # it — and join has a production caller now: a SWAP's successor drains
+        # its predecessor on the successor's own timer thread (see `_run`).
         self._timer_thread: threading.Thread | None = None
         # Serialises the publish/retire pair. Without it a re-assert already in
         # flight on the timer thread could land AFTER the clean-exit clear and
@@ -251,7 +286,14 @@ class SessionBroadcast:
         self._resumable = False
 
     def start(self) -> None:
-        """Publish now, then keep re-asserting until :meth:`stop`."""
+        """Publish now, then keep re-asserting until :meth:`stop`.
+
+        On a swap, called with ``predecessor`` set. The first publish then
+        happens only after the predecessor's withdrawal has been drained, so
+        the two cannot race for the pane — and the drain runs on THIS
+        broadcast's timer thread, which is exactly the thread the event loop
+        is not waiting on.
+        """
         if self._thread is not None:
             return
         thread = threading.Thread(
@@ -295,6 +337,26 @@ class SessionBroadcast:
                 logger.debug("multiplexer publish failed", exc_info=True)
 
     def _run(self) -> None:
+        # A swap must not let the outgoing session's withdrawal land after
+        # the incoming session's publish: both name the same pane, so the
+        # loser's write deletes the winner's. Waiting here is what keeps the
+        # event loop out of it — this is the successor's own timer thread, a
+        # thread nothing user-facing blocks on. The bound is
+        # `SWAP_DRAIN_TIMEOUT_S` rather than a plain join because the
+        # predecessor's retire may itself be queued behind a publish parked
+        # in a `CALL_TIMEOUT_S` subprocess, and the successor must publish
+        # eventually rather than hang behind a socket that never answers.
+        #
+        # `join()` is safe to call on the predecessor from here: it joins the
+        # retire worker and the TIMER, and this thread is neither.
+        predecessor = self._predecessor
+        if predecessor is not None:
+            self._predecessor = None
+            try:
+                predecessor.join(timeout=SWAP_DRAIN_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — a swap must never fail on this
+                logger.debug("predecessor withdrawal drain failed", exc_info=True)
+        self._drained.set()
         # Published immediately so a RESUMED session's binding exists from the
         # first moment; a cold session no-ops here and lands on the poll below.
         self._publish_once()
@@ -362,22 +424,27 @@ class SessionBroadcast:
         # `_retired` latch already prevents it from doing anything meaningful
         # after this point. Joining here would reintroduce the event-loop
         # stall the dispatch above exists to avoid — a publish in flight can
-        # sit in a subprocess timeout for seconds. Tests that need the thread
-        # settled call `join()` explicitly.
+        # sit in a subprocess timeout for seconds. The two callers that DO
+        # need the withdrawal sequenced get it off the loop: a swap's
+        # successor drains this broadcast on its own timer thread, and quit
+        # is covered by the exit drain registered with the retire dispatch.
 
     def _dispatch_retire(self) -> None:
         """Run the backend retire off the caller's thread, at most once.
-
         A dedicated short-lived thread rather than the timer thread: the timer
         may be parked inside a publish subprocess for seconds, and the
-        withdrawal should not queue behind it. Daemon, for the same reason the
-        timer is — a wedged socket must not delay interpreter shutdown, and a
-        withdrawal that loses a race with process exit costs a stale marker,
-        which is the failure mode this package is explicitly allowed to have.
+        withdrawal should not queue behind it. Daemon, so a wedged socket
+        cannot hold the process open — with the exit drain below making that
+        safe: without it, interpreter exit killed the worker before the
+        withdrawal ran, and a session the user deliberately quit stayed
+        advertised in the pane until their next shell replayed it.
         """
         with self._dispatch_lock:
             if self._retire_thread is not None:
                 return
+            # Recorded before the thread exists so the exit drain can see a
+            # dispatch that is still starting up.
+            _RETIRE_REGISTRY.add(self)
 
             def _retire() -> None:
                 # Takes `_call_lock` so the retire cannot interleave with a
@@ -395,14 +462,16 @@ class SessionBroadcast:
                 daemon=True,
             )
             self._retire_thread = worker
+            _register_exit_drain()
             worker.start()
 
     def join(self, timeout: float = CALL_JOIN_TIMEOUT_S) -> None:
         """Wait for the timer and any retire worker to finish.
-
-        For TESTS and teardown diagnostics only. No production path calls this:
-        both real callers are on the event loop, where waiting on a multiplexer
-        socket is the exact bug :meth:`stop` is written to avoid.
+        Called by tests, by teardown diagnostics, and by a SWAP: the successor
+        broadcast's timer thread joins its predecessor before publishing, so
+        the two bindings cannot race for the pane. The event loop is never a
+        caller — both of its call sites (`_adopt_session`, `on_unmount`) use
+        `stop()`/`retire_session()`, which never join.
         """
         with self._dispatch_lock:
             retire_worker = self._retire_thread
@@ -410,19 +479,41 @@ class SessionBroadcast:
             if worker is not None and worker is not threading.current_thread():
                 worker.join(timeout=timeout)
 
+    def _drain_retire(self, *, timeout: float) -> None:
+        """Join only the retire worker, bounded. Exit-path half of the drain.
+
+        Deliberately narrower than :meth:`join`: the timer thread has nothing
+        left to do once `_stopped` is set (and its `_publish_once` refuses
+        under the `_retired` latch), so joining it at exit buys nothing. Only
+        the withdrawal carries state the user can still be harmed by.
+        """
+        with self._dispatch_lock:
+            worker = self._retire_thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=timeout)
+
 
 def broadcast_session(
     session_id: str,
     *,
     cwd: str | None = None,
     env: EnvMap | None = None,
+    predecessor: SessionBroadcast | None = None,
 ) -> SessionBroadcast | None:
     """Start publishing ``session_id`` for this pane, if anything should be.
-
     Returns the handle to stop later, or None when there is nothing to do —
     no multiplexer, the kill switch is set, a subagent's session, or a
     session with no transcript yet. None is the common case and is not an
     error.
+
+    ``predecessor`` is the broadcast this one replaces in the same pane, on a
+    ``/new``/``/resume`` swap. The successor waits for its withdrawal before
+    publishing (on the successor's own thread — never the event loop), which
+    is what stops the outgoing clear from deleting the incoming binding on
+    the marker backends that cannot scope a clear themselves. When this
+    returns None the caller has already stopped the predecessor itself, so
+    the withdrawal still happens; it is simply not sequenced against a
+    successor that does not exist.
 
     Never raises. This is called from session startup, where an exception
     would cost the user their session for the sake of a bookkeeping write.
@@ -443,7 +534,7 @@ def broadcast_session(
         binding = build_binding(session_id, cwd=cwd)
         if binding is None:
             return None
-        broadcast = SessionBroadcast(binding, backend, env=source)
+        broadcast = SessionBroadcast(binding, backend, env=source, predecessor=predecessor)
         broadcast.start()
         logger.debug("publishing resume binding to %s for %s", backend.name, session_id)
         return broadcast
@@ -452,8 +543,94 @@ def broadcast_session(
         return None
 
 
+#: Worst-case delay a user can experience at interpreter exit because of a
+#: resume-binding withdrawal. One bounded join per process, shared by every
+#: broadcast (see :func:`_register_exit_drain`), never on the event loop —
+#: `atexit` runs on the main thread after `on_unmount` has already returned.
+#:
+#: The number is a bound, not an expectation: a healthy backend retires in
+#: one subprocess spawn (single-digit milliseconds), so the join returns in
+#: that. The bound only ever gets used when the multiplexer socket is wedged
+#: mid-restart — the state where the alternative (a synchronous retire on the
+#: event loop) froze the whole TUI for ~9.8s. A quit that outwaits it leaves
+#: a stale marker, which is the package's explicitly allowed failure for the
+#: crash case; the crash case cannot reach this code at all.
+EXIT_DRAIN_TIMEOUT_S = 2.0
+
+#: Registered once per process; guarded by `_EXIT_DRAIN_LOCK`.
+_EXIT_DRAIN_LOCK = threading.Lock()
+_exit_drain_registered = False
+
+#: Every broadcast with a retire dispatched in this process. Weak, so a
+#: broadcast that is garbage-collected before exit (a swap chain) is not kept
+#: alive — and its already-finished worker is not joined for nothing.
+_RETIRE_REGISTRY: weakref.WeakSet["SessionBroadcast"] = weakref.WeakSet()
+
+
+def _register_exit_drain() -> None:
+    """Make sure a dispatched withdrawal survives interpreter exit.
+
+    WHY THIS EXISTS
+    ---------------
+    The retire worker is a daemon thread, and daemon threads are killed at
+    interpreter exit without running their remaining code. Before this
+    drain, `stop(retire=True)` on quit returned in microseconds having only
+    STARTED the worker; the interpreter then exited and the withdrawal never
+    ran, so the pane kept advertising a session the user had deliberately
+    closed — and their next shell in that pane replayed it. A stale marker
+    after a crash is the feature; a stale marker after a clean quit is the
+    bug this function exists to close.
+
+    WHY `atexit` AND NOT A JOIN IN `stop`
+    -------------------------------------
+    Joining in `stop` would put the wait on the Textual event loop (both real
+    callers are coroutines), which is the ~9.8s freeze F1's fix removed.
+    `atexit` handlers run on the main thread AFTER `on_unmount` has returned
+    and the event loop is gone, so nothing user-facing is blocked by the
+    join: the process is already on its way out. `os._exit` (the Windows
+    re-exec path) and a hard crash skip `atexit` entirely, which is correct —
+    both are crash-shaped exits where a surviving binding is the feature.
+
+    The handler is registered once for the process rather than once per
+    broadcast: several panes' worth of broadcasts live in one process only in
+    tests, but a chain of swaps produces one live broadcast plus a series of
+    retired ones, and each would otherwise register its own handler.
+    """
+    global _exit_drain_registered
+    with _EXIT_DRAIN_LOCK:
+        if _exit_drain_registered:
+            return
+        _exit_drain_registered = True
+
+    atexit.register(_drain_retires_at_exit)
+
+
+def _drain_retires_at_exit() -> None:
+    """Join every live retire worker, bounded. Never raises.
+
+    Idempotent and cheap to call early: the registry of broadcasts with a
+    dispatched retire is consulted rather than guessed at, so a process that
+    never dispatched one pays nothing.
+    """
+    deadline = time.monotonic() + EXIT_DRAIN_TIMEOUT_S
+    for broadcast in tuple(_RETIRE_REGISTRY):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            broadcast._drain_retire(timeout=remaining)  # noqa: SLF001 - same package
+        except Exception:  # noqa: BLE001 — an exit path must never raise
+            logger.debug("exit retire drain failed", exc_info=True)
+
+
 def retire_session(broadcast: SessionBroadcast | None) -> None:
-    """Withdraw a binding on a clean exit. Safe with None, never raises."""
+    """Withdraw a binding on a clean exit. Safe with None, never raises.
+
+    The withdrawal itself runs on the broadcast's own retire worker, and the
+    exit drain guarantees it lands before the interpreter is gone — see
+    :func:`_register_exit_drain` for why that is `atexit` and not a join
+    here. A join here would be on the Textual event loop.
+    """
     if broadcast is None:
         return
     try:

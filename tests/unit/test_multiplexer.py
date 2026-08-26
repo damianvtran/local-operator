@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -236,6 +237,205 @@ class TestNeverFatal:
         }
         assert multiplexer_resume_enabled(env) is False
         assert broadcast_session("abc123abc123", env=env) is None
+
+
+class TestSwapOrdering:
+    """F7: a /new or /resume swap must leave the pane advertising the NEW session.
+
+    The failure mode these tests pin is invisible until a crash: the outgoing
+    binding's withdrawal lands AFTER the incoming binding's publish, deletes
+    it (both name the same pane), and the pane then advertises nothing — so
+    the crash this feature exists for finds no binding to restore. Every real
+    backend retire is a subprocess spawn (6-75ms on this host), which is far
+    past the ~5ms threshold where the unsequenced swap starts losing, so the
+    stub-Handle swap test in the TUI suite cannot see this at all: it needs a
+    backend with realistic retire latency.
+    """
+
+    #: One subprocess spawn, the floor for a real backend retire on this host
+    #: (screen -V 6.7ms). High enough to lose every unsequenced swap, low
+    #: enough to keep the suite fast.
+    RETIRE_LATENCY_S = 0.05
+
+    @staticmethod
+    def _marker_session(config_dir: Path, pane_file: str) -> str | None:
+        path = config_dir / "multiplexer" / pane_file
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            return None
+        return payload.get("session_id")
+
+    def test_a_slow_retire_cannot_delete_the_successors_binding(self, config_dir: Path) -> None:
+        """The zellij marker after a swap names the NEW session, not nothing.
+
+        Mirrors `app.py`'s swap exactly — stop the outgoing broadcast, then
+        start the successor with it as predecessor — against the real
+        `ZellijBackend` with one subprocess spawn of retire latency. Before
+        the fix the pane advertised NOTHING after the swap (20/20 trials at
+        5ms of latency in review round 2).
+        """
+        _make_session(config_dir, "aaaaaaaaaaaa")
+        _make_session(config_dir, "bbbbbbbbbbbb")
+        env = {"ZELLIJ_SESSION_NAME": "main", "ZELLIJ_PANE_ID": "0"}
+
+        class SlowRetireZellij(ZellijBackend):
+            def retire(self, binding: Any, env: Any) -> bool:
+                time.sleep(TestSwapOrdering.RETIRE_LATENCY_S)
+                return super().retire(binding, env)
+
+        backend = SlowRetireZellij()
+        outgoing = SessionBroadcast(_binding("aaaaaaaaaaaa"), backend, env=env, interval_s=3600.0)
+        outgoing.start()
+        deadline = time.monotonic() + 5.0
+        while self._marker_session(config_dir, "zellij-main-0.json") != "aaaaaaaaaaaa":
+            assert time.monotonic() < deadline, "outgoing binding never published"
+            time.sleep(0.005)
+
+        # app.py's swap: stop() returns immediately, the successor sequences.
+        outgoing.stop(retire=True)
+        incoming = SessionBroadcast(
+            _binding("bbbbbbbbbbbb"),
+            backend,
+            env=env,
+            interval_s=3600.0,
+            predecessor=outgoing,
+        )
+        incoming.start()
+        incoming.join(timeout=10.0)
+        outgoing.join(timeout=10.0)
+
+        assert (
+            self._marker_session(config_dir, "zellij-main-0.json") == "bbbbbbbbbbbb"
+        ), "swap left the pane advertising nothing — a crash now loses the session"
+
+    def test_a_scoped_retire_never_removes_a_foreign_marker(self, config_dir: Path) -> None:
+        """The class fix, not the instance: retire refuses a marker it did not write.
+
+        Sequencing makes the race rare; scoping makes it harmless. A retire
+        arriving after the successor has published must withdraw nothing,
+        because the marker on disk is no longer its binding.
+        """
+        _make_session(config_dir, "aaaaaaaaaaaa")
+        _make_session(config_dir, "bbbbbbbbbbbb")
+        env = {"ZELLIJ_SESSION_NAME": "main", "ZELLIJ_PANE_ID": "0"}
+        backend = ZellijBackend()
+        assert backend.publish(_binding("bbbbbbbbbbbb"), env) is True
+
+        # The outgoing session's retire arrives late — after the swap.
+        assert backend.retire(_binding("aaaaaaaaaaaa"), env) is False
+        assert (
+            self._marker_session(config_dir, "zellij-main-0.json") == "bbbbbbbbbbbb"
+        ), "a late retire deleted the successor's marker"
+
+    def test_a_scoped_retire_still_removes_its_own_marker(self, config_dir: Path) -> None:
+        """Scoping must not break the ordinary quit: our own marker goes."""
+        _make_session(config_dir, "aaaaaaaaaaaa")
+        env = {"ZELLIJ_SESSION_NAME": "main", "ZELLIJ_PANE_ID": "0"}
+        backend = ZellijBackend()
+        assert backend.publish(_binding("aaaaaaaaaaaa"), env) is True
+        assert backend.retire(_binding("aaaaaaaaaaaa"), env) is True
+        assert self._marker_session(config_dir, "zellij-main-0.json") is None
+
+    def test_an_unreadable_marker_is_never_deleted(self, config_dir: Path) -> None:
+        """Corrupt-or-foreign reads as not-ours, because the feed is a DELETE."""
+        _make_session(config_dir, "aaaaaaaaaaaa")
+        env = {"ZELLIJ_SESSION_NAME": "main", "ZELLIJ_PANE_ID": "0"}
+        marker = config_dir / "multiplexer" / "zellij-main-0.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{not json", encoding="utf-8")
+        assert ZellijBackend().retire(_binding("aaaaaaaaaaaa"), env) is False
+        assert marker.exists(), "an unidentifiable marker must not be removed"
+
+    def test_tmux_retire_reads_back_and_scopes_to_its_own_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The option backend scopes the same way, via `display-message` readback."""
+        options: dict[str, str] = {}
+
+        def fake_run(argv: list[str]) -> bool:
+            # ``-u`` puts the option name at a different index than a set does,
+            # so the fake mirrors the real argv shapes: set is ``... <option>
+            # <value>`` and unset is ``... -u <option>``.
+            if "-u" in argv:
+                options.pop(argv[-1], None)
+            else:
+                options[argv[-2]] = argv[-1]
+            return True
+
+        monkeypatch.setattr("local_operator.multiplexer.markers._run", fake_run)
+        monkeypatch.setattr(
+            "local_operator.multiplexer.markers._capture",
+            lambda argv: options.get("@lop_session"),
+        )
+        monkeypatch.setattr("local_operator.multiplexer.markers._which", lambda b: "/bin/tmux")
+        env = {"TMUX": "/tmp/tmux-501/default,123,0", "TMUX_PANE": "%3"}
+        backend = TmuxBackend()
+
+        # Successor published first: the pane holds another session's binding.
+        options["@lop_session"] = "bbbbbbbbbbbb"
+        assert backend.retire(_binding("aaaaaaaaaaaa"), env) is False
+        assert "@lop_session" in options, "a foreign clear deleted the fresh binding"
+
+        # Our own binding: cleared, both halves.
+        options["@lop_session"] = "aaaaaaaaaaaa"
+        assert backend.retire(_binding("aaaaaaaaaaaa"), env) is True
+        assert "@lop_session" not in options
+
+    def test_a_wezterm_clear_cannot_scope_and_relies_on_sequencing(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """wezterm's write-only user vars make scoping impossible there.
+
+        This pins WHY the swap is sequenced rather than only scoped: without
+        the predecessor wait, this backend's unconditional clear deletes the
+        successor's binding every time. The sequencing is exercised end to
+        end in the TUI swap test; this asserts the property it protects.
+        """
+        _make_session(config_dir, "aaaaaaaaaaaa")
+        _make_session(config_dir, "bbbbbbbbbbbb")
+        options: dict[str, str] = {}
+
+        def fake_run(argv: list[str]) -> bool:
+            # wezterm has no unset: a clear is a set with an empty value, so
+            # the fake mirrors that shape (empty value = absent).
+            if len(argv) > 6 and argv[6] == "":
+                options.pop(argv[5], None)
+            else:
+                options[argv[5]] = argv[6]
+            return True
+
+        monkeypatch.setattr("local_operator.multiplexer.markers._run", fake_run)
+        monkeypatch.setattr("local_operator.multiplexer.markers._which", lambda b: "/bin/wezterm")
+        env = {"WEZTERM_PANE": "7"}
+
+        class SlowRetireWezTerm(WezTermBackend):
+            def retire(self, binding: Any, env: Any) -> bool:
+                time.sleep(TestSwapOrdering.RETIRE_LATENCY_S)
+                return super().retire(binding, env)
+
+        backend = SlowRetireWezTerm()
+        outgoing = SessionBroadcast(_binding("aaaaaaaaaaaa"), backend, env=env, interval_s=3600.0)
+        outgoing.start()
+        deadline = time.monotonic() + 5.0
+        while options.get("@lop_session") != "aaaaaaaaaaaa":
+            assert time.monotonic() < deadline, "outgoing binding never published"
+            time.sleep(0.005)
+
+        outgoing.stop(retire=True)
+        incoming = SessionBroadcast(
+            _binding("bbbbbbbbbbbb"),
+            backend,
+            env=env,
+            interval_s=3600.0,
+            predecessor=outgoing,
+        )
+        incoming.start()
+        incoming.join(timeout=10.0)
+        outgoing.join(timeout=10.0)
+        assert options.get("@lop_session") == "bbbbbbbbbbbb"
 
 
 class TestCleanExitWinsOverReassert:
@@ -477,6 +677,128 @@ class TestCleanExitWinsOverReassert:
             broadcast.stop()
             broadcast.join(timeout=10.0)
 
+    def test_the_withdrawal_lands_before_interpreter_exit(self, tmp_path: Path) -> None:
+        """F8: a deliberate quit must actually withdraw, not just decide to.
+
+        The retire worker is a daemon thread, and daemon threads are killed at
+        interpreter exit without running what is left of their target. Before
+        the exit drain, `stop(retire=True)` on quit returned in microseconds
+        having only STARTED the worker — the process then exited, the
+        withdrawal never ran, and the pane kept advertising a session the user
+        had deliberately closed until their next shell replayed it.
+
+        Run in a SUBPROCESS because the property IS process death: an
+        in-process test would have to exit to observe it.
+        """
+        import subprocess
+        import sys
+
+        child = textwrap.dedent(
+            """
+            import os, sys, time
+            from pathlib import Path
+            sys.path.insert(0, {repo!r})
+            os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = {config!r}
+            from local_operator.multiplexer.broadcast import (
+                SessionBroadcast, build_binding,
+            )
+            from local_operator.multiplexer.markers import ZellijBackend
+
+            class SlowRetireZellij(ZellijBackend):
+                # One subprocess spawn's worth of latency, as every real
+                # backend retire pays; before the drain this was all it took
+                # for interpreter exit to eat the withdrawal.
+                def retire(self, binding, env):
+                    time.sleep(0.05)
+                    return super().retire(binding, env)
+
+            env = {{"ZELLIJ_SESSION_NAME": "main", "ZELLIJ_PANE_ID": "0"}}
+            # The session must be resumable or nothing publishes; the child
+            # has to create it itself because the fixture's monkeypatching
+            # does not cross the process boundary.
+            session = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"]) / "sessions" / "cccccccccccc"
+            session.mkdir(parents=True, exist_ok=True)
+            # The trailing newline is spelled \\n in the source: a real one
+            # inside this literal would break dedent's common-prefix
+            # computation and the child would arrive still-indented.
+            (session / "transcript.jsonl").write_text("{{}}\\n")
+            broadcast = SessionBroadcast(
+                build_binding("cccccccccccc"), SlowRetireZellij(),
+                env=env, interval_s=3600.0,
+            )
+            broadcast.start()
+            path = None
+            from local_operator.multiplexer.markers import marker_dir
+            deadline = time.monotonic() + 5.0
+            while not (marker_dir() / "zellij-main-0.json").exists():
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+            # The clean quit, exactly as on_unmount performs it: stop and
+            # return, letting the process end. Nothing else may run.
+            broadcast.stop(retire=True)
+            """.format(
+                repo=str(Path(__file__).resolve().parent.parent.parent),
+                config=str(tmp_path),
+            )
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", child], capture_output=True, text=True, timeout=60
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+
+        marker = tmp_path / "multiplexer" / "zellij-main-0.json"
+        assert not marker.exists(), (
+            "the withdrawal never ran: a cleanly-quit session is still " "advertised in its pane"
+        )
+
+    def test_a_wedged_retire_bounds_the_quit_delay(self, tmp_path: Path) -> None:
+        """The exit drain is bounded: a wedged socket delays quit, it cannot hang it.
+
+        The drain exists to land the F8 withdrawal; this pins its other half —
+        the worst case it may add to a deliberate quit. The bound is generous
+        against the 2s budget (interpreter startup is inside the measurement)
+        and far under the 30s a wedged backend would otherwise add.
+        """
+        import subprocess
+        import sys
+
+        child = textwrap.dedent(
+            """
+            import os, sys, time
+            sys.path.insert(0, {repo!r})
+            os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = {config!r}
+            from local_operator.multiplexer.broadcast import (
+                SessionBroadcast, build_binding,
+            )
+
+            class Wedged:
+                name = "wedged"
+                def detect(self, env): return True
+                def publish(self, binding, env): return True
+                def retire(self, binding, env):
+                    time.sleep(30.0)   # a socket that never answers
+                    return True
+
+            broadcast = SessionBroadcast(
+                build_binding("abc123abc123"), Wedged(), env={{}}, interval_s=3600.0
+            )
+            broadcast.start()
+            time.sleep(0.2)
+            broadcast.stop(retire=True)
+            """.format(
+                repo=str(Path(__file__).resolve().parent.parent.parent),
+                config=str(tmp_path),
+            )
+        )
+        started = time.monotonic()
+        completed = subprocess.run(
+            [sys.executable, "-c", child], capture_output=True, text=True, timeout=60
+        )
+        elapsed = time.monotonic() - started
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        # 2s drain budget + interpreter startup + scheduling slack.
+        assert elapsed < 10.0, f"a wedged socket delayed quit by {elapsed:.1f}s"
+
 
 class TestReassertInterval:
     def test_it_exceeds_the_cmux_index_cache_ttl(self) -> None:
@@ -606,6 +928,12 @@ class TestMarkerBackends:
         calls: list[list[str]] = []
         monkeypatch.setattr(
             "local_operator.multiplexer.markers._run", lambda argv: calls.append(argv) or True
+        )
+        # The readback our own scoping performs: the pane is assumed to hold
+        # THIS binding, so the retire proceeds to the unset under test.
+        monkeypatch.setattr(
+            "local_operator.multiplexer.markers._capture",
+            lambda argv: _binding().session_id,
         )
         monkeypatch.setattr("local_operator.multiplexer.markers._which", lambda b: "/bin/tmux")
         env = {"TMUX": "/tmp/tmux-501/default,123,0", "TMUX_PANE": "%3"}

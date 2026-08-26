@@ -6994,10 +6994,19 @@ class OperatorApp(App[None]):
         on a multiplexer socket. That holds for the retire of the OUTGOING
         binding below too — ``stop`` dispatches it to a worker and returns
         immediately, so a swap cannot stall this coroutine on a wedged socket.
+
+        The swap's ORDERING lives in the successor broadcast, not here:
+        ``_stop_multiplexer_broadcast`` hands the outgoing handle over and the
+        successor's own timer thread waits for that withdrawal (bounded) before
+        it publishes, so the outgoing clear cannot land after — and delete —
+        the fresh binding. Waiting here would put a subprocess join on the
+        event loop, which is the freeze this hook must never incur.
         """
-        # Retire the outgoing binding BEFORE publishing the new one: both name
-        # the same pane, so the reverse order would clear the fresh binding.
-        self._stop_multiplexer_broadcast()
+        # Stopped FIRST, and the outgoing handle is handed to the successor
+        # rather than dropped: both bindings name the same pane, so the
+        # successor must not publish until this one's withdrawal has landed
+        # (see `SessionBroadcast` for where that wait runs).
+        outgoing = self._stop_multiplexer_broadcast()
         # Headless means no pane to bind, and this gate is what keeps the test
         # suite off the developer's own multiplexer. The suite runs INSIDE cmux
         # and its conftest does not clear `CMUX_*` (it isolates HOME and the
@@ -7019,13 +7028,25 @@ class OperatorApp(App[None]):
         try:
             from local_operator.multiplexer import broadcast_session
 
-            self._multiplexer_broadcast = broadcast_session(session_id, cwd=os.getcwd())
+            started = broadcast_session(session_id, cwd=os.getcwd(), predecessor=outgoing)
         except Exception:  # noqa: BLE001 — bookkeeping must not break a session
             logger.debug("multiplexer broadcast failed to start", exc_info=True)
-            self._multiplexer_broadcast = None
+            started = None
+        self._multiplexer_broadcast = started
+        # The successor owns the outgoing handle from here (it drains it on its
+        # own thread). When no successor could start, nothing sequences the
+        # withdrawal — but nothing is publishing into the pane either, so the
+        # withdraw simply lands whenever its worker finishes and the exit
+        # drain still guarantees it lands at all.
 
-    def _stop_multiplexer_broadcast(self, *, retire: bool = True) -> None:
-        """Withdraw this pane's binding (idempotent).
+    def _stop_multiplexer_broadcast(self, *, retire: bool = True) -> "SessionBroadcast | None":
+        """Withdraw this pane's binding (idempotent), returning the handle.
+
+        The returned handle is the OUTGOING broadcast, when there was one. The
+        swap path passes it to the successor as ``predecessor`` so the
+        successor can wait out this withdrawal before publishing; every other
+        caller ignores it, and the exit drain still guarantees the withdrawal
+        runs before the process is gone.
 
         ``retire=False`` deliberately LEAVES the binding in place, which is
         what a crash path wants: an abandoned binding is how the session comes
@@ -7035,7 +7056,7 @@ class OperatorApp(App[None]):
         """
         broadcast = self._multiplexer_broadcast
         if broadcast is None:
-            return
+            return None
         # Cleared FIRST, so a failure below cannot leave the app holding a
         # handle it believes is still publishing.
         self._multiplexer_broadcast = None
@@ -7044,10 +7065,11 @@ class OperatorApp(App[None]):
                 from local_operator.multiplexer import retire_session
 
                 retire_session(broadcast)
-                return
-            broadcast.stop(retire=False)
+            else:
+                broadcast.stop(retire=False)
         except Exception:  # noqa: BLE001 — never block an exit path
             logger.debug("multiplexer broadcast failed to stop", exc_info=True)
+        return broadcast
 
     def _stop_terminal_title(self) -> None:
         """Give the terminal its own title back (idempotent).

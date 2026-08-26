@@ -36,8 +36,10 @@ surface an error. A missing binary, a socket that is mid-restart, a
 multiplexer that is not running, a non-zero exit, a timeout: all are logged at
 debug and otherwise ignored. Publication is bookkeeping ABOUT a session, and
 taking a session down to record where it lives would be the more expensive
-bug by far. Every subprocess is spawned detached with a short timeout and is
-never waited on from the event loop.
+bug by far. Every subprocess is spawned detached with a short timeout, and is
+never waited on from the event loop: the waits that do exist (a swap's
+successor draining its predecessor, the bounded exit drain) run on worker
+threads or in ``atexit``, never on the loop.
 
 NEVER FOR A SUBAGENT
 --------------------
