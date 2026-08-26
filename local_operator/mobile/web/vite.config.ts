@@ -1,6 +1,6 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 // Relative base: the daemon serves the bundle from its own root, and a
 // tunnel/identity-proxy may mount it under a path — absolute asset URLs
@@ -27,4 +27,10 @@ export default defineConfig({
       "/logout": "http://127.0.0.1:4098",
     },
   },
+	test: {
+		// happy-dom does not survive vitest's global copy on all Node versions
+		// (its localStorage getter is non-enumerable). src/test-setup.ts
+		// re-attaches real Storage so the suite runs on any supported Node.
+		setupFiles: ["./src/test-setup.ts"],
+	},
 });
