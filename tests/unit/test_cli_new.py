@@ -1400,3 +1400,70 @@ def test_a_bare_resume_classifies_sessions_before_resolving_latest(tmp_path, mon
     assert resolved == [
         "mine00000000"
     ], f"a bare --resume reopened a subagent's transcript: {resolved}"
+
+
+# --- Soft-death reaper signal scope (R1) ------------------------------------
+#
+# The soft-death reaper must reap on a genuine process TERMINATION but never on
+# a mid-turn Ctrl-C. In the headless REPL, SIGINT is a turn abort that keeps the
+# session — and its `background=true` bash jobs — ALIVE (`session.abort` spares
+# them on purpose). Wiring the reaper onto SIGINT would SIGKILL those still-live
+# groups while the owning process keeps running, the one case the reaper exists
+# to forbid. These tests pin "SIGINT does not reap; SIGTERM does" so a future
+# edit that re-adds SIGINT to the registration loop fails loudly.
+
+
+def test_soft_death_reaper_installs_on_sigterm_not_sigint(monkeypatch):
+    """`_install_group_reaper_soft_death` handles SIGTERM but leaves SIGINT alone."""
+    import signal
+
+    from local_operator import cli
+
+    # Start from known signal state and restore it after, so the process this
+    # suite runs in is not left with a reaper handler bound to it.
+    original_term = signal.getsignal(signal.SIGTERM)
+    original_int = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        int_before = signal.getsignal(signal.SIGINT)
+
+        cli._install_group_reaper_soft_death()
+
+        # SIGTERM was chained onto a new handler (a genuine termination reaps).
+        assert callable(signal.getsignal(signal.SIGTERM))
+        # SIGINT is untouched: still exactly the turn-abort default it had.
+        assert signal.getsignal(signal.SIGINT) is int_before
+    finally:
+        signal.signal(signal.SIGTERM, original_term)
+        signal.signal(signal.SIGINT, original_int)
+
+
+def test_soft_death_sigterm_handler_reaps_then_chains(monkeypatch):
+    """The installed SIGTERM handler reaps this process's groups, then chains."""
+    import signal
+
+    from local_operator import cli
+
+    reaped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.tools.group_reaper.kill_own_groups",
+        lambda: reaped.append("reaped"),
+    )
+
+    prior_calls: list[int] = []
+    original_term = signal.getsignal(signal.SIGTERM)
+    try:
+        # A pre-existing SIGTERM handler that the reaper must chain to, not eat.
+        signal.signal(signal.SIGTERM, lambda signum, frame: prior_calls.append(signum))
+
+        cli._install_group_reaper_soft_death()
+        handler = signal.getsignal(signal.SIGTERM)
+        assert callable(handler)
+
+        # Invoke the handler directly (no real signal delivery): it must reap
+        # first, then chain to the handler that was installed before it.
+        handler(signal.SIGTERM, None)
+        assert reaped == ["reaped"]
+        assert prior_calls == [signal.SIGTERM]
+    finally:
+        signal.signal(signal.SIGTERM, original_term)
