@@ -212,6 +212,19 @@ class AsyncJob(BaseModel):
     # priced calls preserves exact provider bills without letting one receipt
     # suppress estimates for its siblings.
     descendant_usage: list[Usage] = Field(default_factory=list)
+    # Settled predecessor attempts folded out of the visible roster. This is
+    # separate from descendant_usage because the current process's manager
+    # already owns these components in its settled accumulator; treating them as
+    # current live subtree spend would count them twice. The persisted copy is
+    # what lets a replacement process rebuild the accumulator from the sole
+    # surviving row.
+    prior_attempt_usage: list[Usage] = Field(default_factory=list)
+    # Runtime ownership marker for prior_attempt_usage. bind_logical_identity()
+    # folds a predecessor whose accounting is already in this manager, whereas
+    # restore() starts with an empty accumulator and must ingest the durable
+    # components. Excluding the marker keeps that process-local distinction out
+    # of the authoritative sidecar.
+    prior_attempt_usage_owned: bool = Field(default=False, exclude=True)
     # A live edge exists only while the child can still mutate its own ledger.
     # It is runtime-only and deliberately cleared after the final settlement
     # snapshot, otherwise one retained observability row pins the disposed child
@@ -252,6 +265,12 @@ class AsyncJob(BaseModel):
     # ladder it cannot see.
     agent_role: str | None = None
     effort: str | None = None
+    # A task's transcript directory is the durable identity of the work across
+    # resume attempts. ``id`` remains the attempt handle returned by tools;
+    # these fields let the ledger replace an older attempt in place while old
+    # handles continue resolving to the newest attempt.
+    logical_id: str | None = None
+    attempt_aliases: list[str] = Field(default_factory=list)
 
 
 class AsyncJobManager:
@@ -287,6 +306,10 @@ class AsyncJobManager:
         self._on_roster_change = on_roster_change
         self._on_job_change = on_job_change
         self._jobs: dict[str, AsyncJob] = {}
+        # Historical attempt ids remain valid after a resume replaces the
+        # visible row. Values point directly at the current attempt; flattening
+        # on every bind avoids alias chains whose meaning depends on order.
+        self._aliases: dict[str, str] = {}
         # Terminal rows hand their subtree into this bounded accumulator before
         # retention can remove them. The owning parent runner later copies this
         # snapshot onto its AsyncJob; polling never participates in durability.
@@ -320,7 +343,7 @@ class AsyncJobManager:
     # -- queries ------------------------------------------------------------
 
     def get(self, job_id: str, *, owner_id: str | None = None) -> AsyncJob | None:
-        job = self._jobs.get(job_id)
+        job = self._jobs.get(self._aliases.get(job_id, job_id))
         if job is None:
             return None
         if owner_id is not None and job.owner_id != owner_id:
@@ -440,6 +463,62 @@ class AsyncJobManager:
             except Exception:  # noqa: BLE001 - observation must not break jobs
                 logger.warning("job-change listener raised", exc_info=True)
 
+    def bind_logical_identity(self, job_id: str, logical_id: str) -> None:
+        """Make ``job_id`` the current attempt for one durable task run.
+
+        Called when the child transcript directory becomes known. The method is
+        synchronous because attach and resume run on one event loop: no caller
+        can observe a half-moved row or race two attempts into the visible list.
+        """
+        current = self._jobs.get(job_id)
+        if current is None or current.type != "task":
+            return
+        current.logical_id = logical_id
+        prior = next(
+            (
+                row
+                for row in self._jobs.values()
+                if row.id != job_id and row.type == "task" and row.logical_id == logical_id
+            ),
+            None,
+        )
+        inherited = list(current.attempt_aliases)
+        if prior is not None:
+            if prior.status == "running" and not prior.restored:
+                raise RuntimeError(
+                    f"logical task {logical_id!r} is already running as job {prior.id}"
+                )
+            inherited = [*prior.attempt_aliases, prior.id, *inherited]
+            grouped: dict[tuple[str | None, str | None, bool], Usage] = {}
+            for component in [
+                *current.prior_attempt_usage,
+                *prior.prior_attempt_usage,
+                *_usage_components(prior.usage, prior.model_label),
+                *prior.descendant_usage,
+            ]:
+                _merge_accounting_component(grouped, component)
+            current.prior_attempt_usage = [
+                component.model_copy(deep=True) for component in grouped.values()
+            ]
+            # Every foldable predecessor is terminal and was therefore already
+            # transferred to this manager, either by settle() or restore(). Keep
+            # the durable copy off this process's live and settlement totals.
+            current.prior_attempt_usage_owned = True
+            self._jobs.pop(prior.id, None)
+        aliases = list(dict.fromkeys(alias for alias in inherited if alias != job_id))
+        current.attempt_aliases = aliases
+        for alias in aliases:
+            self._aliases[alias] = job_id
+        for alias, target in list(self._aliases.items()):
+            if target in aliases:
+                self._aliases[alias] = job_id
+        # Registration persists before the runner can attach under the default
+        # task factory. The identity fold is therefore a second durability
+        # boundary: without this notification, that provisional two-row roster
+        # remains the newest snapshot if the parent exits while the continuation
+        # is still running.
+        self._notify_roster_change()
+
     def restore(self, rows: list["AsyncJob"]) -> None:
         """Rehydrate task rows from a persisted roster at resume.
 
@@ -475,7 +554,35 @@ class AsyncJobManager:
         byte-identical snapshot on every resume (and, if a host ever constructs
         a Session off-loop, raise a spurious warning from the persist spawn).
         """
-        for row in rows:
+        # Snapshots are launch-ordered, so newest-first makes the current
+        # attempt win when migrating legacy snapshots that persisted every
+        # resume as another row. Reversing before insertion preserves ordinary
+        # row order after the winning set has been selected.
+        restored: list[AsyncJob] = []
+        seen_logical: set[str] = set()
+        for row in reversed(rows):
+            logical_id = row.logical_id
+            if logical_id and logical_id in seen_logical:
+                current = next(item for item in restored if item.logical_id == logical_id)
+                current.attempt_aliases = list(
+                    dict.fromkeys([*row.attempt_aliases, row.id, *current.attempt_aliases])
+                )
+                # Legacy snapshots represented each continuation as a separate
+                # row. The visible roster now keeps only the newest attempt, but
+                # every discarded attempt remains billable. Carry its direct
+                # and descendant components onto the winner exactly once so a
+                # later restore cannot make accounting depend on which row won.
+                current.descendant_usage.extend(
+                    [
+                        *_usage_components(row.usage, row.model_label),
+                        *(item.model_copy(deep=True) for item in row.descendant_usage),
+                    ]
+                )
+                continue
+            if logical_id:
+                seen_logical.add(logical_id)
+            restored.append(row)
+        for row in reversed(restored):
             if row.id in self._jobs:
                 continue
             if row.status == "running":
@@ -489,6 +596,9 @@ class AsyncJobManager:
                 row.status = "interrupted"
             row.restored = True
             self._jobs[row.id] = row
+            for alias in row.attempt_aliases:
+                if alias != row.id:
+                    self._aliases[alias] = row.id
             if row.status != "running":
                 self._record_settled_accounting(row)
         self._invalidate_accounting()
@@ -590,7 +700,7 @@ class AsyncJobManager:
     def mark_consumed(self, job_id: str) -> None:
         """Flag a job's result as already handed to the model (see the
         ``consumed`` field): auto-delivery checks it and stays quiet."""
-        job = self._jobs.get(job_id)
+        job = self.get(job_id)
         if job is not None:
             job.consumed = True
 
@@ -610,9 +720,10 @@ class AsyncJobManager:
     async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
         """Cancel a job. An owner mismatch is treated as not-found so a
         subagent teardown cannot cancel its parent's jobs."""
-        job = self._jobs.get(job_id)
+        job = self.get(job_id)
         if job is None:
             return False
+        job_id = job.id
         if owner_id is not None and job.owner_id != owner_id:
             return False
         if job.status != "running":
@@ -736,7 +847,7 @@ class AsyncJobManager:
         to kill the job it is reporting for because the row was already swept
         by retention.
         """
-        job = self._jobs.get(job_id)
+        job = self.get(job_id)
         if job is None or not text:
             return
         job.output_seq += len(text)
@@ -760,7 +871,7 @@ class AsyncJobManager:
         caller has an incomplete record and is told so rather than being
         handed a contiguous-looking excerpt that silently skips a step.
         """
-        job = self._jobs.get(job_id)
+        job = self.get(job_id)
         if job is None:
             return None
         seq = job.output_seq
@@ -879,7 +990,7 @@ class AsyncJobManager:
         happened. This is the race the poll loop hid by re-reading status.
         """
 
-        job = self._jobs.get(job_id)
+        job = self.get(job_id)
         if job is None:
             # No row: nothing will ever settle this id, so hand back a pre-set
             # event WITHOUT storing it. Storing one would strand an entry that
@@ -888,6 +999,7 @@ class AsyncJobManager:
             settled = asyncio.Event()
             settled.set()
             return settled
+        job_id = job.id
         event = self._settled_events.get(job_id)
         if event is None:
             event = asyncio.Event()
@@ -916,6 +1028,8 @@ class AsyncJobManager:
     def _record_settled_accounting(self, job: AsyncJob) -> None:
         """Transfer one terminal subtree exactly once into manager ownership."""
         components = [*_usage_components(job.usage, job.model_label), *job.descendant_usage]
+        if not job.prior_attempt_usage_owned:
+            components.extend(job.prior_attempt_usage)
         child_manager = job.child_jobs
         if isinstance(child_manager, AsyncJobManager):
             components.extend(child_manager.accounting_components())
