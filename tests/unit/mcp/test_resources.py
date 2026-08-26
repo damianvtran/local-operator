@@ -106,6 +106,19 @@ POSITIVE_ROUTING_CASES = [
     ("cloudflare", "inspect the domain settings"),
 ]
 
+CONSTRUCTION_CONTRAST_CASES = [
+    ([], "build a Slack integration"),
+    ([], "build a workplace conversation product"),
+    ([], "create a Slack bot"),
+    ([], "develop a Notion client"),
+    ([], "implement a Linear adapter"),
+    ([], "refactor the Datadog integration"),
+    (["slack"], "create a Slack channel"),
+    (["slack"], "write a Slack message"),
+    (["notion"], "build a Notion page"),
+    (["linear"], "create a Linear issue"),
+]
+
 NEGATIVE_ROUTING_CASES = [
     "refactor the parser and add unit tests",
     "implement a WebSocket channel for technical messages",
@@ -128,6 +141,13 @@ def test_representative_service_intents_route(expected: str, query: str) -> None
 @pytest.mark.parametrize("query", NEGATIVE_ROUTING_CASES)
 def test_technical_and_common_noun_intents_do_not_route(query: str) -> None:
     assert select_mcp_suggestions(COMMON_NAMES, query) == []
+
+
+@pytest.mark.parametrize(("expected", "query"), CONSTRUCTION_CONTRAST_CASES)
+def test_software_construction_is_distinct_from_service_operations(
+    expected: list[str], query: str
+) -> None:
+    assert select_mcp_suggestions(COMMON_NAMES, query) == expected
 
 
 @pytest.mark.parametrize(

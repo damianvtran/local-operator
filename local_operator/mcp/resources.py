@@ -48,8 +48,11 @@ _CAPABILITY_HINTS: dict[str, str] = {
 # services collide. The tuples stay small enough to audit as prompt authority.
 _OPERATION_TERMS = frozenset(
     {
+        "build",
         "change",
         "check",
+        "create",
+        "develop",
         "find",
         "inspect",
         "investigate",
@@ -67,6 +70,7 @@ _OPERATION_TERMS = frozenset(
         "show",
         "update",
         "what",
+        "write",
     }
 )
 _SERVICE_OBJECTS: dict[str, frozenset[str]] = {
@@ -125,12 +129,28 @@ _OBJECT_WEIGHTS = {
     "zone": 2,
 }
 
-# Product-building contexts outrank a coincidental service name. A clear service
-# operation ("read Slack messages") may override this; "write a Slack clone"
-# may not. This guard runs before both lexical and semantic routing.
+# Product-building contexts outrank a coincidental service name. Construction
+# verbs alone are ambiguous ("create a Linear issue" is operational), so a
+# software-artifact noun makes them unambiguously technical. Legacy engineering
+# terms remain hard negatives even without a construction verb.
+_CONSTRUCTION_TERMS = frozenset({"build", "create", "develop", "implement", "refactor", "write"})
+_SOFTWARE_ARTIFACT_TERMS = frozenset(
+    {
+        "adapter",
+        "app",
+        "application",
+        "bot",
+        "client",
+        "clone",
+        "integration",
+        "library",
+        "product",
+        "service",
+    }
+)
 _TECHNICAL_CONTEXT_RE = re.compile(
-    r"\b(?:clone|websocket|socket|protocol|implementation|implement|refactor|class|function|"
-    r"unit tests?|code|api endpoint|database schema|debug|rendering|parse|log files?)\b",
+    r"\b(?:websocket|socket|protocol|implementation|class|function|unit tests?|code|"
+    r"api endpoint|database schema|debug|rendering|parse|log files?)\b",
     re.IGNORECASE,
 )
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -204,10 +224,11 @@ def _safe_prompt_names(names: Sequence[str]) -> list[str]:
     return sorted({name for name in names if SERVER_NAME_RE.fullmatch(name)})
 
 
-def _explicit_name(query: str, names: Sequence[str], *, technical: bool) -> str | None:
+def _explicit_name(
+    query: str, names: Sequence[str], *, technical: bool, words: frozenset[str]
+) -> str | None:
     """Find deliberate configured-server use, excluding incidental code mentions."""
     folded = query.casefold()
-    words = frozenset(_WORD_RE.findall(folded))
     clear_operation = bool(words & _OPERATION_TERMS)
     for name in sorted(names, key=lambda item: (-len(item), item.casefold(), item)):
         canonical = name.casefold()
@@ -218,7 +239,8 @@ def _explicit_name(query: str, names: Sequence[str], *, technical: bool) -> str 
         if canonical == "notion" and re.search(r"\bnotion\s+of\b", folded):
             continue
         if canonical in _CAPABILITY_HINTS:
-            if technical and not clear_operation:
+            service_objects = words & _SERVICE_OBJECTS.get(canonical, frozenset())
+            if technical and not (clear_operation and service_objects):
                 continue
             return name
         # Custom names have no trusted capability terms. Require URI syntax or
@@ -247,14 +269,16 @@ def select_mcp_suggestions(names: Sequence[str], query: str) -> list[str]:
     query = query.strip()
     if not query:
         return []
-    technical = bool(_TECHNICAL_CONTEXT_RE.search(query))
-    explicit = _explicit_name(query, safe, technical=technical)
+    words = frozenset(_WORD_RE.findall(query.casefold()))
+    construction = bool(words & _CONSTRUCTION_TERMS)
+    software_artifact = bool(words & _SOFTWARE_ARTIFACT_TERMS)
+    technical = bool(_TECHNICAL_CONTEXT_RE.search(query)) or (construction and software_artifact)
+    explicit = _explicit_name(query, safe, technical=technical, words=words)
     if explicit is not None:
         return [explicit]
     if technical:
         return []
 
-    words = frozenset(_WORD_RE.findall(query.casefold()))
     operations = words & _OPERATION_TERMS
     lexical: list[tuple[int, str]] = []
     if operations:
