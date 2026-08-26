@@ -1009,7 +1009,6 @@ class SubagentView(Vertical):
         #: The delegated instruction, and the raw string it was derived from.
         self._prompt_raw = ""
         self._instruction = ""
-        self._effective_prompt = ""
         self._launch_message_id = ""
         #: Every deterministic ``subagent-launch:<id>`` identity this lineage
         #: owns mapped to its concise delegated instruction, including attempts
@@ -1177,7 +1176,11 @@ class SubagentView(Vertical):
         if prompt != self._prompt_raw:
             self._prompt_raw = prompt
             self._instruction = strip_control_sequences(prompt).strip()
-        self._effective_prompt = strip_control_sequences(effective_prompt).strip()
+        # ``effective_prompt`` stays in the signature because callers still pass
+        # the launch-time wrapper, but the view keeps no private copy: every
+        # launch-row reconciliation keys off ``_launch_prompts`` and
+        # ``_launch_message_id`` alone, so storing it here only invited a future
+        # reader to think reconciliation depended on it (review round 5 M1).
         self._launch_message_id = str(launch_message_id or "").strip()
         # Concise instruction for every durable launch row this lineage owns.
         # The current launch is derived from `prompt` (kept live above); the
