@@ -24,6 +24,13 @@ The script drives the REAL ``SubagentComms`` and the REAL session persist path
 each with a ~30 KB ``result_text``, firing the persist hook on every settle plus
 the usage/heartbeat churn events that do not change the projection.
 
+3. (Fixed here) a transcript ALREADY bloated pre-v0.40.0 was never healed: its
+   superseded ``subagent_roster`` custom entries loaded whole into memory on
+   every resume and were re-serialized on every compaction. ``compact_file`` now
+   drops superseded collapsible customs, keeping only the newest. This script
+   synthesizes such a bloated transcript with the REAL ``Transcript`` and prints
+   the before/after file bytes and entry counts the heal reclaims.
+
 Run:
     PYTHONPATH=<worktree> <venv>/bin/python scripts/roster_bloat_repro.py
 """
@@ -37,10 +44,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.types import Message
 from local_operator.session import session as S
+from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 
 CHILDREN = 80
 RESULT_BYTES = 30_000
+# Superseded legacy roster snapshots to synthesize for the GAP 2 heal. Each
+# carries a ~2 KB record tail, the pre-v0.40.0 shape (a full snapshot appended
+# on every roster move). 50 is enough to make the reclaim obvious without a
+# slow script; the real incident had ~247.
+LEGACY_ROSTER_ENTRIES = 50
+LEGACY_RECORD_BYTES = 2_000
 # Events fired per settle: 1 real settle + 2 no-op churn events (usage,
 # heartbeat) that leave the persisted projection unchanged. This is the shape
 # the fingerprint guard is meant to collapse.
@@ -189,9 +204,75 @@ def _roundtrip_ok() -> bool:
         return len(rows) == 5 and all(row.get("session_dir") for row in rows)
 
 
+async def _heal_legacy_transcript() -> dict[str, object]:
+    """Synthesize a pre-v0.40.0 bloated transcript and heal it on compaction.
+
+    Drives the REAL ``Transcript``: a real user message plus a long run of
+    superseded ``subagent_roster`` custom entries (the shape the old
+    append-on-every-move roster left behind), then ``compact_file`` — which now
+    drops every superseded collapsible custom, keeping only the newest. Reports
+    the before/after file bytes, the roster-entry count, that the message
+    survived replay, and that ``latest_custom`` is unchanged, so the evidence is
+    what the code actually does rather than a relabeled test assertion.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        transcript = Transcript(Path(directory) / "sess")
+        await transcript.append_message(Message.user("keep me"))
+        for generation in range(LEGACY_ROSTER_ENTRIES):
+            await transcript.append_custom(
+                "subagent_roster",
+                {
+                    "generation": generation,
+                    "jobs": [],
+                    "records": [{"blob": "X" * LEGACY_RECORD_BYTES}],
+                },
+            )
+
+        def _roster_count(entries: object) -> int:
+            return sum(
+                1
+                for entry in entries  # type: ignore[union-attr]
+                if entry.type == ENTRY_CUSTOM
+                and entry.payload.get("custom_type") == "subagent_roster"
+            )
+
+        before_bytes = transcript.path.stat().st_size
+        roster_before = _roster_count(transcript.entries())
+        # No pending prune: the heal must fire on the superseded-custom signal
+        # alone, since a legacy bloated file never journals a prune.
+        reclaimed = await transcript.compact_file(min_reclaim_bytes=1)
+        after_bytes = transcript.path.stat().st_size
+
+        reopened = Transcript(Path(directory) / "sess")
+        rosters = [
+            entry
+            for entry in reopened.entries()
+            if entry.type == ENTRY_CUSTOM and entry.payload.get("custom_type") == "subagent_roster"
+        ]
+        messages = [
+            message.text for message in reopened.build_llm_history() if isinstance(message, Message)
+        ]
+        latest = reopened.latest_custom("subagent_roster")
+        survivor = rosters[0].payload["details"]["generation"] if rosters else None
+        return {
+            "before_bytes": before_bytes,
+            "after_bytes": after_bytes,
+            "reclaimed": reclaimed,
+            "roster_before": roster_before,
+            "roster_after": len(rosters),
+            "survivor_generation": survivor,
+            "messages": messages,
+            "latest_generation": latest["generation"] if latest else None,
+            # The equality invariant reclaimable_bytes() prices and compact_file
+            # frees; both must agree or the accounting is wrong.
+            "accounting_ok": after_bytes == before_bytes - reclaimed,
+        }
+
+
 def main() -> None:
     before = _simulate(guarded=False)
     after = _simulate(guarded=True)
+    heal = asyncio.run(_heal_legacy_transcript())
     print("=== GAP 1: redundant sidecar writes (fsync churn) ===")
     print(f"roster events fired            : {before['events']}")
     print(f"BEFORE guard  - sidecar writes : {before['writes']}")
@@ -203,6 +284,17 @@ def main() -> None:
     print("=== #308 size fix still holds (sidecar, capped records) ===")
     print(f"final sidecar size (bytes)     : {after['final_sidecar_bytes']:,}")
     print(f"largest single record (bytes)  : {after['largest_record_bytes']:,}")
+    print()
+    print("=== GAP 2: heal legacy transcript bloat on compaction ===")
+    print(f"roster custom entries          : {heal['roster_before']} -> {heal['roster_after']}")
+    print(
+        f"transcript size (bytes)        : {heal['before_bytes']:,} -> {heal['after_bytes']:,} "
+        f"(reclaimed {heal['reclaimed']:,})"
+    )
+    print(f"surviving roster is newest     : generation {heal['survivor_generation']}")
+    print(f"latest_custom unchanged        : generation {heal['latest_generation']}")
+    print(f"message survived replay        : {heal['messages']}")
+    print(f"reclaimable == reclaimed        : {heal['accounting_ok']}")
     print()
     print("=== resume basis intact ===")
     print(f"snapshot -> restore round-trip : {'OK' if _roundtrip_ok() else 'FAILED'}")
