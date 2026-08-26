@@ -160,7 +160,11 @@ test("origin decision acks render per decision, deny staying neutral", async () 
     const { ackForDecision } = module.loaded;
     const once = ackForDecision("once");
     assert.equal(once.title, "Site allowed.");
-    assert.equal(once.sub, "The agent is continuing.");
+    // The once-ack names the async grant's real semantics: the NEXT visit,
+    // within the 10-minute grant window (n2 — the old "The agent is
+    // continuing." copy was written for the in-flight navigation case).
+    assert.match(once.sub, /next visit/);
+    assert.match(once.sub, /10 minutes/);
     assert.deepEqual([once.tone, once.check], ["success", true]);
     // "always" is a standing grant: the ack must say it persists and where to
     // revoke it.
@@ -178,60 +182,76 @@ test("access request verdicts: idempotent repeat, replace on new origin, deny co
   try {
     const { requestVerdict, newRequest, ACCESS_REQUEST_TTL_MS } = module.loaded;
     const now = 1_000_000;
-    const record = newRequest("https://a.example", "a.example", now);
+    const record = newRequest("https://a.example", "a.example", "req-A", now);
     // Already allowed (stored or once-grant) short-circuits without a prompt.
-    assert.equal(requestVerdict(undefined, true, false, "https://a.example", now), "allowed");
-    assert.equal(requestVerdict(undefined, false, true, "https://a.example", now), "allowed");
+    assert.equal(requestVerdict(undefined, true, false, "https://a.example", "req-A", now), "allowed");
+    assert.equal(requestVerdict(undefined, false, true, "https://a.example", "req-A", now), "allowed");
     // No record: raise a fresh prompt.
-    assert.equal(requestVerdict(undefined, false, false, "https://a.example", now), "raise");
-    // Repeat for the SAME pending origin is idempotent — pending, TTL kept.
-    assert.equal(requestVerdict(record, false, false, "https://a.example", now + 1), "pending");
+    assert.equal(requestVerdict(undefined, false, false, "https://a.example", "req-A", now), "raise");
+    // Repeat for the SAME pending origin BY THE SAME requester is idempotent —
+    // pending, TTL kept (no polling-extension).
+    assert.equal(requestVerdict(record, false, false, "https://a.example", "req-A", now + 1), "pending");
     // A DIFFERENT origin replaces (single popup slot), never queues.
-    assert.equal(requestVerdict(record, false, false, "https://b.example", now + 1), "raise");
+    assert.equal(requestVerdict(record, false, false, "https://b.example", "req-A", now + 1), "raise");
+    // The SAME origin from a DIFFERENT requester replaces too — the displaced
+    // requester reads "superseded" (B1b), never a silent steal.
+    assert.equal(requestVerdict(record, false, false, "https://a.example", "req-B", now + 1), "raise");
     // A fresh deny answers denied without re-prompting (no nagging retries)...
     const denied = { ...record, decision: "deny" };
-    assert.equal(requestVerdict(denied, false, false, "https://a.example", now + 1), "denied");
+    assert.equal(requestVerdict(denied, false, false, "https://a.example", "req-A", now + 1), "denied");
     // ...until the TTL cool-down lapses, when a deliberate re-ask may raise.
     assert.equal(
-      requestVerdict(denied, false, false, "https://a.example", now + ACCESS_REQUEST_TTL_MS),
+      requestVerdict(denied, false, false, "https://a.example", "req-A", now + ACCESS_REQUEST_TTL_MS),
       "raise",
     );
   } finally { await module.close(); }
 });
 
-test("access state machine: pending, resolve paths, TTL expiry, grants", async () => {
+test("access state machine: pending, resolve paths, TTL expiry, grants, supersession", async () => {
   const module = await load("src/access-flow.ts");
   try {
-    const { accessState, activeRequest, newRequest, onceGrantActive, ACCESS_REQUEST_TTL_MS } =
-      module.loaded;
+    const {
+      accessState, activeRequest, newRequest, consumableGrant, tombstoneFor, ACCESS_REQUEST_TTL_MS,
+    } = module.loaded;
     const now = 5_000_000;
-    const record = newRequest("https://a.example", "a.example", now);
+    const record = newRequest("https://a.example", "a.example", "req-A", now);
     // Undecided and live: pending — the only state await_access blocks on.
-    assert.equal(accessState(record, false, false, "https://a.example", now + 1), "pending");
+    assert.equal(accessState(record, undefined, false, false, "https://a.example", "req-A", now + 1), "pending");
     // Each decision resolves to its terminal state.
     assert.equal(
-      accessState({ ...record, decision: "once" }, false, false, "https://a.example", now),
+      accessState({ ...record, decision: "once" }, undefined, false, false, "https://a.example", "req-A", now),
       "allowed",
     );
     assert.equal(
-      accessState({ ...record, decision: "always" }, false, false, "https://a.example", now),
+      accessState({ ...record, decision: "always" }, undefined, false, false, "https://a.example", "req-A", now),
       "allowed",
     );
     assert.equal(
-      accessState({ ...record, decision: "deny" }, false, false, "https://a.example", now),
+      accessState({ ...record, decision: "deny" }, undefined, false, false, "https://a.example", "req-A", now),
       "denied",
     );
     // Past the TTL the record reads as absent — "none", never a stale pending.
     const later = now + ACCESS_REQUEST_TTL_MS;
     assert.equal(activeRequest(record, later), undefined);
-    assert.equal(accessState(record, false, false, "https://a.example", later), "none");
+    assert.equal(accessState(record, undefined, false, false, "https://a.example", "req-A", later), "none");
     // A record for another origin is not this origin's request.
-    assert.equal(accessState(record, false, false, "https://b.example", now), "none");
-    // Once-grants: live inside their window, dead past it.
-    const grants = { "https://a.example": now + 60_000 };
-    assert.equal(onceGrantActive(grants, "https://a.example", now), true);
-    assert.equal(onceGrantActive(grants, "https://a.example", now + 60_000), false);
-    assert.equal(onceGrantActive(grants, "https://b.example", now), false);
+    assert.equal(accessState(record, undefined, false, false, "https://b.example", "req-A", now), "none");
+    // Requester-bound grants: live for the owner inside the window; dead past
+    // it; INVISIBLE to another requester and to an anonymous caller (B1a).
+    const grants = { "https://a.example": { expiresAt: now + 60_000, requester: "req-A" } };
+    assert.ok(consumableGrant(grants, "https://a.example", "req-A", now));
+    assert.equal(consumableGrant(grants, "https://a.example", "req-A", now + 60_000), undefined);
+    assert.equal(consumableGrant(grants, "https://a.example", "req-B", now), undefined);
+    assert.equal(consumableGrant(grants, "https://a.example", "", now), undefined);
+    assert.equal(consumableGrant(grants, "https://b.example", "req-A", now), undefined);
+    // Supersession: the displaced requester reads "superseded" from the
+    // tombstone; anyone else reads the neutral "none"; past the tombstone's
+    // TTL the receipt is gone too.
+    const tomb = tombstoneFor(record);
+    const tombs = { "https://a.example": tomb };
+    assert.equal(accessState(undefined, tombs, false, false, "https://a.example", "req-A", now), "superseded");
+    assert.equal(accessState(undefined, tombs, false, false, "https://a.example", "req-B", now), "none");
+    assert.equal(accessState(undefined, tombs, false, false, "https://a.example", "req-A", later), "none");
   } finally { await module.close(); }
 });
 

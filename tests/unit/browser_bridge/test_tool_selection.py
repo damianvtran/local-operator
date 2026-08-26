@@ -364,10 +364,13 @@ async def test_bridge_open_recovers_from_a_dead_pinned_tab(monkeypatch) -> None:
     assert surface.surface_id == "bridge:33:fresh"
     assert len(calls) == 2 and "tab" in calls[0] and "tab" not in calls[1]
 
+
 # ---------------------------------------------------------------------------
 # Async site-approval flow (request_access / await_access)
 # ---------------------------------------------------------------------------
 
+
+@pytest.mark.asyncio
 async def test_request_access_works_without_a_surface(monkeypatch) -> None:
     # The whole point of the flow: 'open' just FAILED, so no surface exists.
     # Routing these through the "no browser surface open" guard would send the

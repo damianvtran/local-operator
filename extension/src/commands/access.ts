@@ -57,6 +57,7 @@ async function pollSnapshot(requestId: string, origin: string): Promise<{ origin
   const url = new URL(origin + "/");
   const state = accessState(
     session.accessRequest,
+    session.accessTombstones,
     await originAllowed(url),
     !!consumableGrant(session.onceGrants, origin, requestId, now),
     origin,

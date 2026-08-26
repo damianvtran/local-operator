@@ -1,10 +1,11 @@
 import {
   activeRequest,
-  anyGrantLive,
   consumableGrant,
   newRequest,
   ONCE_GRANT_TTL_MS,
-  supersedeRequest,
+  TOMBSTONE_CAP,
+  tombstoneFor,
+  type AccessRequest,
   type OriginDecision,
 } from "./access-flow";
 import { BridgeCommandError, cdp } from "./cdp";
@@ -192,28 +193,31 @@ export async function expireAccessRequest(): Promise<void> {
 }
 
 /** Raise a fresh async request, tombstoning any live one it replaces.
- * The displaced request is NOT deleted: its record stays with the
- * "superseded" sentinel so the displaced requester's next poll learns its
- * prompt was taken over (round-1 B1b) instead of reading a silent absence as
- * expiry. The replaced prompt surfaces are cleared immediately — waiting for
- * the lazy sweep let a dead prompt's badge outlive it (round-1 m2). */
+ * The displaced requester gets a receipt (see AccessTombstones in
+ * access-flow.ts) so its next poll learns "superseded" instead of reading a
+ * silent absence as expiry — without it, two sessions could steal the single
+ * prompt slot back and forth forever (round-1 B1b). The new prompt's surfaces
+ * are raised immediately, overwriting the replaced one's badge/record
+ * atomically (round-1 m2: a dead prompt's badge must not outlive it). */
 export async function raiseAccessRequest(url: URL, requester: string): Promise<AccessRequest> {
   const now = Date.now();
   const session = await getSession();
-  const record = newRequest(url.origin, url.hostname, requester, now);
   const previous = activeRequest(session.accessRequest, now);
-  const replacedOwnPrompt =
-    previous &&
-    previous.origin !== record.origin &&
-    session.pendingOrigin?.origin === previous.origin;
-  if (previous && previous.origin !== record.origin) {
-    await chrome.storage.session.set({ accessRequest: supersedeRequest(previous) });
+  const record = newRequest(url.origin, url.hostname, requester, now);
+  if (previous && (previous.origin !== record.origin || previous.requester !== record.requester)) {
+    // Different origin OR same origin from a different requester: both
+    // displace the pending prompt, both leave the receipt.
+    const tombs = { ...(session.accessTombstones ?? {}) };
+    tombs[previous.origin] = tombstoneFor(previous);
+    // Drop expired/oldest beyond the cap so a churny fleet cannot grow the
+    // map unbounded — a receipt that old describes a prompt nobody remembers.
+    const entries = Object.entries(tombs)
+      .filter(([, t]) => now < t.expiresAt)
+      .sort((a, b) => b[1].expiresAt - a[1].expiresAt)
+      .slice(0, TOMBSTONE_CAP);
+    await chrome.storage.session.set({ accessTombstones: Object.fromEntries(entries) });
   }
   await chrome.storage.session.set({ accessRequest: record });
-  if (replacedOwnPrompt) {
-    // The old prompt record is stale the moment the new one lands; raise
-    // the new one over it, which overwrites badge/title atomically.
-  }
   await raisePrompt(url, requester);
   // The expiry alarm is armed by the CALLER (access.ts) with this record's
   // own expiry; chrome.alarms.create replaces a same-named alarm, so the

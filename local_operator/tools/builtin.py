@@ -5705,10 +5705,24 @@ def _access_result_text(state: str, origin: str) -> str:
             "(toolbar icon, badge '!') — the badge alone is not reliably seen — THEN "
             "call action='await_access' with the same url to wait for the decision."
         )
-    # "none": no live request — expired, superseded, or never raised.
+    if state == "superseded":
+        # A DIFFERENT session's request replaced this one's prompt slot (the
+        # popup shows one origin at a time). The agent must know it was
+        # displaced — reading this as expiry would send it into a
+        # request/notify loop that keeps stealing the prompt back and forth
+        # between sessions (round-1 B1b).
+        return (
+            f"the approval prompt for {origin} was superseded by another session's "
+            "request — the extension shows one prompt at a time. Wait for the other "
+            "session's prompt to resolve, then call action='request_access' again "
+            "if this origin is still needed."
+        )
+    # "none": no live request for the caller — expired, never raised, or
+    # superseded by a request it did not own.
     return (
-        f"no live access request for {origin} (it may have expired unanswered). "
-        "Call action='request_access' with the url to raise a new prompt."
+        f"no live access request for {origin} (it may have expired unanswered, or "
+        "never been raised). Call action='request_access' with the url to raise a "
+        "new prompt."
     )
 
 

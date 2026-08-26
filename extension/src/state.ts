@@ -56,6 +56,7 @@ export interface SessionState {
   pendingOrigin?: PendingOrigin;
   accessRequest?: import("./access-flow").AccessRequest;
   onceGrants?: import("./access-flow").OnceGrants;
+  accessTombstones?: import("./access-flow").AccessTombstones;
 }
 
 export async function getLocal(): Promise<LocalState> {
@@ -69,6 +70,7 @@ export async function getSession(): Promise<SessionState> {
     "pendingOrigin",
     "accessRequest",
     "onceGrants",
+    "accessTombstones",
   ]);
 }
 

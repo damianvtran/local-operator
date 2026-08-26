@@ -24,12 +24,6 @@
 
 export type OriginDecision = "once" | "always" | "deny";
 
-/** Record decision column: a real user decision OR the "superseded" sentinel
- * written when a different requester's prompt replaces a pending one. Kept
- * distinct from OriginDecision so the user-facing vocabulary cannot leak
- * into wire types, while storage stays one string field. */
-export type RequestOutcome = OriginDecision | "superseded";
-
 /** What request_access/await_access report back to the agent. "none" means no
  * live request exists FOR THE CALLER (never raised, expired, or superseded);
  * "superseded" means a DIFFERENT requester's prompt replaced this origin's
@@ -69,9 +63,8 @@ export interface AccessRequest {
   requester: string;
   requestedAt: number;
   expiresAt: number;
-  /** Set once the request resolved: a user decision, or the "superseded"
-   * sentinel (see supersedeRequest); absent while the prompt is still open. */
-  decision?: RequestOutcome;
+  /** Set once the user decided; absent while the prompt is still open. */
+  decision?: OriginDecision;
 }
 
 /** A live "Allow once" grant, bound to the requester the user approved FOR
@@ -84,6 +77,28 @@ export interface OnceGrant {
 
 /** Origin -> grant, one per origin at most. */
 export type OnceGrants = Record<string, OnceGrant>;
+
+/** The live prompt slot holds ONE record (the popup's constraint), so a
+ * replace-don't-queue overwrite would otherwise erase the displaced request
+ * silently — the displaced requester's next poll would read "none",
+ * indistinguishable from expiry, and its agent would nag the user by
+ * re-raising the prompt in a steal loop (round-1 B1b). The tombstone map
+ * remembers RECENT replacements (bounded, same TTL discipline) so that
+ * requester learns "superseded" instead. Not a queue: the new prompt still
+ * replaces the old one immediately; this is only the receipt. */
+export interface SupersededTombstone {
+  origin: string;
+  requester: string;
+  /** Matches the displaced record's expiry: the receipt lives no longer
+   * than the request it stands for. */
+  expiresAt: number;
+}
+export type AccessTombstones = Record<string, SupersededTombstone>;
+
+/** Cap on retained tombstones: a churny fleet must not grow the map without
+ * bound; the oldest beyond the cap are dropped (a tombstone that old is
+ * telling its owner about a prompt the user has long forgotten anyway). */
+export const TOMBSTONE_CAP = 8;
 
 /** A record past its TTL reads as absent everywhere: await_access answers
  * "none" and request_access raises a fresh prompt. Expiry is computed on read
@@ -155,12 +170,12 @@ export function requestVerdict(
 }
 
 /** What await_access answers WITHOUT waiting. "pending" is the only state the
- * caller should then block on; everything else is final for this poll. The
- * tombstone records the record's own requester, so a supersession only reads
- * as "superseded" to the displaced requester — a third session asking about
- * the origin gets the neutral "none". */
+ * caller should then block on; everything else is final for this poll. A
+ * tombstone only reads as "superseded" to the requester it displaced — a
+ * third session asking about the origin gets the neutral "none". */
 export function accessState(
   record: AccessRequest | undefined,
+  tombstones: AccessTombstones | undefined,
   storedAllowed: boolean,
   onceGrant: boolean,
   origin: string,
@@ -169,12 +184,13 @@ export function accessState(
 ): AccessState {
   if (storedAllowed || onceGrant) return "allowed";
   const live = activeRequest(record, now);
-  if (!live || live.origin !== origin) return "none";
-  if (live.decision === "superseded") {
-    return live.requester === requester ? "superseded" : "none";
+  if (live && live.origin === origin) {
+    if (!live.decision) return "pending";
+    return live.decision === "deny" ? "denied" : "allowed";
   }
-  if (!live.decision) return "pending";
-  return live.decision === "deny" ? "denied" : "allowed";
+  const tomb = tombstones?.[origin];
+  if (tomb && now < tomb.expiresAt && tomb.requester === requester) return "superseded";
+  return "none";
 }
 
 export function newRequest(
@@ -186,11 +202,7 @@ export function newRequest(
   return { origin, hostname, requester, requestedAt: now, expiresAt: now + ACCESS_REQUEST_TTL_MS };
 }
 
-/** Tombstone a record being replaced: the origin and TTL are kept, the
- * decision becomes the sentinel "superseded", so the displaced requester's
- * next poll learns its prompt was taken over instead of reading the record
- * as simply gone. The record is NOT deleted — deleting would make the
- * displaced requester indistinguishable from a session that never asked. */
-export function supersedeRequest(record: AccessRequest): AccessRequest {
-  return { ...record, decision: "superseded" };
+/** The tombstone a replacement leaves for the displaced requester. */
+export function tombstoneFor(record: AccessRequest): SupersededTombstone {
+  return { origin: record.origin, requester: record.requester, expiresAt: record.expiresAt };
 }
