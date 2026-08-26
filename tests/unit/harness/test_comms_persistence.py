@@ -176,6 +176,67 @@ def test_attach_collapse_keeps_prior_attempt_launch_prompts(tmp_path) -> None:
     assert comms.node("attempt-1") is node or comms.node("attempt-1") == node
 
 
+def test_fanned_resume_keeps_each_target_launch_identity_and_prompts_distinct(
+    tmp_path,
+) -> None:
+    """#318's `hub op='resume'` fan-out must not entangle launch identities.
+
+    A batch resume loops the SAME single-child ``comms.resume`` per target, each
+    on its own session directory, so this PR's per-attempt ``launch_prompts``
+    folding stays strictly per-record. Prove two children resumed in one fan-out
+    keep distinct deterministic launch ids and each folds only ITS OWN prior
+    attempt's concise prompt — no cross-target leakage (round 5 semantic check
+    against #318).
+    """
+
+    def make_attempt(comms, jobs, session_dir, job_id, prompt) -> None:
+        jobs.add(job_id, status="running")
+        comms.record_launch(
+            job_id,
+            "reviewer",
+            prompt=prompt,
+            launch_message_id=f"subagent-launch:{job_id}",
+        )
+        comms.attach(job_id, FakeChild(), session_dir)  # type: ignore[arg-type]
+
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    dir_a = tmp_path / "child-a"
+    dir_a.mkdir()
+    (dir_a / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    dir_b = tmp_path / "child-b"
+    dir_b.mkdir()
+    (dir_b / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+
+    # Each target has its own original attempt on its own directory.
+    make_attempt(comms, jobs, dir_a, "a1", "Task A.")
+    comms.record_outcome("a1", "cancelled")
+    comms.detach("a1")
+    jobs.jobs["a1"].status = "cancelled"
+    make_attempt(comms, jobs, dir_b, "b1", "Task B.")
+    comms.record_outcome("b1", "cancelled")
+    comms.detach("b1")
+    jobs.jobs["b1"].status = "cancelled"
+
+    # The fan-out resumes both, each as its own continuation on its own dir.
+    make_attempt(comms, jobs, dir_a, "a2", "Continue A.")
+    make_attempt(comms, jobs, dir_b, "b2", "Continue B.")
+
+    node_a = comms.node("a2")
+    node_b = comms.node("b2")
+    assert node_a is not None and node_b is not None
+    # Each target folds ONLY its own predecessor; no cross-directory bleed.
+    assert node_a.launch_prompts == {
+        "subagent-launch:a1": "Task A.",
+        "subagent-launch:a2": "Continue A.",
+    }
+    assert node_b.launch_prompts == {
+        "subagent-launch:b1": "Task B.",
+        "subagent-launch:b2": "Continue B.",
+    }
+    assert node_a.launch_message_id != node_b.launch_message_id
+
+
 def test_snapshot_restore_round_trips_collapsed_launch_prompts(tmp_path) -> None:
     jobs = FakeJobs()
     comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
