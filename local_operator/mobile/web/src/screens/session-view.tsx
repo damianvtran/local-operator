@@ -169,9 +169,13 @@ export function SessionScreen({
 				   the greyed-out-buttons bug: busy stayed true after answering
 				   Q1, so every Q2 option rendered disabled. The remount is the
 				   honest fix — it makes the invariant structural rather than
-				   relying on the card to reset itself. */
+				   relying on the card to reset itself. kind is included as
+				   cheap hardening: request_ids are unique per push today, so
+				   an approval→ask flip at the same index can't collide in
+				   practice, but if the daemon ever reuses an id across kinds
+				   the card must not inherit the other kind's state. */
 				<PendingCard
-					key={`${projection.pending.request_id}:${projection.pending.question_index}`}
+					key={`${projection.pending.request_id}:${projection.pending.kind}:${projection.pending.question_index}`}
 					pid={sessionId}
 					pending={projection.pending}
 					count={projection.pending_count}
