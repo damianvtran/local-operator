@@ -12,12 +12,14 @@ from typing import Any, Literal
 
 import pytest
 
+import local_operator.harness.loop as loop_module
 from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
     STEERING_INTERRUPT_POLL_S,
     AgentLoop,
     LoopContext,
     _consume_claim,
+    _get_before_timeout,
     validate_tool_arguments,
 )
 from local_operator.harness.types import (
@@ -46,6 +48,26 @@ from local_operator.harness.types import (
 from local_operator.providers.failover import ProviderError
 
 MODEL = ModelSpec(provider="test", model_id="m")
+
+
+class _ControlledDeadline:
+    """Keep the abort drain live until a test-controlled parking boundary."""
+
+    def __init__(self, parked: asyncio.Event) -> None:
+        self.parked = parked
+
+    def __sub__(self, _now: float) -> float:
+        return -1.0 if self.parked.is_set() else 60.0
+
+
+class ControlledDrainBudget:
+    """Replace the numeric drain budget without adding a production test seam."""
+
+    def __init__(self, parked: asyncio.Event) -> None:
+        self.parked = parked
+
+    def __radd__(self, _now: float) -> _ControlledDeadline:
+        return _ControlledDeadline(self.parked)
 
 
 class ScriptedStream:
@@ -1644,82 +1666,67 @@ async def test_a_slow_unwind_still_reports_the_tool_as_ENDED():
 
 
 @pytest.mark.asyncio
-async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill():
-    """Review round 3, R3-1. The backfill must decide before it emits.
+async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill(monkeypatch):
+    """The final flush must emit an end parked after the drain has expired.
 
-    A generator suspends at every ``yield``, handing control to a consumer that
-    may await. A runner whose cleanup lands in one of those windows parks its
-    own result — writing its end event to the queue nobody reads any more — and
-    an interleaved backfill then saw the filled slot and emitted nothing. That
-    call kept its start event and never got an end, which is the exact damage
-    the backfill exists to prevent.
-
-    Needs BOTH a multi-call batch (so there is an earlier slot to suspend on)
-    and a consumer that actually awaits. The single-tool guard above cannot
-    reach it: with one slot there is nothing to suspend on before it.
+    Two calls make the boundary observable: c1 parks immediately on abort, while
+    c2 cannot finish cancellation until the consumer is suspended on c1's end.
+    At that exact yield, c2 parks synchronously and the controlled budget expires.
+    The backfill sees c2's filled slot and owes no synthetic end, leaving the
+    final queue flush as the only path that can emit c2's real end event.
     """
     started = asyncio.Event()
     parked = asyncio.Event()
+    allow_park = asyncio.Event()
+    started_count = 0
+    monkeypatch.setattr(loop_module, "ABORT_DRAIN_TIMEOUT_S", ControlledDrainBudget(parked))
 
-    async def never_parks(tool_call_id, args, signal, on_update, context) -> ToolResult:
-        started.set()
+    async def parks_immediately(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        nonlocal started_count
+        started_count += 1
+        if started_count == 2:
+            started.set()
         await asyncio.sleep(30)
         return ToolResult(
-            tool_call_id=tool_call_id, tool_name="stuck", content=[TextContent(text="late")]
+            tool_call_id=tool_call_id, tool_name="first", content=[TextContent(text="late")]
         )
 
-    async def parks_late(tool_call_id, args, signal, on_update, context) -> ToolResult:
+    async def parks_at_flush_boundary(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        nonlocal started_count
+        started_count += 1
+        if started_count == 2:
+            started.set()
         try:
             await asyncio.sleep(30)
         except asyncio.CancelledError:
-            # Settles just past the drain budget: the batch has given up
-            # waiting, so this lands while the backfill is mid-emit.
             with contextlib.suppress(asyncio.CancelledError):
-                # Parks past the drain budget by enough that the event lands on
-                # a queue the drain loop has already abandoned — which is the
-                # window the FLUSH exists to cover, and the only window in which
-                # this test can detect the flush going missing.
-                #
-                # A RIDGE, NOT A FLOOR: moving this value in EITHER direction
-                # blinds the test. Swept against a tree with the flush deleted,
-                # it detects at +0.30 and is blind at +0.15, +0.35, +0.40, +0.45
-                # and +0.60 (R10/R11).
-                #
-                # Detection is PROBABILISTIC — roughly 3 runs in 4 (measured
-                # 7/8, 9/12, 11/16, 12/16 red). Anyone spot-checking by deleting
-                # the flush must repeat the run: a single green one proves
-                # nothing and would wrongly suggest the test is already dead.
-                #
-                # Too short and the park lands in the range the
-                # backfill already handles; too long and it lands after the
-                # batch has stopped emitting. Both ends pass with the flush
-                # gone, which means the test silently stops testing the thing it
-                # is named for. The flakiness this once had is fixed by the
-                # `parked` gate below, not by moving this.
-                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
+                await allow_park.wait()
+            # No await may separate this signal from the runner's synchronous
+            # park: the consumer must resume only after c2 has filled its slot
+            # and queued the end event that solely the final flush can emit.
             parked.set()
             raise
         return ToolResult(
-            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="late")]
+            tool_call_id=tool_call_id, tool_name="second", content=[TextContent(text="late")]
         )
 
     tools = [
         AgentTool(
-            name="stuck",
+            name="first",
             parameters={"type": "object", "properties": {}},
-            execute=never_parks,
+            execute=parks_immediately,
         ),
         AgentTool(
-            name="slow",
+            name="second",
             parameters={"type": "object", "properties": {}},
-            execute=parks_late,
+            execute=parks_at_flush_boundary,
         ),
     ]
     stream = ScriptedStream(
         [
             [
-                tool_call_delta(0, id="c1", name="stuck", args="{}"),
-                tool_call_delta(1, id="c2", name="slow", args="{}"),
+                tool_call_delta(0, id="c1", name="first", args="{}"),
+                tool_call_delta(1, id="c2", name="second", args="{}"),
                 StreamEndEvent(stop_reason="toolUse"),
             ],
             [StreamEndEvent(stop_reason="stop")],
@@ -1729,47 +1736,22 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
     config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
     signal = AbortSignal()
     loop = AgentLoop()
-
     events: list[Any] = []
 
     async def run() -> None:
         async for event in loop.run([Message.user("go")], context, config, signal):
             events.append(event)
-            # A consumer that awaits — the TUI paints, the API server writes.
-            # Without this the generator never suspends and the loss is not
-            # reachable at all.
-            #
-            # The duration is deliberate and must not be shortened to settle a
-            # flake: the tool has to park AFTER the drain gives up at
-            # ABORT_DRAIN_TIMEOUT_S but while the consumer still owes the
-            # generator a resume, and that window is what the flush covers.
-            # Moving either number moves the park out of that window — see the
-            # ridge measurements on the tool's own sleep above — and the test
-            # then passes with the flush deleted, i.e. it stops testing the
-            # thing it is named for. Waiting on the park event instead was tried
-            # and is worse (3/40): it lets the generator finish before the park
-            # it is supposed to be racing.
-            #
-            # The IDENTICAL literal `ABORT_DRAIN_TIMEOUT_S + 0.3` appears once
-            # more in this file, in the duplicate-call-id suppression test —
-            # grep `does_not_suppress_the_real_calls` — and that is the copy a
-            # search-and-replace would collide with. It is INDEPENDENT of this
-            # one: it exercises the suppression rule, not the flush window, so
-            # nothing about it needs to move if this does.
-            #
-            # (The slow-unwind test — grep `still_reports_the_tool_as_ENDED` —
-            # overshoots by `+ 2` and is independent for the same reason. Only
-            # the identical literal is a real hazard.)
-            await asyncio.sleep(0.3)
+            if isinstance(event, ToolExecutionEndEvent) and event.tool_call_id == "c1":
+                # Every yielded event reaches an awaiting consumer, matching the
+                # TUI paint/API write shape rather than draining synchronously.
+                allow_park.set()
+                await asyncio.wait_for(parked.wait(), timeout=5)
+            await asyncio.sleep(0)
 
-    task = asyncio.ensure_future(run())
+    task = asyncio.create_task(run())
     await asyncio.wait_for(started.wait(), timeout=5)
     signal.abort("interrupted")
-    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 15)
-    # The scenario only exists once the slow tool has actually parked. Without
-    # this the assertion sometimes ran against a turn that ended BEFORE the
-    # cleanup finished — a different shape, and the source of a ~1-in-8 flake.
-    await asyncio.wait_for(parked.wait(), timeout=5)
+    await asyncio.wait_for(task, timeout=15)
 
     started_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
     ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
@@ -1779,7 +1761,7 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
             f"{call_id} was announced as started and ended {ended_ids.count(call_id)} "
             f"times; every started call needs exactly one end (ends={ended_ids})"
         )
-    # And the wire is still legal: one tool_result per tool_use.
+
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert sorted(str(m.tool_call_id) for m in tool_messages) == ["c1", "c2"]
 
@@ -1976,6 +1958,79 @@ def test_the_flush_suppression_counts_rather_than_matching():
     assert _consume_claim(claimed, "dup") is False
     # An id nobody claimed is never suppressed.
     assert _consume_claim(Counter(), "other") is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_can_lose_an_item_delivered_at_its_timeout_boundary(monkeypatch):
+    """Pin the production race that requires an explicit getter/timer race."""
+
+    class ControlledTimeout:
+        def __init__(self) -> None:
+            self.armed = asyncio.Event()
+            self.task: asyncio.Task[Any] | None = None
+            self.expiring = False
+
+        async def __aenter__(self):
+            self.task = asyncio.current_task()
+            self.armed.set()
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            if self.expiring and exc_type is asyncio.CancelledError:
+                raise TimeoutError from exc
+            return None
+
+        def fire(self) -> None:
+            self.expiring = True
+            assert self.task is not None
+            self.task.cancel()
+
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    item = object()
+    getter = asyncio.create_task(queue.get())
+    await asyncio.sleep(0)  # Register the getter before arranging the boundary.
+    controlled = ControlledTimeout()
+    monkeypatch.setattr(asyncio.timeouts, "timeout", lambda _delay: controlled)
+    waiting = asyncio.create_task(asyncio.wait_for(getter, timeout=30))
+    await controlled.armed.wait()
+
+    # Queue delivery runs first and dequeues the item; timeout cancellation then
+    # wins before wait_for observes that result, reproducing the lost-item race.
+    queue.put_nowait(item)
+    asyncio.get_running_loop().call_soon(controlled.fire)
+
+    with pytest.raises(TimeoutError):
+        await waiting
+    assert queue.empty()
+    assert getter.done() and not getter.cancelled()
+    assert getter.result() is item
+
+
+@pytest.mark.asyncio
+async def test_queue_get_wins_when_it_ties_the_timeout():
+    queue = asyncio.Queue()
+    item = object()
+    queue.put_nowait(item)
+
+    assert await _get_before_timeout(queue, timeout=0) is item
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_queue_timeout_cancels_and_awaits_its_pending_getter():
+    queue = asyncio.Queue()
+    current = asyncio.current_task()
+    tasks_before = {task for task in asyncio.all_tasks() if task is not current}
+
+    with pytest.raises(TimeoutError):
+        await _get_before_timeout(queue, timeout=0)
+
+    tasks_after = {task for task in asyncio.all_tasks() if task is not current}
+    assert tasks_after == tasks_before
+    item = object()
+    queue.put_nowait(item)
+    await asyncio.sleep(0)
+    assert queue.get_nowait() is item
 
 
 # ---------------------------------------------------------------------------

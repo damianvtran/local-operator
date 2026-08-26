@@ -28,7 +28,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -162,6 +162,39 @@ def _lower_effort(model: "ModelSpec") -> str | None:
 # (a process group refusing to die) keeps unwinding in the background while the
 # turn it belonged to is already over.
 ABORT_DRAIN_TIMEOUT_S = 2.0
+
+_QueueItemT = TypeVar("_QueueItemT")
+
+
+async def _get_before_timeout(queue: asyncio.Queue[_QueueItemT], timeout: float) -> _QueueItemT:
+    """Get one queue item before ``timeout`` without losing a boundary item.
+
+    The timeout and a queue delivery can become ready in the same event-loop
+    turn. ``wait_for(queue.get())`` may report the timeout after the getter has
+    already dequeued an item, orphaning that event from both this drain and its
+    final queue flush. Racing explicit tasks lets delivery win every tie; if the
+    timer wins alone, the getter is cancelled and joined before control returns,
+    so it cannot consume a later item in the background.
+    """
+    getter = asyncio.create_task(queue.get())
+    timer = asyncio.create_task(asyncio.sleep(timeout))
+    try:
+        await asyncio.wait({getter, timer}, return_when=asyncio.FIRST_COMPLETED)
+        if getter.done():
+            return getter.result()
+        getter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await getter
+        raise TimeoutError
+    finally:
+        # Caller cancellation must not leave either contestant alive: a leaked
+        # getter could silently consume an event after this drain has unwound.
+        for task in (getter, timer):
+            if not task.done():
+                task.cancel()
+        for task in (getter, timer):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 def _consume_claim(claimed: Counter[str], call_id: str) -> bool:
@@ -1478,9 +1511,8 @@ class AgentLoop:
                                 ABORT_DRAIN_TIMEOUT_S,
                             )
                             break
-                        getter = asyncio.ensure_future(queue.get())
                         try:
-                            event = await asyncio.wait_for(getter, timeout=remaining)
+                            event = await _get_before_timeout(queue, remaining)
                         except TimeoutError:
                             # The tasks are left running: they own their own
                             # resources, log their own failures, and the
