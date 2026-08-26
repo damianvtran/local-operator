@@ -35,7 +35,8 @@ async def wait_for(predicate, timeout: float = 2.0) -> None:
 
 
 def _row(job_id: str, status: JobStatus = "completed", **kw) -> AsyncJob:
-    return AsyncJob(id=job_id, type="task", status=status, start_time=1.0, label=job_id, **kw)
+    values = {"start_time": 1.0, "label": job_id, **kw}
+    return AsyncJob(id=job_id, type="task", status=status, **values)
 
 
 @pytest.mark.asyncio
@@ -120,6 +121,62 @@ async def test_roster_change_hook_fires_on_register_and_settle() -> None:
     before_settle = len(calls)
     await wait_for(lambda: manager.get(job_id).status == "completed")  # type: ignore[union-attr]
     assert len(calls) > before_settle  # settle fired it again
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fresh_identical_launches_remain_distinct() -> None:
+    manager = AsyncJobManager()
+    manager.restore([_row("one", label="same"), _row("two", label="same")])
+    assert [job.id for job in manager.list()] == ["one", "two"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_resume_attempts_replace_one_logical_row_and_alias_ids() -> None:
+    manager = AsyncJobManager()
+    manager.restore([_row("old", logical_id="/tmp/child")])
+
+    async def runner(job_id, signal, report_progress):
+        await asyncio.sleep(5)
+
+    current = manager.register("task", "same", runner)
+    await asyncio.sleep(0)
+    manager.bind_logical_identity(current, "/tmp/child")
+    assert [job.id for job in manager.list()] == [current]
+    assert manager.get("old") is manager.get(current)
+    assert manager.get(current).attempt_aliases == ["old"]  # type: ignore[union-attr]
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_duplicate_snapshot_keeps_newest_and_all_aliases() -> None:
+    manager = AsyncJobManager()
+    manager.restore(
+        [
+            _row("oldest", start_time=1.0, logical_id="/tmp/child"),
+            _row("middle", start_time=2.0, logical_id="/tmp/child"),
+            _row("newest", start_time=3.0, logical_id="/tmp/child"),
+        ]
+    )
+    assert [job.id for job in manager.list()] == ["newest"]
+    assert manager.get("oldest") is manager.get("newest")
+    assert manager.get("middle") is manager.get("newest")
+
+
+@pytest.mark.asyncio
+async def test_bind_rejects_two_live_attempts_for_one_transcript() -> None:
+    manager = AsyncJobManager(max_running=3)
+
+    async def runner(job_id, signal, report_progress):
+        await asyncio.sleep(5)
+
+    first = manager.register("task", "same", runner)
+    manager.bind_logical_identity(first, "/tmp/child")
+    second = manager.register("task", "same", runner)
+    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="already running"):
+        manager.bind_logical_identity(second, "/tmp/child")
+    assert [job.id for job in manager.list()] == [first, second]
     await manager.dispose()
 
 

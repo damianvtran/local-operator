@@ -321,6 +321,9 @@ class _ChildRecord:
     #: content are one durable fact after the ephemeral job row is swept.
     result_text: str | None = None
     error_text: str | None = None
+    #: Attempt handles superseded by this record. Persisted so a parent can
+    #: keep using an id it mentioned before either process or child resumed.
+    attempt_aliases: list[str] = field(default_factory=list)
 
 
 class SubagentComms:
@@ -335,6 +338,7 @@ class SubagentComms:
         self._session = session
         self._records: dict[str, _ChildRecord] = {}
         self._detail_listeners: set[Callable[[str], None]] = set()
+        self._aliases: dict[str, str] = {}
 
     def subscribe_detail_changes(self, listener: Callable[[str], None]) -> Callable[[], None]:
         """Observe child transcript mutations through the shared root registry."""
@@ -422,8 +426,34 @@ class SubagentComms:
         if record is None:
             record = _ChildRecord(job_id=job_id, label=job_id)
             self._records[job_id] = record
+        # The directory, not the human label, identifies a resumed child. Fold
+        # the predecessor before exposing the live record so every roster read
+        # observes either the old attempt or the new one, never both.
+        prior = next(
+            (
+                item
+                for item in self._records.values()
+                if item.job_id != job_id and item.session_dir == session_dir
+            ),
+            None,
+        )
+        if prior is not None:
+            record.label = prior.label
+            record.parent_job_id = prior.parent_job_id
+            record.agent_role = prior.agent_role
+            record.effort = prior.effort
+            record.attempt_aliases = list(
+                dict.fromkeys([*prior.attempt_aliases, prior.job_id, *record.attempt_aliases])
+            )
+            self._records.pop(prior.job_id, None)
+        for alias in record.attempt_aliases:
+            self._aliases[alias] = job_id
         record.child = child
         record.session_dir = session_dir
+        jobs = self._jobs()
+        bind = getattr(jobs, "bind_logical_identity", None) if jobs is not None else None
+        if callable(bind):
+            bind(job_id, str(session_dir))
         record.settled = False
         record.unsubscribe = child.subscribe(self._make_reply_watcher(record))
         for message in record.pending:
@@ -452,7 +482,7 @@ class SubagentComms:
         """Release the live child. An unanswered question fails here rather
         than burning its caller's full timeout: the child is gone, no answer
         is coming."""
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return
         record.settled = True
@@ -480,7 +510,7 @@ class SubagentComms:
         context carries a job id this instance knows is a CHILD, and gets the
         child-shaped tool.
         """
-        return job_id is not None and job_id in self._records
+        return job_id is not None and self._record(job_id) is not None
 
     # -- lineage --------------------------------------------------------------
 
@@ -495,7 +525,7 @@ class SubagentComms:
         return [node for job_id in self._records if (node := self.node(job_id)) is not None]
 
     def node(self, job_id: str) -> SubagentNode | None:
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return None
         session_id = record.session_dir.name if record.session_dir is not None else None
@@ -626,7 +656,7 @@ class SubagentComms:
         roster would show a deliberately parked child as an ordinary
         cancellation. Only :meth:`resume` ends a pause.
         """
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return None
 
@@ -703,6 +733,7 @@ class SubagentComms:
                     "error_text": record.error_text,
                     "paused": record.paused,
                     "settled_at": record.settled_at,
+                    "attempt_aliases": list(record.attempt_aliases),
                 }
             )
         return rows
@@ -724,7 +755,29 @@ class SubagentComms:
         live child of this session must never be clobbered by a stale snapshot
         of its predecessor.
         """
-        for row in rows:
+        # Newest wins for legacy snapshots that retained one record per resume
+        # attempt. Older ids become aliases of that winner rather than vanished
+        # handles, which preserves parent messages and old transcript references.
+        winners: list[dict[str, Any]] = []
+        by_dir: dict[str, dict[str, Any]] = {}
+        for row in reversed(rows):
+            raw_dir = row.get("session_dir")
+            logical_id = str(raw_dir) if raw_dir else ""
+            winner = by_dir.get(logical_id) if logical_id else None
+            if winner is not None:
+                old_id = str(row.get("job_id") or "")
+                aliases = [
+                    *row.get("attempt_aliases", []),
+                    old_id,
+                    *winner.get("attempt_aliases", []),
+                ]
+                winner["attempt_aliases"] = list(dict.fromkeys(alias for alias in aliases if alias))
+                continue
+            copied = dict(row)
+            winners.append(copied)
+            if logical_id:
+                by_dir[logical_id] = copied
+        for row in reversed(winners):
             job_id = str(row.get("job_id") or "")
             if not job_id or job_id in self._records:
                 continue
@@ -747,9 +800,17 @@ class SubagentComms:
                     str(row["result_text"]) if row.get("result_text") is not None else None
                 ),
                 error_text=(str(row["error_text"]) if row.get("error_text") is not None else None),
+                attempt_aliases=[str(alias) for alias in row.get("attempt_aliases", []) if alias],
             )
             self._records[job_id] = record
+            for alias in record.attempt_aliases:
+                if alias != job_id:
+                    self._aliases[alias] = job_id
         self._evict_overflow()
+
+    def _record(self, job_id: str) -> _ChildRecord | None:
+        """Resolve either a current attempt id or any durable predecessor."""
+        return self._records.get(self._aliases.get(job_id, job_id))
 
     async def peek(
         self,
@@ -777,7 +838,7 @@ class SubagentComms:
         exists, so an out-of-range request is an error about the range, not a
         transcript dump.
         """
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return PeekWindow(job_id, job_id, "gone", 0, error=f"unknown subagent {job_id!r}")
         info = self._describe(record, time.time())
@@ -1012,11 +1073,11 @@ class SubagentComms:
         )
 
     def label_of(self, job_id: str) -> str:
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         return record.label if record is not None else job_id
 
     def session_dir_of(self, job_id: str) -> Path | None:
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         return record.session_dir if record is not None else None
 
     # -- parent -> child ------------------------------------------------------
@@ -1033,7 +1094,7 @@ class SubagentComms:
         that way — including on resume, where a note framed as an aside and a
         redirection framed as an order are very different things to replay.
         """
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return Delivery(job_id, job_id, "failed", f"unknown subagent {job_id!r}")
         if record.child is None:
@@ -1107,7 +1168,7 @@ class SubagentComms:
         this session next yields" is not an actionable answer for the one
         caller who cannot yield without making another call.
         """
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return Reply(job_id, job_id, error=f"unknown subagent {job_id!r}")
         # ONE guard for BOTH paths, and it has to be here rather than beside
@@ -1239,7 +1300,7 @@ class SubagentComms:
     async def cancel(self, job_id: str) -> Delivery:
         """Stop a child. Idempotent from the caller's point of view: a second
         cancel reports the state rather than pretending to act."""
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         label = record.label if record is not None else job_id
         jobs = self._jobs()
         if jobs is None:
@@ -1286,7 +1347,7 @@ class SubagentComms:
         and replay costs a transcript rehydration on resume and frees
         everything meanwhile.
         """
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return Delivery(job_id, job_id, "failed", f"unknown subagent {job_id!r}")
         if record.session_dir is None:
@@ -1335,7 +1396,7 @@ class SubagentComms:
         """
         from local_operator.harness.subagent import run_subagent
 
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return None, f"unknown subagent {job_id!r}"
         if record.session_dir is None:
@@ -1396,7 +1457,7 @@ class SubagentComms:
         rather than delivered. Unarmed messages therefore fall through to the
         note path below; nothing is lost either way.
         """
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         label = record.label if record is not None else job_id
         if record is not None and record.armed and record.ask is not None and not record.ask.done():
             self._journal_communication(
@@ -1537,7 +1598,7 @@ class SubagentComms:
         )
 
     def _deliver(self, job_id: str, message: CustomMessage) -> Delivery:
-        record = self._records.get(job_id)
+        record = self._record(job_id)
         if record is None:
             return Delivery(job_id, job_id, "failed", f"unknown subagent {job_id!r}")
         if record.child is None:

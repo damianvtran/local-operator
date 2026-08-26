@@ -933,6 +933,10 @@ _ROSTER_ROW_FIELDS = frozenset(
         # rest of this allowlist exists to prevent for the model/usage fields.
         "agent_role",
         "effort",
+        # Resume reconciliation metadata is bounded by attempts of this one
+        # logical child and keeps legacy handles valid after process restore.
+        "logical_id",
+        "attempt_aliases",
     }
 )
 
@@ -6006,17 +6010,36 @@ class Session:
             self._subagent_roster_generation if loaded_sidecar else -1
         )
         records = details.get("records") or []
+        logical_by_job: dict[str, str] = {}
+        aliases_by_job: dict[str, list[str]] = {}
         if records:
             # ``self.subagent_comms`` (the property) mints the instance on first
             # use; restoring into it is what makes the children addressable.
             try:
                 self.subagent_comms.restore(list(records))
+                for record in self.subagent_comms.snapshot():
+                    job_id = str(record.get("job_id") or "")
+                    session_dir = str(record.get("session_dir") or "")
+                    if job_id and session_dir:
+                        aliases = [
+                            str(alias) for alias in record.get("attempt_aliases", []) if alias
+                        ]
+                        aliases_by_job[job_id] = aliases
+                        for attempt_id in [*aliases, job_id]:
+                            logical_by_job[attempt_id] = session_dir
             except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
                 logger.warning("could not restore subagent records", exc_info=True)
         rows: list[AsyncJob] = []
         for raw in details.get("jobs") or []:
             try:
-                rows.append(AsyncJob.model_validate(raw))
+                payload = dict(raw)
+                job_id = str(payload.get("id") or "")
+                # Legacy job snapshots predate ``logical_id``; the comms half
+                # already carried the transcript directory, so join the two by
+                # attempt id before asking the manager to collapse duplicates.
+                payload.setdefault("logical_id", logical_by_job.get(job_id))
+                payload.setdefault("attempt_aliases", aliases_by_job.get(job_id, []))
+                rows.append(AsyncJob.model_validate(payload))
             except Exception:
                 logger.warning("dropping malformed persisted subagent row: %r", raw)
         if rows:

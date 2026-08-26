@@ -150,6 +150,17 @@ async def test_a_completed_subagent_is_restored_and_resumable(tmp_path, monkeypa
     new_job_id, error = resumed.subagent_comms.resume(job_id, "keep going")
     assert error is None
     assert new_job_id and new_job_id != job_id
+
+    def _is_reconciled() -> bool:
+        row = resumed.jobs.get(new_job_id)
+        return row is not None and row.logical_id == str(session_dir)
+
+    await wait_for(_is_reconciled)
+    rows = [j for j in resumed.jobs.list() if j.type == "task"]
+    assert [row.id for row in rows] == [new_job_id]
+    assert resumed.jobs.get(job_id) is resumed.jobs.get(new_job_id)
+    assert [item.job_id for item in resumed.subagent_comms.roster()] == [new_job_id]
+    assert resumed.subagent_comms.session_dir_of(job_id) == session_dir
     await resumed.dispose()
 
 
