@@ -347,13 +347,25 @@ class SessionBroadcast:
         # in a `CALL_TIMEOUT_S` subprocess, and the successor must publish
         # eventually rather than hang behind a socket that never answers.
         #
-        # `join()` is safe to call on the predecessor from here: it joins the
-        # retire worker and the TIMER, and this thread is neither.
+        # `_drain_retire` and NOT `join`: `join` applies its timeout PER
+        # WORKER over the retire worker and the timer, so a `join(timeout=6)`
+        # here really bounded the successor's first publish at 12s — twice the
+        # number this comment and `SWAP_DRAIN_TIMEOUT_S` both name (measured
+        # 12.02s). Worse, it compounded down a swap chain: draining the
+        # predecessor's TIMER means waiting out that timer's own drain of ITS
+        # predecessor, so A→B→C paid B's drain of A as well. Only the
+        # withdrawal carries swap ordering — the predecessor's timer is
+        # `_stopped` and its `_publish_once` refuses under the `_retired`
+        # latch, so it can no longer touch the pane and joining it buys
+        # nothing. This is the same narrowing `_drain_retire` already
+        # documents for the exit path.
         predecessor = self._predecessor
         if predecessor is not None:
             self._predecessor = None
             try:
-                predecessor.join(timeout=SWAP_DRAIN_TIMEOUT_S)
+                predecessor._drain_retire(  # noqa: SLF001 - same package
+                    timeout=SWAP_DRAIN_TIMEOUT_S
+                )
             except Exception:  # noqa: BLE001 — a swap must never fail on this
                 logger.debug("predecessor withdrawal drain failed", exc_info=True)
         self._drained.set()
@@ -587,9 +599,22 @@ def _register_exit_drain() -> None:
     callers are coroutines), which is the ~9.8s freeze F1's fix removed.
     `atexit` handlers run on the main thread AFTER `on_unmount` has returned
     and the event loop is gone, so nothing user-facing is blocked by the
-    join: the process is already on its way out. `os._exit` (the Windows
-    re-exec path) and a hard crash skip `atexit` entirely, which is correct —
-    both are crash-shaped exits where a surviving binding is the feature.
+    join: the process is already on its way out.
+
+    EVERY exec-shaped exit skips `atexit`, not just the Windows one. A hard
+    crash does (no handlers run), `os._exit` does (it is the point of
+    `os._exit`), and so does the POSIX re-exec: `reexec.py` replaces the
+    process image with `os.execvpe`, and exec runs no `atexit` handler either.
+    Naming Windows alone here would mislead the next reader working out which
+    exits this drain actually covers.
+
+    That is harmless for both shapes, for different reasons. A crash is the
+    case where a surviving binding IS the feature. A re-exec has already
+    dispatched its withdrawal before the exec happens — `_request_relaunch`
+    exits through Textual, so `on_unmount` runs `_stop_multiplexer_broadcast`
+    → `retire_session`, and `cli.py` only calls `replace_self` after
+    `asyncio.run` has returned — and a relaunch wants the binding withdrawn
+    anyway, because the successor process republishes its own.
 
     The handler is registered once for the process rather than once per
     broadcast: several panes' worth of broadcasts live in one process only in

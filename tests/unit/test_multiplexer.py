@@ -30,6 +30,7 @@ import pytest
 from local_operator.multiplexer.broadcast import (
     _PENDING_POLL_S,
     RESUME_FLAG,
+    SWAP_DRAIN_TIMEOUT_S,
     SessionBroadcast,
     broadcast_session,
     build_binding,
@@ -310,6 +311,138 @@ class TestSwapOrdering:
         assert (
             self._marker_session(config_dir, "zellij-main-0.json") == "bbbbbbbbbbbb"
         ), "swap left the pane advertising nothing — a crash now loses the session"
+
+    def test_the_swap_drain_is_bounded_by_the_number_it_documents(self, config_dir: Path) -> None:
+        """F9: a wedged predecessor delays the successor by SWAP_DRAIN_TIMEOUT_S, once.
+
+        Nothing pinned this bound before, which is how a 2x survived to review.
+        The successor used to drain its predecessor with `join`, whose timeout
+        is PER WORKER over the retire worker and the timer, so the real bound
+        on the first publish was 12s against a documented 6s (measured 12.02s).
+        `_drain_retire` waits only on the withdrawal, which is the sole worker
+        carrying swap ordering.
+
+        The assertion is one-sided on purpose: the LOWER bound would pin the
+        drain actually happening, but that is `test_a_slow_retire_cannot_
+        delete_the_successors_binding`'s job. This one pins the ceiling.
+        """
+        _make_session(config_dir, "aaaaaaaaaaaa")
+        _make_session(config_dir, "bbbbbbbbbbbb")
+        published = threading.Event()
+        release = threading.Event()
+
+        class WedgedBackend:
+            name = "wedged"
+
+            def detect(self, env: Any) -> bool:
+                return True
+
+            def publish(self, binding: Any, env: Any) -> bool:
+                if binding.session_id == "bbbbbbbbbbbb":
+                    published.set()
+                    return True
+                # The predecessor's publish parks, so its retire queues behind
+                # a call already inside a subprocess timeout — the state that
+                # makes the drain bound observable at all.
+                release.wait(timeout=30.0)
+                return False
+
+            def retire(self, binding: Any, env: Any) -> bool:
+                release.wait(timeout=30.0)
+                return True
+
+        backend = WedgedBackend()
+        outgoing = SessionBroadcast(_binding("aaaaaaaaaaaa"), backend, env={}, interval_s=3600.0)
+        outgoing.start()
+        time.sleep(0.2)  # let the publish get INTO the wedged call
+        outgoing.stop(retire=True)
+
+        started = time.monotonic()
+        incoming = SessionBroadcast(
+            _binding("bbbbbbbbbbbb"),
+            backend,
+            env={},
+            interval_s=3600.0,
+            predecessor=outgoing,
+        )
+        incoming.start()
+        assert published.wait(timeout=30.0), "the successor never published at all"
+        elapsed = time.monotonic() - started
+
+        # One drain budget plus scheduling slack, and well under the 12s the
+        # per-worker join produced on this same scenario.
+        assert elapsed < SWAP_DRAIN_TIMEOUT_S + 2.0, (
+            f"the successor's first publish waited {elapsed:.2f}s, past the "
+            f"documented {SWAP_DRAIN_TIMEOUT_S}s swap drain bound"
+        )
+        release.set()
+        incoming.stop(retire=False)
+
+    def test_a_swap_chain_does_not_compound_the_drain(self, config_dir: Path) -> None:
+        """F9, the compounding half: A->B->C pays ONE drain, not two.
+
+        Draining the predecessor's TIMER meant waiting out that timer's own
+        drain of ITS predecessor, so a second swap against a wedged socket
+        stacked the bounds (measured 11.70s for C's first publish). Only the
+        withdrawal is drained now, and a withdrawal never waits on another
+        broadcast, so the chain cannot accumulate.
+        """
+        for session_id in ("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"):
+            _make_session(config_dir, session_id)
+        published_c = threading.Event()
+        release = threading.Event()
+
+        class WedgedBackend:
+            name = "wedged"
+
+            def detect(self, env: Any) -> bool:
+                return True
+
+            def publish(self, binding: Any, env: Any) -> bool:
+                if binding.session_id == "cccccccccccc":
+                    published_c.set()
+                    return True
+                release.wait(timeout=30.0)
+                return False
+
+            def retire(self, binding: Any, env: Any) -> bool:
+                release.wait(timeout=30.0)
+                return True
+
+        backend = WedgedBackend()
+        first = SessionBroadcast(_binding("aaaaaaaaaaaa"), backend, env={}, interval_s=3600.0)
+        first.start()
+        time.sleep(0.2)
+        first.stop(retire=True)
+        second = SessionBroadcast(
+            _binding("bbbbbbbbbbbb"),
+            backend,
+            env={},
+            interval_s=3600.0,
+            predecessor=first,
+        )
+        second.start()
+        time.sleep(0.2)
+        second.stop(retire=True)
+
+        started = time.monotonic()
+        third = SessionBroadcast(
+            _binding("cccccccccccc"),
+            backend,
+            env={},
+            interval_s=3600.0,
+            predecessor=second,
+        )
+        third.start()
+        assert published_c.wait(timeout=30.0), "the third session never published"
+        elapsed = time.monotonic() - started
+
+        assert elapsed < SWAP_DRAIN_TIMEOUT_S + 2.0, (
+            f"a two-swap chain delayed the pane by {elapsed:.2f}s — the drain "
+            f"is compounding across the chain again"
+        )
+        release.set()
+        third.stop(retire=False)
 
     def test_a_scoped_retire_never_removes_a_foreign_marker(self, config_dir: Path) -> None:
         """The class fix, not the instance: retire refuses a marker it did not write.
