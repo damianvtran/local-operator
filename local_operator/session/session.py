@@ -997,6 +997,35 @@ def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
             temp.unlink()
 
 
+def _write_roster_sidecar_if_changed(
+    path: Any, payload: dict[str, Any], previous_fingerprint: str | None
+) -> tuple[str, bool]:
+    """Compute the roster fingerprint and write the sidecar only if it moved.
+
+    Runs ENTIRELY on the worker thread (dispatched via ``asyncio.to_thread``):
+    the fingerprint is an O(roster) ``json.dumps`` and #308's invariant is that
+    everything that scales leaves the event loop. Computing it on the loop made
+    a large roster pay that serialization on every roster event — the exact
+    regression ``TestMeasurementCosts`` catches. Returns ``(fingerprint, wrote)``.
+
+    The fingerprint deliberately EXCLUDES ``generation``: the counter is bumped
+    on every roster event by design (it drives the coalescing loop), so
+    including it would make every payload unique and defeat the guard. Only the
+    durable projection a resume actually reads is compared. ``sort_keys`` keeps
+    the serialization order-stable so an unchanged roster hashes identically
+    across writes.
+    """
+    fingerprint = json.dumps(
+        {key: payload[key] for key in ("version", "jobs", "records")},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if fingerprint == previous_fingerprint:
+        return fingerprint, False
+    _write_roster_sidecar(path, payload)
+    return fingerprint, True
+
+
 def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
     """Read a supported sidecar, falling back to the legacy transcript on error."""
     try:
@@ -1466,7 +1495,10 @@ class Session:
         # limit" throttle on a long delegating session. Mirrors the todo guard
         # (:meth:`_maybe_persist_todos`): fingerprint the durable content and
         # write only when it actually moved. ``None`` means nothing persisted
-        # yet, so the first event always writes.
+        # yet, so the first event always writes. The fingerprint itself is
+        # computed ON THE WORKER THREAD by
+        # :func:`_write_roster_sidecar_if_changed` — it is an O(roster)
+        # ``json.dumps``, which must not run on the loop.
         self._persisted_roster_fingerprint: str | None = None
         # Session-scoped task group (HC-11): wake deliveries and aside
         # persistence are routed through it so dispose() cancels them
@@ -5950,28 +5982,18 @@ class Session:
                     "jobs": rows,
                     "records": compact_records,
                 }
-                # Fingerprint the CONTENT, not the counter. ``generation`` is
-                # bumped on every roster event by design (it drives the
-                # coalescing loop), so including it here would make every payload
-                # unique and defeat the guard. Everything else is the durable
-                # projection a resume actually reads. ``sort_keys`` makes the
-                # serialization order-stable so an unchanged roster hashes
-                # identically across writes.
-                fingerprint = json.dumps(
-                    {
-                        "version": _SUBAGENT_ROSTER_VERSION,
-                        "jobs": rows,
-                        "records": compact_records,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
+                # The O(roster) fingerprint computation rides the SAME worker
+                # hop as the write: #308's invariant is that everything that
+                # scales leaves the loop, and an on-loop ``json.dumps`` of a
+                # large roster is the exact regression TestMeasurementCosts
+                # catches (it fires on every roster event, teardown included).
+                fingerprint, wrote = await asyncio.to_thread(
+                    _write_roster_sidecar_if_changed,
+                    self._transcript.directory / SUBAGENT_ROSTER_SIDECAR,
+                    payload,
+                    self._persisted_roster_fingerprint,
                 )
-                if fingerprint != self._persisted_roster_fingerprint:
-                    await asyncio.to_thread(
-                        _write_roster_sidecar,
-                        self._transcript.directory / SUBAGENT_ROSTER_SIDECAR,
-                        payload,
-                    )
+                if wrote:
                     # Keep one bounded legacy entry for readers predating
                     # v0.35.2; future mutations replace only the sidecar,
                     # avoiding quadratic history while preserving a
