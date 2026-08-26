@@ -37,6 +37,54 @@ METHODS = (
 )
 
 
+#: How long the extension's approval popup gives the user to answer an origin
+#: prompt before auto-denying with a typed ORIGIN_DENIED (origins.ts consumes
+#: the generated copy in protocol.gen.ts). Milliseconds because it feeds a
+#: chrome ``setTimeout`` directly.
+#:
+#: Timeout-chain invariant (finding A3): extension deny (60 s) < daemon prompt
+#: window (65 s) < session client timeout (base command timeout + prompt window
+#: + margin, backend.py). Each layer must outlive the one below it so the
+#: innermost deadline always wins the race and the session receives a TYPED
+#: answer (origin_denied / nav_timeout / result) instead of a transport
+#: timeout. When the session client fired first (it used a flat 30–35 s), a
+#: healthy daemon waiting on a human was misreported as "bridge unreachable"
+#: and a QA session (transcript 0ee4974ba84a) burned an hour restarting a
+#: daemon that was fine. All three constants live in or derive from this
+#: module so the relationship cannot drift.
+ORIGIN_PROMPT_TIMEOUT_MS = 60_000
+
+#: Per-method base budgets for a command the extension is actively serving.
+#: The daemon enforces these; the session client derives its own longer
+#: HTTP timeout from them (backend.py) so the daemon's typed timeout always
+#: arrives before the client gives up.
+COMMAND_TIMEOUTS = {
+    "open": 30.0,
+    "goto": 30.0,
+    "click": 25.0,
+    "type": 25.0,
+    "read": 20.0,
+    "snapshot": 20.0,
+    "screenshot": 20.0,
+    "close": 20.0,
+    "status": 20.0,
+    # scroll waits briefly for the wheel/scrollIntoView to settle and re-reads
+    # position; logs just drains a per-tab ring buffer already in memory.
+    "scroll": 20.0,
+    "logs": 20.0,
+}
+
+#: Extra budget granted to a command that is BLOCKED on a human origin
+#: decision, on top of the base command timeout. The extension gives the user
+#: 60 s to answer (ORIGIN_PROMPT_TIMEOUT_MS above); without this the 25–30 s
+#: command timeout fired first, so a user who took longer than that got a
+#: spurious tool failure while the tab navigated anyway against a surface the
+#: session had written off (finding A3). Derived slightly above the extension's
+#: deny-timeout so that deny wins the race and returns a typed ORIGIN_DENIED
+#: rather than this firing blind.
+ORIGIN_PROMPT_WINDOW_S = ORIGIN_PROMPT_TIMEOUT_MS / 1000 + 5.0
+
+
 class ErrorCode(StrEnum):
     EXTENSION_DISCONNECTED = "extension_disconnected"
     NOT_PAIRED = "not_paired"
