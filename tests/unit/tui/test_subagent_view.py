@@ -304,6 +304,28 @@ async def _wait_history(pilot: Any, view: SubagentView) -> None:
     raise AssertionError("history worker did not settle")
 
 
+async def _wait_geometry_settled(
+    pilot: Any, body: Any, *, cycles: int = 4, limit: int = 200
+) -> None:
+    """Pause until the body's geometry stops changing for ``cycles`` cycles.
+
+    A prepend restores the anchor across TWO layout passes: gap settlement
+    re-decides margins against real widths, and the pass that applies them
+    republishes positions. A fixed number of pauses bets on which pass wins and
+    loses that bet under parallel load, so the wait is on the observable itself.
+    """
+    last: tuple[int, float] | None = None
+    stable = 0
+    for _ in range(limit):
+        await pilot.pause()
+        current = (body.virtual_size.height, body.scroll_y)
+        stable = stable + 1 if current == last else 0
+        last = current
+        if stable >= cycles:
+            return
+    raise AssertionError("body geometry never settled")
+
+
 @pytest.mark.asyncio
 async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) -> None:
     transcript = Transcript(tmp_path / "child")
@@ -395,18 +417,21 @@ async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
         monkeypatch.setattr(view.__module__ + ".read_transcript_page", slow)
         view._initial_tail_pending = True
         view._body.scroll_home(animate=False)
-        await pilot.pause()
+        await _wait_geometry_settled(pilot, view._body)
         view._initial_tail_pending = False
-        before_max = view._body.max_scroll_y
-        before = view._body.scroll_y
+        # The row the reader is on, and where it sits in the viewport. This is
+        # the invariant a prepend must hold: the SAME entry stays put. Asserting
+        # it via `max_scroll_y` growth instead approximates it with a number that
+        # gap settlement legitimately changes after the anchor is restored, which
+        # is what made this test flake by 2 rows under load.
+        anchor_block = view._body._blocks[0]
+        before_gap = anchor_block.virtual_region.y - view._body.scroll_y
         view.action_home()
         view.action_home()
         await _wait_history(pilot, view)
-        for _ in range(5):
-            await pilot.pause()
+        await _wait_geometry_settled(pilot, view._body)
         assert calls == 1
-        growth = view._body.max_scroll_y - before_max
-        assert abs(view._body.scroll_y - (before + growth)) <= 1
+        assert anchor_block.virtual_region.y - view._body.scroll_y == before_gap
 
 
 @pytest.mark.asyncio
