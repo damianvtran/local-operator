@@ -6,6 +6,7 @@ sets LOCAL_OPERATOR_CONFIG_DIR to a tmp path)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -167,6 +168,14 @@ async def test_dial_skips_oversized_frame_and_delivers_the_next() -> None:
         }
         writer.write(json.dumps(good).encode() + b"\n")
         await writer.drain()
+        # Close the fixture's side explicitly: the daemon never closes
+        # mid-stream, and a writer left open keeps the handler's socket
+        # transport alive after the test body finishes — Python 3.12's
+        # teardown then waits on that leaked transport forever (3.13+
+        # reap it, which is why only the 3.12 CI job hung).
+        writer.close()
+        with contextlib.suppress(ConnectionResetError):
+            await writer.wait_closed()
 
     server = await asyncio.start_server(serve, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -185,6 +194,9 @@ async def test_dial_skips_oversized_frame_and_delivers_the_next() -> None:
     daemon.table.entries[record.pid] = entry
     dial = asyncio.ensure_future(_dial(daemon, entry))
     try:
+        # Poll is bounded (50 x 0.05 s = 2.5 s), so a functional regression
+        # here fails the asserts instead of hanging the suite; the historical
+        # 3.12 hang was teardown, below, not this wait.
         for _ in range(50):
             if entry.projection is not None:
                 break
@@ -194,6 +206,12 @@ async def test_dial_skips_oversized_frame_and_delivers_the_next() -> None:
         assert entry.projection.conversation_name == "recovered"
     finally:
         dial.cancel()
+        # A cancelled task that is never awaited leaves the dial's reader/
+        # socket transport un-reaped; Python 3.12's asyncio teardown waits on
+        # it forever (3.13+ tolerate the leak). Await the cancellation to
+        # completion before tearing the server down.
+        with contextlib.suppress(asyncio.CancelledError):
+            await dial
         server.close()
         await server.wait_closed()
 
