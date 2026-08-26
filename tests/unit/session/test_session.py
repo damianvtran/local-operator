@@ -3475,6 +3475,47 @@ def test_paired_prefix_is_not_defeated_by_a_custom_message_in_the_tail():
     ]
 
 
+class TestAChangedGoalTakesEffectAtTheNextCall:
+    """``set_goal`` reaches the running turn's next provider call."""
+
+    @pytest.mark.asyncio
+    async def test_a_goal_change_during_a_tool_reaches_the_next_call(self, tmp_path):
+        holder: dict[str, Session] = {}
+        stream = ScriptedStream(
+            [
+                [
+                    StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+        async def execute(tool_call_id, args, signal, on_update, context):
+            holder["session"].set_goal("new goal")
+            return ToolResult(
+                tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+            )
+
+        def blocks() -> list[str]:
+            session = holder.get("session")
+            return ["stable", f"goal: {session.goal if session is not None else 'old goal'}"]
+
+        tool = AgentTool(name="echo", parameters={"type": "object"}, execute=execute)
+        session = make_session(tmp_path, stream, tools=[tool], system_blocks_provider=blocks)
+        holder["session"] = session
+        session.set_goal("old goal")
+        try:
+            await session.prompt("go")
+        finally:
+            await session.dispose()
+
+        assert [request.system_blocks for request in stream.requests] == [
+            ["stable", "goal: old goal"],
+            ["stable", "goal: new goal"],
+        ]
+
+
 class TestASwitchedModelTakesEffectAtTheNextCall:
     """``set_model`` reaches the RUNNING turn's next provider call.
 

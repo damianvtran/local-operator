@@ -2392,9 +2392,11 @@ class Session:
     def set_goal(self, text: str) -> str:
         """Set (or clear, with an empty string) the standing objective.
 
-        Returns what was actually stored (trimmed and length-capped). The
-        goal rides the system prompt's volatile tail, so it applies from the
-        next turn and only invalidates that tail — never the cached prefix.
+        Returns what was actually stored (trimmed and length-capped). The goal
+        rides the system prompt's volatile tail, which is re-read before every
+        provider call: idle changes apply to the next turn, and mid-turn changes
+        apply to the next model step. Only that tail changes — never the cached
+        prefix or an in-flight request.
         """
         stored = self._goal_state.set(text)
         # Same tail, same fate on resume as the team/agent briefs, so the goal
@@ -4016,6 +4018,12 @@ class Session:
                 # this turn is running reaches its NEXT call instead of
                 # waiting for the turn to end (see ``set_model``).
                 get_model=lambda: self._model,
+                # The volatile tail contains the live /goal, /team and /agent
+                # instructions. Re-read it per provider step so a setting changed
+                # while a tool runs reaches the next call in THIS turn rather than
+                # waiting for another user message. The loop keeps the turn-start
+                # snapshot as a fallback if this host resolver ever fails.
+                get_system_blocks=self._system_blocks,
                 convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
