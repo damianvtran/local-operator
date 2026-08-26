@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 from local_operator.mobile.command_reservation import CommandReservations
-from local_operator.mobile.projection import ProjectionFold, fold_messages_to_entries
+from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle, image_blocks
 from local_operator.mobile.types import (
     PendingRequest,
@@ -774,10 +774,15 @@ class TuiSessionHandle(SessionHandle):
                 current = comms.node(job_id)
                 if current is None or str(current.session_dir) != session_dir:
                     return
-                fingerprint, transcript, todos = result
+                fingerprint, todos = result
                 if self._detail_fingerprints.get(session_dir) != fingerprint:
                     self._detail_fingerprints[session_dir] = fingerprint
-                    if self._fold.set_subagent_hydrated_details(job_id, transcript, todos):
+                    # The transcript is NEVER placed on the wire (it is fetched
+                    # lazily from /history), so only ``todos`` is hydrated here.
+                    # Passing ``[]`` keeps the fold's signature stable while
+                    # avoiding the child-history fold that would only be
+                    # discarded (once here, and again on the /history fetch).
+                    if self._fold.set_subagent_hydrated_details(job_id, [], todos):
                         if self._on_projection is not None:
                             self._on_projection()
                 return
@@ -859,14 +864,21 @@ class _DetailChangedDuringHydration(RuntimeError):
 
 def _load_subagent_detail(
     session_dir: str,
-) -> tuple[tuple[int, int], list[Any], list[dict[str, Any]]]:
-    """Read one child transcript in a worker and return its stable fingerprint."""
+) -> tuple[tuple[int, int], list[dict[str, Any]]]:
+    """Read one child's todos in a worker and return its stable fingerprint.
+
+    Only ``todos`` is hydrated from this path: the child transcript is no longer
+    projected on the wire (it blew past the daemon's 1 MB control-frame cap and
+    is fetched lazily from ``/api/sessions/{sid}/agents/{job_id}/history``
+    instead — see ``ProjectionFold.set_subagent_hydrated_details``). Folding the
+    full child history here only to discard it duplicated, per child, the exact
+    work the /history endpoint already does on fetch, so it is not built.
+    """
     from local_operator.session.transcript import TRANSCRIPT_FILENAME, Transcript
 
     path = Path(session_dir) / TRANSCRIPT_FILENAME
     before = path.stat()
     transcript = Transcript(session_dir)
-    entries = fold_messages_to_entries(transcript.build_llm_history())
     raw_todos = (transcript.latest_custom("todo_snapshot") or {}).get("items") or []
     after = path.stat()
     # Atomic transcript replacement or an append during hydration invalidates
@@ -874,7 +886,7 @@ def _load_subagent_detail(
     fingerprint = (after.st_size, after.st_mtime_ns)
     if (before.st_size, before.st_mtime_ns) != fingerprint:
         raise _DetailChangedDuringHydration("child transcript changed during hydration")
-    return fingerprint, entries, raw_todos if isinstance(raw_todos, list) else []
+    return fingerprint, raw_todos if isinstance(raw_todos, list) else []
 
 
 def _session_cwd(session: Any) -> str:
