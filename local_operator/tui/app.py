@@ -102,6 +102,7 @@ from local_operator.tui.events import (
     ContextUsageReported,
     EffectiveModelChanged,
     EventController,
+    HistoryRowsSettled,
     NoticePosted,
     PeerMessageDelivered,
     RetryEnded,
@@ -2633,7 +2634,25 @@ class OperatorApp(App[None]):
             history = list(session.history())
         except Exception:
             return  # defensive: reduced hosts may lack the accessor
+        self._project_settled_rows(history)
 
+    def _project_settled_rows(self, history: list[Any]) -> bool:
+        """Mount settled transcript rows through the ONE role-aware renderer.
+
+        The shared history/render seam: cold resume feeds it the whole
+        conversation and a reconnect's durable gap replay
+        (:class:`HistoryRowsSettled`) feeds it exactly the rows no frontend
+        painted. One implementation is the point — the gap replay previously
+        synthesized role-blind assistant events and a recovered user prompt
+        painted as agent speech (review round 3, MAJOR-1/U7/D1). Whatever
+        this method does for ``--resume`` is by construction what a
+        reconnect gap does: user rows as :class:`UserBlock` with images,
+        assistant prose + tool cards paired with results, wake/peer custom
+        rows as their own blocks, refusal/error notices.
+
+        Returns whether anything mounted, so callers can skip tail-follow
+        work for an empty projection.
+        """
         # Results are keyed by the call they answer, and a tool message can sit
         # several messages after its call (one assistant turn issues a batch).
         # Indexing first is what lets each call render WITH its outcome instead
@@ -2797,6 +2816,7 @@ class OperatorApp(App[None]):
             # resumed session streams carries them with it rather than growing
             # off the bottom of a viewport pinned to the replay's last frame.
             transcript.follow_tail()
+        return appended
 
     def _replay_tool_call(
         self, call: Any, results: dict[str, Any], *, user_run: bool = False
@@ -14322,6 +14342,20 @@ class OperatorApp(App[None]):
         # next — another model call, a tool batch — the line must stop claiming
         # text is still arriving.
         self._refresh_working_activity()
+
+    def on_history_rows_settled(self, message: HistoryRowsSettled) -> None:
+        """Paint a reconnect's durable gap through the settled-history renderer.
+
+        The rows settled while this frontend had no owner socket, so no live
+        event ever painted them. They are HISTORY, not stream: projecting
+        them through :meth:`_project_settled_rows` — the same implementation
+        cold resume uses — is what guarantees a recovered transcript is
+        indistinguishable from one that never disconnected: user rows keep
+        their user styling and images, tool calls come back as settled cards
+        with their results, custom rows reach their own blocks (review round
+        3, MAJOR-1/U7/D1).
+        """
+        self._project_settled_rows(message.messages)
 
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
         """Move the context reading AND the cost DURING a turn, not only at its end.

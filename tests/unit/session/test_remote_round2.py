@@ -8,6 +8,11 @@ replays (history/seed/reconnect re-advertising a completed row) stay dropped.
 
 U6 (UX round 2): rows that became durable while the follower was disconnected
 must be PAINTED after reconnect, not merely loaded into ``history()``.
+
+MAJOR-1/U7/D1 (review round 3): the gap goes out as ONE typed
+``history_delta`` carrying the settled rows verbatim — never per-row
+``message_end`` events, which are a live assistant contract and painted every
+role as assistant prose.
 """
 
 from __future__ import annotations
@@ -19,11 +24,16 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import (
+    CustomMessage,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
     NoticeEvent,
+    TextContent,
+    ToolCall,
+    ToolResult,
 )
 from local_operator.mobile.registrant import Registrant
 from local_operator.session.remote import RemoteSession
@@ -196,17 +206,24 @@ async def test_reconnect_paints_rows_that_became_durable_during_the_gap(
             # retry loop (a failed dial clears the flag before re-arming).
             deadline = asyncio.get_running_loop().time() + 15
             while asyncio.get_running_loop().time() < deadline:
-                ends = [event for event in events if event.type == "message_end"]
-                if not remote._recovering and len(remote.history()) == 3 and len(ends) == 2:
+                deltas = [event for event in events if event.type == "history_delta"]
+                if not remote._recovering and len(remote.history()) == 3 and deltas:
                     break
                 await asyncio.sleep(0.02)
             assert remote._recovering is False
             # history() carries the gap rows AND the transcript painted them:
-            # one settled message event per gap row, in durable order, none
-            # repeated, and the pre-disconnect row not replayed.
-            ends = [event for event in events if event.type == "message_end"]
-            painted_ids = [str(event.message.id) for event in ends]
-            assert painted_ids == [gap_user.id, gap_assistant.id]
+            # ONE typed history delta carrying the gap rows verbatim — role,
+            # id and order preserved — with the pre-disconnect row absent.
+            # Per-row message_end replay is the round-3 regression (MAJOR-1):
+            # it repainted user rows as assistant speech.
+            deltas = [event for event in events if event.type == "history_delta"]
+            assert len(deltas) == 1
+            assert not any(event.type == "message_end" for event in events)
+            replayed = deltas[0].messages
+            assert [(m.role, str(m.id)) for m in replayed] == [
+                ("user", gap_user.id),
+                ("assistant", gap_assistant.id),
+            ]
             assert len(remote.history()) == 3
             assert str(remote.history()[-2].id) == gap_user.id
             assert str(remote.history()[-1].id) == gap_assistant.id
@@ -326,13 +343,13 @@ async def test_reconnect_replays_each_gap_row_once_even_across_two_cycles(
             while asyncio.get_running_loop().time() < deadline:
                 if (
                     not remote._recovering
-                    and [event.type for event in events].count("message_end") == 1
+                    and [event.type for event in events].count("history_delta") == 1
                 ):
                     break
                 await asyncio.sleep(0.02)
             assert remote._recovering is False
             first_cycle = [event.type for event in events]
-            assert first_cycle.count("message_end") == 1
+            assert first_cycle.count("history_delta") == 1
 
             # A SECOND disconnect with no new durable rows replays nothing.
             replacement.close()
@@ -353,7 +370,7 @@ async def test_reconnect_replays_each_gap_row_once_even_across_two_cycles(
                             break
                     await asyncio.sleep(0.02)
                 assert remote._recovering is False
-                assert [event.type for event in events].count("message_end") == 1
+                assert [event.type for event in events].count("history_delta") == 1
             finally:
                 third.close()
         finally:
@@ -372,3 +389,201 @@ async def test_non_message_events_are_never_deduped() -> None:
     for _ in range(3):
         remote._on_wire_event(NoticeEvent(text="same text", kind="info").model_dump(mode="json"))
     assert events == ["notice", "notice", "notice"]
+
+
+# One transparent 1x1 PNG, enough for ImageContent round-trips without a real
+# screenshot in the fixture.
+_PNG_1X1 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBg"
+    "AAAABQABh6FO1AAAAABJRU5ErkJggg=="
+)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_gap_delta_preserves_every_native_row_shape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MAJOR-1/U7/D1: the durable gap survives reconnect with roles intact.
+
+    Production socket, full interleaving: a user prompt WITH an image, an
+    assistant turn carrying prose plus a tool call, the call's tool result
+    (with its own image), and a custom peer-message row all become durable
+    during the disconnect. The replay must hand them over verbatim in ONE
+    typed history delta — the shape the app's settled renderer consumes —
+    with no role collapsed into assistant speech and no per-row live events.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    transcript = Transcript(tmp_path / "sessions" / "s1")
+    await transcript.append_message(Message.user("visible before disconnect"))
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        events: list[Any] = []
+        remote.subscribe(events.append)
+
+        registrant.close()
+        import os
+
+        (tmp_path / "sessions" / "s1" / ".session.pid").write_text(str(os.getpid()))
+        for _ in range(100):
+            if remote._recovering:
+                break
+            await asyncio.sleep(0.02)
+        assert remote._recovering is True
+
+        gap_user = Message.user(
+            "user gap", images=[ImageContent(data=_PNG_1X1, mime_type="image/png")]
+        )
+        await transcript.append_message(gap_user)
+        call = ToolCall(id="call-gap-1", name="read", arguments={"path": "/tmp/x"})
+        gap_assistant = Message(
+            role="assistant",
+            content=[TextContent(text="reading the file")],
+            tool_calls=[call],
+        )
+        await transcript.append_message(gap_assistant)
+        gap_result = Message.tool_result(
+            ToolResult(
+                tool_call_id="call-gap-1",
+                tool_name="read",
+                content=[
+                    TextContent(text="tool output"),
+                    ImageContent(data=_PNG_1X1, mime_type="image/png"),
+                ],
+            )
+        )
+        await transcript.append_message(gap_result)
+        gap_custom = CustomMessage(
+            custom_type="peer_message",
+            attribution="system",
+            details={"body": "note from a peer", "sender": {"session_id": "s2"}},
+        )
+        await transcript.append_message(gap_custom)
+
+        replacement = Registrant(handle, kind="tui")
+        replacement.start()
+        try:
+            deadline = asyncio.get_running_loop().time() + 15
+            while asyncio.get_running_loop().time() < deadline:
+                deltas = [event for event in events if event.type == "history_delta"]
+                if not remote._recovering and deltas:
+                    break
+                await asyncio.sleep(0.02)
+            assert remote._recovering is False
+            deltas = [event for event in events if event.type == "history_delta"]
+            assert len(deltas) == 1
+            # No role-blind live replay: the round-3 defect emitted one
+            # message_end per row and every row painted as assistant prose.
+            assert not any(event.type == "message_end" for event in events)
+            replayed = deltas[0].messages
+            assert [str(getattr(m, "id", "")) for m in replayed] == [
+                gap_user.id,
+                gap_assistant.id,
+                gap_result.id,
+                gap_custom.id,
+            ]
+            user_row, assistant_row, result_row, custom_row = replayed
+            assert user_row.role == "user"
+            assert any(isinstance(block, ImageContent) for block in user_row.content)
+            assert assistant_row.role == "assistant"
+            assert assistant_row.text == "reading the file"
+            assert [c.id for c in assistant_row.tool_calls] == ["call-gap-1"]
+            assert result_row.role == "tool"
+            assert result_row.tool_call_id == "call-gap-1"
+            assert any(isinstance(block, ImageContent) for block in result_row.content)
+            assert getattr(custom_row, "custom_type", None) == "peer_message"
+            # A second quiet cycle replays nothing: the ids are claimed.
+            assert len(remote.history()) == 5
+        finally:
+            replacement.close()
+    finally:
+        if remote is not None:
+            await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_routed_slash_during_recovery_refuses_in_user_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MINOR-1/U8: a gap slash answers in user vocabulary, never transport terms."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        registrant.close()
+        import os
+
+        (tmp_path / "sessions" / "s1" / ".session.pid").write_text(str(os.getpid()))
+        for _ in range(100):
+            if remote._recovering:
+                break
+            await asyncio.sleep(0.02)
+        assert remote._recovering is True
+        with pytest.raises(ConnectionError) as excinfo:
+            await remote.route_shared_slash("goal", "")
+        text = str(excinfo.value)
+        assert "reconnecting" in text
+        assert "/goal" in text
+        assert "attach" not in text.lower()
+    finally:
+        if remote is not None:
+            await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_prompt_during_recovery_still_queues_and_delivers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The gap prompt contract is unchanged: chat waits on the owner, slash refuses.
+
+    Guards the asymmetry the U8 fix makes deliberate — the refusal above must
+    not leak into the prompt path, whose queued delivery is the designed
+    behavior (verified end to end in UX round 3).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        registrant.close()
+        import os
+
+        (tmp_path / "sessions" / "s1" / ".session.pid").write_text(str(os.getpid()))
+        for _ in range(100):
+            if remote._recovering:
+                break
+            await asyncio.sleep(0.02)
+        assert remote._recovering is True
+        prompt_task = asyncio.create_task(remote.prompt("queued during gap"))
+        await asyncio.sleep(0.2)
+        assert not prompt_task.done()  # waiting on _owner_ready, not failing
+        replacement = Registrant(handle, kind="tui")
+        replacement.start()
+        try:
+            await asyncio.wait_for(prompt_task, timeout=15)
+            assert any(call[0] == "prompt" for call in handle.calls)
+        finally:
+            replacement.close()
+    finally:
+        if remote is not None:
+            await remote.dispose()

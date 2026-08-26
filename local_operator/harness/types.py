@@ -920,6 +920,29 @@ class MessageEndEvent(AgentEvent[Literal["message_end"]]):
     message: AgentMessage
 
 
+class HistoryDeltaEvent(AgentEvent[Literal["history_delta"]]):
+    """Settled transcript rows that became durable while no frontend painted them.
+
+    Emitted by a reconnecting follower for the durable gap between what it
+    painted before losing the owner and the fresh sync's cursor. It is a
+    HISTORY contract, not a live one: every row is already settled, so the
+    consumer must project each row through the same role-aware settled-history
+    renderer a cold resume uses — user rows as user rows, assistant prose and
+    tool calls as prose and tool cards paired with their results, custom rows
+    through their own block paths. Replaying the gap as per-row live
+    ``message_end`` events collapsed every role into assistant speech (review
+    round 3, MAJOR-1/U7/D1), which is exactly the failure this event exists to
+    make unrepresentable.
+
+    ``messages`` preserves durable order and carries tool-result rows beside
+    the calls that asked for them, because the settled renderer pairs them by
+    ``tool_call_id`` rather than by adjacency.
+    """
+
+    type: Literal["history_delta"] = "history_delta"
+    messages: list[AgentMessage] = Field(default_factory=list)
+
+
 class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     """The model is STILL WRITING a tool call; nothing has run yet.
 

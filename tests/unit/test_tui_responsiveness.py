@@ -337,6 +337,98 @@ async def test_remote_connect_replay_does_not_stall_the_loop(tmp_path: Path) -> 
         registrant.close()
 
 
+# --- MAJOR-2 (round 3): reconnect gap replay stays off the loop ---------------
+
+
+@pytest.mark.asyncio
+async def test_reconnect_gap_replay_does_not_stall_the_loop(tmp_path: Path) -> None:
+    """The reconnect path parses the transcript in a thread, like connect.
+
+    Round 3 found ``_replay_durable_suffix`` re-parsing the whole file
+    synchronously inside ``_recover_owner`` — a 60 MB transcript blocked the
+    loop ~90 ms, past the 50 ms bar #300's connect fix established. The
+    recovery now takes ONE threaded parse and feeds both the gap projection
+    and the history bind from it, so this drives the actual production
+    recovery — owner lost, durable gap appended, replacement owner published —
+    over a transcript inflated to tens of megabytes and asserts the loop
+    never stalled while it settled.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+
+    async def build() -> None:
+        transcript = Transcript(tmp_path / "sessions" / "s1")
+        # 60+ MB of durable history: 3200 rows x ~20 KB of text each. This is
+        # the size class the round-3 measurement used to demonstrate the
+        # synchronous stall.
+        for index in range(3_200):
+            await transcript.append_message(
+                Message(
+                    role="assistant",
+                    content=[TextContent(text=f"turn {index} " + "z" * 20_000)],
+                )
+            )
+
+    await build()
+    assert (tmp_path / "sessions" / "s1" / "transcript.jsonl").stat().st_size > 60 * 1024 * 1024
+
+    from local_operator.mobile.registrant import Registrant
+    from local_operator.session.remote import RemoteSession
+    from tests.unit.mobile.test_registrant import FakeHandle
+    from tests.unit.session.test_remote import _wait_record
+
+    monkeypatch_env(tmp_path)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        events: list[Any] = []
+        remote.subscribe(events.append)
+
+        registrant.close()
+        import os
+
+        (tmp_path / "sessions" / "s1" / ".session.pid").write_text(str(os.getpid()))
+        for _ in range(200):
+            if remote._recovering:
+                break
+            await asyncio.sleep(0.02)
+        assert remote._recovering is True
+        transcript = Transcript(tmp_path / "sessions" / "s1")
+        await transcript.append_message(Message.user("durable while disconnected"))
+
+        recorder = StallRecorder()
+        await recorder.start()
+        replacement = Registrant(handle, kind="tui")
+        replacement.start()
+        try:
+            deadline = asyncio.get_running_loop().time() + 60
+            while asyncio.get_running_loop().time() < deadline:
+                if not remote._recovering and any(
+                    event.type == "history_delta" for event in events
+                ):
+                    break
+                await asyncio.sleep(0.02)
+            await recorder.stop()
+            assert remote._recovering is False
+            deltas = [event for event in events if event.type == "history_delta"]
+            assert len(deltas) == 1  # the gap genuinely replayed
+            recorder.assert_no_stall_loaded()
+        finally:
+            replacement.close()
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
 async def _never_take_over() -> Any:
     raise AssertionError("live owner should not trigger takeover")
 

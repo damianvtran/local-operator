@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     EventHandler,
+    HistoryDeltaEvent,
     ImageContent,
     Message,
     MessageEndEvent,
@@ -85,6 +86,11 @@ from local_operator.session_lease import SessionLeaseHeldError
 
 logger = logging.getLogger(__name__)
 
+#: User-facing refusal for a routed slash submitted while the owner is being
+#: recovered. One string, formatted with the command, so every seam that can
+#: race the gap says the same thing — never the transport's ``not attached``.
+_RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a moment"
+
 _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
     cls.model_fields["type"].default: cls
     for cls in (
@@ -95,6 +101,7 @@ _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
         MessageStartEvent,
         MessageUpdateEvent,
         MessageEndEvent,
+        HistoryDeltaEvent,
         ToolCallComposeEvent,
         ToolExecutionStartEvent,
         ToolExecutionUpdateEvent,
@@ -286,12 +293,38 @@ class RemoteSession:
         file, so a long session's replay is file I/O plus JSON parsing from
         end to end, with nothing the loop needs until the result is bound.
         """
+        entries, history = await self._read_transcript()
+        self._bind_history(
+            entries, history, live_cursor, drop_history_duplicates=drop_history_duplicates
+        )
+
+    async def _read_transcript(self) -> tuple[list[Any], list[Any]]:
+        """Parse the durable transcript off-loop, once per sync.
+
+        The single threaded read shared by initial connect AND reconnect:
+        review round 3 (MAJOR-2) found the reconnect path re-running this
+        exact parse synchronously on the event loop — a 60 MB transcript
+        blocked it for ~90 ms, past the 50 ms no-stall bar #300 established
+        for the connect path. Both callers now consume ONE threaded result
+        (gap projection and ``_history`` reconciliation), so the file is
+        parsed once per sync and never on the loop.
+        """
 
         def _replay() -> tuple[list[Any], list[Any]]:
             transcript = Transcript(self._config_dir / "sessions" / self._session_id)
             return transcript.entries(), transcript.build_llm_history()
 
-        entries, history = await asyncio.to_thread(_replay)
+        return await asyncio.to_thread(_replay)
+
+    def _bind_history(
+        self,
+        entries: list[Any],
+        history: list[Any],
+        live_cursor: str | None,
+        *,
+        drop_history_duplicates: bool,
+    ) -> None:
+        """Adopt one parsed transcript as ``_history``, bounded by the cursor."""
         if live_cursor is not None:
             # Keep only the message entries at or before the advertised cursor.
             # The cursor names a transcript ENTRY id (any type); walk to it and
@@ -352,37 +385,61 @@ class RemoteSession:
             seeded.append(event)
         if self.frontend_state.streaming:
             seeded.insert(0, AgentStartEvent(generation=self.frontend_state.generation))
-        self._buffered_events[0:0] = seeded
+        # Durable-before-live is the transcript's paint invariant. On
+        # reconnect the buffer's head can hold the gap's HistoryDeltaEvent
+        # (rows OLDER than everything the seed and relay carry); inserting
+        # the seed at 0 unconditionally would mount the in-flight turn above
+        # the durable rows it follows. Initial connect buffers no delta, so
+        # this degenerates to the plain front-insert it always was.
+        insert_at = 0
+        while insert_at < len(self._buffered_events) and isinstance(
+            self._buffered_events[insert_at], HistoryDeltaEvent
+        ):
+            insert_at += 1
+        self._buffered_events[insert_at:insert_at] = seeded
         self._ready_for_events = True
         self._owner_ready.set()
         self._drain_buffered_events()
 
-    def _replay_durable_suffix(self) -> None:
-        """Emit settled events for durable rows no live event ever painted.
+    def _replay_durable_suffix(self, history: list[Any]) -> None:
+        """Emit ONE typed history delta for durable rows nothing ever painted.
 
-        Reads the transcript DIRECTLY rather than ``self._history``: on the
-        reconnect path this runs before the fresh ``_load_history``, and the
-        pre-disconnect ``_history`` is exactly the rows that need no replay.
-        Only rows whose id is absent from ``_message_events`` (the painted
-        set) are emitted, so a reconnect after a quiet gap replays nothing and
-        a reconnect across a missed turn repaints exactly that turn. Each
-        replayed id is tracked, so the follow-up sync's live seed, the history
-        reload and any later relay dedupe against it rather than re-painting.
+        ``history`` is the reconnect's single threaded transcript parse (the
+        same result ``_bind_history`` adopts): on the reconnect path this runs
+        before the fresh history bind, and the pre-disconnect ``_history`` is
+        exactly the rows that need no replay. Only rows whose id is absent
+        from ``_message_events`` (the painted set) are gathered, so a
+        reconnect after a quiet gap replays nothing and a reconnect across a
+        missed turn repaints exactly that turn. Each replayed id is claimed,
+        so the follow-up sync's live seed, the history bind and any later
+        relay dedupe against it rather than re-painting.
+
+        The gap goes out as a single :class:`HistoryDeltaEvent` rather than
+        per-row ``message_end`` events. A ``message_end`` is a LIVE assistant
+        contract — the controller adopts its text into the streaming block —
+        so replaying a user prompt, a tool call/result pair, or a custom row
+        through it painted every role as assistant prose and dropped tools,
+        images and custom blocks entirely (review round 3, MAJOR-1/U7/D1).
+        The typed delta hands the settled rows — INCLUDING role-less tool
+        results, which the settled renderer pairs with their calls — to the
+        same role-aware projector a cold resume uses, so a recovered
+        transcript is indistinguishable from one that never disconnected.
         """
-        transcript = Transcript(self._config_dir / "sessions" / self._session_id)
-        try:
-            messages = transcript.build_llm_history()
-        except Exception:
-            # A transcript that cannot be read fails the replay, never the
-            # recovery: the reload that follows owns the honest error.
-            logger.debug("gap replay could not read the transcript", exc_info=True)
-            return
-        for message in messages:
+        gap: list[Any] = []
+        claimed: list[str] = []
+        for message in history:
             message_id = str(getattr(message, "id", "") or "")
             if not message_id or message_id in self._message_events:
                 continue
-            self._message_events.add(message_id)
-            self._emit_or_buffer(MessageEndEvent(message=message))
+            claimed.append(message_id)
+            gap.append(message)
+        if not any(getattr(message, "role", None) != "tool" for message in gap):
+            # Tool results ride their call's assistant row, so a gap of ONLY
+            # results (their calls already painted) mounts nothing — claim
+            # nothing and emit nothing rather than sending an empty delta.
+            return
+        self._message_events.update(claimed)
+        self._emit_or_buffer(HistoryDeltaEvent(messages=gap))
 
     def _is_duplicate(self, event: AgentEvent[Any]) -> bool:
         """Whether this event is a true replay duplicate, never a lifecycle peer.
@@ -675,21 +732,27 @@ class RemoteSession:
                         await self._dial(record)
                         frontend = await self._await_frontend()
                         self._install_frontend(frontend.snapshot, publish=True)
-                        # The gap replay must run BEFORE the history reload:
-                        # ``_load_history`` seeds the painted-id set from every
-                        # durable row it loads, so running it first would mark
-                        # the gap rows painted before their replay event was
-                        # ever emitted — recovery then "succeeds" with the
-                        # rows in ``history()`` but never on screen (U6,
-                        # review round 2). The replay reads the transcript
-                        # itself and emits settled events for exactly the
-                        # durable ids this follower has not painted; the
-                        # reload afterwards brings ``_history`` to the same
-                        # point and the live seed dedupes against the ids the
-                        # replay just claimed (M4).
-                        self._replay_durable_suffix()
-                        await self._load_history(
-                            frontend.live_cursor, drop_history_duplicates=False
+                        # ONE threaded parse feeds both the gap replay and the
+                        # history bind: reconnect must not re-parse the file on
+                        # the event loop (review round 3, MAJOR-2 — a 60 MB
+                        # transcript stalled it ~90 ms) and must not parse it
+                        # twice. The replay must still run BEFORE the bind:
+                        # ``_bind_history`` seeds the painted-id set from every
+                        # durable row it adopts, so binding first would mark
+                        # the gap rows painted before their delta was ever
+                        # emitted — recovery then "succeeds" with the rows in
+                        # ``history()`` but never on screen (U6, review round
+                        # 2). The replay claims exactly the durable ids this
+                        # follower has not painted; the bind afterwards brings
+                        # ``_history`` to the same point and the live seed
+                        # dedupes against the ids the replay just claimed (M4).
+                        entries, history = await self._read_transcript()
+                        self._replay_durable_suffix(history)
+                        self._bind_history(
+                            entries,
+                            history,
+                            frontend.live_cursor,
+                            drop_history_duplicates=False,
                         )
                         self._finish_sync()
                         return
@@ -884,15 +947,28 @@ class RemoteSession:
         copy of shared orchestration state. The owner returns a typed
         :class:`SlashResult` dict the invoker renders locally — the answer
         never paints in the owner's terminal.
+
+        During owner recovery this REFUSES, in user vocabulary, rather than
+        waiting like ``prompt()`` does. A prompt is fire-and-forget so queuing
+        it across the gap is invisible; a slash is request/response, and a
+        command that silently blocks until an owner returns minutes later
+        answers a question the user has stopped asking — against whatever
+        state the replacement owner has by then. The refusal names the retry,
+        and the transport's own ``not attached`` wording must never surface
+        (review round 3, MINOR-1/U8): the disconnect can also land mid-request,
+        so the raced ``ConnectionError`` is rewritten below too.
         """
         client = self._client
-        if client is None:
-            raise ConnectionError("session owner is reconnecting")
-        return await client.slash_result(
-            command,
-            args,
-            [_image_to_wire(image) for image in (images or [])],
-        )
+        if client is None or self._recovering or not client.connected:
+            raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command))
+        try:
+            return await client.slash_result(
+                command,
+                args,
+                [_image_to_wire(image) for image in (images or [])],
+            )
+        except ConnectionError as error:
+            raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
 
     async def compact_now(self) -> CompactionOutcome:
         client = self._client
