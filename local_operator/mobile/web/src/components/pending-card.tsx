@@ -8,8 +8,19 @@
  * or a paste field — masked when the ask is a secret credential (D1/U2) —
  * when the daemon offered no options. A multi-question ask shows a
  * "Question N of M" header and re-renders the next question after each answer
- * (U1); the card keys off `request_id`+`question_index` so React remounts the
- * input between questions rather than carrying a stale draft forward.
+ * (U1).
+ *
+ * Transient card state (`busy`/`error`/`remember`/free-text draft) lives in
+ * component-local `useState`, so it MUST NOT survive from one question to the
+ * next: a stale `busy` leaves the next question's options disabled and
+ * untappable, a stale draft carries a typed answer forward. The invariant is
+ * kept structurally by the render site (screens/session-view.tsx), which keys
+ * this card on `request_id`+`question_index` — the daemon keeps the same
+ * `request_id` pending across a multi-question ask and only advances
+ * `question_index`, so that key changes per question and React remounts the
+ * whole card with fresh state. The key lives at the render site, not inside
+ * this component, because a component cannot key itself; that is why there is
+ * no per-field remount key here.
  */
 import { useState } from "react";
 import { sendCommand } from "../api";
@@ -71,8 +82,13 @@ export function PendingCard({
 			setError(humanizeError(String((e as Error).message ?? e)));
 			setBusy(false);
 		}
-		/* On success the next projection repaint clears `pending`, which
-		   unmounts this card — no local reset needed. */
+		/* No local reset on the success path. For a single-question ask the
+		   next repaint clears `pending` and unmounts this card; for a
+		   multi-question ask `pending` stays non-null (same request_id, next
+		   question_index) and the render-site key remounts the card fresh.
+		   Either way this instance's `busy`/`error` never need clearing here —
+		   and must not be cleared, or D7 (options inert while in flight) breaks
+		   within the current question. */
 	};
 
 	const approve = (approved: boolean) =>
@@ -199,9 +215,10 @@ export function PendingCard({
 				<div className="flex flex-col gap-1">
 					<div className="flex gap-2">
 						<input
-							/* Remount the field between questions of a multi-part
-							   ask so a typed draft never carries forward (U1). */
-							key={`${pending.request_id}:${pending.question_index}`}
+							/* No per-field remount key needed: the whole card is keyed
+							   on request_id+question_index at the render site, so this
+							   input (and the free-text draft) is already fresh per
+							   question of a multi-part ask (U1). */
 							value={freeText}
 							onChange={(e) => setFreeText(e.target.value)}
 							/* Secret asks are credentials: mask the value on screen

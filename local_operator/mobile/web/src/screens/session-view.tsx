@@ -158,7 +158,20 @@ export function SessionScreen({
 			) : null}
 
 			{projection.pending ? (
+				/* Key the WHOLE card on request_id + question_index so React
+				   remounts it for each question of a multi-part ask. A
+				   multi-question ask keeps the SAME request_id pending and only
+				   advances question_index (see mobile/projection.py set_pending/
+				   _sync_pending) — projection.pending never goes null between
+				   questions, so without this key React reuses the one
+				   PendingCard instance and its transient useState (busy/error/
+				   remember/free-text draft) leaks across questions. That leak is
+				   the greyed-out-buttons bug: busy stayed true after answering
+				   Q1, so every Q2 option rendered disabled. The remount is the
+				   honest fix — it makes the invariant structural rather than
+				   relying on the card to reset itself. */
 				<PendingCard
+					key={`${projection.pending.request_id}:${projection.pending.question_index}`}
 					pid={sessionId}
 					pending={projection.pending}
 					count={projection.pending_count}
