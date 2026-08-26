@@ -1,4 +1,4 @@
-import { getSession, parseSurface, type StoredSurface } from "./state";
+import { getSurfaces, putSurface, removeSurface, resolveSurfaceToken, type StoredSurface } from "./state";
 
 const attached = new Set<number>();
 
@@ -13,16 +13,28 @@ export class BridgeCommandError extends Error {
 }
 
 export async function requireSurface(token: unknown): Promise<StoredSurface> {
-  const parsed = parseSurface(token);
-  const { surface } = await getSession();
-  if (!parsed || !surface || parsed.tabId !== surface.tabId || parsed.nonce !== surface.nonce) {
+  // Exact-token lookup in the surfaces map: the nonce is part of the key, so a
+  // handle from another session (or a guessed tab id) resolves to nothing and
+  // keeps the same tab_closed shape callers already handle. This is what lets
+  // parallel sessions share the map without being able to drive each other's
+  // tabs by accident.
+  const surface = resolveSurfaceToken(token, await getSurfaces());
+  if (!surface) {
     throw new BridgeCommandError("tab_closed", "the browser tab handle is stale");
   }
   try {
     await chrome.tabs.get(surface.tabId);
   } catch {
+    // The Chrome tab is gone; drop the map entry so `tabs` never lists it and
+    // the map cannot fill with dead surfaces while their handles count toward
+    // the surface cap.
+    await removeSurface(String(token));
     throw new BridgeCommandError("tab_closed", "the browser tab was closed");
   }
+  // Recency for the `tabs` listing; best-effort, never on the command's
+  // critical path for correctness.
+  surface.lastUsedAt = Date.now();
+  await putSurface(surface);
   return surface;
 }
 

@@ -98,6 +98,10 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         )
     if error.code == ErrorCode.ORIGIN_PROMPT_PENDING:
         return "the extension is waiting for the user to approve this site in its popup."
+    if error.code == ErrorCode.TAB_LIMIT:
+        # The extension's message already names the cap and the remedy; append
+        # the discovery verb so the agent knows how to find a tab to close.
+        return f"{error.message}. Use 'tabs' to list the open tabs and their handles."
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):
         return (
             f"the browser tab crashed while {action or 'the action'} was running. "

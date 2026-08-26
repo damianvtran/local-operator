@@ -487,9 +487,11 @@ class BridgeService:
         if request.id in self.link.pending:
             return self._error_response(request.id, ErrorCode.BUSY, "request id already in flight")
         # Serialize per tab so concurrent sessions cannot interleave commands on
-        # the one shared surface (finding A4). Commands that name no tab (open,
-        # status) serialize on a shared key so a second open cannot race the
-        # first into a duplicate surface.
+        # the same surface (finding A4); commands on DIFFERENT tabs run in
+        # parallel, which is what lets each session drive its own surface.
+        # Commands that name no tab (open, status, tabs) serialize on a shared
+        # key so a fresh open cannot race another open past the surface cap, and
+        # a listing cannot interleave with an open's map write.
         tab_key = str(request.params.get("tab") or "__global__")
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
         async with lock:

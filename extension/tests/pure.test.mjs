@@ -189,3 +189,27 @@ test("origin render holds the ack through the decision round-trip race", async (
     assert.equal(originPromptView("https://example.com", null), "prompt");
   } finally { await module.close(); }
 });
+
+test("surface tokens resolve only with an exact nonce-bearing handle", async () => {
+  const module = await load("src/state.ts");
+  try {
+    const { surfaceToken, parseSurface, resolveSurfaceToken, atSurfaceCap, MAX_SURFACES } = module.loaded;
+    const surface = { tabId: 42, nonce: "abc123", epoch: 3, createdAt: 1, lastUsedAt: 2 };
+    const token = surfaceToken(surface);
+    assert.equal(token, "bridge:42:abc123");
+    assert.deepEqual(parseSurface(token), { tabId: 42, nonce: "abc123" });
+    const surfaces = { [token]: surface };
+    // Exact token resolves; a guessed nonce or the bare tab id does not — the
+    // nonce is the anti-guessing property that keeps parallel sessions from
+    // driving each other's tabs.
+    assert.equal(resolveSurfaceToken(token, surfaces), surface);
+    assert.equal(resolveSurfaceToken("bridge:42:guessed", surfaces), undefined);
+    assert.equal(resolveSurfaceToken("bridge:42", surfaces), undefined);
+    assert.equal(resolveSurfaceToken(42, surfaces), undefined);
+    // Cap math: at MAX_SURFACES entries a fresh open must be refused.
+    const many = {};
+    for (let i = 0; i < MAX_SURFACES; i += 1) many[`bridge:${i}:n${i}`] = { ...surface, tabId: i };
+    assert.equal(atSurfaceCap(surfaces), false);
+    assert.equal(atSurfaceCap(many), true);
+  } finally { await module.close(); }
+});
