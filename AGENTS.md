@@ -69,6 +69,39 @@ change to `main`, run `lop-update`, verify the `.lop-source` marker, then smoke
 test `lop` from outside the repository. Never repoint `lop` at the editable
 `.venv`; doing so couples the stable command back to in-progress work.
 
+## Versioning: choose the bump by materiality, not commit type
+
+The version in `pyproject.toml` and the `vX.Y.Z` release tag are chosen by the
+**user-facing materiality** of the change, **not** by its conventional-commit
+type. A `feat:` commit is *not* automatically a minor. Using the commit type as
+the version signal is how a run of bug-fix and reliability releases inflates the
+minor number and drains its meaning — a minor should mark a step-function
+improvement a user would notice and adopt, so that going from `0.N.x` to
+`0.(N+1).0` still tells them something.
+
+- **Patch (`0.N.x` → `0.N.(x+1)`) — the default; most releases are patches.**
+  Bug fixes, performance and reliability improvements (backoff, retries,
+  timeouts, tuning), refactors, internal cleanups, docs, and small
+  self-contained features that do not change what the product can fundamentally
+  do. A single small `feat:` commit is a patch. **When in doubt, patch.**
+
+- **Minor (`0.N.x` → `0.(N+1).0`) — a material, step-function capability.**
+  Reserve it for a new surface or subsystem a user would notice and adopt: the
+  browser extension, the mobile relay, peer-to-peer session messaging. The test
+  is simple — if you cannot name the step-function capability in the release
+  title (`X.Y.0: <the new thing>`), it is a patch, not a minor. Several small
+  features bundled together are still patches unless one of them clears this
+  bar on its own.
+
+- **Major (`0.x` → higher, or `1.0`) — only on explicit request.** Bump the
+  major version *only* when the developer explicitly asks for it, in the rare
+  case where the new version is considered a distinct product from its
+  predecessor. Never decide a major bump on your own judgement.
+
+Because releases run frequently here, err toward patch: an under-called bump is
+trivially corrected by the next release, while an over-called minor permanently
+misreports how much changed.
+
 ## Visual validation: how to actually look at a UI change
 
 This is a terminal UI. **A passing test is not evidence that a visual change
