@@ -338,6 +338,43 @@ def test_swept_nested_outcome_survives_fresh_projection_and_reconnect(
         assert selected.activity == ""
 
 
+@pytest.mark.parametrize(
+    "parents",
+    [
+        {"a": "a"},
+        {"a": "b", "b": "a"},
+    ],
+)
+def test_subagent_metadata_projection_tolerates_legacy_parent_cycles(
+    parents,
+) -> None:  # noqa: ANN001
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for job_id, parent_id in parents.items():
+        comms.record_launch(job_id, job_id, parent_job_id=parent_id)
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    assert {row.job_id for row in fold.projection.subagents} == set(parents)
+
+
+def test_subagent_metadata_projection_never_constructs_transcript(monkeypatch) -> None:
+    """The ordinary event path must remain memory-only regardless of child count."""
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(75):
+        comms.record_launch(f"child-{index}", f"child {index}")
+
+    class ForbiddenTranscript:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError("metadata projection opened a child transcript")
+
+    monkeypatch.setattr("local_operator.session.transcript.Transcript", ForbiddenTranscript)
+    fold = make_fold()
+    for _ in range(100):
+        fold.set_subagent_details(comms)
+    assert len(fold.projection.subagents) == 75
+
+
 def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
     """The runner records terminal state before the manager stamps its row."""
 

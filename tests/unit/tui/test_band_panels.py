@@ -10,6 +10,7 @@ isolated widget calls that can pass while the wiring is dead.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -51,6 +52,12 @@ async def test_todo_panel_reads_selected_child_snapshot_without_root_leakage(tmp
         panel = TodoPanel()
         session = type("Session", (), {"session_id": "root"})()
         panel.sync(session, session_id="child", transcript_directory=str(child.directory))
+        # Historical transcript fallback is deliberately off-loop; the first
+        # sync schedules one worker read and the callback repaints from cache.
+        for _ in range(50):
+            if "child only" in str(panel._body.content):
+                break
+            await asyncio.sleep(0.01)
         assert "child only" in str(panel._body.content)
         assert "root only" not in str(panel._body.content)
         panel.sync(session, session_id="missing")

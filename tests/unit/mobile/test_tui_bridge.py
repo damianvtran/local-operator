@@ -7,10 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from local_operator.mobile.tui_handle import TuiSessionHandle
+from local_operator.mobile.tui_handle import (
+    TuiSessionHandle,
+    _DetailChangedDuringHydration,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -71,6 +76,76 @@ async def test_tui_stalled_steers_apply_owner_loop_backpressure() -> None:
     with pytest.raises(RuntimeError, match=r"steering queue is full \(32\)"):
         await handle.steer("overflow", command_id="overflow")
     assert len(session.steer_calls) == 32
+
+
+@pytest.mark.asyncio
+async def test_nested_child_detail_events_refresh_after_warm(monkeypatch) -> None:
+    class Comms:
+        def __init__(self) -> None:
+            self.listener = None
+            self.child = SimpleNamespace(
+                job_id="nested",
+                label="nested",
+                session_dir=Path("/tmp/nested"),
+                parent_job_id="parent",
+                session_id="nested",
+                prompt="",
+                effort="",
+                agent_role="task",
+                launch_message_id=None,
+            )
+
+        def roster(self):  # noqa: ANN201
+            return []
+
+        def nodes(self):  # noqa: ANN201
+            return [self.child]
+
+        def job(self, job_id):  # noqa: ANN001, ANN201
+            return None
+
+        def node(self, job_id):  # noqa: ANN001, ANN201
+            return self.child if job_id == "nested" else None
+
+        def subscribe_detail_changes(self, listener):  # noqa: ANN001, ANN201
+            self.listener = listener
+            return lambda: None
+
+    comms = Comms()
+    session = FakeSession()
+    setattr(session, "_subagent_comms", comms)
+    app = SimpleNamespace(_session=session)
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    invalidated: list[str] = []
+    monkeypatch.setattr(handle, "_invalidate_subagent_detail", invalidated.append)
+    handle.subscribe(lambda: None)
+    assert invalidated == ["nested"]  # initial warm
+    assert comms.listener is not None
+    comms.listener("nested")
+    assert invalidated == ["nested", "nested"]  # later nested mutation
+
+
+@pytest.mark.asyncio
+async def test_dirty_hydration_retries_without_later_event(monkeypatch) -> None:
+    node = SimpleNamespace(job_id="nested", session_dir=Path("/tmp/nested"))
+    comms = SimpleNamespace(node=lambda job_id: node)
+    session = FakeSession()
+    setattr(session, "_subagent_comms", comms)
+    handle = TuiSessionHandle(SimpleNamespace(_session=session))  # type: ignore[arg-type]
+    handle._detail_generations["nested"] = 1
+    calls = 0
+
+    async def fake_to_thread(fn, session_dir):  # noqa: ANN001, ANN202
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _DetailChangedDuringHydration
+        return (1, 1), [], []
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(handle._fold, "set_subagent_hydrated_details", lambda *args: True)
+    await handle._hydrate_subagent_detail("nested")
+    assert calls == 2
 
 
 @pytest.mark.asyncio

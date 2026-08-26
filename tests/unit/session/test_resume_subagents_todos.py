@@ -23,6 +23,7 @@ whole point, that a restored child is still resumable.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -31,9 +32,12 @@ from local_operator.harness.types import (
     ChatRequest,
     StreamEndEvent,
     StreamTextDelta,
+    TextContent,
+    ToolResult,
 )
 from local_operator.session.session import (
     SUBAGENT_ROSTER_CUSTOM_TYPE,
+    SUBAGENT_ROSTER_SIDECAR,
     TODO_SNAPSHOT_CUSTOM_TYPE,
     Session,
 )
@@ -367,6 +371,157 @@ async def test_unchanged_todos_are_not_re_persisted_every_turn(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_malformed_v1_sidecar_falls_back_to_legacy_roster(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_custom(
+        SUBAGENT_ROSTER_CUSTOM_TYPE,
+        {
+            "jobs": [],
+            "records": [
+                {
+                    "job_id": "legacy",
+                    "label": "legacy",
+                    "session_dir": str(tmp_path / "child"),
+                    "outcome": "completed",
+                }
+            ],
+        },
+    )
+    (transcript.directory / SUBAGENT_ROSTER_SIDECAR).write_text(
+        json.dumps({"version": 1, "generation": "broken", "jobs": [], "records": []})
+    )
+    resumed = _session(tmp_path, IdleStream())
+    assert [row.job_id for row in resumed.subagent_comms.roster()] == ["legacy"]
+
+
+@pytest.mark.asyncio
+async def test_todo_snapshot_precedes_cancelling_tool_end_subscriber(tmp_path, monkeypatch) -> None:
+    """A real todo mutation is durable before async ToolExecutionEnd fan-out."""
+    from local_operator.harness.types import ToolExecutionEndEvent
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _session(tmp_path, IdleStream())
+    TODO_STORE[parent.session_id] = [
+        {"name": "Nested", "items": [{"text": "survive", "status": "pending"}]}
+    ]
+    seen: list[str] = []
+
+    async def cancelling_subscriber(event) -> None:  # noqa: ANN001
+        if isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo":
+            details = parent._transcript.latest_custom(TODO_SNAPSHOT_CUSTOM_TYPE)
+            assert details is not None
+            seen.append(details["items"][0]["items"][0]["text"])
+            raise asyncio.CancelledError
+
+    parent.subscribe(cancelling_subscriber)
+    event = ToolExecutionEndEvent(
+        tool_call_id="todo-1",
+        tool_name="todo",
+        result=ToolResult(tool_call_id="todo-1", content=[TextContent(text="ok")]),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        # This loop fragment is the exact production ordering under test.
+        await parent._maybe_persist_todos()
+        await parent._emit(event)
+    assert seen == ["survive"]
+
+
+@pytest.mark.asyncio
+async def test_child_detail_notification_follows_durable_append(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    notifications: list[str] = []
+    comms = type(
+        "Comms",
+        (),
+        {"notify_detail_persisted": lambda self, job_id: notifications.append(job_id)},
+    )()
+    child = Session(
+        model=MODEL,
+        stream_fn=IdleStream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "child"),
+        system_blocks_provider=lambda: ["stable"],
+        job_id="nested",
+        subagent_comms=comms,
+    )
+    original_messages = child._persist_new_messages
+    original_todos = child._maybe_persist_todos
+    TODO_STORE[child.session_id] = [
+        {
+            "name": "Nested",
+            "items": [{"text": "persisted after error", "status": "pending"}],
+        }
+    ]
+
+    async def checked_messages(messages):  # noqa: ANN001, ANN202
+        assert notifications == []
+        await original_messages(messages)
+        assert notifications == []
+
+    async def checked_todos() -> None:
+        assert notifications == []
+        await original_todos()
+        assert notifications == []
+        details = child._transcript.latest_custom(TODO_SNAPSHOT_CUSTOM_TYPE)
+        assert details is not None
+        assert details["items"][0]["items"][0]["text"] == "persisted after error"
+
+    monkeypatch.setattr(child, "_persist_new_messages", checked_messages)
+    monkeypatch.setattr(child, "_maybe_persist_todos", checked_todos)
+    await child.prompt("persist this child turn")
+    assert notifications == ["nested"]
+    assert len(child._transcript.build_llm_history()) > 1
+
+
+@pytest.mark.asyncio
+async def test_empty_roster_final_flush_persists_todos_without_delay(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _session(tmp_path, IdleStream())
+    TODO_STORE[parent.session_id] = [
+        {"name": "Work", "items": [{"text": "persist me", "status": "pending"}]}
+    ]
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await parent._final_persist_snapshots()
+    assert loop.time() - started < 0.5
+    assert parent._subagent_roster_written_generation == parent._subagent_roster_generation
+    details = parent._transcript.latest_custom(TODO_SNAPSHOT_CUSTOM_TYPE)
+    assert details is not None
+    assert details["items"][0]["items"][0]["text"] == "persist me"
+
+
+@pytest.mark.asyncio
+async def test_final_roster_persist_waits_for_active_writer(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _session(tmp_path, IdleStream())
+    parent.jobs.restore([])
+    parent._subagent_roster_generation = 1
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    writes: list[int] = []
+
+    async def blocked_write() -> None:
+        entered.set()
+        await release.wait()
+        writes.append(parent._subagent_roster_generation)
+        parent._subagent_roster_written_generation = parent._subagent_roster_generation
+        if parent._subagent_roster_writer is asyncio.current_task():
+            parent._subagent_roster_writer = None
+
+    writer = asyncio.create_task(blocked_write())
+    parent._subagent_roster_writer = writer
+    await entered.wait()
+    final = asyncio.create_task(parent._final_persist_snapshots())
+    await asyncio.sleep(0)
+    assert not final.done()
+    release.set()
+    await final
+    assert writes == [2]
+    assert parent._subagent_roster_written_generation == 2
+
+
+@pytest.mark.asyncio
 async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypatch):
     """A launched child writes a roster snapshot custom entry to the
     transcript — the durable record the resume reads."""
@@ -382,6 +537,17 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
         if e.type == "custom" and e.payload.get("custom_type") == SUBAGENT_ROSTER_CUSTOM_TYPE
     ]
     assert entries
+    sidecar = parent._transcript.directory / SUBAGENT_ROSTER_SIDECAR
+    assert sidecar.exists()
+    first_size = sidecar.stat().st_size
+    transcript_size = parent._transcript.path.stat().st_size
+    for _ in range(25):
+        parent._schedule_subagent_persist()
+    await asyncio.sleep(0.1)
+    # Generation digits may add a byte, but repeated transitions replace one
+    # bounded file and never append another full roster to the transcript.
+    assert sidecar.stat().st_size <= first_size + 4
+    assert parent._transcript.path.stat().st_size == transcript_size
     latest = entries[-1].payload["details"]
     # Job rows carry the manager's own ``id`` key; comms records carry job_id.
     row = next(r for r in latest["jobs"] if r["id"] == job_id)

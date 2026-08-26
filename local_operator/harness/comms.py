@@ -334,6 +334,27 @@ class SubagentComms:
     def __init__(self, session: "Session") -> None:
         self._session = session
         self._records: dict[str, _ChildRecord] = {}
+        self._detail_listeners: set[Callable[[str], None]] = set()
+
+    def subscribe_detail_changes(self, listener: Callable[[str], None]) -> Callable[[], None]:
+        """Observe child transcript mutations through the shared root registry."""
+        self._detail_listeners.add(listener)
+
+        def unsubscribe() -> None:
+            self._detail_listeners.discard(listener)
+
+        return unsubscribe
+
+    def notify_detail_persisted(self, job_id: str) -> None:
+        """Publish only after a child has durably appended its new history."""
+        self._notify_detail_change(job_id)
+
+    def _notify_detail_change(self, job_id: str) -> None:
+        for listener in tuple(self._detail_listeners):
+            try:
+                listener(job_id)
+            except Exception:  # noqa: BLE001 - projection listeners are additive
+                logger.debug("subagent detail listener failed", exc_info=True)
 
     # -- launch bookkeeping ---------------------------------------------------
 
@@ -1585,6 +1606,10 @@ class SubagentComms:
         """
 
         async def watcher(event: AgentEvent) -> None:
+            # Nested child events never flow through the root Session, but this
+            # shared registry sees every attached child. Notify detail consumers
+            # before ask-specific filtering so mobile history stays fresh.
+            self._notify_detail_change(record.job_id)
             if not record.armed or record.ask is None or record.ask.done():
                 return
             if not isinstance(event, MessageEndEvent):

@@ -34,6 +34,7 @@ hides it again.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -180,7 +181,9 @@ def _as_phases(raw: list[Any]) -> list[dict[str, Any]]:
     return [{"name": _IMPLICIT_PHASE, "items": list(raw)}]  # legacy/flat
 
 
-def todo_items(session_id: str, transcript_directory: str | None = None) -> list[dict[str, Any]]:
+def todo_items(
+    session_id: str, restored: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     """The live todo list for ``session_id``, as phases (copies, never the store).
 
     Reads the todo tool's own store — the one writer is the tool, so the table
@@ -198,18 +201,7 @@ def todo_items(session_id: str, transcript_directory: str | None = None) -> list
         from local_operator.tools.builtin import TODO_STORE
     except Exception:
         return []
-    raw = TODO_STORE.get(session_id)
-    if not raw and transcript_directory:
-        # A resumed/swept child has no live process store. Its own transcript is
-        # authoritative; never consult the root session as a convenience.
-        try:
-            from local_operator.session.transcript import Transcript
-
-            details = Transcript(transcript_directory).latest_custom("todo_snapshot") or {}
-            candidate = details.get("items") or []
-            raw = candidate if isinstance(candidate, list) else []
-        except Exception:
-            raw = []
+    raw = TODO_STORE.get(session_id) or restored
     if not raw:
         return []
     return [
@@ -219,6 +211,15 @@ def todo_items(session_id: str, transcript_directory: str | None = None) -> list
         }
         for phase in _as_phases(raw)
     ]
+
+
+def _read_restored_todos(transcript_directory: str) -> list[dict[str, Any]]:
+    """Read a historical child snapshot; callers must run this in a worker."""
+    from local_operator.session.transcript import Transcript
+
+    details = Transcript(transcript_directory).latest_custom("todo_snapshot") or {}
+    candidate = details.get("items") or []
+    return candidate if isinstance(candidate, list) else []
 
 
 def _is_closed(item: dict[str, Any]) -> bool:
@@ -394,6 +395,8 @@ class TodoPanel(Container):
         #: line count, and the two must agree or the band reflows on the first
         #: frame (see :meth:`predicted_rows`).
         self._painted_rows: int = 0
+        self._restored_todos: dict[str, list[dict[str, Any]]] = {}
+        self._todo_loads: dict[str, asyncio.Task[None]] = {}
         # Hidden until the first todo exists: an empty panel is not content.
         self.display = False
 
@@ -457,6 +460,25 @@ class TodoPanel(Container):
         yield self._affordance
 
     # -- sync -----------------------------------------------------------------
+    async def _load_restored_todos(
+        self, session: Any, session_id: str, transcript_directory: str
+    ) -> None:
+        """Load a swept child's durable todos once, away from render polling."""
+        try:
+            phases = await asyncio.to_thread(_read_restored_todos, transcript_directory)
+            self._restored_todos[transcript_directory] = phases
+            self.sync(
+                session,
+                session_id=session_id,
+                transcript_directory=transcript_directory,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._restored_todos[transcript_directory] = []
+        finally:
+            self._todo_loads.pop(transcript_directory, None)
+
     def sync(
         self,
         session: Any,
@@ -475,8 +497,17 @@ class TodoPanel(Container):
             selected_id = (
                 session_id if session_id is not None else getattr(session, "session_id", "")
             )
+            restored = None
+            if transcript_directory is not None:
+                restored = self._restored_todos.get(transcript_directory)
+                if restored is None and transcript_directory not in self._todo_loads:
+                    # Selection changes initiate one worker read. The 1 Hz
+                    # refresh path only observes the cache and never opens disk.
+                    self._todo_loads[transcript_directory] = asyncio.create_task(
+                        self._load_restored_todos(session, selected_id or "", transcript_directory)
+                    )
             phases = (
-                todo_items(selected_id or "", transcript_directory)
+                todo_items(selected_id or "", restored)
                 if transcript_directory is not None
                 else todo_items(selected_id or "")
             )
