@@ -8613,6 +8613,11 @@ class OperatorApp(App[None]):
                 or getattr(node, "effective_prompt", "")
                 or ""
             ),
+            launch_message_id=str(
+                getattr(job, "launch_message_id", None)
+                or getattr(node, "launch_message_id", "")
+                or ""
+            ),
             events=getattr(job, "trajectory", None) or [],
             progress=str((getattr(job, "latest_details", None) or {}).get("progress") or ""),
             # Launch-time identity: the child's role and effort tier, recorded

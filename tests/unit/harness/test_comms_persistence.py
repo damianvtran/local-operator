@@ -35,6 +35,7 @@ def _comms_with_settled_child(tmp_path: Path, jobs: FakeJobs) -> SubagentComms:
         "explore the repo",
         prompt="Inspect it.",
         effective_prompt="Specialist guidance.\n\nInspect it.",
+        launch_message_id="launch-row-1",
     )
     comms.attach("job1", FakeChild(), session_dir)  # type: ignore[arg-type]
     comms.record_outcome("job1", "completed")
@@ -54,6 +55,7 @@ def test_snapshot_captures_the_resumable_fields(tmp_path) -> None:
     assert row["outcome"] == "completed"
     assert row["prompt"] == "Inspect it."
     assert row["effective_prompt"] == "Specialist guidance.\n\nInspect it."
+    assert row["launch_message_id"] == "launch-row-1"
 
 
 def test_a_never_started_child_is_not_snapshotted(tmp_path) -> None:
@@ -86,6 +88,7 @@ def test_restore_rebuilds_a_resumable_record(tmp_path) -> None:
     assert node is not None
     assert node.prompt == "Inspect it."
     assert node.effective_prompt == "Specialist guidance.\n\nInspect it."
+    assert node.launch_message_id == "launch-row-1"
 
 
 def test_restore_preserves_a_failure_outcome(tmp_path) -> None:

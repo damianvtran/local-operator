@@ -235,6 +235,9 @@ def run_subagent(
     ran at a chosen level the band should name.
     """
     effective_prompt, profile = _effective_prompt(prompt, agent, parent_session)
+    # Reserved before registration so a queued job already has a stable launch
+    # identity. Session.prompt writes this same ID as the transcript entry key.
+    launch_message_id = uuid.uuid4().hex
     queued = jobs_manager.at_capacity()
     job_id = jobs_manager.register(
         "task",
@@ -242,6 +245,7 @@ def run_subagent(
         _make_runner(
             label=label,
             effective_prompt=effective_prompt,
+            launch_message_id=launch_message_id,
             parent_session=parent_session,
             jobs_manager=jobs_manager,
             model_spec=model_spec,
@@ -260,6 +264,7 @@ def run_subagent(
         # would claim the child had begun and produced nothing.
         job.prompt = prompt
         job.effective_prompt = effective_prompt
+        job.launch_message_id = launch_message_id
         # Same registration-time rule as ``prompt``: the role and effort tier
         # identify the child before its runner exists, and a queued job that
         # never starts still shows both in the page title and the status band.
@@ -276,6 +281,7 @@ def run_subagent(
             parent_job_id=getattr(parent_session, "_job_id", None),
             prompt=prompt,
             effective_prompt=effective_prompt,
+            launch_message_id=launch_message_id,
             agent_role=agent,
             effort=effort or "",
         )
@@ -309,6 +315,7 @@ def _make_runner(
     *,
     label: str,
     effective_prompt: str,
+    launch_message_id: str,
     parent_session: "Session",
     jobs_manager: "AsyncJobManager",
     model_spec: ModelSpec | None,
@@ -401,7 +408,7 @@ def _make_runner(
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
             try:
-                await child.prompt(effective_prompt)
+                await child.prompt(effective_prompt, message_id=launch_message_id)
             finally:
                 bridge.cancel()
                 with contextlib.suppress(BaseException):

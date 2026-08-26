@@ -376,13 +376,20 @@ async def test_specialist_launch_records_the_exact_effective_prompt(tmp_path, mo
     assert job is not None
     assert job.prompt == "Deploy dashboard."
     assert job.effective_prompt == "Follow the release checklist.\n\nDeploy dashboard."
+    assert job.launch_message_id
     node = parent.subagent_comms.node(job_id)
     assert node is not None
     assert node.effective_prompt == job.effective_prompt
+    assert node.launch_message_id == job.launch_message_id
 
     await wait_for(lambda: job.status == "completed")
+    session_dir = parent.subagent_comms.session_dir_of(job_id)
+    assert session_dir is not None
+    transcript_entries = Transcript(session_dir).entries()
+    assert any(entry.id == job.launch_message_id for entry in transcript_entries)
     [snapshot] = parent.subagent_comms.snapshot()
     assert snapshot["effective_prompt"] == job.effective_prompt
+    assert snapshot["launch_message_id"] == job.launch_message_id
     await parent.dispose()
 
 

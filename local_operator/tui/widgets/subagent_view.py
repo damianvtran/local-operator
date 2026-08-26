@@ -203,11 +203,6 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def _normalized_prompt(text: str) -> str:
-    """Stable plain-text comparison form for durable launch-turn matching."""
-    return " ".join(strip_control_sequences(text).split())
-
-
 def _duration(value: Any) -> float | None:
     """A trustworthy elapsed time, or ``None`` for malformed producer data.
 
@@ -1015,6 +1010,7 @@ class SubagentView(Vertical):
         self._prompt_raw = ""
         self._instruction = ""
         self._effective_prompt = ""
+        self._launch_message_id = ""
         self._status = "running"
         self._queued = False
         self._elapsed = "0s"
@@ -1120,6 +1116,7 @@ class SubagentView(Vertical):
         events: Sequence[Any],
         prompt: str = "",
         effective_prompt: str = "",
+        launch_message_id: str = "",
         progress: str = "",
         agent_role: str = "",
         effort: str = "",
@@ -1174,6 +1171,7 @@ class SubagentView(Vertical):
             self._prompt_raw = prompt
             self._instruction = strip_control_sequences(prompt).strip()
         self._effective_prompt = strip_control_sequences(effective_prompt).strip()
+        self._launch_message_id = str(launch_message_id or "").strip()
         if self._instruction and "__prompt__" not in self._known:
             # HEAD position, and it is safe only because `AsyncJob.prompt` is
             # assigned at REGISTRATION (harness/subagent.py) — before a runner
@@ -1388,24 +1386,36 @@ class SubagentView(Vertical):
         """Compose durable and live rows in conversation order.
 
         A resumed child's durable transcript already contains the launch turn.
-        The launcher records that exact assembled message separately from the
-        plain prompt displayed here, so replay can replace only the canonical
-        durable row rather than guessing from suffix prose. Legacy records have
-        no assembled identity and safely fall back to the exact plain prompt.
+        New jobs carry its exact Message/TranscriptEntry ID, so replay replaces
+        only that row even when later turns repeat the same words. Legacy records
+        have no ID; they may use an exact plain-text match only when it is unique,
+        because choosing among duplicates would silently rewrite user history.
         """
         live = [self._known[key] for key in self._order]
         durable_keys = {entry.key for entry in self._history_entries}
         history = list(self._history_entries)
         prompt_entry = self._known.get("__prompt__")
         matched = None
-        launch_identity = self._effective_prompt or self._instruction
-        launch_norm = _normalized_prompt(launch_identity)
-        if launch_norm:
-            for index in range(len(history) - 1, -1, -1):
-                candidate = history[index]
-                if candidate.kind == "user" and _normalized_prompt(candidate.text) == launch_norm:
-                    matched = index
-                    break
+        if self._launch_message_id:
+            matched = next(
+                (
+                    index
+                    for index, candidate in enumerate(history)
+                    if candidate.kind == "user" and candidate.key == self._launch_message_id
+                ),
+                None,
+            )
+        else:
+            # Compatibility for snapshots written before launch IDs existed.
+            # Exact PLAIN matching only: uniqueness is what makes replacing the
+            # row conservative when user turns repeat the same words.
+            candidates = [
+                index
+                for index, candidate in enumerate(history)
+                if candidate.kind == "user" and candidate.text == self._instruction
+            ]
+            if self._instruction and len(candidates) == 1:
+                matched = candidates[0]
         if matched is not None:
             original = history[matched]
             history[matched] = SubagentEntry(original.key, "prompt", text=self._instruction)

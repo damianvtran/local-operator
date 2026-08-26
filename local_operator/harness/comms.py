@@ -224,6 +224,7 @@ class SubagentNode:
     session_dir: Path | None
     prompt: str = ""
     effective_prompt: str = ""
+    launch_message_id: str = ""
     agent_role: str = ""
     effort: str = ""
 
@@ -257,6 +258,7 @@ class _ChildRecord:
     parent_job_id: str | None = None
     prompt: str = ""
     effective_prompt: str = ""
+    launch_message_id: str = ""
     agent_role: str = ""
     effort: str = ""
     #: The child's transcript directory. Set at attach; the whole basis of
@@ -344,6 +346,7 @@ class SubagentComms:
         parent_job_id: str | None = None,
         prompt: str = "",
         effective_prompt: str = "",
+        launch_message_id: str = "",
         agent_role: str = "",
         effort: str = "",
     ) -> None:
@@ -380,6 +383,7 @@ class SubagentComms:
             existing.parent_job_id = parent_job_id
             existing.prompt = prompt
             existing.effective_prompt = effective_prompt
+            existing.launch_message_id = launch_message_id
             existing.agent_role = agent_role
             existing.effort = effort
             return
@@ -389,6 +393,7 @@ class SubagentComms:
             parent_job_id=parent_job_id,
             prompt=prompt,
             effective_prompt=effective_prompt,
+            launch_message_id=launch_message_id,
             agent_role=agent_role,
             effort=effort,
         )
@@ -488,6 +493,7 @@ class SubagentComms:
             session_dir=record.session_dir,
             prompt=record.prompt,
             effective_prompt=record.effective_prompt,
+            launch_message_id=record.launch_message_id,
             agent_role=record.agent_role,
             effort=record.effort,
         )
@@ -673,6 +679,7 @@ class SubagentComms:
                     "parent_job_id": record.parent_job_id,
                     "prompt": record.prompt,
                     "effective_prompt": record.effective_prompt,
+                    "launch_message_id": record.launch_message_id,
                     "agent_role": record.agent_role,
                     "effort": record.effort,
                     "session_dir": str(record.session_dir),
@@ -714,6 +721,7 @@ class SubagentComms:
                 parent_job_id=(str(row["parent_job_id"]) if row.get("parent_job_id") else None),
                 prompt=str(row.get("prompt") or ""),
                 effective_prompt=str(row.get("effective_prompt") or ""),
+                launch_message_id=str(row.get("launch_message_id") or ""),
                 agent_role=str(row.get("agent_role") or ""),
                 effort=str(row.get("effort") or ""),
                 session_dir=session_dir,

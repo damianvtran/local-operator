@@ -1378,6 +1378,7 @@ async def test_durable_launch_turn_is_replaced_in_place(
     job = _job_with([], status="completed")
     job.prompt = "Delegated parent instruction."
     job.effective_prompt = durable_prompt
+    job.launch_message_id = launch.id
     job.agent_role = agent_role
     session = FakeSession()
     session.jobs = _fake_jobs(job)
@@ -1409,6 +1410,7 @@ async def test_specialist_identity_cannot_replace_a_later_suffix_collision(tmp_p
     job = _job_with([], status="completed")
     job.prompt = "Delegated parent instruction."
     job.effective_prompt = effective
+    job.launch_message_id = launch.id
     job.agent_role = "dashboard-specialist"
     session = FakeSession()
     session.jobs = _fake_jobs(job)
@@ -1426,6 +1428,83 @@ async def test_specialist_identity_cannot_replace_a_later_suffix_collision(tmp_p
         assert later.kind == "user"
         assert later.text == "Please quote:\n\nDelegated parent instruction."
         assert sum(entry.kind == "prompt" for entry in entries) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "later_text",
+    ["Delegated parent instruction.", "  Delegated   parent instruction.  "],
+)
+async def test_launch_id_wins_over_exact_and_whitespace_equivalent_duplicates(
+    tmp_path, later_text: str
+) -> None:
+    transcript = Transcript(tmp_path / "child")
+    launch = await transcript.append_message(Message.user("Delegated parent instruction."))
+    later = await transcript.append_message(Message.user(later_text))
+    job = _job_with([], status="completed")
+    job.prompt = "Delegated parent instruction."
+    job.effective_prompt = "Delegated parent instruction."
+    job.launch_message_id = launch.id
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        assert next(entry for entry in entries if entry.key == launch.id).kind == "prompt"
+        duplicate = next(entry for entry in entries if entry.key == later.id)
+        assert duplicate.kind == "user"
+        assert duplicate.text == later_text.strip()
+
+
+@pytest.mark.asyncio
+async def test_legacy_whitespace_equivalent_prompt_is_not_value_matched(tmp_path) -> None:
+    transcript = Transcript(tmp_path / "child")
+    durable = await transcript.append_message(Message.user("  Delegated   parent instruction.  "))
+    job = _job_with([], status="completed")
+    job.prompt = "Delegated parent instruction."
+    job.effective_prompt = ""
+    job.launch_message_id = ""
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        assert entries[0].key == "__prompt__"
+        assert next(entry for entry in entries if entry.key == durable.id).kind == "user"
+
+
+@pytest.mark.asyncio
+async def test_legacy_duplicate_prompt_is_left_ambiguous_and_synthetic(tmp_path) -> None:
+    transcript = Transcript(tmp_path / "child")
+    first = await transcript.append_message(Message.user("Delegated parent instruction."))
+    second = await transcript.append_message(Message.user("Delegated parent instruction."))
+    job = _job_with([], status="completed")
+    job.prompt = "Delegated parent instruction."
+    job.effective_prompt = ""
+    job.launch_message_id = ""
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        assert entries[0].key == "__prompt__"
+        assert next(entry for entry in entries if entry.key == first.id).kind == "user"
+        assert next(entry for entry in entries if entry.key == second.id).kind == "user"
 
 
 @pytest.mark.asyncio
