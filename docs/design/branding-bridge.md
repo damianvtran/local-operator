@@ -118,7 +118,7 @@ Pairing prompt:
 - Heading: **"Pair with Local Operator"**
 - Body: "Type the 6-digit code from the Local Operator app. Pairing links this
   browser to your app and nothing else."
-- Field label: "Pairing code" · Button: "Pair" · Error: "That code didn't match. Codes expire after a minute — check the app for a fresh one."
+- Field label: "Pairing code" · Button: "Pair" · Error: "That code didn't match. Codes expire after two minutes — check the app for a fresh one."
 
 Per-site allow prompt:
 - Heading: **"Let the agent use github.com?"**
