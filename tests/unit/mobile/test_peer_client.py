@@ -101,13 +101,28 @@ async def test_send_raises_on_error_frame() -> None:
 
 @pytest.mark.asyncio
 async def test_send_times_out_on_a_silent_socket() -> None:
-    # A raw listener that accepts, reads, but never acks: the sender's deadline
-    # must fire rather than block forever.
+    # A raw listener that accepts, reads both frames, but never acks: the
+    # sender's per-read deadline must fire rather than block forever.
+    #
+    # The handler must hold the connection OPEN (never send EOF) for the whole
+    # duration the client is reading, otherwise the client sees a closed socket
+    # and raises ``ConnectionError`` instead of timing out. But it must NOT
+    # outlive the test: on CPython 3.12 ``Server.wait_closed()`` blocks until
+    # every active handler task finishes, so a handler stuck in a fixed
+    # ``asyncio.sleep`` wedges teardown and hangs the whole process (3.14 does
+    # not gate teardown on active connections, which is why this only hung
+    # under 3.12). We square the two by parking the handler on a ``stop`` event
+    # the teardown sets: it keeps the socket open while the client times out,
+    # then returns the moment teardown signals it, letting the server close.
+    stop = asyncio.Event()
+
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readline()  # auth frame
         await reader.readline()  # the peer_message frame
-        # Deliberately never reply.
-        await asyncio.sleep(1.0)
+        # Deliberately never reply; park until teardown releases us so the
+        # connection stays open (client must time out, not see EOF) without the
+        # handler outliving the test and stalling server teardown.
+        await stop.wait()
 
     server = await asyncio.start_server(_handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -121,8 +136,33 @@ async def test_send_times_out_on_a_silent_socket() -> None:
         control_port=port,
         control_key="k",
     )
-    async with server:
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        # The outer ``wait_for`` is a hard hang-catcher: if the client ever
+        # regresses to ignoring its deadline on a silent peer, the whole call is
+        # cancelled here instead of wedging the run. The inner deadline is the
+        # behaviour under test; ``asyncio.TimeoutError`` must come from it.
         with pytest.raises(asyncio.TimeoutError):
-            await send_peer_message(
-                record, text="hi", mode="mailbox", wake=False, sender={}, deadline_s=0.2
+            await asyncio.wait_for(
+                send_peer_message(
+                    record, text="hi", mode="mailbox", wake=False, sender={}, deadline_s=0.2
+                ),
+                timeout=1.5,
             )
+        # The 0.2s deadline must resolve the call well under a second; a much
+        # larger elapsed would mean the client blocked past its own deadline.
+        elapsed = loop.time() - started
+        assert elapsed < 0.9, f"send did not return promptly after timeout: {elapsed:.3f}s"
+    finally:
+        # Release the parked handler FIRST so its task can finish, then close.
+        # Do NOT rely on ``async with server`` / ``Server.wait_closed()``: on
+        # CPython 3.12 that awaits outstanding connections, so an un-signalled
+        # handler would block it. Bounding the wait is belt-and-suspenders in
+        # case the handler never reached ``stop.wait()``.
+        stop.set()
+        server.close()
+        try:
+            await asyncio.wait_for(server.wait_closed(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
