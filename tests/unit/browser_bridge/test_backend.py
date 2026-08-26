@@ -77,8 +77,12 @@ def test_client_timeout_outlives_daemon_budget_per_method() -> None:
 
 
 def test_client_timeout_unknown_method_takes_conservative_max() -> None:
-    assert client_timeout("no-such-method") == client_timeout("open")
-    assert client_timeout("no-such-method") >= max(COMMAND_TIMEOUTS.values())
+    # The real invariant is >= every known method's budget, not equality with
+    # any particular method (which would break silently if a longer one were
+    # ever added).
+    assert client_timeout("no-such-method") >= max(
+        client_timeout(method) for method in COMMAND_TIMEOUTS
+    )
 
 
 def _client_with_transport(
@@ -95,20 +99,34 @@ def _client_with_transport(
     return BridgeClient(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        # Refused TCP connection: daemon genuinely gone.
+        httpx.ConnectError("connection refused"),
+        # Timeout WHILE connecting: nothing was reached; must not get the
+        # popup message despite being a TimeoutException (finding m1).
+        httpx.ConnectTimeout("connect deadline"),
+        # Daemon died mid-request after accepting the connection: restart
+        # advice is right, popup advice would be a lie (finding m2).
+        httpx.ReadError("connection reset"),
+        httpx.RemoteProtocolError("server disconnected"),
+    ],
+    ids=["connect-refused", "connect-timeout", "read-error", "protocol-error"],
+)
 @pytest.mark.asyncio
-async def test_connect_error_reports_daemon_unreachable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_transport_failures_report_daemon_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport_error: Exception
 ) -> None:
-    # A refused TCP connection means the daemon is genuinely gone, so restart
-    # advice is the correct diagnosis.
     publish(tmp_path)
 
-    def refuse(_request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
+    def fail(_request: httpx.Request) -> httpx.Response:
+        raise transport_error
 
-    client = _client_with_transport(tmp_path, monkeypatch, refuse)
-    with pytest.raises(BridgeUnreachable, match="unreachable.*not.*answering"):
+    client = _client_with_transport(tmp_path, monkeypatch, fail)
+    with pytest.raises(BridgeUnreachable, match="unreachable.*not.*answering") as excinfo:
         await client.call("status", {})
+    assert "popup" not in str(excinfo.value)
 
 
 @pytest.mark.asyncio
@@ -129,6 +147,9 @@ async def test_timeout_after_connect_names_the_popup_not_the_daemon(
     with pytest.raises(BridgeUnreachable, match="extension.*popup") as excinfo:
         await client.call("goto", {"url": "https://example.com"})
     assert "unreachable" not in str(excinfo.value)
+    # Honesty check: we only know the connection was accepted, so the message
+    # must not assert the daemon "is running" (finding m2).
+    assert "is running" not in str(excinfo.value)
 
 
 @pytest.mark.asyncio
