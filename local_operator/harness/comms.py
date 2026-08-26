@@ -426,14 +426,18 @@ class SubagentComms:
         if record is None:
             record = _ChildRecord(job_id=job_id, label=job_id)
             self._records[job_id] = record
-        # The directory, not the human label, identifies a resumed child. Fold
-        # the predecessor before exposing the live record so every roster read
-        # observes either the old attempt or the new one, never both.
+        # The directory, not the human label, identifies a resumed child. Only
+        # a terminal predecessor can be replaced: two live children may share a
+        # fixture directory, and collapsing those would hide autonomous work.
+        # Fold before exposing the continuation so every roster read observes
+        # either the old attempt or the new one, never both.
         prior = next(
             (
                 item
                 for item in self._records.values()
-                if item.job_id != job_id and item.session_dir == session_dir
+                if item.job_id != job_id
+                and item.session_dir == session_dir
+                and (item.child is None or item.settled)
             ),
             None,
         )
