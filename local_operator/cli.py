@@ -2343,6 +2343,63 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
                 pass
 
 
+def _install_group_reaper_soft_death() -> None:
+    """Wire the process-group reaper's soft-death path for THIS process.
+
+    Registers ``group_reaper.kill_own_groups`` as an ``atexit`` hook and as a
+    SIGTERM/SIGINT handler, so a catchable stop of the interactive TUI/headless
+    REPL reaps this process's own still-live bash groups instead of leaking them
+    to the next launch's startup sweep. The whole leak this addresses is a HARD
+    (uncatchable SIGKILL) death, which no handler can cover — but a POLITE stop
+    (cmux replace, launchd stop, Ctrl+C at the REPL) IS catchable, and reaping
+    it here makes the common case instant and precise rather than deferred.
+
+    Scoped to the interactive entry on purpose: ``exec``/``serve``/``mobile``
+    own their own SIGTERM semantics (``exec_worker.py``, ``mobile/child.py``) and
+    are dispatched before this is ever called. As a second belt, any
+    pre-existing SIGTERM/SIGINT handler is CHAINED, not clobbered — the reaper
+    runs first, then the previous handler (or the default) still fires — so this
+    can never silently swallow a signal another component was relying on.
+
+    Best-effort and idempotent: the reaper unlinks its ledger on the first call,
+    so the atexit hook, a signal, and the TUI teardown ``finally`` firing in any
+    order all converge on one reap. On Windows the reaper is a no-op, and the
+    signal registration is guarded so a platform without SIGTERM is harmless.
+    """
+    import atexit
+    import contextlib
+    import signal
+
+    from local_operator.tools.group_reaper import kill_own_groups
+
+    atexit.register(kill_own_groups)
+
+    def _chain(signum: int) -> None:
+        previous = signal.getsignal(signum)
+
+        def _handler(received_signum, frame):  # type: ignore[no-untyped-def]
+            try:
+                kill_own_groups()
+            except Exception:  # noqa: BLE001 — a handler must never raise
+                pass
+            # Chain to whatever was installed before us so the process still
+            # stops the way it otherwise would (default disposition included).
+            if callable(previous):
+                previous(received_signum, frame)
+            elif previous == signal.SIG_DFL:
+                # Restore the default and re-raise so the default action (e.g.
+                # terminate) actually happens rather than being swallowed.
+                signal.signal(received_signum, signal.SIG_DFL)
+                os.kill(os.getpid(), received_signum)
+
+        with contextlib.suppress(ValueError, OSError):
+            # ValueError: not the main thread; OSError: unsupported signal.
+            signal.signal(signum, _handler)
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        _chain(_sig)
+
+
 def main() -> int:
     # FIRST, before anything else can log. `helpers.py` used to configure the
     # root logger as an import side effect; now the entry point owns it, which
@@ -2799,6 +2856,19 @@ def main() -> int:
         # event loop from exec_mode/the server module.
         import asyncio
 
+        # Soft-death process-group reaper (tools/group_reaper.py). Installed
+        # ONLY on the interactive TUI + headless REPL entry — the two paths that
+        # spawn bash tool groups and tear down in this process. A catchable stop
+        # (the polite cmux stop, a launchd stop, a clean quit, or an unexpected
+        # exit) then kills this process's own still-live bash groups precisely
+        # and instantly instead of leaving them for the next launch's sweep.
+        # Deliberately NOT installed for `exec`/`serve`/`mobile`: those own their
+        # own SIGTERM lifecycle (exec_worker.py, mobile/child.py) and must keep
+        # it — `_install_group_reaper_soft_death` chains any pre-existing handler
+        # rather than clobbering it, but scoping to here keeps the concern where
+        # the groups are actually created.
+        _install_group_reaper_soft_death()
+
         if use_tui and run_tui is not None:
             tui_config = config_manager.get_config_value("tui", None)
             theme_name = tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
@@ -2904,6 +2974,16 @@ def main() -> int:
                 try:
                     tui_auth_store.close()
                 except Exception:  # noqa: BLE001 — closing on teardown, never fatal
+                    pass
+                # Reap this process's own bash groups on TUI teardown — a clean
+                # quit, an exception exit, or after run_tui returns. Idempotent
+                # with the atexit/signal hooks (the ledger is unlinked on the
+                # first call). See _install_group_reaper_soft_death.
+                try:
+                    from local_operator.tools.group_reaper import kill_own_groups
+
+                    kill_own_groups()
+                except Exception:  # noqa: BLE001 — teardown, never fatal
                     pass
 
         return asyncio.run(

@@ -1,0 +1,579 @@
+"""Reap orphaned process groups whose owning ``lop`` process died hard.
+
+Every shell command the bash tool runs is spawned ``start_new_session=True``
+(`builtin.py`), so each command becomes its own session + process group, and
+``execute_bash`` kills that group on every in-process stop path via
+``_kill()`` -> ``os.killpg(...)``. Those paths — foreground timeout, real
+abort, steering-detach, background-job cleanup, the final reap after a normal
+exit — are complete and correct for any death the owning process is alive to
+observe.
+
+The one leak they cannot cover is a **HARD death of the owning ``lop``
+process**: a SIGKILL when cmux replaces a session, an OOM kill, a crash. No
+in-process code runs, so ``_kill()`` never fires. Because ``start_new_session``
+already detached the group from the controlling terminal, the group receives no
+SIGHUP either; it reparents to launchd/init (pid 1) and runs forever. This was
+observed in the wild as a ``pyright`` group still alive ten hours after its
+owner died.
+
+This module closes that hole the same way :mod:`local_operator.session.retention`
+closes the analogous "hard-killed session left an empty directory behind" hole
+one level up: a liveness marker written at spawn, swept at the next startup, and
+reaped **only when the OWNER is provably dead**.
+
+The whole point — the invariant every line here defends — is in
+:mod:`retention` too, and it is worth restating because a mistake here KILLS a
+process rather than removing an empty directory:
+
+    Reap ONLY genuine waste; NEVER a legitimate long-running command whose
+    owning session is still alive.
+
+A ten-hour ML trainer and a ten-hour stuck ``pyright`` are **identical** by
+runtime, CPU%, and idle time, so those signals are BANNED as inputs to the
+decision (see the ``ts`` field, which is diagnostics-only and which no branch in
+this module may read). The one reliable signal is **owner liveness**: a group is
+waste iff the ``lop`` process that spawned it is dead. That check delegates to
+:func:`retention._process_alive` verbatim — the liveness probe is shared truth,
+and a second copy could drift from the one retention already trusts.
+
+Deliberately NOT folded into :mod:`retention`: retention's contract is "never
+delete a transcript"; this module's contract is "kill a process group". Merging
+a killer into the never-delete module would blur the single guarantee that file
+exists to make. This module imports ``_process_alive`` from retention and
+nothing else.
+
+POSIX-only by nature. The leak is POSIX-specific (``start_new_session``
+orphaning); ``os.killpg`` / ``os.getpgid`` do not exist on Windows, and
+``_process_alive`` cannot probe there, so every entry point early-returns a
+no-op on win32 and nothing is ever registered or reaped.
+
+Out of scope, on purpose: ``exec_mode --background`` workers. Those spawn
+``python -m local_operator.exec_worker`` as a SEPARATE detached process (not via
+``execute_bash``), so they never get a ledger line — and they should not: they
+are deliberate fire-and-forget workers with their own SIGTERM lifecycle and
+their own log file. AsyncJobManager-owned background bash jobs, by contrast, DO
+go through ``execute_bash`` and so are registered like any command, keyed by the
+same owner (the ``lop`` process); they are reaped only when that owner dies,
+which is exactly correct — a detached background job outliving its owner is
+waste, because the sink its output and completion were destined for died with
+the owner.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from local_operator.session.retention import _process_alive
+
+logger = logging.getLogger(__name__)
+
+#: Directory under the config dir holding the per-owner ledgers. 0700 like the
+#: rest of the config dir's private state; created lazily on first register.
+PROC_GROUPS_DIRNAME = "proc-groups"
+
+#: This module's view of the platform, a module-local copy for the same reason
+#: retention keeps one (``_PLATFORM``): a test steers the Windows branch by
+#: patching THIS name rather than the global ``sys.platform``, which would tell
+#: every other thread in the process it is on Windows for the duration — and
+#: this suite runs with threads.
+_PLATFORM = sys.platform
+
+#: Whether this platform can spawn/kill process groups at all. ``os.killpg`` and
+#: ``os.getpgid`` are POSIX-only, and ``_process_alive`` cannot probe on
+#: Windows, so the whole mechanism no-ops there (mirrors retention's
+#: ``_LIVENESS_IS_VERIFIABLE``). Named rather than inlined so every entry point
+#: reads the same decision.
+_REAPING_IS_SUPPORTED = _PLATFORM != "win32"
+
+#: First N chars of the command, stored for the LOG LINE only. Never a decision
+#: input. Bounded so a pathological one-line command cannot bloat the ledger.
+_CMD_LOG_CHARS = 120
+
+
+@dataclass(frozen=True)
+class ReaperSweepResult:
+    """What one hard-death sweep did.
+
+    Returned rather than only logged so a test (and a future benchmark) can
+    assert the outcome without scraping log output, exactly as retention's
+    ``SweepResult`` is used.
+    """
+
+    scanned_ledgers: int = 0
+    reaped_groups: int = 0
+    skipped_live_owners: int = 0
+    errors: int = 0
+
+
+def _owner_start_token(pid: int) -> str | None:
+    """The opaque process-start token for ``pid``, or ``None`` if unreadable.
+
+    ``ps -o lstart=`` prints a process's start time in a fixed, locale-stable
+    form under ``LC_ALL=C`` (verified identical on macOS and Linux, e.g.
+    ``Wed Aug 26 11:38:17 2026``). It needs no ``/proc`` (macOS has none) and no
+    psutil (not installed), which is why it is used here instead of a
+    platform-specific probe.
+
+    The token is treated as **opaque**: stored and compared as a raw string,
+    NEVER parsed into a datetime. That is a safety property, not laziness — a
+    locale quirk or a ``ps`` format surprise can then only make two tokens
+    *differ* (which errs toward NOT reaping, the safe direction), never make two
+    genuinely-different processes' tokens falsely *match* (which could reap a
+    live victim).
+
+    Returns ``None`` when the pid is gone or ``ps`` fails for any reason; every
+    caller treats ``None`` as "cannot establish identity" and refuses to reap.
+    """
+    if pid <= 0:
+        return None
+    try:
+        # LC_ALL=C pins the month/day names so the token is byte-stable across
+        # machines and users; text mode + explicit decode keeps it a str.
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+            check=False,
+        )
+    except (OSError, ValueError) as exc:  # ps missing, or bad argv
+        logger.debug("group reaper: ps lstart failed for pid %s: %s", pid, exc)
+        return None
+    if completed.returncode != 0:
+        # Non-zero almost always means "no such process" — the pid is gone.
+        return None
+    token = completed.stdout.strip()
+    return token or None
+
+
+def _ledger_path(config_dir: Path, owner_pid: int, owner_start: str) -> Path:
+    """Path to the ledger for the owner identified by ``(pid, start)``.
+
+    One file per OWNER (the ``lop`` process), keyed by its two-factor identity
+    so the soft-death handler and the sweep can both answer "which groups belong
+    to owner P?" with a single stat, and a dead owner's whole ledger can be
+    removed in one unlink after its groups are handled. The start token is
+    sanitised into the filename (spaces/colons -> ``-``) so it is a legal,
+    single-path-segment name on every filesystem while staying unique per owner.
+    """
+    safe_start = "".join(c if c.isalnum() else "-" for c in owner_start)
+    return config_dir / PROC_GROUPS_DIRNAME / f"{owner_pid}-{safe_start}.jsonl"
+
+
+def _resolve_config_dir(config_dir: Path | None) -> Path | None:
+    """Resolve the config dir, ``None`` when the helper itself fails.
+
+    ``config_dir=None`` means "ask :func:`paths.config_dir`", imported lazily so
+    this module stays import-light and so a test that patched the env var is
+    honoured on every call (the helper re-reads it each time).
+    """
+    if config_dir is not None:
+        return config_dir
+    try:
+        from local_operator.paths import config_dir as app_config_dir
+
+        return app_config_dir()
+    except Exception as exc:  # noqa: BLE001 — best-effort; never break a command
+        logger.debug("group reaper: cannot resolve config dir: %s", exc)
+        return None
+
+
+def register_group(
+    pgid: int,
+    cmd: str,
+    *,
+    config_dir: Path | None = None,
+    owner_pid: int | None = None,
+) -> None:
+    """Append this group to the owner's ledger. Best-effort; never raises.
+
+    Called at spawn, immediately after the pgid is known. Records the
+    two-factor OWNER identity (this ``lop`` process's pid + start token) that
+    the reap gate keys on, and the group leader's start token (the pgid-reuse
+    defence — see :func:`sweep_orphan_groups`).
+
+    Best-effort by design, exactly like ``retention.claim_session``: a marker
+    that cannot be written (disk full, permission) must NEVER stop a command
+    from running. The worst case of a missed marker is the pre-existing
+    behaviour — one leaked group on a hard owner death.
+    """
+    if not _REAPING_IS_SUPPORTED:
+        return
+    resolved = _resolve_config_dir(config_dir)
+    if resolved is None:
+        return
+    pid = os.getpid() if owner_pid is None else owner_pid
+    owner_start = _owner_start_token(pid)
+    if owner_start is None:
+        # Cannot establish our own identity -> a ledger keyed by it would be
+        # un-reapable (the sweep needs the start token to disambiguate reuse).
+        # Skip rather than write an unusable line.
+        logger.debug("group reaper: no start token for self (pid %s); skip register", pid)
+        return
+    # The leader pid IS the pgid for a group created by start_new_session; its
+    # start token is the pgid-reuse defence recorded at the one moment we know
+    # the group is genuinely ours.
+    grp_leader_start = _owner_start_token(pgid)
+    entry = {
+        "pgid": pgid,
+        "owner_pid": pid,
+        "owner_start": owner_start,
+        "grp_leader_start": grp_leader_start,
+        "cmd": cmd[:_CMD_LOG_CHARS],
+        # Diagnostics ONLY. BANNED as a decision input (§2 of the design): a
+        # stuck pyright and a live trainer are indistinguishable by age. No
+        # branch in this module may read this field.
+        "ts": _now(),
+    }
+    path = _ledger_path(resolved, pid, owner_start)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Single append write of one JSON line. A POSIX append under PIPE_BUF
+        # (this line is well under 512 bytes) is atomic, so parallel bash calls
+        # from the same owner interleave cleanly at line boundaries without
+        # rewriting the file — which is why the ledger is JSONL, not a
+        # read-modify-write document.
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except OSError as exc:
+        logger.debug("group reaper: cannot register pgid %s: %s", pgid, exc)
+
+
+def unregister_group(
+    pgid: int,
+    *,
+    config_dir: Path | None = None,
+    owner_pid: int | None = None,
+) -> None:
+    """Drop one pgid from THIS owner's ledger after a clean group death.
+
+    Called on the normal-exit reap and the detached-job cleanup once the group
+    is confirmed dead. Keeps a long host session's ledger from growing without
+    bound and means a clean run leaves nothing for the sweep to consider.
+
+    Best-effort: a missed unregister is harmless — the group is already dead, so
+    both the soft-death and sweep paths find the leader gone and simply drop the
+    line without killing anything.
+    """
+    if not _REAPING_IS_SUPPORTED:
+        return
+    resolved = _resolve_config_dir(config_dir)
+    if resolved is None:
+        return
+    pid = os.getpid() if owner_pid is None else owner_pid
+    owner_start = _owner_start_token(pid)
+    if owner_start is None:
+        return
+    path = _ledger_path(resolved, pid, owner_start)
+    _rewrite_without_pgid(path, pgid)
+
+
+def _rewrite_without_pgid(path: Path, pgid: int) -> None:
+    """Rewrite ``path`` keeping every line whose ``pgid`` differs. Best-effort.
+
+    Reads the whole ledger, filters the one pgid, and writes it back. Torn or
+    unparseable lines are KEPT verbatim (never silently dropped by a filter that
+    could not read them) so a concurrent append that is still mid-write is not
+    lost. If nothing remains, the file is unlinked so the owner's ledger
+    disappears once its last group is accounted for.
+    """
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.debug("group reaper: cannot read ledger %s: %s", path, exc)
+        return
+    kept: list[str] = []
+    for line in raw_lines:
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            # Unparseable (possibly a torn concurrent append): keep it, since
+            # dropping a line we could not read would lose a sibling's group.
+            kept.append(line)
+            continue
+        if isinstance(obj, dict) and obj.get("pgid") == pgid:
+            continue
+        kept.append(line)
+    try:
+        if kept:
+            path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug("group reaper: cannot rewrite ledger %s: %s", path, exc)
+
+
+def kill_own_groups(
+    *,
+    config_dir: Path | None = None,
+    owner_pid: int | None = None,
+) -> None:
+    """SOFT-DEATH path: reap every still-live group THIS owner registered.
+
+    Wired at the TUI/headless entry via ``atexit`` + a SIGTERM/SIGINT handler +
+    the teardown ``finally``, so a catchable stop (the polite cmux stop, a
+    launchd stop, a clean quit) reaps this process's groups precisely and
+    instantly instead of waiting for the next process's startup sweep.
+
+    **Scope guarantee**: this reads ONLY the current process's own ledger
+    (``<config_dir>/proc-groups/<self_pid>-<self_start>.jsonl``). It never scans
+    another owner's ledger, so a sibling ``lop``'s live groups are untouchable by
+    construction — this can only ever kill groups THIS process spawned.
+
+    Idempotent: a second call finds the ledger already unlinked and does
+    nothing; a ``killpg`` on an already-dead group raises ``ProcessLookupError``,
+    which is suppressed. POSIX only.
+    """
+    if not _REAPING_IS_SUPPORTED:
+        return
+    resolved = _resolve_config_dir(config_dir)
+    if resolved is None:
+        return
+    pid = os.getpid() if owner_pid is None else owner_pid
+    owner_start = _owner_start_token(pid)
+    if owner_start is None:
+        return
+    path = _ledger_path(resolved, pid, owner_start)
+    try:
+        entries = _read_ledger(path)
+    except OSError:
+        return
+    for entry in entries:
+        # This IS our own ledger, so the owner check is moot — but the
+        # pgid-reuse (victim) gate still applies: between a group's death and
+        # this call the pgid may have been recycled onto an unrelated live
+        # group, and killing that would murder an innocent. Same guard as the
+        # sweep.
+        _reap_if_still_ours(entry)
+    # Drop the whole ledger: this process is going away, so nothing more will be
+    # appended to it, and everything in it has now been handled.
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def sweep_orphan_groups(
+    config_dir: Path,
+    *,
+    self_pid: int | None = None,
+) -> ReaperSweepResult:
+    """HARD-DEATH path: reap groups whose owning ``lop`` process is provably dead.
+
+    Runs at startup beside the retention sweep, off-loop, best-effort. Scans
+    every owner's ledger under ``proc-groups/``; for each whose owner is dead
+    (two-factor identity, below), kills every still-live registered group whose
+    leader identity still matches, then unlinks the ledger. A LIVE owner's
+    ledger is never touched — that is the live-trainer guarantee.
+
+    OWNER identity is two-factor (``owner_pid`` + ``owner_start``), because a
+    bare pid is forgeable: after the OS recycles a dead ``lop``'s pid onto an
+    unrelated live process, a bare-pid probe reads "alive" and the sweep would
+    refuse to reap a genuinely-orphaned group forever. The truth table:
+
+        _process_alive(owner_pid) | start token | verdict
+        --------------------------|-------------|--------------------------------
+        False (pid gone)          | —           | owner dead        -> reap
+        True                      | matches     | owner ALIVE       -> NEVER reap
+        True                      | differs     | pid recycled/dead -> reap
+        True                      | unreadable  | ambiguous         -> NEVER reap
+
+    Every ambiguous cell resolves to NOT reaping.
+
+    POSIX only; on Windows returns an empty result and reaps nothing (mirrors
+    retention). Best-effort: a scan error is counted and swallowed so a sweep
+    failure never blocks session start.
+    """
+    result = ReaperSweepResult()
+    if not _REAPING_IS_SUPPORTED:
+        return result
+    me = os.getpid() if self_pid is None else self_pid
+    groups_dir = config_dir / PROC_GROUPS_DIRNAME
+    try:
+        ledgers = sorted(groups_dir.glob("*.jsonl"))
+    except OSError as exc:
+        logger.debug("group reaper: cannot list %s: %s", groups_dir, exc)
+        return result
+    scanned = 0
+    reaped = 0
+    skipped_live = 0
+    errors = 0
+    for ledger in ledgers:
+        scanned += 1
+        try:
+            entries = _read_ledger(ledger)
+        except OSError as exc:
+            # A wholly-unreadable ledger is left in place (err toward keeping
+            # evidence), never blindly unlinked.
+            logger.debug("group reaper: cannot read ledger %s: %s", ledger, exc)
+            errors += 1
+            continue
+        if not entries:
+            # Empty or all-torn ledger with nothing actionable: remove the shell
+            # so the directory does not accumulate husks. Safe — no pgid to act
+            # on.
+            _safe_unlink(ledger)
+            continue
+        # Owner identity is taken from the FILE's first readable entry: every
+        # line in one ledger shares the same owner by construction (it is keyed
+        # by owner). If the owner is our own live pid, this is a sibling-safe
+        # skip — but that only happens if a stale ledger from a PRIOR process
+        # reused our pid, which the start-token check below still resolves
+        # correctly.
+        owner_pid = entries[0].get("owner_pid")
+        owner_start = entries[0].get("owner_start")
+        if not isinstance(owner_pid, int) or not isinstance(owner_start, str):
+            errors += 1
+            continue
+        if owner_pid == me:
+            # Never reap groups attributed to the sweeping process itself; the
+            # soft-death path owns those.
+            skipped_live += 1
+            continue
+        verdict = _owner_is_dead(owner_pid, owner_start)
+        if verdict is None:
+            # Ambiguous (pid alive, token unreadable) -> never reap.
+            skipped_live += 1
+            continue
+        if not verdict:
+            # Owner alive, token matches -> the live-trainer case. Leave the
+            # ledger entirely untouched; it belongs to a running session.
+            skipped_live += 1
+            continue
+        # Owner is provably dead: reap each still-ours group, then drop the
+        # ledger.
+        for entry in entries:
+            if _reap_if_still_ours(entry):
+                reaped += 1
+        _safe_unlink(ledger)
+    return ReaperSweepResult(
+        scanned_ledgers=scanned,
+        reaped_groups=reaped,
+        skipped_live_owners=skipped_live,
+        errors=errors,
+    )
+
+
+def _owner_is_dead(owner_pid: int, owner_start: str) -> bool | None:
+    """Is the ledger's owner provably dead? ``None`` when it cannot be decided.
+
+    Implements the owner-side truth table. Returns ``True`` (reap) only when the
+    pid is gone OR the pid is alive but its start token differs (pid recycled
+    onto a different process). Returns ``False`` (never reap) when the original
+    owner is provably still alive. Returns ``None`` (never reap, ambiguous) when
+    the pid is alive but its current start token is unreadable.
+    """
+    if not _process_alive(owner_pid):
+        return True  # pid gone -> owner dead -> reap
+    current = _owner_start_token(owner_pid)
+    if current is None:
+        return None  # alive but unreadable -> ambiguous -> never reap
+    if current != owner_start:
+        return True  # pid recycled onto a different process -> owner dead -> reap
+    return False  # same pid, same start -> original owner ALIVE -> never reap
+
+
+def _reap_if_still_ours(entry: dict[str, object]) -> bool:
+    """killpg one registered group, but ONLY if it is still genuinely ours.
+
+    The pgid-reuse (victim) gate: even with a dead owner, the pgid itself may
+    have been recycled by the OS onto an unrelated live group between the
+    owner's death and now. Killing a recycled pgid would murder an innocent
+    process. Defence uses the group-leader start token recorded at spawn (the
+    leader pid == the pgid):
+
+        still_ours = _process_alive(pgid) and
+                     _owner_start_token(pgid) == grp_leader_start
+
+    - leader gone            -> the group already died; drop, no kill.
+    - leader alive, differs  -> pgid recycled onto a new leader; drop, no kill.
+    - leader alive, matches  -> genuinely our orphaned group; killpg.
+
+    Returns ``True`` only when a live, still-ours group was actually signalled.
+    """
+    pgid = entry.get("pgid")
+    if not isinstance(pgid, int) or pgid <= 0:
+        return False
+    grp_leader_start = entry.get("grp_leader_start")
+    if not _process_alive(pgid):
+        return False  # leader gone: group already dead, nothing to kill
+    current_leader = _owner_start_token(pgid)
+    if current_leader is None:
+        # Alive but the leader's identity is unreadable -> ambiguous -> do NOT
+        # kill (err toward not killing an innocent).
+        return False
+    if current_leader != grp_leader_start:
+        # pgid recycled onto a different leader -> the original group is gone,
+        # this is an innocent live group. Do NOT kill.
+        return False
+    try:
+        os.killpg(pgid, _sigkill())
+    except ProcessLookupError:
+        # Died between the liveness check and the kill: idempotent, fine.
+        return False
+    except OSError as exc:
+        logger.debug("group reaper: killpg %s failed: %s", pgid, exc)
+        return False
+    logger.info(
+        "group reaper: reaped orphaned group pgid=%s cmd=%r",
+        pgid,
+        entry.get("cmd", ""),
+    )
+    return True
+
+
+def _read_ledger(path: Path) -> list[dict[str, object]]:
+    """Parse a ledger into a list of entry dicts, skipping torn/corrupt lines.
+
+    A torn final line (a concurrent append still mid-write) or any otherwise
+    unparseable line is SKIPPED, not fatal — the same posture retention takes
+    with a bad claim marker. Raises ``OSError`` only when the file itself cannot
+    be read (a missing file is not an error: returns ``[]``).
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    entries: list[dict[str, object]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue  # torn or corrupt line: skip, keep processing the rest
+        if isinstance(obj, dict):
+            entries.append(obj)
+    return entries
+
+
+def _safe_unlink(path: Path) -> None:
+    """Unlink ``path`` tolerating a concurrent sweep that already removed it."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug("group reaper: cannot unlink ledger %s: %s", path, exc)
+
+
+def _sigkill() -> int:
+    """``signal.SIGKILL``, imported lazily to keep this module import-light."""
+    import signal
+
+    return signal.SIGKILL
+
+
+def _now() -> float:
+    """Wall clock for the diagnostics-only ``ts`` field. Never a decision input."""
+    import time
+
+    return time.time()

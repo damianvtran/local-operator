@@ -98,6 +98,7 @@ from local_operator.imaging import (
     bound_image_for_model,
 )
 from local_operator.media import ImageInfo, sniff_image_file
+from local_operator.tools import group_reaper
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -1254,6 +1255,32 @@ async def execute_bash(
         start_new_session=True,
     )
 
+    # Record this group in the owner's process-group ledger so a HARD death of
+    # THIS lop process (SIGKILL from cmux, OOM, crash) — the one stop path with
+    # no in-process code to run _kill() — can still be reaped at the next
+    # startup. start_new_session already detached the group from the terminal,
+    # so a hard-dead owner would otherwise leak it to init forever. Best-effort
+    # and owner-liveness-only by construction: the group is reaped iff THIS
+    # process is dead, never by runtime/CPU/idle, so a legit long-runner (a 10h
+    # trainer) is safe while its session lives. See tools/group_reaper.py.
+    # suppress(Exception): os.getpgid is POSIX-only (absent on Windows), and
+    # registration must never be the reason a command fails to run. The pgid is
+    # held so the clean-death paths below can unregister the exact line.
+    spawned_pgid: int | None = None
+    with contextlib.suppress(Exception):
+        spawned_pgid = os.getpgid(process.pid)
+        group_reaper.register_group(spawned_pgid, params.command)
+
+    def _unregister_group() -> None:
+        # Drop this group's ledger line once it is confirmed dead, so a clean
+        # run leaves nothing for the startup sweep to consider and a long host
+        # session's ledger cannot grow without bound. Best-effort; a miss is
+        # harmless (the sweep finds the leader gone and drops the line anyway).
+        if spawned_pgid is None:
+            return
+        with contextlib.suppress(Exception):
+            group_reaper.unregister_group(spawned_pgid)
+
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
     # Set once the command is owned by a background job, so the pipe readers
@@ -1410,6 +1437,8 @@ async def execute_bash(
                 transport = getattr(process, "_transport", None)
                 if transport is not None:
                     transport.close()
+                # Clean group death: drop its ledger line (see _unregister_group).
+                _unregister_group()
 
             try:
                 while not bg_wait.done():
@@ -1607,6 +1636,8 @@ async def execute_bash(
     transport = getattr(process, "_transport", None)
     if transport is not None:
         transport.close()
+    # Normal-exit reap complete: the group is dead, so drop its ledger line.
+    _unregister_group()
 
     if abort_waiter is not None and not abort_waiter.done():
         abort_waiter.cancel()
