@@ -1,0 +1,12 @@
+icons/icon-128.png
+icons/icon-16.png
+icons/icon-32.png
+icons/icon-48.png
+manifest.json
+options/options.css
+options/options.html
+options/options.js
+popup/popup.css
+popup/popup.html
+popup/popup.js
+worker.js

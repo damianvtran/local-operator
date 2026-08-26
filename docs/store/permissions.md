@@ -119,7 +119,7 @@ For every category selected, declare:
 
 Include these in the dashboard's reviewer-instructions field if offered:
 
-> This extension requires the free Local Operator desktop/CLI app on the same computer. Start its browser bridge with `lop browser install`, then run `lop browser pair`; enter the displayed six-digit code in the extension popup. The extension connects only to `127.0.0.1` (default port 4099). Ask Local Operator to open an HTTP(S) URL. The extension will create one dedicated tab and prompt before entering an unapproved site. Choose Allow once. Chrome's debugger notice will appear while the extension drives that tab. Suggested review actions: open, read, snapshot, click, type, and screenshot. Contact [ASSUMPTION: insert monitored review-support email] if the review environment cannot complete pairing.
+> This extension requires the free Local Operator desktop/CLI app on the same computer. Start its browser bridge with `lop browser install`, then run `lop browser pair`; enter the displayed six-digit code in the extension popup. The extension connects only to `127.0.0.1` (default port 4099). Ask Local Operator to open an HTTP(S) URL. The extension will create one dedicated tab and prompt before entering an unapproved site. Choose Allow once. Chrome's debugger notice will appear while the extension drives that tab. Suggested review actions: open, read, snapshot, click, type, and screenshot. Contact damian@radienthq.com if the review environment cannot complete pairing.
 
 **Assumption:** final CLI commands and default port come from the approved
 design. Confirm them against the shipped build before pasting.
