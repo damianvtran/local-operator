@@ -36,11 +36,13 @@ from local_operator.harness.types import (
     ToolResult,
     Usage,
 )
+from local_operator.session import session as session_module
 from local_operator.session.session import (
     SUBAGENT_ROSTER_CUSTOM_TYPE,
     SUBAGENT_ROSTER_SIDECAR,
     TODO_SNAPSHOT_CUSTOM_TYPE,
     Session,
+    _compact_subagent_record,
 )
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import TODO_STORE, execute_todo
@@ -676,3 +678,129 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     for kept in ("id", "label", "status", "start_time"):
         assert kept in row
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_redundant_roster_events_skip_the_sidecar_write(tmp_path, monkeypatch):
+    """A roster event that does not change the persisted projection writes no
+    sidecar, but the generation watermark still advances.
+
+    The persist hook fires on every job-row mutation, most of which (usage,
+    heartbeat) leave the durable {version, jobs, records} projection identical.
+    Each write is a full fsync + os.replace + directory-fsync; firing one per
+    identical event is the disk-write volume that tripped the macOS throttle on
+    a long delegating session. The guard collapses those, and the watermark must
+    still advance so teardown's writer drain does not loop chasing a generation
+    the guard will always skip."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="x", prompt="p")
+    await wait_for(lambda: _status(parent, job_id) == "completed")
+
+    writes = {"n": 0}
+    real_write = session_module._write_roster_sidecar
+
+    def _counting_write(path, payload):
+        writes["n"] += 1
+        return real_write(path, payload)
+
+    monkeypatch.setattr(session_module, "_write_roster_sidecar", _counting_write)
+
+    # Flush any pending writer from the launch/settle so the counter starts from
+    # a settled baseline the guard has already fingerprinted.
+    await parent._persist_subagent_roster()
+    baseline_writes = writes["n"]
+    baseline_generation = parent._subagent_roster_written_generation
+
+    # Fire a burst of roster events that change nothing in the projection.
+    for _ in range(20):
+        parent._schedule_subagent_persist()
+    await parent._await_subagent_roster_writer()
+
+    # No redundant write happened, yet the watermark tracked every bumped
+    # generation (otherwise the writer drain would spin).
+    assert writes["n"] == baseline_writes
+    assert parent._subagent_roster_written_generation > baseline_generation
+    assert parent._subagent_roster_written_generation == parent._subagent_roster_generation
+
+    # A REAL change (a second child) must still write.
+    second = parent._launch_subagent(label="y", prompt="q")
+    await wait_for(lambda: _status(parent, second) == "completed")
+    await parent._persist_subagent_roster()
+    assert writes["n"] > baseline_writes
+
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compact_record_caps_oversized_text_but_keeps_short_and_fields():
+    """The durable record projection bounds the unbounded text tails (#308)
+    while preserving short values verbatim and every resume-critical field.
+
+    The cap is what keeps a 30 KB ``result_text`` from bloating the sidecar; the
+    verbatim short case is what keeps the roster panel's ``cancelled while
+    parked`` one-word detection and the settled-summary display intact. The
+    session_dir/outcome/job_id fields are the resume basis and must survive
+    untouched."""
+    long_record = {
+        "job_id": "job1",
+        "label": "child1",
+        "session_dir": "/sessions/child1",
+        "outcome": "completed",
+        "prompt": "p" * 10_000,
+        "result_text": "R" * 30_000,
+        "error_text": "E" * 30_000,
+        "attempt_aliases": ["old1"],
+        "paused": False,
+    }
+    compact = _compact_subagent_record(long_record)
+    cap = session_module._SUBAGENT_SUMMARY_CHARS
+    assert len(compact["result_text"]) == cap
+    assert len(compact["error_text"]) == cap
+    assert len(compact["prompt"]) == cap
+    # Resume-critical fields pass through byte-for-byte.
+    assert compact["job_id"] == "job1"
+    assert compact["session_dir"] == "/sessions/child1"
+    assert compact["outcome"] == "completed"
+    assert compact["attempt_aliases"] == ["old1"]
+
+    short_record = {
+        "job_id": "job2",
+        "session_dir": "/sessions/child2",
+        "outcome": "cancelled",
+        "result_text": "cancelled",  # the parked-cancel one-word detail
+        "error_text": None,
+    }
+    short_compact = _compact_subagent_record(short_record)
+    assert short_compact["result_text"] == "cancelled"  # verbatim, not clipped
+    assert short_compact["error_text"] is None  # None survives, not "" (a regression)
+
+
+@pytest.mark.asyncio
+async def test_capped_snapshot_round_trips_through_restore(tmp_path, monkeypatch):
+    """A capped durable snapshot restores without error and stays resumable.
+
+    Caps live only in the DURABLE projection; a restore reads those capped rows
+    and must still list every child with its session_dir intact so
+    ``hub op='resume'`` can relaunch it."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="heavy", prompt="p")
+    await wait_for(lambda: _status(parent, job_id) == "completed")
+    # Simulate a heavy settled child: a large result_text on the live record.
+    record = parent.subagent_comms._records[job_id]
+    record.result_text = "R" * 30_000
+    await parent._persist_subagent_roster()
+    await parent.dispose()
+
+    resumed = _session(tmp_path, IdleStream())
+    await resumed.async_init()
+    roster = resumed.subagent_comms.roster()
+    assert [row.job_id for row in roster] == [job_id]
+    # The restored record carries a capped-but-present result and its resume dir.
+    restored = resumed.subagent_comms.snapshot()[0]
+    assert restored["session_dir"]
+    assert 0 < len(restored["result_text"]) <= session_module._SUBAGENT_SUMMARY_CHARS
+    await resumed.dispose()

@@ -894,11 +894,12 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
 
 
 #: The ONLY ``AsyncJob`` fields the roster snapshot carries. An allowlist, not
-#: an exclude set, because the whole task-row list is re-appended on every
-#: roster move and custom entries are never reclaimed (``compact_file`` folds
-#: only the message prune journal) — so anything unbounded here is written once
-#: per surviving child per move, i.e. O(children²) bytes of superseded data on
-#: disk. The fields kept are all small and bounded: the identity, the timings
+#: an exclude set, because the roster projection must stay small: it is written
+#: to the replaced sidecar on every roster move, and a superseded copy in a
+#: legacy transcript is only reclaimed lazily (``compact_file`` now collapses
+#: superseded ``subagent_roster`` customs, but not until the next compaction) —
+#: so anything unbounded here bloats both surfaces. The fields kept are all
+#: small and bounded: the identity, the timings
 #: the panel prices elapsed from, the model/usage/window it paints, and the
 #: routing/queue flags a restore needs. Everything a reader might want beyond
 #: this — the child's full ``result_text``, its verbatim ``prompt`` (documented
@@ -994,6 +995,35 @@ def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
     finally:
         with contextlib.suppress(FileNotFoundError):
             temp.unlink()
+
+
+def _write_roster_sidecar_if_changed(
+    path: Any, payload: dict[str, Any], previous_fingerprint: str | None
+) -> tuple[str, bool]:
+    """Compute the roster fingerprint and write the sidecar only if it moved.
+
+    Runs ENTIRELY on the worker thread (dispatched via ``asyncio.to_thread``):
+    the fingerprint is an O(roster) ``json.dumps`` and #308's invariant is that
+    everything that scales leaves the event loop. Computing it on the loop made
+    a large roster pay that serialization on every roster event — the exact
+    regression ``TestMeasurementCosts`` catches. Returns ``(fingerprint, wrote)``.
+
+    The fingerprint deliberately EXCLUDES ``generation``: the counter is bumped
+    on every roster event by design (it drives the coalescing loop), so
+    including it would make every payload unique and defeat the guard. Only the
+    durable projection a resume actually reads is compared. ``sort_keys`` keeps
+    the serialization order-stable so an unchanged roster hashes identically
+    across writes.
+    """
+    fingerprint = json.dumps(
+        {key: payload[key] for key in ("version", "jobs", "records")},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if fingerprint == previous_fingerprint:
+        return fingerprint, False
+    _write_roster_sidecar(path, payload)
+    return fingerprint, True
 
 
 def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
@@ -1454,6 +1484,22 @@ class Session:
         self._subagent_roster_generation = 0
         self._subagent_roster_written_generation = 0
         self._subagent_roster_writer: asyncio.Task[None] | None = None
+        # The CONTENT of the roster payload last written to the sidecar, so a
+        # redundant write can be skipped. The roster persist hook fires on every
+        # job-row mutation — usage/heartbeat churn included — but most of those
+        # events leave the persisted projection ({version, jobs, records}, minus
+        # the ever-incrementing ``generation`` counter) byte-identical. A real
+        # fan-out fired ~3 sidecar writes per settle, ~2 of them identical, and
+        # each is a full mkstemp + fsync + os.replace + directory-fsync cycle;
+        # that fsync volume is what tripped the macOS "disk writes exceeding
+        # limit" throttle on a long delegating session. Mirrors the todo guard
+        # (:meth:`_maybe_persist_todos`): fingerprint the durable content and
+        # write only when it actually moved. ``None`` means nothing persisted
+        # yet, so the first event always writes. The fingerprint itself is
+        # computed ON THE WORKER THREAD by
+        # :func:`_write_roster_sidecar_if_changed` — it is an O(roster)
+        # ``json.dumps``, which must not run on the loop.
+        self._persisted_roster_fingerprint: str | None = None
         # Session-scoped task group (HC-11): wake deliveries and aside
         # persistence are routed through it so dispose() cancels them
         # deterministically and a delivery after dispose never raises into an
@@ -2017,8 +2063,8 @@ class Session:
     def model_label(self) -> str:
         return f"{self._model.provider}/{self._model.model_id}"
 
-    def _system_blocks(self) -> list[str] | Awaitable[list[str]]:
-        """Invoke the block provider with the live model label.
+    def _system_blocks(self, model: ModelSpec | None = None) -> list[str] | Awaitable[list[str]]:
+        """Invoke the block provider with one internally consistent model label.
 
         The provider gained an optional ``model_label`` argument so the env
         block can name the running model (see ``build_system_blocks``). A
@@ -2027,17 +2073,22 @@ class Session:
         probed by catching ``TypeError``, which would mask a genuine TypeError
         raised INSIDE a one-arg provider and re-invoke it) and it is called with
         no argument. The label is therefore strictly additive: no caller is
-        forced to grow a parameter it does not use.
+        forced to grow a parameter it does not use. ``model`` is supplied by the
+        loop before an async block build so that build and the request use the
+        same snapshot; other callers omit it and read the session's live model.
         """
+        model_label = (
+            f"{model.provider}/{model.model_id}" if model is not None else self.model_label
+        )
         if not self._blocks_provider_takes_label:
             return self._system_blocks_provider()
         if self._blocks_provider_arity_certain:
             # Signature was readable and takes the label: any TypeError from here
             # is a genuine bug inside the provider and must surface, not be
             # swallowed by a zero-arg retry.
-            return self._system_blocks_provider(self.model_label)
+            return self._system_blocks_provider(model_label)
         try:
-            return self._system_blocks_provider(self.model_label)
+            return self._system_blocks_provider(model_label)
         except TypeError:
             # Unreadable signature guessed one-arg and guessed wrong: this
             # provider is genuinely zero-arg. Remember it and call the
@@ -2385,9 +2436,11 @@ class Session:
     def set_goal(self, text: str) -> str:
         """Set (or clear, with an empty string) the standing objective.
 
-        Returns what was actually stored (trimmed and length-capped). The
-        goal rides the system prompt's volatile tail, so it applies from the
-        next turn and only invalidates that tail — never the cached prefix.
+        Returns what was actually stored (trimmed and length-capped). The goal
+        rides the system prompt's volatile tail, which is re-read before every
+        provider call: idle changes apply to the next turn, and mid-turn changes
+        apply to the next model step. Only that tail changes — never the cached
+        prefix or an in-flight request.
         """
         stored = self._goal_state.set(text)
         # Same tail, same fate on resume as the team/agent briefs, so the goal
@@ -4066,6 +4119,12 @@ class Session:
                 # this turn is running reaches its NEXT call instead of
                 # waiting for the turn to end (see ``set_model``).
                 get_model=lambda: self._model,
+                # The volatile tail contains the live /goal, /team and /agent
+                # instructions. Re-read it per provider step so a setting changed
+                # while a tool runs reaches the next call in THIS turn rather than
+                # waiting for another user message. The loop keeps the turn-start
+                # snapshot as a fallback if this host resolver ever fails.
+                get_system_blocks=self._system_blocks,
                 convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
@@ -6037,27 +6096,42 @@ class Session:
                 records = (
                     self._subagent_comms.snapshot() if self._subagent_comms is not None else []
                 )
+                compact_records = [_compact_subagent_record(record) for record in records]
                 payload = {
                     "version": _SUBAGENT_ROSTER_VERSION,
                     "generation": generation,
                     "jobs": rows,
-                    "records": [_compact_subagent_record(record) for record in records],
+                    "records": compact_records,
                 }
-                await asyncio.to_thread(
-                    _write_roster_sidecar,
+                # The O(roster) fingerprint computation rides the SAME worker
+                # hop as the write: #308's invariant is that everything that
+                # scales leaves the loop, and an on-loop ``json.dumps`` of a
+                # large roster is the exact regression TestMeasurementCosts
+                # catches (it fires on every roster event, teardown included).
+                fingerprint, wrote = await asyncio.to_thread(
+                    _write_roster_sidecar_if_changed,
                     self._transcript.directory / SUBAGENT_ROSTER_SIDECAR,
                     payload,
+                    self._persisted_roster_fingerprint,
                 )
-                # Keep one bounded legacy entry for readers predating v0.35.2;
-                # future mutations replace only the sidecar, avoiding quadratic
-                # history while preserving a rolling-upgrade resume path.
-                if (rows or records) and self._transcript.latest_custom(
-                    SUBAGENT_ROSTER_CUSTOM_TYPE
-                ) is None:
-                    await self._transcript.append_custom(
-                        SUBAGENT_ROSTER_CUSTOM_TYPE,
-                        {"jobs": rows, "records": payload["records"]},
-                    )
+                if wrote:
+                    # Keep one bounded legacy entry for readers predating
+                    # v0.35.2; future mutations replace only the sidecar,
+                    # avoiding quadratic history while preserving a
+                    # rolling-upgrade resume path.
+                    if (rows or records) and self._transcript.latest_custom(
+                        SUBAGENT_ROSTER_CUSTOM_TYPE
+                    ) is None:
+                        await self._transcript.append_custom(
+                            SUBAGENT_ROSTER_CUSTOM_TYPE,
+                            {"jobs": rows, "records": payload["records"]},
+                        )
+                    self._persisted_roster_fingerprint = fingerprint
+                # Advance the written-generation watermark whether or not this
+                # payload was actually flushed: the CONTENT is up to date on
+                # disk (identical bytes already there), and leaving the watermark
+                # behind would make ``_await_subagent_roster_writer`` at teardown
+                # loop forever chasing a generation the guard will always skip.
                 self._subagent_roster_written_generation = generation
         except Exception:  # noqa: BLE001 - persistence must never break a turn
             logger.warning("could not persist subagent roster", exc_info=True)

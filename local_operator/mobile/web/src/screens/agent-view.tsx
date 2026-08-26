@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { getSubagentDetail } from "../api";
+import { getSubagentDetail, getSubagentHistory } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
 import {
 	AGENT_GLYPH,
@@ -12,8 +12,31 @@ import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
 import { DetailRequestCoordinator } from "../detail-loader";
 import { cn } from "../lib/cn";
+import { formatEffort } from "../lib/format";
 import { navigate, navigateUp } from "../router";
-import type { SessionProjection, SubagentDetail, TranscriptEntry } from "../types";
+import type {
+	SessionProjection,
+	SubagentDetail,
+	SubagentRow,
+	SubagentStatus,
+	TranscriptEntry,
+} from "../types";
+
+/** The identity a stable header needs before the full detail lands. A tapped
+ * roster row already carries all of it, so the header can paint the real
+ * label/agent/effort/status immediately and let only the transcript BODY show
+ * the loading state, instead of flickering to a generic "Agent" placeholder
+ * and reflowing in a status pill after the fetch (design D1). */
+interface HeaderIdentity {
+	label: string;
+	agent: string;
+	effort: string;
+	status: SubagentStatus;
+}
+
+function identityFromRow(row: SubagentRow): HeaderIdentity {
+	return { label: row.label, agent: row.agent, effort: row.effort, status: row.status };
+}
 
 const CACHE_MAX = 24;
 const detailCache = new Map<string, SubagentDetail>();
@@ -151,17 +174,26 @@ function ConversationTail({
 
 function AgentHeader({
 	detail,
+	identity,
 	parentPath,
 	onOpenAgents,
 	agentsButtonRef,
 	fallbackSubtitle = "Loading activity",
 }: {
 	detail: SubagentDetail | null;
+	/** Known label/agent/effort/status from the tapped roster row, used to keep
+	 * the header stable while the full detail is still loading (design D1). When
+	 * a real ``detail`` is present it wins; otherwise this paints the identity
+	 * the user already saw instead of a generic placeholder. */
+	identity?: HeaderIdentity | null;
 	parentPath: string;
 	onOpenAgents?: () => void;
 	agentsButtonRef?: RefObject<HTMLButtonElement | null>;
 	fallbackSubtitle?: string;
 }) {
+	const shown: HeaderIdentity | null = detail
+		? { label: detail.label, agent: detail.agent, effort: detail.effort, status: detail.status }
+		: identity ?? null;
 	return (
 		<header className="flex min-h-[52px] items-center gap-1 border-b border-hairline bg-surface px-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 			<button
@@ -173,17 +205,22 @@ function AgentHeader({
 				‹
 			</button>
 			<div className="min-w-0 flex-1">
-				<p className="truncate text-body-sm font-medium">{detail?.label || "Agent"}</p>
+				<p className="truncate text-body-sm font-medium">{shown?.label || "Agent"}</p>
 				<p className="truncate text-meta text-ink-dim">
-					{detail ? `${detail.agent}${detail.effort ? ` · ${detail.effort}` : ""}` : fallbackSubtitle}
+					{shown
+						? `${shown.agent}${shown.effort ? ` · ${formatEffort(shown.effort)}` : ""}`
+						: fallbackSubtitle}
 				</p>
 			</div>
-			{detail ? (
-				<span className={cn("max-w-20 shrink truncate text-meta", agentStatusClass(detail.status))}>
-					<span aria-hidden className="font-mono">{AGENT_GLYPH[detail.status]}</span>{" "}
-					{detail.status}
+			{shown ? (
+				<span className={cn("max-w-20 shrink truncate text-meta", agentStatusClass(shown.status))}>
+					<span aria-hidden className="font-mono">{AGENT_GLYPH[shown.status]}</span>{" "}
+					{shown.status}
 				</span>
 			) : null}
+			{/* The Agents navigator needs the full detail (path/peers/children), so
+			   it only appears once detail lands — the identity-only header still
+			   keeps its label/status stable in the meantime. */}
 			{detail && onOpenAgents ? (
 				<button
 					ref={agentsButtonRef}
@@ -230,20 +267,219 @@ export function AgentUnavailable({
 	);
 }
 
-export function AgentLoading({ sessionId, connected }: { sessionId: string; connected: boolean }) {
+export function AgentLoading({
+	sessionId,
+	connected,
+	identity = null,
+	parentPath,
+}: {
+	sessionId: string;
+	connected: boolean;
+	identity?: HeaderIdentity | null;
+	parentPath?: string;
+}) {
 	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
 	return (
 		<>
-			<AgentHeader detail={null} parentPath={rootPath} />
+			<AgentHeader detail={null} identity={identity} parentPath={parentPath ?? rootPath} />
 			<InlineState>
-				<p className="text-body-sm text-ink-dim">{connected ? "Loading agent activity…" : "Connecting to saved agent activity…"}</p>
-				<div aria-hidden className="mt-2 flex flex-col gap-3">
-					<span className="h-4 w-3/4 rounded-sm bg-sunken" />
-					<span className="h-4 w-full rounded-sm bg-sunken" />
-					<span className="h-4 w-2/3 rounded-sm bg-sunken" />
-				</div>
+				<TranscriptLoading connected={connected} />
 			</InlineState>
 		</>
+	);
+}
+
+/** The body-level "loading transcript" affordance, shared by the full-screen
+ * detail load and the open→transcript gap after detail lands (U2). The bars use
+ * ``bg-elevated`` rather than ``bg-sunken`` because sunken sits at ~1.3:1
+ * against the page and all but vanishes in a still or under phone glare (design
+ * D2); elevated lifts them a clear step while the shimmer still animates on top.
+ * A visible ``lo-spinner`` accompanies the label so the state reads as "loading"
+ * even with motion disabled and even before the shimmer registers. */
+function TranscriptLoading({ connected }: { connected: boolean }) {
+	return (
+		<>
+			<div className="flex items-center gap-2" role="status">
+				<span aria-hidden className="lo-spinner h-4 w-4 rounded-full" />
+				<p className="text-body-sm text-ink-dim">
+					{connected ? "Loading agent activity…" : "Connecting to saved agent activity…"}
+				</p>
+			</div>
+			<div aria-hidden className="mt-2 flex flex-col gap-3">
+				<span className="lo-shimmer-bar h-4 w-3/4 rounded-sm bg-elevated" />
+				<span className="lo-shimmer-bar h-4 w-full rounded-sm bg-elevated" />
+				<span className="lo-shimmer-bar h-4 w-2/3 rounded-sm bg-elevated" />
+			</div>
+		</>
+	);
+}
+
+/** The tail of a child transcript the sheet paints without scrolling. Matches
+ * the daemon's PROJECTION_TRANSCRIPT_LIMIT so the initial fetch is the same
+ * window the projection used to inline, before it was removed from the wire. */
+const SUBAGENT_TRANSCRIPT_TAIL = 80;
+/** How often an OPEN sheet for a still-running child re-pulls its transcript.
+ * The list projection keeps status/progress/todos live over SSE with no poll;
+ * only the full transcript is fetched, and only while the child is running and
+ * its sheet is on screen. 1.5s is frequent enough to read as real-time without
+ * turning one open sheet into a tight request loop against the child's file. */
+const SUBAGENT_TRANSCRIPT_POLL_MS = 1500;
+
+/** Lazily hydrate a child's transcript for the open sheet.
+ *
+ * Subagent transcripts are no longer carried in the projection wire (they blew
+ * past the daemon's 1 MB control-frame cap and wedged real-time updates for the
+ * whole session — see ``ProjectionFold.set_subagent_hydrated_details``). So when
+ * a modern daemon sends an empty ``detail.transcript``, the sheet fetches the
+ * newest page from the lineage-checked history endpoint instead, and — while the
+ * child is still running — re-fetches on a modest interval so the open sheet
+ * stays live. A legacy daemon that still inlines ``detail.transcript`` is honored
+ * as-is (no fetch), which also keeps the component's unit tests transcript-driven.
+ *
+ * Older pages are still paged in by ``<Transcript>`` itself via the same
+ * endpoint as the user scrolls up; this hook only owns the newest tail.
+ */
+/** Cheap equality for two transcript tails: same length and, per row, same id
+ * and same text length. A streaming assistant row grows its text, so comparing
+ * text length (not full text) catches live growth without an O(chars) compare,
+ * while a settled poll that returns the identical page short-circuits the
+ * setState and preserves array identity (U3). */
+function sameTail(a: TranscriptEntry[], b: TranscriptEntry[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].id !== b[i].id || a[i].text.length !== b[i].text.length) return false;
+	}
+	return true;
+}
+
+interface LazyTranscript {
+	entries: TranscriptEntry[];
+	/** A fetch is in flight and nothing has landed yet: the body shows its
+	 * loading affordance instead of a blank window (U2). */
+	loading: boolean;
+	/** The (single, for a settled child) fetch failed and no entries are shown:
+	 * the body must surface an error + retry rather than a silent blank (U1). */
+	failed: boolean;
+	/** Imperative re-pull for the retry affordance. */
+	retry: () => void;
+}
+
+function useLazySubagentTranscript(
+	sessionId: string,
+	jobId: string,
+	detail: SubagentDetail,
+	connected: boolean,
+): LazyTranscript {
+	// A daemon that still inlines the transcript wins outright: never fetch. This
+	// gates the fetch effect below (in its dep list) so legacy payloads render
+	// straight from the wire with no network round trip.
+	const inlined = detail.transcript.length > 0;
+	const [fetched, setFetched] = useState<TranscriptEntry[]>([]);
+	const [loading, setLoading] = useState(!inlined);
+	const [failed, setFailed] = useState(false);
+	// A monotonic nonce the retry button bumps to force the fetch effect to
+	// re-run even when nothing else in its dep list changed (a settled child on
+	// the same connection). Mirrors the detail loader's explicit retry signal.
+	const [attempt, setAttempt] = useState(0);
+	const running = detail.status === "running";
+	useEffect(() => {
+		// Reset when the addressed child changes so a stale page never flashes
+		// under a newly-opened sibling before its own fetch lands.
+		setFetched([]);
+		setLoading(true);
+		setFailed(false);
+	}, [sessionId, jobId]);
+	useEffect(() => {
+		if (inlined) return;
+		let alive = true;
+		let controller: AbortController | null = null;
+		const pull = async () => {
+			controller?.abort();
+			controller = new AbortController();
+			try {
+				const { entries } = await getSubagentHistory(
+					sessionId,
+					jobId,
+					null,
+					SUBAGENT_TRANSCRIPT_TAIL,
+					controller.signal,
+				);
+				if (alive) {
+					// Keep the previous array identity when a poll tick returns the
+					// same tail (id + text length unchanged), so a long-running
+					// child does not re-diff/re-render the whole window every
+					// 1.5s for no visible change (U3). A genuine growth or edit
+					// still swaps in the fresh array.
+					setFetched((prev) => (sameTail(prev, entries) ? prev : entries));
+					setLoading(false);
+					setFailed(false);
+				}
+			} catch (err) {
+				/* An aborted request is a teardown/replacement, not a failure:
+				   the successor pull owns the state. A real drop for a RUNNING
+				   child self-heals on the next poll tick, so it only reflects as
+				   loading; for a SETTLED child there is no poll, so the single
+				   dropped fetch is terminal and must surface a retry (U1). */
+				if (!alive || (err instanceof DOMException && err.name === "AbortError")) return;
+				setLoading(false);
+				setFailed(true);
+			}
+		};
+		void pull();
+		// Only an actively-running child needs the poll; a settled child's
+		// transcript is final, so one fetch suffices and the interval is skipped.
+		const timer = running
+			? window.setInterval(() => void pull(), SUBAGENT_TRANSCRIPT_POLL_MS)
+			: undefined;
+		return () => {
+			alive = false;
+			controller?.abort();
+			if (timer !== undefined) window.clearInterval(timer);
+		};
+		// ``connected`` is a dep so a restored link re-pulls a settled child that
+		// missed its one fetch while offline — the detail loader already retries
+		// on reconnect this way (U1); ``attempt`` covers the manual retry button.
+	}, [sessionId, jobId, inlined, running, connected, attempt]);
+	const retry = () => {
+		setLoading(true);
+		setFailed(false);
+		setAttempt((n) => n + 1);
+	};
+	if (inlined) {
+		return { entries: detail.transcript, loading: false, failed: false, retry };
+	}
+	return { entries: fetched, loading, failed, retry };
+}
+
+/** The body shown when a settled child's single transcript fetch failed and no
+ * entries are on screen (U1). Without this the body was a permanent blank on a
+ * transient link drop, with no signal anything failed and no way to recover
+ * short of navigating away — the exact flaky-link case this surface targets.
+ * The Outcome/todos tail still renders below via ``tailContent``; this only
+ * fills the empty transcript window with a reason and an in-place retry. */
+function TranscriptFetchError({
+	connected,
+	onRetry,
+}: {
+	connected: boolean;
+	onRetry: () => void;
+}) {
+	return (
+		<div role="alert" className="flex flex-col items-start gap-2 py-4">
+			<p className="text-body-sm font-medium text-ink">Couldn't load the transcript.</p>
+			<p className="text-meta text-ink-dim">
+				{connected
+					? "The conversation steps didn't load. Retry to pull them again."
+					: "You're offline. Reconnecting will retry automatically."}
+			</p>
+			<button
+				type="button"
+				onClick={onRetry}
+				className="min-h-11 rounded-sm border border-control px-3 text-body-sm active:bg-elevated"
+			>
+				Retry
+			</button>
+		</div>
 	);
 }
 
@@ -270,7 +506,32 @@ export function AgentConversation({
 	const parentPath = detail.parent_job_id
 		? agentPath(sessionId, detail.parent_job_id)
 		: rootPath;
-	const entries = useMemo(() => agentConversationEntries(detail), [detail]);
+	const { entries: transcript, loading, failed, retry } = useLazySubagentTranscript(
+		sessionId,
+		jobId,
+		detail,
+		connected,
+	);
+	// ``agentConversationEntries`` reads ``detail.transcript``; feed it the
+	// lazily-fetched tail when the wire no longer carries one. Identity-stable
+	// via useMemo so the transcript array only rebuilds when its inputs change.
+	const detailForRender = useMemo(
+		() => (detail.transcript.length > 0 ? detail : { ...detail, transcript }),
+		[detail, transcript],
+	);
+	const entries = useMemo(() => agentConversationEntries(detailForRender), [detailForRender]);
+	// The transcript body owns three off-happy-path states when the wire carries
+	// no entries: a fetch in flight (loading affordance, not a blank window —
+	// U2), a settled child whose one fetch failed (visible error + retry so it is
+	// recoverable in place, never a silent blank — U1), or genuinely empty. The
+	// header/outcome above stay put; only the BODY reflects these.
+	const emptyBody = failed ? (
+		<TranscriptFetchError connected={connected} onRetry={retry} />
+	) : loading ? (
+		<div className="py-4">
+			<TranscriptLoading connected={connected} />
+		</div>
+	) : null;
 	return (
 		<>
 			<AgentHeader
@@ -289,7 +550,7 @@ export function AgentConversation({
 				jobId={jobId}
 				entries={entries}
 				tailContent={<ConversationTail detail={detail} sessionId={sessionId} projection={projection} />}
-				emptyContent={null}
+				emptyContent={emptyBody}
 			/>
 			{detail.status === "running" ? (
 				<footer className="flex min-h-11 items-center justify-between border-t border-hairline bg-surface px-3 pb-[max(env(safe-area-inset-bottom),0.25rem)] text-meta">
@@ -366,7 +627,26 @@ export function AgentScreen({
 			/>
 		);
 	}
-	if (!detail) return <AgentLoading sessionId={sessionId} connected={connected} />;
+	if (!detail) {
+		/* The user tapped a roster row that already carried the label, agent,
+		   effort and status. Feed that known identity into the loading header so
+		   only the BODY shows the skeleton — the header no longer flickers to a
+		   generic "Agent" placeholder and reflows a status pill in after the
+		   fetch lands (design D1). The metadata is still on the wire in the
+		   projection roster even though the transcript is not. */
+		const summary = projection.subagents.find((row) => row.job_id === jobId);
+		const parentPath = summary?.parent_job_id
+			? agentPath(sessionId, summary.parent_job_id)
+			: `/s/${encodeURIComponent(sessionId)}`;
+		return (
+			<AgentLoading
+				sessionId={sessionId}
+				connected={connected}
+				identity={summary ? identityFromRow(summary) : null}
+				parentPath={parentPath}
+			/>
+		);
+	}
 
 	return (
 		<AgentConversation

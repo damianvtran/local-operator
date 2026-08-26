@@ -779,6 +779,29 @@ class AgentLoop:
         # say" case (see the field), handled the same as having no resolver.
         return live if live is not None else config.model
 
+    @staticmethod
+    async def _current_system_blocks(
+        context: LoopContext, config: LoopConfig, model: "ModelSpec"
+    ) -> list[str]:
+        """Resolve session-scoped prompt blocks immediately before one call.
+
+        ``context.system_blocks`` remains the compatible snapshot for hosts that
+        do not expose a live provider. Resolver failures are host bugs, but losing
+        a running turn over a status-tail refresh would be worse than sending the
+        last valid snapshot, so this mirrors :meth:`_current_model`'s fallback.
+        """
+        resolver = config.get_system_blocks
+        if resolver is None:
+            return list(context.system_blocks)
+        try:
+            live = resolver(model)
+            if inspect.isawaitable(live):
+                live = await live
+        except Exception:  # host accessor bug — never fatal to a running turn
+            logger.exception("get_system_blocks resolver failed; using the run's snapshot")
+            return list(context.system_blocks)
+        return list(live) if live is not None else list(context.system_blocks)
+
     # (``_abortable_stream`` is a module-level helper; see below the class.)
 
     async def _model_turn(
@@ -803,36 +826,6 @@ class AgentLoop:
         converted = config.convert_to_llm(shaped)
         if inspect.isawaitable(converted):
             converted = await converted
-        # Resolved after `transform_context`/`convert_to_llm`, which can
-        # await: the spec is read as late as possible so a switch made
-        # while this call was being prepared still catches it.
-        model = self._current_model(config)
-        if effort_ceiling is not None:
-            # An empty-truncation retreat is in force. The host's resolver
-            # returns ITS model (the session's `get_model` ignores the
-            # loop's `config.model` mutation entirely), so the clamp has to
-            # land on the RESOLVED spec or the retry goes back out at the
-            # exact rung that just produced silence (review F1). Applied
-            # here rather than in the resolver because the ceiling is the
-            # loop's own state, and `effort_ceiling` on the request only
-            # covers hosts that re-impose an effort override downstream.
-            ladder = model.reasoning_efforts
-            current = model.reasoning_effort
-            if (
-                current is not None
-                and effort_ceiling in ladder
-                and current in ladder
-                and ladder.index(current) > ladder.index(effort_ceiling)
-            ):
-                model = model.model_copy(update={"reasoning_effort": effort_ceiling})
-        request = ChatRequest(
-            model=model,
-            system_blocks=list(context.system_blocks),
-            messages=list(converted),
-            tools=list(context.tools),
-            effort_ceiling=effort_ceiling,
-        )
-
         assistant = Message(role="assistant")
         text_parts: list[str] = []
         tool_states: dict[int, dict[str, Any]] = {}
@@ -845,6 +838,37 @@ class AgentLoop:
         yield MessageStartEvent(message=assistant)
 
         try:
+            # Resolve every live session setting at the LAST safe point after
+            # step-start handlers have run. The model snapshot is passed INTO the
+            # async block build so its env label and the request model cannot tear
+            # across that await. If /model changes during the build, the next call
+            # sees it; this call remains internally consistent, exactly like an
+            # already-open provider stream does.
+            model = self._current_model(config)
+            system_blocks = await self._current_system_blocks(context, config, model)
+            if effort_ceiling is not None:
+                # An empty-truncation retreat is in force. The host's resolver
+                # returns ITS model, so clamp the RESOLVED spec or the retry goes
+                # back out at the rung that just produced silence. This belongs
+                # here rather than in the resolver because the ceiling is loop
+                # state, and ``effort_ceiling`` on the request only covers hosts
+                # that re-impose an override downstream.
+                ladder = model.reasoning_efforts
+                current = model.reasoning_effort
+                if (
+                    current is not None
+                    and effort_ceiling in ladder
+                    and current in ladder
+                    and ladder.index(current) > ladder.index(effort_ceiling)
+                ):
+                    model = model.model_copy(update={"reasoning_effort": effort_ceiling})
+            request = ChatRequest(
+                model=model,
+                system_blocks=system_blocks,
+                messages=list(converted),
+                tools=list(context.tools),
+                effort_ceiling=effort_ceiling,
+            )
             stream = _abortable_stream(config.stream_fn(request, signal), signal)
             async for event in stream:
                 if isinstance(event, StreamTextDelta):

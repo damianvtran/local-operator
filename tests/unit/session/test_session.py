@@ -3475,6 +3475,47 @@ def test_paired_prefix_is_not_defeated_by_a_custom_message_in_the_tail():
     ]
 
 
+class TestAChangedGoalTakesEffectAtTheNextCall:
+    """``set_goal`` reaches the running turn's next provider call."""
+
+    @pytest.mark.asyncio
+    async def test_a_goal_change_during_a_tool_reaches_the_next_call(self, tmp_path):
+        holder: dict[str, Session] = {}
+        stream = ScriptedStream(
+            [
+                [
+                    StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+        async def execute(tool_call_id, args, signal, on_update, context):
+            holder["session"].set_goal("new goal")
+            return ToolResult(
+                tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+            )
+
+        def blocks() -> list[str]:
+            session = holder.get("session")
+            return ["stable", f"goal: {session.goal if session is not None else 'old goal'}"]
+
+        tool = AgentTool(name="echo", parameters={"type": "object"}, execute=execute)
+        session = make_session(tmp_path, stream, tools=[tool], system_blocks_provider=blocks)
+        holder["session"] = session
+        session.set_goal("old goal")
+        try:
+            await session.prompt("go")
+        finally:
+            await session.dispose()
+
+        assert [request.system_blocks for request in stream.requests] == [
+            ["stable", "goal: old goal"],
+            ["stable", "goal: new goal"],
+        ]
+
+
 class TestASwitchedModelTakesEffectAtTheNextCall:
     """``set_model`` reaches the RUNNING turn's next provider call.
 
@@ -3524,6 +3565,51 @@ class TestASwitchedModelTakesEffectAtTheNextCall:
             await session.dispose()
 
         assert self._labels(stream) == ["test/m", "test/other"]
+
+    @pytest.mark.asyncio
+    async def test_async_prompt_build_and_request_share_one_model_snapshot(self, tmp_path):
+        """A switch during prompt construction applies next call, never half-call."""
+        holder: dict[str, Session] = {}
+        labels: list[str] = []
+        stream = ScriptedStream(
+            [
+                [
+                    StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+                [StreamTextDelta(delta="again"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+        async def blocks(model_label: str) -> list[str]:
+            labels.append(model_label)
+            await asyncio.sleep(0)
+            # Call 1 is the turn-start snapshot; call 3 builds the second
+            # provider step after the tool result.
+            if len(labels) == 3:
+                holder["session"].set_model(self.OTHER)
+            return [f"Model: {model_label}"]
+
+        session = make_session(
+            tmp_path,
+            stream,
+            tools=[echo_tool([])],
+            system_blocks_provider=blocks,
+        )
+        holder["session"] = session
+        try:
+            await session.prompt("go")
+            await session.prompt("again")
+        finally:
+            await session.dispose()
+
+        assert self._labels(stream) == ["test/m", "test/m", "test/other"]
+        assert [request.system_blocks for request in stream.requests] == [
+            ["Model: test/m"],
+            ["Model: test/m"],
+            ["Model: test/other"],
+        ]
 
     @pytest.mark.asyncio
     async def test_a_switch_mid_stream_never_re_targets_the_call_in_flight(self, tmp_path):

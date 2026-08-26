@@ -224,6 +224,75 @@ def test_fold_reports_the_childs_own_failure_and_its_retries() -> None:
     ]
 
 
+def test_fold_narrates_a_fallback_route_change_once() -> None:
+    events = [
+        {
+            "type": "notice",
+            "text": "provider failure — falling back to x/mini",
+            "kind": "warning",
+        },
+        {
+            "type": "model_change",
+            "provider": "x",
+            "model_id": "mini",
+            "is_fallback": True,
+        },
+    ]
+
+    entries = fold_trajectory(events, settled=False)
+
+    assert [(entry.text, entry.notice_kind) for entry in entries] == [
+        ("provider failure — falling back to x/mini", "warning")
+    ]
+
+
+def test_fold_keeps_each_notice_in_a_fallback_cascade_without_model_change_duplicates() -> None:
+    events: list[dict[str, Any]] = []
+    targets = ["x/mini", "y/medium", "z/max"]
+    for selector in targets:
+        provider, model_id = selector.split("/", 1)
+        events.extend(
+            [
+                {
+                    "type": "notice",
+                    "text": f"provider failure — falling back to {selector}",
+                    "kind": "warning",
+                },
+                {
+                    "type": "model_change",
+                    "provider": provider,
+                    "model_id": model_id,
+                    "is_fallback": True,
+                },
+            ]
+        )
+
+    entries = fold_trajectory(events, settled=False)
+
+    assert [entry.text for entry in entries] == [
+        f"provider failure — falling back to {selector}" for selector in targets
+    ]
+    assert [entry.notice_kind for entry in entries] == ["warning"] * len(targets)
+
+
+def test_fold_narrates_primary_recovery_once() -> None:
+    events = [
+        {"type": "notice", "text": "back to primary/model", "kind": "info"},
+        {
+            "type": "model_change",
+            "provider": "primary",
+            "model_id": "model",
+            "is_fallback": False,
+        },
+    ]
+
+    entries = fold_trajectory(events, settled=False)
+
+    assert [(entry.text, entry.notice_kind) for entry in entries] == [
+        ("back to primary/model", "info")
+    ]
+
+
 def test_fold_admits_that_the_engine_dropped_the_start_of_a_long_run() -> None:
     """At the retention cap the beginning of the run is GONE, and a transcript
     that hides that invites conclusions drawn from a deleted opening."""

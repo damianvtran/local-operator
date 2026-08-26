@@ -1258,6 +1258,21 @@ class LoopConfig(BaseModel):
     # resolver at all.
     get_model: Callable[[], "ModelSpec | None"] | None = Field(default=None, exclude=True)
 
+    # The system blocks to send NOW, re-read immediately before every provider
+    # call for the supplied model snapshot. A run may contain several
+    # model→tools→model steps, and session-scoped
+    # instructions such as ``/goal`` live in the volatile tail of these blocks.
+    # Keeping only the turn-start snapshot makes a goal changed while a tool is
+    # running miss the next model step and wait for another user turn. As with
+    # ``get_model``, the in-flight request is never mutated; changes land only at
+    # the safe boundary between provider calls. Supplying the model prevents the
+    # prompt's model label and the request model from tearing across an async
+    # block build. ``None`` keeps the snapshot in
+    # ``LoopContext.system_blocks`` for embedders that do not expose live blocks.
+    get_system_blocks: Callable[["ModelSpec"], Awaitable[list[str]] | list[str] | None] | None = (
+        Field(default=None, exclude=True)
+    )
+
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.
     convert_to_llm: Callable[[list[AgentMessage]], list[Message]] = Field(exclude=True)

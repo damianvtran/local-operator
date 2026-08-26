@@ -1101,6 +1101,132 @@ async def test_a_late_call_id_does_not_change_the_compose_key():
     assert len({event.tool_call_id for event in composes}) == 1
 
 
+class TestSystemBlocksAreReadAtEveryCall:
+    """Live session instructions reach the next model step of the same run."""
+
+    @staticmethod
+    def _two_call_stream() -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c1", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_goal_change_between_calls_lands_on_the_next_one(self):
+        live = [["stable", "goal: old"]]
+        stream = self._two_call_stream()
+
+        async def execute(tool_call_id, args, signal, on_update, context):
+            # The user runs /goal while this tool is in flight.
+            live[0] = ["stable", "goal: new"]
+            return ToolResult(
+                tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+            )
+
+        tool = AgentTool(name="echo", parameters={"type": "object"}, execute=execute)
+        context = LoopContext(system_blocks=["stable", "goal: old"], tools=[tool])
+        config = make_config(stream, get_system_blocks=lambda _model: live[0])
+
+        async for _ in AgentLoop().run([Message.user("go")], context, config, None):
+            pass
+
+        assert [request.system_blocks for request in stream.requests] == [
+            ["stable", "goal: old"],
+            ["stable", "goal: new"],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_async_block_resolver_is_supported(self):
+        stream = self._two_call_stream()
+        executed: list[str] = []
+        context = LoopContext(system_blocks=["snapshot"], tools=[echo_tool(executed)])
+
+        async def resolve(_model: ModelSpec) -> list[str]:
+            await asyncio.sleep(0)
+            return ["live"]
+
+        async for _ in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, get_system_blocks=resolve), None
+        ):
+            pass
+
+        assert [request.system_blocks for request in stream.requests] == [["live"], ["live"]]
+
+    @pytest.mark.asyncio
+    async def test_goal_change_on_step_start_reaches_the_not_yet_started_call(self):
+        live = [["goal: old"]]
+        stream = ScriptedStream(
+            [[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]]
+        )
+        context = LoopContext(system_blocks=["goal: old"])
+        events = AgentLoop().run(
+            [Message.user("go")],
+            context,
+            make_config(stream, get_system_blocks=lambda _model: live[0]),
+            None,
+        )
+
+        async for event in events:
+            if event.type == "turn_start":
+                live[0] = ["goal: new"]
+
+        assert stream.requests[0].system_blocks == ["goal: new"]
+
+    @pytest.mark.asyncio
+    async def test_model_is_resolved_after_an_async_block_refresh(self):
+        new = ModelSpec(provider="test", model_id="new")
+        current = [MODEL]
+        stream = ScriptedStream(
+            [[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]]
+        )
+        context = LoopContext(system_blocks=["snapshot"])
+
+        async def blocks(model: ModelSpec) -> list[str]:
+            await asyncio.sleep(0)
+            current[0] = new
+            return [f"Model: {model.model_id}"]
+
+        async for _ in AgentLoop().run(
+            [Message.user("go")],
+            context,
+            make_config(stream, get_system_blocks=blocks, get_model=lambda: current[0]),
+            None,
+        ):
+            pass
+
+        # A change DURING an async block build belongs to the next call; this
+        # request stays internally consistent instead of pairing new-model wire
+        # options with an old-model environment block.
+        assert stream.requests[0].model == MODEL
+        assert stream.requests[0].system_blocks == ["Model: m"]
+
+    @pytest.mark.asyncio
+    async def test_a_broken_block_resolver_uses_the_snapshot(self, caplog):
+        stream = self._two_call_stream()
+        executed: list[str] = []
+        context = LoopContext(system_blocks=["snapshot"], tools=[echo_tool(executed)])
+
+        def broken(_model: ModelSpec) -> list[str]:
+            raise RuntimeError("block resolver exploded")
+
+        with caplog.at_level(logging.ERROR):
+            async for _ in AgentLoop().run(
+                [Message.user("go")], context, make_config(stream, get_system_blocks=broken), None
+            ):
+                pass
+
+        assert [request.system_blocks for request in stream.requests] == [
+            ["snapshot"],
+            ["snapshot"],
+        ]
+        assert "block resolver exploded" in caplog.text
+
+
 class TestTheModelIsReadAtEveryCall:
     """A model switched mid-run reaches the run's NEXT provider call.
 

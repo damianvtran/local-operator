@@ -401,8 +401,8 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     assistant messages accumulate per message id (start resets, update appends
     the delta, end adopts the authoritative text), tool rows are keyed by
     ``tool_call_id``, and compaction/retry/notice/agent_end produce the same
-    notice wording the live transcript produces. Turn boundaries are noise at
-    this zoom and dropped.
+    notice wording the live transcript produces. Turn boundaries and effective
+    model changes are display-state noise at this zoom and dropped.
 
     ``settled`` marks the job as no longer running, and is the only way to
     tell a tool that is STILL executing from one whose end event never
@@ -522,17 +522,11 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 body += f" → falling back to {event.get('fallback_model')}"
             note(index, body, "warning")
         elif etype == "model_change":
-            # The child's route moved (fallback pinned or primary recovered).
-            # One line either way: the page is a trajectory, and which model
-            # answered from this point on is part of what happened.
-            fell = bool(event.get("is_fallback"))
-            selector = f"{event.get('provider', '')}/{event.get('model_id', '')}"
-            # Same verb pairing as the parent's notices (design D2).
-            note(
-                index,
-                (f"fell back to {selector}" if fell else f"back to {selector}"),
-                "warning" if fell else "info",
-            )
+            # Route notices narrate the edge once; this event only keeps model
+            # labels and context limits truthful elsewhere in the subagent UI.
+            # Rendering it would recreate the main transcript's historical
+            # two-notices-for-one-transition defect.
+            continue
         elif etype == "agent_end":
             # The child's own failure, in the wording `on_turn_ended` uses for
             # the parent's. Without it a failed subagent's page simply stopped,
