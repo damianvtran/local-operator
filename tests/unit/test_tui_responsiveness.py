@@ -1156,9 +1156,9 @@ async def test_relay_frame_during_threaded_replay_is_not_double_painted(tmp_path
 
         real_load = RemoteSession._load_history
 
-        async def instrumented_load(self_inner) -> None:
+        async def instrumented_load(self_inner, *args, **kwargs) -> None:
             replay_started.set()
-            await real_load(self_inner)
+            await real_load(self_inner, *args, **kwargs)
 
         from unittest.mock import patch as _patch
 
