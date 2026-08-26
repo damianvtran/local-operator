@@ -89,7 +89,13 @@ async def test_a_reviewer_child_cannot_edit_but_can_run_commands(tmp_path, monke
 @pytest.mark.asyncio
 async def test_a_non_delegating_role_gets_no_task_tool(tmp_path, monkeypatch) -> None:
     """A reviewer spawning its own children turns one review into a fan-out
-    nobody is watching."""
+    nobody is watching, so the SPAWN/persist tools stay pruned.
+
+    ``jobs`` is the deliberate exception: it only observes and cancels the
+    child's OWN background bash jobs, and the reviewer keeps ``bash`` (hence
+    ``background``), so pruning ``jobs`` would leave a reviewer that
+    backgrounded a long command looping on ``Tool not found: jobs``. See the
+    ``_can_background`` invariant in ``harness/subagent.py``."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     stream = RecordingStream()
     parent = make_parent(tmp_path, stream)
@@ -97,7 +103,13 @@ async def test_a_non_delegating_role_gets_no_task_tool(tmp_path, monkeypatch) ->
     await run_role(parent, "reviewer")
 
     names = {tool.name for tool in stream.requests[0].tools}
-    assert not names & {"task", "wait", "jobs", "wake"}
+    # The fan-out and persistence tools stay gone: a non-delegating role must
+    # not start its own children or arm a wake its one-prompt session can't keep.
+    assert not names & {"task", "wait", "wake"}
+    # But it keeps ``jobs`` to poll/cancel the background bash jobs it can
+    # still produce (it has ``bash``), which is what stops the poll loop.
+    assert "jobs" in names
+    assert "bash" in names
     await parent.dispose()
 
 
