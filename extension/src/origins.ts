@@ -269,7 +269,9 @@ async function recordAccessDecisionLocked(
  * resolved only after that atomic validation succeeds. A duplicate delivery
  * of the CURRENT generation is idempotent: the record already carries the
  * decision, so the re-read sees `live.decision` set and nothing re-applies
- * (still `applied:true` — the user's click did land, it just already landed). */
+ * (`applied:false` — the click already landed once; a second landing must be
+ * a no-op, and the caller distinguishes "this delivery did something" from
+ * "the decision exists" via the record, not the return value). */
 export function resolveOrigin(
   origin: string,
   decision: OriginDecision,
