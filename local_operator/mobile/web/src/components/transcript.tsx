@@ -8,11 +8,11 @@
  * Auto-scroll: the view follows the tail only while the user is already at
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
-import { getHistory, imageUrl } from "../api";
+import { getHistory, getSubagentHistory, imageUrl } from "../api";
 import { cn } from "../lib/cn";
 import type { TranscriptEntry } from "../types";
 
@@ -193,9 +193,19 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 export function Transcript({
 	pid,
 	entries,
+	jobId,
+	scrollKey = `${pid}:${jobId ?? "root"}`,
+	tailContent,
+	emptyContent,
 }: {
 	pid: string;
 	entries: TranscriptEntry[];
+	jobId?: string;
+	scrollKey?: string;
+	/** Lifecycle outcomes belong in the conversation's one discoverable scroll
+	 * surface, not in a clipped nested footer beneath it. */
+	tailContent?: ReactNode;
+	emptyContent?: ReactNode;
 }) {
 	const [windowSize, setWindowSize] = useState(PAGE);
 	/* Older entries the daemon served, PREPENDED above the live window. The
@@ -209,12 +219,19 @@ export function Transcript({
 	const pinnedRef = useRef(true);
 	/* Auto-load trigger guard: one in-flight page at a time. */
 	const loadingRef = useRef(false);
-	/* Reset the back-filled history when the session changes. */
+	/* Each hash route owns its history and scroll position. Browser Back/Forward
+	   remounts a route, so preserving it outside React state is what returns the
+	   reader to the row they left instead of the latest token. */
 	useEffect(() => {
 		setOlder([]);
 		setHasMore(true);
 		setWindowSize(PAGE);
-	}, [pid]);
+		const saved = Number(sessionStorage.getItem(`lo-mobile-scroll:${scrollKey}`));
+		requestAnimationFrame(() => {
+			const el = scrollRef.current;
+			if (el && Number.isFinite(saved) && saved > 0) el.scrollTop = saved;
+		});
+	}, [scrollKey]);
 
 	/* The auto-scroll trigger. It must fire ONLY when the transcript actually
 	   grew or the tail streamed more text — never on a same-content re-render.
@@ -278,7 +295,9 @@ export function Transcript({
 		loadingRef.current = true;
 		setLoadingOlder(true);
 		try {
-			const { entries: page, has_more } = await getHistory(pid, oldestId, PAGE);
+			const { entries: page, has_more } = jobId
+				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
+				: await getHistory(pid, oldestId, PAGE);
 			if (page.length > 0) prependPage(page);
 			setHasMore(has_more);
 		} catch {
@@ -294,6 +313,7 @@ export function Transcript({
 		if (!el) return;
 		pinnedRef.current =
 			el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+		sessionStorage.setItem(`lo-mobile-scroll:${scrollKey}`, String(el.scrollTop));
 		/* Near the top with more history to fetch: auto-load so scrolling up
 		   just keeps going, no button needed. */
 		if (el.scrollTop < 120 && hasMore && !loadingRef.current) {
@@ -343,6 +363,8 @@ export function Transcript({
 					<Entry entry={e} pid={pid} />
 				</RowBoundary>
 			))}
+			{visible.length === 0 ? emptyContent : null}
+			{tailContent}
 		</div>
 	);
 }

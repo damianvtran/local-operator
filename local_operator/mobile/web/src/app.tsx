@@ -17,7 +17,13 @@ export function App() {
 		case "past":
 			return <PastSessionsScreen />;
 		case "session":
-			return <SessionScreen key={route.sessionId} sessionId={route.sessionId} />;
+			return (
+				<SessionScreen
+					key={`${route.sessionId}:${route.jobId ?? "root"}`}
+					sessionId={route.sessionId}
+					jobId={route.jobId}
+				/>
+			);
 		default:
 			return <SessionListScreen />;
 	}

@@ -69,7 +69,13 @@ function TodoRow({ t }: { t: TodoItem }) {
 	);
 }
 
-export function TodosPanel({ todos }: { todos: TodoPhase[] }) {
+export function TodosPanel({
+	todos,
+	embedded = false,
+}: {
+	todos: TodoPhase[];
+	embedded?: boolean;
+}) {
 	const items = todos.flatMap((p) => p.items);
 	const done = items.filter((t) => CLOSED.has(t.status)).length;
 	// Headerless flat-list case: exactly one phase, and it is the implicit
@@ -83,7 +89,7 @@ export function TodosPanel({ todos }: { todos: TodoPhase[] }) {
 			   screen. The header's count is the at-a-glance signal; tap to work
 			   the list. */
 			defaultOpen={false}
-			className="border-t border-hairline px-4"
+			className={cn("border-t border-hairline", embedded ? "pt-1" : "px-4")}
 			header={
 				<span className="text-body-sm text-ink-muted">
 					tasks{" "}

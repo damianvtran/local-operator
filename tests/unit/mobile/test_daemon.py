@@ -14,7 +14,15 @@ from starlette.testclient import TestClient
 from local_operator.mobile import registry
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
 from local_operator.mobile.registrant import Registrant
-from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT, SessionProjection
+from local_operator.mobile.types import (
+    PROJECTION_TRANSCRIPT_LIMIT,
+    SessionProjection,
+    SessionRecord,
+    SubagentRow,
+    TodoItem,
+    TodoPhase,
+    TranscriptEntry,
+)
 
 
 class FakeHandle:
@@ -45,8 +53,8 @@ class FakeHandle:
     async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
         return await self._record("prompt", text)
 
-    async def steer(self, text, images=None):  # noqa: ANN001, ANN202
-        return await self._record("steer", text)
+    async def steer(self, text, images=None, command_id=None):  # noqa: ANN001  # noqa: ANN202
+        return await self._record("steer", text, command_id=command_id)
 
     async def abort(self):  # noqa: ANN202
         return await self._record("abort")
@@ -111,6 +119,20 @@ async def test_registrant_publishes_and_daemon_adopts() -> None:
             assert reply["op"] == "ack"
             assert handle.calls[-1][0] == "prompt"
 
+            command_id = "12345678-1234-4678-9234-567812345678"
+            reply = await daemon.request(
+                record.pid,
+                "steer",
+                command_id=command_id,
+                text="parent instruction",
+            )
+            assert reply == {"op": "ack", "req": reply["req"], "detail": "steer ok"}
+            assert handle.calls[-1] == (
+                "steer",
+                ("parent instruction",),
+                {"command_id": command_id},
+            )
+
             reply = await daemon.request(record.pid, "set_effort", effort="high")
             assert "set_effort ok" in reply["detail"]
         finally:
@@ -167,6 +189,648 @@ def test_http_gate_and_login_flow() -> None:
     authed = client.get("/api/sessions")
     assert authed.status_code == 200
     assert authed.json() == {"sessions": []}
+
+    logout = client.get("/logout")
+    assert logout.status_code == 303
+    assert logout.headers["location"] == "/login"
+    assert logout.headers["clear-site-data"] == '"storage"'
+    assert "lop_mobile=" in logout.headers["set-cookie"]
+
+
+def test_login_page_clears_private_storage_without_relying_on_header() -> None:
+    """U2: the WebKit-safe cleanup path. Every logout/401/expiry lands on the
+    server-rendered login page, whose inline script clears the private storage
+    prefixes in the page's own engine — so cleanup does not depend on the
+    ``Clear-Site-Data`` header that WebKit may ignore."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    body = client.get("/login").text
+    # The script must remove exactly the two private prefixes and nothing else
+    # (theme and other preferences survive), matching web/src/private-storage.ts.
+    assert "localStorage.removeItem(key)" in body
+    assert '"lo-mobile-command:"' in body
+    assert '"lo-mobile-draft:"' in body
+    # It must not blanket-clear storage, which would wipe non-private prefs.
+    assert "localStorage.clear()" not in body
+
+
+def test_subagent_summary_detail_and_child_history_are_isolated(tmp_path, monkeypatch) -> None:
+    """Root repaints stay light while the selected child pages its own file."""
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root-only", id="root-row")))
+    asyncio.run(Transcript(child_dir).append_message(Message.user("child-only", id="child-row")))
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    projection = SessionProjection(session_id="root-session", pid=9, version=7)
+    projection.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="child",
+            session_id="child-session",
+            transcript=[TranscriptEntry(id="child-row", kind="user", text="child-only")],
+            todos=[TodoPhase(name="Todos", items=[TodoItem(text="verify")])],
+        )
+    ]
+    summary = daemon.capture_subagent_details(projection)
+    assert projection.subagents[0].transcript[0].text == "child-only"
+    assert projection.subagents[0].todos[0].items[0].text == "verify"
+    assert summary.subagents[0].transcript == []
+    assert summary.subagents[0].todos == []
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    detail = client.get("/api/sessions/root-session/agents/child-job")
+    assert detail.status_code == 200
+    assert detail.json()["version"] == 7
+    assert [entry["text"] for entry in detail.json()["transcript"]] == ["child-only"]
+    history = client.get(
+        "/api/sessions/root-session/agents/child-job/history", params={"limit": 10}
+    )
+    assert history.status_code == 200
+    assert [entry["id"] for entry in history.json()["entries"]] == ["child-row"]
+    assert "root-row" not in str(history.json())
+    assert client.get("/api/sessions/root-session/agents/not-related").status_code == 404
+
+
+def test_retained_summary_recapture_preserves_rich_detail_and_monotonic_version() -> None:
+    """Wake/reconnect may recapture only the already-stripped retained summary."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    projection = SessionProjection(session_id="root-session", pid=9, version=7)
+    projection.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="child",
+            prompt="secret prompt",
+            launch_message_id="subagent-launch:child-job",
+            status="completed",
+            result_text="full result",
+            transcript=[TranscriptEntry(id="child-row", kind="assistant", text="full reply")],
+            todos=[TodoPhase(name="Work", items=[TodoItem(text="ship", status="done")])],
+        )
+    ]
+
+    summary = daemon.capture_subagent_details(projection)
+    assert summary is daemon.session_projections["root-session"]
+    assert summary is not projection
+    assert summary.subagents[0].prompt == ""
+
+    # The exact retained object is reused by wake and reconnect paths. Repeated
+    # capture must be idempotent instead of treating stripped empties as updates.
+    recaptured = daemon.capture_subagent_details(summary)
+    stale = SessionProjection(session_id="root-session", pid=9, version=5)
+    stale.subagents = [SubagentRow(job_id="child-job", label="stale child")]
+    recaptured = daemon.capture_subagent_details(stale)
+    detail = daemon.subagent_details[("root-session", "child-job")]
+    assert recaptured.version == 7
+    assert detail["version"] == 7
+    assert detail["prompt"] == "secret prompt"
+    assert detail["launch_message_id"] == "subagent-launch:child-job"
+    assert detail["result_text"] == "full result"
+    assert detail["transcript"][0]["text"] == "full reply"
+    assert detail["todos"][0]["items"][0]["text"] == "ship"
+
+
+def test_new_process_generation_supersedes_high_version_and_rejects_late_old_frame() -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="old",
+        cwd="/tmp",
+        model_label="old-model",
+        control_port=4101,
+        control_key="old-registration",
+        started_at=100.0,
+        heartbeat_at=101.0,
+    )
+    old = SessionProjection(
+        session_id="root-session",
+        pid=101,
+        version=40,
+        transcript=[TranscriptEntry(id="old-root", kind="assistant", text="old root")],
+        todos=[TodoPhase(name="Old", items=[TodoItem(text="old todo")])],
+    )
+    old.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="old child",
+            status="running",
+            prompt="old prompt",
+            transcript=[TranscriptEntry(id="old-child", kind="assistant", text="old child")],
+            todos=[TodoPhase(name="Old child", items=[TodoItem(text="old child todo")])],
+        )
+    ]
+    assert daemon.capture_subagent_details(old, record=old_record).version == 40
+
+    # started_at + registration key distinguishes process birth even if the OS
+    # reuses the PID; its low ProjectionFold counter must still advance the
+    # daemon epoch and rematerialize every detail-only field from this owner.
+    new_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="new",
+        cwd="/tmp",
+        model_label="new-model",
+        control_port=4202,
+        control_key="new-registration",
+        started_at=200.0,
+        heartbeat_at=201.0,
+    )
+    new = SessionProjection(
+        session_id="root-session",
+        pid=101,
+        version=1,
+        transcript=[TranscriptEntry(id="new-root", kind="assistant", text="new root")],
+        todos=[TodoPhase(name="New", items=[TodoItem(text="new todo", status="done")])],
+    )
+    new.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="new child",
+            status="completed",
+            prompt="new prompt",
+            result_text="new result",
+            transcript=[TranscriptEntry(id="new-child", kind="assistant", text="new child")],
+            todos=[TodoPhase(name="New child", items=[TodoItem(text="new child todo")])],
+        )
+    ]
+    current = daemon.capture_subagent_details(new, record=new_record)
+    assert current.version == 41
+    assert [row.id for row in current.transcript] == ["new-root"]
+    assert current.todos[0].items[0].text == "new todo"
+    detail = daemon.subagent_details[("root-session", "child-job")]
+    assert detail["version"] == 41
+    assert detail["label"] == "new child"
+    assert detail["status"] == "completed"
+    assert detail["prompt"] == "new prompt"
+    assert detail["result_text"] == "new result"
+    assert detail["transcript"][0]["id"] == "new-child"
+    assert detail["todos"][0]["items"][0]["text"] == "new child todo"
+
+    late = daemon.capture_subagent_details(old, record=old_record)
+    assert late is current
+    assert daemon.subagent_details[("root-session", "child-job")]["label"] == "new child"
+
+
+def test_scan_replaces_process_state_when_registration_reuses_pid(monkeypatch) -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="old",
+        cwd="/tmp",
+        model_label="old-model",
+        control_port=4101,
+        control_key="old-registration",
+        started_at=100.0,
+    )
+    old_entry = SessionEntry(old_record)
+    old_entry.ended = True
+    old_entry.degraded = True
+    daemon.table.entries[101] = old_entry
+    new_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="new",
+        cwd="/tmp",
+        model_label="new-model",
+        control_port=4202,
+        control_key="new-registration",
+        started_at=200.0,
+    )
+    monkeypatch.setattr(registry, "scan", lambda: [(new_record, "live")])
+    dialed: list[SessionEntry] = []
+
+    async def fake_dial(_daemon, entry):  # noqa: ANN001, ANN202
+        dialed.append(entry)
+
+    monkeypatch.setattr("local_operator.mobile.daemon._dial", fake_dial)
+    asyncio.run(daemon._scan_once())
+
+    replacement = daemon.table.entries[101]
+    assert replacement is not old_entry
+    assert replacement.record.control_key == "new-registration"
+    assert replacement.ended is False
+    assert replacement.degraded is False
+    assert dialed == [replacement]
+
+
+def test_terminal_fold_advances_epoch_and_blocks_late_live_frame() -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="live",
+        cwd="/tmp",
+        model_label="model",
+        control_port=4101,
+        control_key="registration",
+        started_at=100.0,
+    )
+    live = SessionProjection(session_id="root-session", pid=101, version=40, streaming=True)
+    daemon.capture_subagent_details(live, record=record)
+    durable = SessionProjection(
+        session_id="root-session",
+        pid=0,
+        version=1,
+        ended=True,
+        transcript=[TranscriptEntry(id="durable", kind="assistant", text="settled")],
+    )
+    terminal = daemon.capture_subagent_details(durable, record=record, terminal=True)
+    assert terminal.version == 41
+    assert terminal.ended is True
+    assert daemon.capture_subagent_details(live, record=record) is terminal
+
+
+def test_live_generation_epoch_survives_payload_eviction_pressure() -> None:
+    """A browser-observed epoch must outlive bounded route payload eviction."""
+    from local_operator.mobile.daemon import (
+        MAX_RETAINED_SESSION_PROJECTIONS,
+        SessionEntry,
+    )
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        cwd="/tmp",
+        model_label="old",
+        conversation_name="root",
+        heartbeat_at=10,
+        control_port=4101,
+        control_key="old-key",
+        started_at=10,
+    )
+    new_record = SessionRecord(
+        pid=102,
+        kind="tui",
+        session_id="root-session",
+        cwd="/tmp",
+        model_label="new",
+        conversation_name="root",
+        heartbeat_at=20,
+        control_port=4102,
+        control_key="new-key",
+        started_at=20,
+    )
+    daemon.table.entries[new_record.pid] = SessionEntry(new_record)
+
+    old = SessionProjection(session_id="root-session", pid=101, version=40)
+    assert daemon.capture_subagent_details(old, record=old_record).version == 40
+    replacement = SessionProjection(session_id="root-session", pid=102, version=1)
+    assert daemon.capture_subagent_details(replacement, record=new_record).version == 41
+
+    for index in range(MAX_RETAINED_SESSION_PROJECTIONS):
+        daemon.capture_subagent_details(
+            SessionProjection(session_id=f"pressure-{index:03d}", pid=200 + index, version=1)
+        )
+    assert "root-session" not in daemon.session_projections
+    assert daemon._projection_generations["root-session"].epoch == 41
+
+    next_replacement = SessionProjection(session_id="root-session", pid=102, version=2)
+    assert daemon.capture_subagent_details(next_replacement, record=new_record).version == 42
+    late_old = SessionProjection(session_id="root-session", pid=101, version=999)
+    assert (
+        daemon.capture_subagent_details(late_old, record=old_record)
+        is daemon.session_projections["root-session"]
+    )
+    assert daemon.session_projections["root-session"].version == 42
+
+    daemon.session_projections.pop("root-session")
+    from local_operator.mobile.daemon import _StaleProjection
+
+    with pytest.raises(_StaleProjection):
+        daemon.capture_subagent_details(late_old, record=old_record)
+    daemon.table.entries[new_record.pid].ended = True
+    daemon._prune_projection_generation("root-session")
+    assert "root-session" not in daemon._projection_generations
+
+
+def test_evicted_payload_reconstructs_under_epoch_while_late_old_frame_stays_fenced(
+    tmp_path, monkeypatch
+) -> None:
+    """The lifecycle contract's hardest case, end to end.
+
+    A high daemon epoch is superseded by a low-version replacement owner; the
+    only route payload is then evicted under cache pressure while a live SSE
+    subscriber keeps the generation ledger alive. Detail and history must still
+    reconstruct from durable disk (re-admitted at the retained monotonic epoch,
+    NOT fenced to HTTP 500), and a genuine late frame from the OLD process must
+    still be fenced. This is the single documented reconciliation the R9 pass
+    replaced case-by-case eviction patches with.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.mobile.daemon import MAX_RETAINED_SESSION_PROJECTIONS
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    (child_dir / "origin.json").write_text('{"origin":"subagent"}')
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(Transcript(child_dir).append_message(Message.assistant("reply", id="child-row")))
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "completed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "prompt": "durable prompt",
+                        "session_dir": str(child_dir),
+                        "outcome": "completed",
+                        "result_text": "done",
+                    }
+                ],
+            },
+        )
+    )
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    old_record = SessionRecord(
+        pid=101,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="root",
+        cwd="/tmp",
+        model_label="old",
+        control_port=4101,
+        control_key="old-key",
+        started_at=10.0,
+    )
+    new_record = SessionRecord(
+        pid=102,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="root",
+        cwd="/tmp",
+        model_label="new",
+        control_port=4102,
+        control_key="new-key",
+        started_at=20.0,
+    )
+    # A live SSE subscriber is the route owner that intentionally keeps the
+    # generation ledger alive past payload eviction (the F1 scenario).
+    daemon.table.session_subscribers["root-session"] = {asyncio.Queue()}
+
+    # High epoch, then a low-version replacement owner supersedes it.
+    high = SessionProjection(session_id="root-session", pid=101, version=50)
+    assert daemon.capture_subagent_details(high, record=old_record).version == 50
+    replacement = SessionProjection(session_id="root-session", pid=102, version=1)
+    assert daemon.capture_subagent_details(replacement, record=new_record).version == 51
+
+    # Evict the route payload under pressure; the subscriber keeps the ledger.
+    for index in range(MAX_RETAINED_SESSION_PROJECTIONS):
+        daemon.capture_subagent_details(
+            SessionProjection(session_id=f"pressure-{index:03d}", pid=200 + index, version=1)
+        )
+    assert "root-session" not in daemon.session_projections
+    assert daemon._projection_generations["root-session"].epoch == 51
+
+    # Durable detail/history now rebuild instead of fencing to a 500, and the
+    # rematerialized payload carries the retained monotonic epoch.
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    detail = client.get("/api/sessions/root-session/agents/child-job")
+    assert detail.status_code == 200
+    assert detail.json()["prompt"] == "durable prompt"
+    assert detail.json()["version"] == 51
+    history = client.get(
+        "/api/sessions/root-session/agents/child-job/history", params={"limit": 10}
+    )
+    assert history.status_code == 200
+    assert [row["id"] for row in history.json()["entries"]] == ["child-row"]
+
+    # A genuine late frame from the OLD process is still fenced: reconstruction
+    # rebuilt the payload but never reopened the superseded generation.
+    late_old = SessionProjection(session_id="root-session", pid=101, version=999)
+    assert (
+        daemon.capture_subagent_details(late_old, record=old_record)
+        is daemon.session_projections["root-session"]
+    )
+    assert daemon.session_projections["root-session"].version == 51
+
+
+def test_subagent_detail_merge_accepts_lifecycle_updates_and_terminal_clearing() -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    first = SessionProjection(session_id="root-session", pid=9, version=2)
+    first.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="child",
+            status="failed",
+            error_text="first failure",
+            prompt="original prompt",
+            transcript=[TranscriptEntry(id="old", kind="assistant", text="old reply")],
+        )
+    ]
+    daemon.capture_subagent_details(first)
+
+    resumed = SessionProjection(session_id="root-session", pid=9, version=3)
+    resumed.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="child renamed",
+            status="running",
+            progress="trying again",
+            transcript=[TranscriptEntry(id="new", kind="assistant", text="new reply")],
+        )
+    ]
+    daemon.capture_subagent_details(resumed)
+    detail = daemon.subagent_details[("root-session", "child-job")]
+    assert detail["version"] == 3
+    assert detail["label"] == "child renamed"
+    assert detail["status"] == "running"
+    assert detail["progress"] == "trying again"
+    assert detail["error_text"] == ""
+    assert detail["prompt"] == "original prompt"
+    assert [row["id"] for row in detail["transcript"]] == ["new"]
+
+    completed = SessionProjection(session_id="root-session", pid=9, version=4)
+    completed.subagents = [
+        SubagentRow(job_id="child-job", label="child renamed", status="completed")
+    ]
+    daemon.capture_subagent_details(completed)
+    detail = daemon.subagent_details[("root-session", "child-job")]
+    assert detail["version"] == 4
+    assert detail["status"] == "completed"
+    assert detail["result_text"] == ""
+    assert detail["error_text"] == ""
+    assert [row["id"] for row in detail["transcript"]] == ["new"]
+
+
+def test_every_published_subagent_resolves_beyond_legacy_256_limit() -> None:
+    """A rendered roster row must never lead to a deterministic detail 404."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    projection = SessionProjection(session_id="root-session", pid=9, version=11)
+    projection.subagents = [
+        SubagentRow(job_id=f"job-{index:03d}", label=f"child {index}") for index in range(300)
+    ]
+    daemon.capture_subagent_details(projection)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    assert len(projection.subagents) == 300
+    assert client.get("/api/sessions/root-session/agents/job-000").status_code == 200
+    assert client.get("/api/sessions/root-session/agents/job-256").status_code == 200
+    assert client.get("/api/sessions/root-session/agents/job-299").status_code == 200
+
+
+def test_retained_projection_routes_survive_more_than_16_root_sessions() -> None:
+    """Projection and detail ownership cannot diverge at the old cache boundary."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    for index in range(20):
+        projection = SessionProjection(session_id=f"root-{index:02d}", pid=index, version=index)
+        projection.subagents = [
+            SubagentRow(job_id="child", label=f"child {index}", session_id=f"child-{index:02d}")
+        ]
+        daemon.capture_subagent_details(projection)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    assert "root-00" in daemon.session_projections
+    assert "root-19" in daemon.session_projections
+    assert client.get("/api/sessions/root-00/agents/child").status_code == 200
+    assert client.get("/api/sessions/root-19/agents/child").status_code == 200
+
+
+def test_projection_and_detail_evict_as_one_bounded_unit() -> None:
+    """The only allowed dead route is one no retained projection advertises."""
+    from local_operator.mobile.daemon import MAX_RETAINED_SESSION_PROJECTIONS
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    for index in range(MAX_RETAINED_SESSION_PROJECTIONS + 1):
+        projection = SessionProjection(session_id=f"root-{index:03d}", pid=index)
+        projection.subagents = [SubagentRow(job_id="child", label="child")]
+        daemon.capture_subagent_details(projection)
+
+    assert len(daemon.session_projections) == MAX_RETAINED_SESSION_PROJECTIONS
+    # Unowned generation entries leave with their payload cache unit; active or
+    # subscribed routes are the only entries allowed to outlive this bound.
+    assert len(daemon._projection_generations) == MAX_RETAINED_SESSION_PROJECTIONS
+    assert "root-000" not in daemon.session_projections
+    assert "root-000" not in daemon._projection_generations
+    assert ("root-000", "child") not in daemon.subagent_details
+    for session_id, projection in daemon.session_projections.items():
+        assert all(
+            (session_id, row.job_id) in daemon.subagent_details for row in projection.subagents
+        )
+
+
+def test_durable_subagent_routes_reconstruct_after_daemon_restart(tmp_path, monkeypatch) -> None:
+    """Restart/reconnect rebuilds detail and child history from durable lineage."""
+    from local_operator.harness.types import Message
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    child_dir = cfg / "sessions" / "child-session"
+    root_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    (child_dir / "origin.json").write_text('{"origin":"subagent"}')
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    asyncio.run(Transcript(root_dir).append_message(Message.user("root", id="root-row")))
+    asyncio.run(Transcript(child_dir).append_message(Message.user("oldest", id="child-oldest")))
+    asyncio.run(
+        Transcript(child_dir).append_message(Message.assistant("newest", id="child-newest"))
+    )
+    asyncio.run(
+        Transcript(root_dir).append_custom(
+            SUBAGENT_ROSTER_CUSTOM_TYPE,
+            {
+                "jobs": [{"id": "child-job", "status": "completed", "label": "child"}],
+                "records": [
+                    {
+                        "job_id": "child-job",
+                        "label": "child",
+                        "prompt": "inspect durable state",
+                        "session_dir": str(child_dir),
+                        "outcome": "completed",
+                        "result_text": "done",
+                    }
+                ],
+            },
+        )
+    )
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    detail = client.get("/api/sessions/root-session/agents/child-job")
+    assert detail.status_code == 200
+    assert detail.json()["prompt"] == "inspect durable state"
+    assert [row["id"] for row in detail.json()["transcript"]] == [
+        "child-oldest",
+        "child-newest",
+    ]
+    history = client.get("/api/sessions/root-session/agents/child-job/history", params={"limit": 1})
+    assert history.status_code == 200
+    assert [row["id"] for row in history.json()["entries"]] == ["child-newest"]
+
+    restarted = MobileDaemon(port=0, password="pw123")
+    restarted_client = TestClient(build_app(restarted), follow_redirects=False)
+    restarted_client.post("/login", data={"password": "pw123"})
+    assert restarted_client.get("/api/sessions/root-session/agents/child-job").status_code == 200
+    assert (
+        restarted_client.get(
+            "/api/sessions/root-session/agents/child-job/history",
+            params={"before": "child-newest", "limit": 1},
+        ).json()["entries"][0]["id"]
+        == "child-oldest"
+    )
+
+
+def test_http_command_requires_auth_and_rejects_empty_steer_before_dispatch() -> None:
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=123,
+        kind="tui",
+        session_id="root-session",
+        conversation_name="root",
+        cwd="/tmp",
+        model_label="fixture",
+        control_port=1,
+        control_key="fixture",
+    )
+    daemon.table.entries[record.pid] = SessionEntry(record)
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    payload = {
+        "op": "steer",
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "text": "parent instruction",
+    }
+    unauthorized = client.post("/api/sessions/root-session/command", json=payload)
+    assert unauthorized.status_code == 401
+
+    client.post("/login", data={"password": "pw123"})
+    empty = client.post(
+        "/api/sessions/root-session/command",
+        json={**payload, "text": "   "},
+    )
+    assert empty.status_code == 422
+    assert empty.json() == {"error": "text must be a non-empty string"}
 
 
 def test_unknown_session_command_is_a_409() -> None:
@@ -278,6 +942,59 @@ def test_previous_command_validation_is_bounded_without_side_effects(tmp_path, m
         assert "error" in response.json()
     assert not called
     assert [message.id for message in transcript.build_llm_history()] == ["existing"]
+
+
+def test_failed_wake_recapture_preserves_cached_child_detail(tmp_path, monkeypatch) -> None:
+    """A retained summary may be republished before wake construction fails."""
+    import asyncio as _asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.mobile import attach_client
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    directory = cfg / "sessions" / "previous-rich"
+    directory.mkdir(parents=True)
+    _asyncio.run(Transcript(directory).append_message(Message.user("existing", id="existing")))
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    projection = SessionProjection(session_id="previous-rich", pid=9, version=7, ended=True)
+    projection.subagents = [
+        SubagentRow(
+            job_id="child-job",
+            label="child",
+            prompt="secret prompt",
+            result_text="full result",
+            transcript=[TranscriptEntry(id="child-row", kind="assistant", text="full reply")],
+            todos=[TodoPhase(name="Work", items=[TodoItem(text="verify", status="done")])],
+        )
+    ]
+    daemon.capture_subagent_details(projection)
+
+    async def fail(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ConnectionError("daemon restarted")
+
+    monkeypatch.setattr(attach_client, "continue_command", fail)
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    response = client.post(
+        "/api/sessions/previous-rich/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-5678-1234-567812345678",
+            "text": "wake again",
+        },
+    )
+    assert response.status_code == 502
+    detail = client.get("/api/sessions/previous-rich/agents/child-job")
+    assert detail.status_code == 200
+    assert detail.json()["prompt"] == "secret prompt"
+    assert detail.json()["result_text"] == "full result"
+    assert detail.json()["transcript"][0]["text"] == "full reply"
+    assert detail.json()["todos"][0]["items"][0]["text"] == "verify"
+    assert daemon.session_projections["previous-rich"].ended is False
 
 
 def test_previous_continuation_transport_failure_is_non_2xx(tmp_path, monkeypatch) -> None:

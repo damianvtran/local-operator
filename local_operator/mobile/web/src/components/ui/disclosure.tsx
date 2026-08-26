@@ -39,7 +39,9 @@ export function Disclosure({
 				aria-expanded={open}
 				onClick={() => setOpen(!open)}
 				className={cn(
-					"flex min-h-8 w-full items-center gap-1 text-left select-none",
+					/* The compact label stays unchanged while the hit box matches the
+					   navigation controls users alternate with on a phone. */
+					"flex min-h-11 w-full items-center gap-1 text-left select-none",
 					headerClassName,
 				)}
 			>

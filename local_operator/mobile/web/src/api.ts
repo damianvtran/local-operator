@@ -6,6 +6,7 @@
  * the same way, so reload the page and let the server 303 to /login. There
  * is no client-side login form — login is server-rendered.
  */
+import { clearPrivateSessionStorage } from "./private-storage";
 import type {
 	CommandOp,
 	Directories,
@@ -13,8 +14,16 @@ import type {
 	PastSession,
 	SessionSummary,
 	SlashCommand,
+	SubagentDetail,
 	TranscriptEntry,
 } from "./types";
+
+export class HttpError extends Error {
+	constructor(readonly status: number, message: string) {
+		super(message);
+		this.name = "HttpError";
+	}
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(path, {
@@ -22,6 +31,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		...init,
 	});
 	if (res.status === 401) {
+		/* A replaced/login-expired browser session must not expose drafts or
+		   retry envelopes to whoever authenticates next on this device. */
+		clearPrivateSessionStorage();
 		location.reload();
 		/* Never reached in practice; satisfies the type when reload is slow. */
 		throw new Error("unauthorized");
@@ -34,7 +46,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		} catch {
 			/* A non-JSON error body carries no more than the status did. */
 		}
-		throw new Error(detail);
+		throw new HttpError(res.status, detail);
 	}
 	return (await res.json()) as T;
 }
@@ -125,4 +137,33 @@ export function getHistory(
 	const q = new URLSearchParams({ limit: String(limit) });
 	if (before) q.set("before", before);
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`);
+}
+
+export function getSubagentDetail(
+	sessionId: string,
+	jobId: string,
+	signal?: AbortSignal,
+): Promise<SubagentDetail> {
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(jobId)}`,
+		{ signal },
+	);
+}
+
+/** Child history has its own lineage-checked endpoint. Reusing the root route
+    here was the paging bug: once a child scrolled above its live tail, root
+    user/tool rows appeared inside the child's conversation. */
+export function getSubagentHistory(
+	sessionId: string,
+	jobId: string,
+	before: string | null,
+	limit = 80,
+	signal?: AbortSignal,
+): Promise<{ entries: TranscriptEntry[]; has_more: boolean }> {
+	const q = new URLSearchParams({ limit: String(limit) });
+	if (before) q.set("before", before);
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(jobId)}/history?${q}`,
+		{ signal },
+	);
 }

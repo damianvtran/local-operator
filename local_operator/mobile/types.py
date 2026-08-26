@@ -271,7 +271,7 @@ class SessionRecord:
 # frames stay plain dicts — json.loads output needs no decoding step.
 ControlOp = Literal[
     "prompt",  # {command_id, text, images?} — durable idempotent user turn
-    "steer",  # {text} — inject mid-turn
+    "steer",  # {command_id, text, images?} — idempotent mid-turn injection
     "abort",  # {} — the stop button; never kills the session
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
@@ -429,8 +429,10 @@ class SubagentRow:
     parent_job_id: str | None = None
     session_id: str | None = None
     prompt: str = ""
+    launch_message_id: str = ""
     effort: str = ""
     ancestors: list[str] = field(default_factory=list)
+    ancestor_ids: list[str] = field(default_factory=list)
     child_ids: list[str] = field(default_factory=list)
     peer_ids: list[str] = field(default_factory=list)
     transcript: list[TranscriptEntry] = field(default_factory=list)
