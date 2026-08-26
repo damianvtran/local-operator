@@ -1,4 +1,10 @@
 import { BridgeCommandError, cdp, requireSurface } from "../cdp";
+import {
+  defaultScrollExpression,
+  deltaScrollExpression,
+  SCROLL_INTO_VIEW_FN,
+  scrollExpressionFor,
+} from "../scroll-expressions";
 import { getSession } from "../state";
 
 interface CallResult { result: { value?: unknown } }
@@ -18,10 +24,6 @@ interface Metrics {
 // the rest move one page-sized step in that direction. Kept here (not the page)
 // so the set is fixed and no page-provided string is ever executed.
 const DIRECTIONS = new Set(["top", "bottom", "up", "down", "left", "right"]);
-
-// A "page" step leaves this much overlap so the agent does not skip a band of
-// content between reads — the same courtesy a PageDown key gives.
-const PAGE_OVERLAP_PX = 80;
 
 /**
  * Read the scroll position and whether more content remains past the viewport.
@@ -100,6 +102,12 @@ async function nodeObjectId(tabId: number, selector: string, epoch: number): Pro
  * calling the FIXED `window.scrollBy`/`scrollTo` / `Element.scrollIntoView`
  * DOM methods via Runtime, which run regardless of tab visibility and never
  * activate the tab — preserving the no-focus-steal guarantee.
+ *
+ * CONSTRAINT — behavior:'instant' everywhere: those DOM methods honour the
+ * page's CSS `scroll-behavior: smooth`, which never progresses in a hidden tab
+ * because Chrome throttles requestAnimationFrame to zero there. All scroll
+ * expressions live in scroll-expressions.ts, which documents and enforces the
+ * instant override (and keeps them loadable by the pure tests).
  */
 export async function scroll(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
@@ -116,14 +124,14 @@ export async function scroll(params: Record<string, unknown>): Promise<Record<st
     const objectId = await nodeObjectId(tabId, selector, surface.epoch);
     await cdp(tabId, "Runtime.callFunctionOn", {
       objectId,
-      functionDeclaration: `function(){ this.scrollIntoView({block:'center', inline:'center'}); }`,
+      functionDeclaration: SCROLL_INTO_VIEW_FN,
       returnByValue: true,
     });
   } else if (hasX || hasY) {
     const dx = hasX ? Number(params.x) : 0;
     const dy = hasY ? Number(params.y) : 0;
     await cdp(tabId, "Runtime.evaluate", {
-      expression: `window.scrollBy(${dx}, ${dy})`,
+      expression: deltaScrollExpression(dx, dy),
       returnByValue: true,
     });
   } else if (direction) {
@@ -142,40 +150,16 @@ export async function scroll(params: Record<string, unknown>): Promise<Record<st
     // Default: one viewport down (minus overlap), the "read more of this page"
     // gesture the agent reaches for most.
     await cdp(tabId, "Runtime.evaluate", {
-      expression: `window.scrollBy(0, window.innerHeight - ${PAGE_OVERLAP_PX})`,
+      expression: defaultScrollExpression(),
       returnByValue: true,
     });
   }
 
-  // Let a smooth/asynchronous scroll settle before reading position, so the
-  // reported scrollY is where the viewport actually landed.
+  // Scrolls are instant now, but scroll-linked effects (lazy loading, sticky
+  // headers, IntersectionObserver reveals) may still reflow the page right
+  // after; a short settle keeps the reported position and moreBelow honest.
   await new Promise((resolve) => setTimeout(resolve, 150));
   const metrics = await readMetrics(tabId);
   const tab = await chrome.tabs.get(tabId);
   return { ...metrics, url: tab.url ?? "", title: tab.title ?? "" };
-}
-
-// Fixed expression per direction. Separated so the branch selection stays in TS
-// and the page only ever receives constant code.
-function scrollExpressionFor(direction: string): string {
-  const page = `(window.innerHeight - ${PAGE_OVERLAP_PX})`;
-  const across = `(window.innerWidth - ${PAGE_OVERLAP_PX})`;
-  switch (direction) {
-    case "top":
-      return `window.scrollTo(window.scrollX, 0)`;
-    case "bottom": {
-      const de = `(document.scrollingElement||document.documentElement)`;
-      return `window.scrollTo(window.scrollX, ${de}.scrollHeight)`;
-    }
-    case "up":
-      return `window.scrollBy(0, -${page})`;
-    case "down":
-      return `window.scrollBy(0, ${page})`;
-    case "left":
-      return `window.scrollBy(-${across}, 0)`;
-    case "right":
-      return `window.scrollBy(${across}, 0)`;
-    default:
-      return `void 0`;
-  }
 }
