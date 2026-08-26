@@ -19,7 +19,13 @@ export function compactAX(nodes: AXNode[], epoch: number): { snapshot: string; r
   const refs: Record<string, SnapshotRef> = {};
   const lines: string[] = [];
   let sequence = 0;
+  // Guard against cyclic or duplicated childIds in a malformed AX payload:
+  // the walk trusts protocol data, and without this a cycle would recurse
+  // forever inside the extension's service worker (review round 1, MINOR-1).
+  const visited = new Set<string>();
   function visit(node: AXNode, depth: number): void {
+    if (visited.has(node.nodeId)) return;
+    visited.add(node.nodeId);
     // An ignored node is excluded from the accessible tree but its subtree is
     // NOT: Chrome wraps every real page in ignored generic containers (html and
     // body surface as role "none", ignored: true) sitting directly under the
@@ -29,7 +35,10 @@ export function compactAX(nodes: AXNode[], epoch: number): { snapshot: string; r
     // Chrome 151 and Chrome for Testing 145, where getFullAXTree returns a
     // full tree (48 nodes on the repro page) whose nodes 2..3 are ignored
     // wrappers. Treat ignored nodes as transparent: skip the line, keep the
-    // depth, and walk through to their children.
+    // depth, and walk through to their children. This is deliberate even for
+    // an ignored node carrying `focusable` (e.g. inside aria-hidden): ignored
+    // means excluded from the accessible tree, so it emits no line and no ref
+    // despite focusable being a ref trigger for rendered nodes below.
     if (node.ignored) {
       for (const child of node.childIds ?? []) {
         const found = byId.get(child);

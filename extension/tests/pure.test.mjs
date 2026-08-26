@@ -61,6 +61,25 @@ test("AX compaction walks through ignored wrapper nodes", async () => {
   } finally { await module.close(); }
 });
 
+test("AX compaction terminates on cyclic and duplicated childIds", async () => {
+  const module = await load("src/ax-compact.ts");
+  try {
+    // The walk trusts protocol data; a malformed payload with a cycle
+    // (2 -> 3 -> 2) or the same child listed twice must neither hang the
+    // service worker nor emit duplicate lines (review round 1, MINOR-1).
+    const rendered = module.loaded.compactAX([
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Page" }, childIds: ["2", "2"] },
+      { nodeId: "2", role: { value: "heading" }, name: { value: "Loop" }, childIds: ["3"] },
+      { nodeId: "3", role: { value: "link" }, name: { value: "Back" }, backendDOMNodeId: 4, childIds: ["2"] },
+    ], 1);
+    assert.deepEqual(rendered.snapshot.split("\n"), [
+      '- RootWebArea "Page"',
+      '  - heading "Loop"',
+      '    - link "Back" [e1]',
+    ]);
+  } finally { await module.close(); }
+});
+
 test("scroll expressions force instant behavior in every mode", async () => {
   const module = await load("src/scroll-expressions.ts");
   try {
