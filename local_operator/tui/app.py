@@ -180,6 +180,7 @@ from local_operator.tui.widgets.status_line import (
 from local_operator.tui.widgets.subagent_panel import (
     JobStats,
     SubagentPanel,
+    SubagentRow,
     job_elapsed,
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
@@ -5635,6 +5636,13 @@ class OperatorApp(App[None]):
         ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
         those.
         """
+        # Expanded roster navigation temporarily owns focus so arrows can reach
+        # every child. Its first Esc returns to the draft-bearing composer;
+        # only a subsequent Esc enters the stop ladder below.
+        if isinstance(self.focused, SubagentRow):
+            if self._subagent_panel is not None:
+                self._subagent_panel.exit_navigation()
+            return
         if self._close_aside():
             return
         if self._subagent_view is not None and self._session is not None:

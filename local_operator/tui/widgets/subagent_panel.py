@@ -86,7 +86,7 @@ _PREVIEW_JOB_ROWS = MAX_SUBAGENT_ROWS - _HEADER_ROWS - 1
 #: transcript breathing room plus the composer/status shell and slot rhythm.
 #: Expanded means every child is reachable, not that the dock may push the
 #: composer off-screen; overflow therefore scrolls inside the roster.
-_EXPANDED_DOCK_ROWS = 11
+_EXPANDED_DOCK_ROWS = 14
 
 #: Seam between the numbers on a row. The same ` · ` the full-page view's
 #: title uses between its own facts, one tone under them — a row and the page
@@ -945,6 +945,11 @@ class SubagentRow(Static):
     can_focus = True
     BINDINGS = [
         Binding("enter", "open_subagent", "Open subagent", show=False),
+        Binding("up", "move_roster(-1)", "Previous subagent", show=False),
+        Binding("down", "move_roster(1)", "Next subagent", show=False),
+        # Priority keeps the app-level double-Esc stop ladder from taking the
+        # first press while roster navigation owns focus.
+        Binding("escape", "exit_roster", "Return to composer", show=False, priority=True),
     ]
 
     def __init__(self, job_id: str, on_open: Callable[[str], None]) -> None:
@@ -1063,6 +1068,16 @@ class SubagentRow(Static):
 
     def action_open_subagent(self) -> None:
         self._on_open(self._job_id)
+
+    def action_move_roster(self, direction: int) -> None:
+        panel = self.parent
+        if isinstance(panel, VerticalScroll) and isinstance(panel.parent, SubagentPanel):
+            panel.parent.move_focus(self._job_id, direction)
+
+    def action_exit_roster(self) -> None:
+        panel = self.parent
+        if isinstance(panel, VerticalScroll) and isinstance(panel.parent, SubagentPanel):
+            panel.parent.exit_navigation()
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
         event.stop()
@@ -1192,9 +1207,37 @@ class SubagentPanel(Container):
 
     def toggle_expanded(self) -> None:
         """Flip between the recent-child preview and the full scrollable roster."""
+        if len(self._rows) <= _PREVIEW_JOB_ROWS:
+            return
         self._expanded = not self._expanded
         self._apply_visibility()
         self._dirty = True
+        if self._expanded:
+            # Expansion entered from a keyboard shortcut must remain keyboard
+            # useful: focus starts at the oldest row and arrows traverse every
+            # retained child. Esc returns to the draft-bearing composer.
+            self.call_after_refresh(self._focus_oldest)
+        else:
+            self.exit_navigation()
+
+    def _focus_oldest(self) -> None:
+        rows = [row for row in self._rows.values() if row.display]
+        if rows:
+            rows[0].focus(scroll_visible=True)
+
+    def move_focus(self, job_id: str, direction: int) -> None:
+        """Move through the complete start-ordered roster without wrapping."""
+        rows = [row for row in self._rows.values() if row.display]
+        current = next((index for index, row in enumerate(rows) if row.job_id == job_id), 0)
+        rows[max(0, min(len(rows) - 1, current + direction))].focus(scroll_visible=True)
+
+    def exit_navigation(self) -> None:
+        """Return keyboard ownership to the composer without touching its draft."""
+        try:
+            editor = self.app.query_one("Editor")
+            editor.focus()
+        except Exception:
+            pass
 
     def request_toggle(self) -> None:
         """Toggle from either input path and settle the dock in the same frame."""
@@ -1211,6 +1254,8 @@ class SubagentPanel(Container):
         for job_id, row in self._rows.items():
             row.display = job_id in visible_ids
         visible_count = len(visible_ids)
+        has_overflow = len(job_ids) > _PREVIEW_JOB_ROWS
+        self._affordance.display = has_overflow
         if self._expanded:
             try:
                 budget = max(1, int(self.screen.size.height) - _EXPANDED_DOCK_ROWS)
@@ -1221,8 +1266,9 @@ class SubagentPanel(Container):
         else:
             list_rows = visible_count
             self._list.styles.max_height = _PREVIEW_JOB_ROWS
-        self._painted_rows = _HEADER_ROWS + list_rows + 1
-        self._paint_affordance(len(job_ids) - visible_count)
+        self._painted_rows = _HEADER_ROWS + list_rows + int(has_overflow)
+        if has_overflow:
+            self._paint_affordance(len(job_ids) - visible_count)
 
     def _paint_affordance(self, hidden: int) -> None:
         dim = Style(color=theme_mod.semantic_color("dim"))
@@ -1552,6 +1598,10 @@ class SubagentPanel(Container):
         column, and the tick is what turns that stream into one repaint.
         """
         self._apply_visibility()
+        # Resize arrives before the new geometry has fully settled. Reapplying
+        # after layout prevents a short terminal's max-height surviving the
+        # grow-back frame and leaving the screen virtually one row too tall.
+        self.call_after_refresh(self._apply_visibility)
         self._dirty = True
         if self._rows:
             self._start_spinner()
