@@ -1,0 +1,9 @@
+pane=%0
+detected backend: TmuxBackend
+publish -> True
+  @lop_session = 'abc123abc123'
+  @lop_resume_command = 'lop --resume abc123abc123'
+retire -> True
+  @lop_session after retire = '' (rc=1)
+  @lop_resume_command after retire = '' (rc=1)
+tmux server torn down

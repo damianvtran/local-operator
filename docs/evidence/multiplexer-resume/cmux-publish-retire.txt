@@ -1,0 +1,15 @@
+backend detected: cmux
+before: {}
+broadcast handle: SessionBroadcast
+AFTER PUBLISH:
+{
+  "source": "agent-hook",
+  "approval_policy": "auto",
+  "auto_resume": true,
+  "checkpoint_id": "c9a4b15eed9e",
+  "kind": "local-operator",
+  "command": "cd -- '/private/tmp/lop-mux-resume' 2>/dev/null || [ ! -d '/private/tmp/lop-mux-resume' ] && /private/tmp/mux_evidence.py --resume c9a4b15eed9e",
+  "cwd": "/private/tmp/lop-mux-resume"
+}
+RETIRE:
+after retire: {}

@@ -1,0 +1,29 @@
+$ date "+%H:%M:%S"
+16:21:51
+
+# The file cmux restores from after a crash (written on autosave, not on
+# clean shutdown), read back while a published binding was in force.
+$ python3 - <<'PY'
+... walk session-com.cmuxterm.app.json for resumeBinding kind=local-operator ...
+PY
+
+local-operator resumeBindings on disk: 1
+{
+  "kind": "local-operator",
+  "checkpointId": "c9a4b15eed9e",
+  "source": "agent-hook",
+  "autoResume": true,
+  "approvalPolicy": "auto",
+  "command": "cd -- '/tmp/lop-final' 2>/dev/null || [ ! -d '/tmp/lop-final' ] && lop --resume c9a4b15eed9e",
+  "cwd": "/tmp/lop-final"
+}
+
+# Identity verified exactly, not by eyeball:
+path:            .windows[0].tabManager.workspaces[8].panels[0].terminal
+panels[0].id:    3E63FAC7-CA22-4AD5-9151-874E05B5A490
+CMUX_SURFACE_ID: 3E63FAC7-CA22-4AD5-9151-874E05B5A490
+MATCH panel==surface: True
+
+workspaces[8].workspaceId: B6A8E3AD-DAD2-40B8-8C6A-732351BEF641
+CMUX_WORKSPACE_ID:         B6A8E3AD-DAD2-40B8-8C6A-732351BEF641
+MATCH workspace: True
