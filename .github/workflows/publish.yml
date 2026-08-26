@@ -23,7 +23,9 @@ jobs:
   #
   # The zip is the SAME artifact `pnpm build:zip` produces locally: MV3,
   # source-map-free, so what ships in the release equals what a maintainer
-  # uploads to the store.
+  # uploads to the store. Store submission is intentionally a separate,
+  # protected manual workflow so publishing a Python release cannot also make
+  # browser code public without its own approval.
   # ---------------------------------------------------------------------------
   extension-release:
     runs-on: ubuntu-latest
@@ -110,11 +112,9 @@ jobs:
         with:
           files: ${{ steps.ext-build.outputs.asset }}
 
-      # TODO(store): when Radient's Chrome Web Store business verification is
-      # complete, add a step here (or a dedicated extension-v* release stream)
-      # that uploads this same zip to the Web Store via the CWS API
-      # (chrome.google.com/webstore/devconsole). Until then the release carries
-      # the binary for manual upload; the packaging is already store-clean.
+      # Chrome Web Store submission remains in chrome-web-store.yml rather than
+      # this automatic release event. It rebuilds and validates the same store
+      # artifact behind a dedicated protected environment before API upload.
 
   release-build:
     runs-on: ubuntu-latest
