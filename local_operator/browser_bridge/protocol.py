@@ -32,9 +32,70 @@ METHODS = (
     "type",
     "close",
     "status",
+    # tabs lists every live extension-owned surface. It exists because parallel
+    # sessions now each open their OWN tab (open no longer reuses another
+    # session's surface), so agents need read-only discovery of what is being
+    # driven. Listed handles are REDACTED (nonce truncated): the full token is
+    # the drive capability, granted only by the surface's own `open` response,
+    # so the listing is genuinely awareness-only. Bridge-only, like
+    # scroll/logs: cmux has no multi-surface registry.
+    "tabs",
     "scroll",
     "logs",
 )
+
+
+#: How long the extension's approval popup gives the user to answer an origin
+#: prompt before auto-denying with a typed ORIGIN_DENIED (origins.ts consumes
+#: the generated copy in protocol.gen.ts). Milliseconds because it feeds a
+#: chrome ``setTimeout`` directly.
+#:
+#: Timeout-chain invariant (finding A3): extension deny (60 s) < daemon prompt
+#: window (65 s) < session client timeout (base command timeout + prompt window
+#: + margin, backend.py). Each layer must outlive the one below it so the
+#: innermost deadline always wins the race and the session receives a TYPED
+#: answer (origin_denied / nav_timeout / result) instead of a transport
+#: timeout. When the session client fired first (it used a flat 30–35 s), a
+#: healthy daemon waiting on a human was misreported as "bridge unreachable"
+#: and a QA session (transcript 0ee4974ba84a) burned an hour restarting a
+#: daemon that was fine. All three constants live in or derive from this
+#: module so the relationship cannot drift.
+ORIGIN_PROMPT_TIMEOUT_MS = 60_000
+
+#: Per-method base budgets for a command the extension is actively serving.
+#: The daemon enforces these; the session client derives its own longer
+#: HTTP timeout from them (backend.py) so the daemon's typed timeout always
+#: arrives before the client gives up.
+COMMAND_TIMEOUTS = {
+    "open": 30.0,
+    "goto": 30.0,
+    "click": 25.0,
+    "type": 25.0,
+    "read": 20.0,
+    "snapshot": 20.0,
+    "screenshot": 20.0,
+    "close": 20.0,
+    "status": 20.0,
+    # tabs, like status, names no tab and does no navigation: it enumerates the
+    # extension's surface map and prunes dead entries, a handful of chrome.tabs
+    # calls. It rides the same global lock key (no ``tab`` param) so a listing
+    # cannot interleave with an in-flight open's map write.
+    "tabs": 20.0,
+    # scroll waits briefly for the wheel/scrollIntoView to settle and re-reads
+    # position; logs just drains a per-tab ring buffer already in memory.
+    "scroll": 20.0,
+    "logs": 20.0,
+}
+
+#: Extra budget granted to a command that is BLOCKED on a human origin
+#: decision, on top of the base command timeout. The extension gives the user
+#: 60 s to answer (ORIGIN_PROMPT_TIMEOUT_MS above); without this the 25–30 s
+#: command timeout fired first, so a user who took longer than that got a
+#: spurious tool failure while the tab navigated anyway against a surface the
+#: session had written off (finding A3). Derived slightly above the extension's
+#: deny-timeout so that deny wins the race and returns a typed ORIGIN_DENIED
+#: rather than this firing blind.
+ORIGIN_PROMPT_WINDOW_S = ORIGIN_PROMPT_TIMEOUT_MS / 1000 + 5.0
 
 
 class ErrorCode(StrEnum):
@@ -47,6 +108,16 @@ class ErrorCode(StrEnum):
     ORIGIN_DENIED = "origin_denied"
     ORIGIN_PROMPT_PENDING = "origin_prompt_pending"
     DEBUGGER_CONFLICT = "debugger_conflict"
+    # The extension refuses to open more concurrent tabs than its cap (see
+    # MAX_SURFACES in extension/src/state.ts): parallel sessions each own a
+    # tab now, and without a bound an agent fleet could spray tabs into the
+    # user's real browser. Typed so the tool can tell the agent to close one.
+    TAB_LIMIT = "tab_limit"
+    # A bare `close` while several tabs are open: the request is
+    # under-specified, not a bridge fault, so it must not render as an
+    # "internal" bridge error (review finding n1). The message carries the
+    # REDACTED live handles so the caller can pick its own.
+    TAB_AMBIGUOUS = "tab_ambiguous"
     BUSY = "busy"
     PROTO_MISMATCH = "proto_mismatch"
     INTERNAL = "internal"

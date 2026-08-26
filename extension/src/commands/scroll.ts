@@ -5,7 +5,7 @@ import {
   SCROLL_INTO_VIEW_FN,
   scrollExpressionFor,
 } from "../scroll-expressions";
-import { getSession } from "../state";
+import { getRefs, surfaceToken, type StoredSurface } from "../state";
 
 interface CallResult { result: { value?: unknown } }
 interface PushResult { nodeIds: number[] }
@@ -57,16 +57,24 @@ async function readMetrics(tabId: number): Promise<Metrics> {
   };
 }
 
-async function nodeObjectId(tabId: number, selector: string, epoch: number): Promise<string> {
+async function nodeObjectId(surface: StoredSurface, selector: string): Promise<string> {
   // Resolve a snapshot ref (e5) exactly as click/type do so the two ways of
   // naming an element stay consistent; otherwise treat it as a CSS selector.
-  const { refs = {} } = await getSession();
+  // Refs come from THIS surface's own map (see state.ts): another tab's
+  // snapshot must not supply the scroll target.
+  const tabId = surface.tabId;
+  const refs = await getRefs(surfaceToken(surface));
   const ref = /^e\d+$/.test(selector) ? refs[selector] : undefined;
   let nodeId: number;
   if (ref) {
-    if (ref.epoch !== epoch) {
+    if (ref.epoch !== surface.epoch) {
       throw new BridgeCommandError("element_not_found", "the page navigated since that snapshot");
     }
+    // Same constraint as input.ts nodeIdFor: pushNodesByBackendIdsToFrontend
+    // rejects with -32000 "Document needs to be requested first" unless this
+    // debugger session has requested the document. See input.ts for the full
+    // rationale (found live once #319 made refs reachable at all).
+    await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
     const pushed = await cdp<PushResult>(tabId, "DOM.pushNodesByBackendIdsToFrontend", {
       backendNodeIds: [ref.backendNodeId],
     });
@@ -121,7 +129,7 @@ export async function scroll(params: Record<string, unknown>): Promise<Record<st
   if (selector) {
     // scrollIntoView on the resolved node, centered so the element is usable
     // after the scroll rather than jammed against the viewport edge.
-    const objectId = await nodeObjectId(tabId, selector, surface.epoch);
+    const objectId = await nodeObjectId(surface, selector);
     await cdp(tabId, "Runtime.callFunctionOn", {
       objectId,
       functionDeclaration: SCROLL_INTO_VIEW_FN,

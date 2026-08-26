@@ -30,6 +30,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
+    COMMAND_TIMEOUTS,
+    ORIGIN_PROMPT_WINDOW_S,
     PROTO_VERSION,
     ErrorCode,
     ErrorDetail,
@@ -52,31 +54,6 @@ PAIR_TTL_S = 120.0
 PAIR_MAX_ATTEMPTS = 5
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
-COMMAND_TIMEOUTS = {
-    "open": 30.0,
-    "goto": 30.0,
-    "click": 25.0,
-    "type": 25.0,
-    "read": 20.0,
-    "snapshot": 20.0,
-    "screenshot": 20.0,
-    "close": 20.0,
-    "status": 20.0,
-    # scroll waits briefly for the wheel/scrollIntoView to settle and re-reads
-    # position; logs just drains a per-tab ring buffer already in memory.
-    "scroll": 20.0,
-    "logs": 20.0,
-}
-
-#: Extra budget granted to a command that is BLOCKED on a human origin
-#: decision, on top of the base command timeout. The extension gives the user
-#: 60 s to answer (origins.ts); without this the 25–30 s command timeout fired
-#: first, so a user who took longer than that got a spurious tool failure while
-#: the tab navigated anyway against a surface the session had written off
-#: (finding A3). Slightly above 60 s so the extension's own deny-timeout wins
-#: the race and returns a typed ORIGIN_DENIED rather than this firing blind.
-ORIGIN_PROMPT_WINDOW_S = 65.0
-
 #: Poll granularity for the extendable command wait. A pending future is
 #: normally resolved by the receive loop the instant the response lands; this
 #: only bounds how quickly a deadline EXTENSION (awaiting_origin) is noticed.
@@ -510,13 +487,23 @@ class BridgeService:
         if request.id in self.link.pending:
             return self._error_response(request.id, ErrorCode.BUSY, "request id already in flight")
         # Serialize per tab so concurrent sessions cannot interleave commands on
-        # the one shared surface (finding A4). Commands that name no tab (open,
-        # status) serialize on a shared key so a second open cannot race the
-        # first into a duplicate surface.
+        # the same surface (finding A4); commands on DIFFERENT tabs run in
+        # parallel, which is what lets each session drive its own surface.
+        # Commands that name no tab (open, status, tabs) serialize on a shared
+        # key so a fresh open cannot race another open past the surface cap, and
+        # a listing cannot interleave with an open's map write.
         tab_key = str(request.params.get("tab") or "__global__")
         lock = self._tab_locks.setdefault(tab_key, asyncio.Lock())
         async with lock:
-            return await self._dispatch_locked(request)
+            response = await self._dispatch_locked(request)
+        # Per-tab keys used to be near-singleton; with every opened tab minting
+        # a token the map would now grow for the daemon's lifetime. Evict the
+        # key once its tab is closed and nothing is waiting on the lock —
+        # unlocked-and-unwaited means a later command for the same (now dead)
+        # handle can safely mint a fresh Lock.
+        if request.method == "close" and tab_key != "__global__" and not lock.locked():
+            self._tab_locks.pop(tab_key, None)
+        return response
 
     async def _dispatch_locked(self, request: Request) -> JSONResponse:
         future: asyncio.Future[Response] = asyncio.get_running_loop().create_future()

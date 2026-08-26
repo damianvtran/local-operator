@@ -381,6 +381,46 @@ def test_subagent_only_loads_explicit_specialist_instructions(tmp_path):
     assert _specialist_instructions("dashboard-release", parent) == "Follow the release checklist."
 
 
+@pytest.mark.asyncio
+async def test_specialist_launch_records_the_exact_effective_prompt(tmp_path, monkeypatch):
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    registry = AgentRegistry(tmp_path / "agents")
+    specialist = registry.create_agent(
+        _agent_fields(
+            name="dashboard-release",
+            description="Release the dashboard",
+            categories=["specialist"],
+        )
+    )
+    registry.set_agent_system_prompt(specialist.id, "Follow the release checklist.")
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=registry)
+
+    job_id = parent._launch_subagent(
+        label="release", prompt="Deploy dashboard.", agent="dashboard-release"
+    )
+    job = parent.jobs.get(job_id)
+    assert job is not None
+    assert job.prompt == "Deploy dashboard."
+    assert job.effective_prompt == "Follow the release checklist.\n\nDeploy dashboard."
+    assert job.launch_message_id
+    node = parent.subagent_comms.node(job_id)
+    assert node is not None
+    assert node.effective_prompt == job.effective_prompt
+    assert node.launch_message_id == job.launch_message_id
+
+    await wait_for(lambda: job.status == "completed")
+    session_dir = parent.subagent_comms.session_dir_of(job_id)
+    assert session_dir is not None
+    transcript_entries = Transcript(session_dir).entries()
+    assert any(entry.id == job.launch_message_id for entry in transcript_entries)
+    [snapshot] = parent.subagent_comms.snapshot()
+    assert snapshot["effective_prompt"] == job.effective_prompt
+    assert snapshot["launch_message_id"] == job.launch_message_id
+    await parent.dispose()
+
+
 def test_attach_team_layers_specialist_manager_instructions(tmp_path, monkeypatch):
     from datetime import datetime, timezone
 
@@ -1110,9 +1150,14 @@ async def test_child_of_top_level_session_keeps_delegation_but_not_wake(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_grandchild_never_advertises_session_capability_tools(tmp_path, monkeypatch):
-    """One level deeper the whole set goes: a grandchild's children would
-    register on a job manager nothing observes and that dies mid-turn."""
+async def test_grandchild_cannot_fan_out_but_polls_its_own_background_bash(tmp_path, monkeypatch):
+    """One level deeper the SPAWN/PERSIST tools go: a grandchild's children
+    would register on a job manager nothing observes and that dies mid-turn.
+    But ``jobs`` stays, because the grandchild keeps ``bash`` with
+    ``background`` — so it can still poll and cancel the background command it
+    is told to (the bash receipt advertises ``jobs(op='peek')``), and without
+    ``jobs`` that advice loops forever on ``Tool not found: jobs``. The
+    invariant: ``jobs`` survives IFF ``bash`` can still background."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
     # A parent that is itself a child is recognisable by its _job_id.
@@ -1121,7 +1166,10 @@ async def test_grandchild_never_advertises_session_capability_tools(tmp_path, mo
     child = await build_child(parent)
 
     names = {tool.name for tool in child._tools}
-    assert names.isdisjoint({"task", "wait", "jobs", "wake"})
+    # No fan-out and no cross-boundary persistence from a grandchild.
+    assert names.isdisjoint({"task", "wait", "wake"})
+    # ...but it can observe/cancel its OWN background job.
+    assert "jobs" in names
     assert {"bash", "read", "edit", "write"} <= names
     await child.dispose()
     await parent.dispose()
@@ -1186,10 +1234,54 @@ async def test_a_tool_restricted_role_keeps_hub_so_it_can_answer(tmp_path, monke
     )
 
     names = {tool.name for tool in child._tools}
-    assert names <= {"read", "glob", "grep", "bash", "todo", "hub"}
+    assert names <= {"read", "glob", "grep", "bash", "todo", "hub", "jobs"}
     assert "hub" in names
-    # The boundary itself is intact: nothing the allowlist denies survived.
-    assert {"edit", "write", "eval"}.isdisjoint(names)
+    # It keeps ``bash`` with ``background``, so it must keep ``jobs`` to poll
+    # and cancel that background job — otherwise the bash receipt's advice to
+    # ``jobs(op='peek')`` loops on ``Tool not found: jobs``.
+    assert "jobs" in names
+    # The boundary itself is intact: nothing the allowlist denies survived,
+    # and a role that must not fan out still has no spawn/persist tools.
+    assert {"edit", "write", "eval", "task", "wait", "wake"}.isdisjoint(names)
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_non_delegating_role_keeps_jobs_to_poll_its_background_bash(tmp_path, monkeypatch):
+    """The bug this fixes: a non-delegating role (coder/reviewer) that
+    backgrounds a long ``bash`` command spun forever emitting ``Tool not
+    found: jobs``. Such a role loses the SPAWN/PERSIST capability tools
+    (``task``/``wait``/``wake``) — a slice that fans out is a fan-out nobody
+    watches — but it keeps ``bash`` with ``background``, so it must keep
+    ``jobs`` to observe and cancel the job that ``bash`` receipt tells it to
+    poll. Invariant: ``jobs`` survives IFF ``bash`` can still background."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    # A coder-shaped profile: full toolset (no allowlist), does not delegate.
+    profile = AgentProfile(
+        name="coder",
+        description="implements a slice",
+        may_delegate=False,
+    )
+    child = await subagent_mod._build_child_session(
+        label="sub",
+        prompt="implement the slice",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-1",
+        agent="coder",
+        profile=profile,
+    )
+
+    names = {tool.name for tool in child._tools}
+    assert "bash" in names
+    assert "jobs" in names
+    assert {"task", "wait", "wake"}.isdisjoint(names)
     await child.dispose()
     await parent.dispose()
 

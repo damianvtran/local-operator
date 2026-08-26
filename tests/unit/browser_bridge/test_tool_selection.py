@@ -107,10 +107,11 @@ async def test_bridge_fallback_and_token_routing(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_scroll_and_logs_are_advertised_actions() -> None:
+def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
     assert "scroll" in builtin.BROWSER_ACTIONS
     assert "logs" in builtin.BROWSER_ACTIONS
-    assert builtin.BRIDGE_ONLY_BROWSER_ACTIONS == frozenset({"scroll", "logs"})
+    assert "tabs" in builtin.BROWSER_ACTIONS
+    assert builtin.BRIDGE_ONLY_BROWSER_ACTIONS == frozenset({"scroll", "logs", "tabs"})
 
 
 @pytest.mark.parametrize(
@@ -251,7 +252,112 @@ async def test_scroll_and_logs_degrade_on_cmux(monkeypatch) -> None:
     surface = BrowserSurface()
     surface.surface_id = "surface:cmux-open"
     context = ToolContext(browser=surface)
-    for action in ("scroll", "logs"):
+    for action in ("scroll", "logs", "tabs"):
         result = await builtin.execute_browser("t", {"action": action}, None, None, context)
         assert "not supported on the cmux backend" in result.text
         assert "Local Operator browser extension" in result.text
+
+
+# ---------------------------------------------------------------------------
+# tabs — multi-surface discovery. Parallel sessions each own a tab, so agents
+# need to list what is being driven, spot their own handle, and know which
+# handle to close when the surface cap refuses a fresh open.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tabs_lists_surfaces_and_marks_own(monkeypatch) -> None:
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        assert action == "tabs"
+        assert params == {}
+        # The extension REDACTS listed handles (finding M1): truncated nonce
+        # plus ellipsis, so the listing cannot hand out drive capabilities.
+        return {
+            "tabs": [
+                {
+                    "tab": "bridge:9:aaaaaa\u2026",
+                    "url": "https://example.com/a",
+                    "title": "Mine",
+                    "createdAt": 1000,
+                    "lastUsedAt": 2000,
+                },
+                {
+                    "tab": "bridge:12:bbbbbb\u2026",
+                    "url": "https://example.com/b",
+                    "title": "Theirs",
+                    "createdAt": 1000,
+                    "lastUsedAt": 1500,
+                },
+            ],
+            "limit": 8,
+        }, None
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:aaaaaa0123456789aaaaaa0123456789"
+    context = ToolContext(browser=surface)
+    result = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
+    assert not result.is_error
+    # The caller's own tab is recognised by PREFIX-matching its full pinned
+    # token against the redacted entry; the other session's is listed as
+    # awareness only.
+    assert "bridge:9:aaaaaa\u2026 (yours)" in result.text
+    assert "bridge:12:bbbbbb\u2026:" in result.text
+    assert "awareness-only" in result.text
+    assert result.details is not None and result.details["tab_count"] == 2
+
+
+def test_redacted_ownership_prefix_matching() -> None:
+    own = "bridge:9:aaaaaa0123456789aaaaaa0123456789"
+    assert builtin._owns_redacted_tab(own, "bridge:9:aaaaaa\u2026")
+    # Another session's redacted entry does not match.
+    assert not builtin._owns_redacted_tab(own, "bridge:9:bbbbbb\u2026")
+    # Same tab id alone is not ownership — the nonce prefix must agree.
+    assert not builtin._owns_redacted_tab("bridge:9:cccccc\u2026", "bridge:9:aaaaaa\u2026")
+    assert not builtin._owns_redacted_tab("", "bridge:9:aaaaaa\u2026")
+    # Defensive exact-match path for an unredacted value.
+    assert builtin._owns_redacted_tab(own, own)
+
+
+@pytest.mark.asyncio
+async def test_tabs_works_without_an_owned_surface(monkeypatch) -> None:
+    # Discovery must not require 'open' first: its main use is deciding
+    # whether to resume an existing tab or seeing what fills the cap.
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        return {"tabs": []}, None
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(browser=BrowserSurface())
+    result = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
+    assert not result.is_error
+    assert "No extension-driven browser tabs" in result.text
+
+
+@pytest.mark.asyncio
+async def test_bridge_open_recovers_from_a_dead_pinned_tab(monkeypatch) -> None:
+    # 'open' is the recovery verb: when the session's pinned tab died, the
+    # resume attempt fails with tab-gone and the tool must fall back to
+    # creating a fresh tab instead of surfacing the error.
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        calls.append(params)
+        if "tab" in params:
+            # Recovery keys on the TYPED wire code carried in details, not on
+            # the diagnostic's wording (finding m4).
+            problem = builtin._error("t", "browser", "browser tab bridge:9:dead is gone.")
+            problem.details = {"error_code": "tab_closed"}
+            return None, problem
+        return {"tab": "bridge:33:fresh", "url": "https://example.com/", "title": "E"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:dead"
+    result = await builtin._bridge_open("t", surface, "https://example.com")
+    assert not result.is_error
+    assert surface.surface_id == "bridge:33:fresh"
+    assert len(calls) == 2 and "tab" in calls[0] and "tab" not in calls[1]

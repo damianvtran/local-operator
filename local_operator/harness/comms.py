@@ -54,6 +54,7 @@ from local_operator.harness.types import (
     CustomMessage,
     Message,
     MessageEndEvent,
+    ModelSpec,
     StaleAside,
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
@@ -224,9 +225,17 @@ class SubagentNode:
     session_id: str | None
     session_dir: Path | None
     prompt: str = ""
+    effective_prompt: str = ""
     launch_message_id: str = ""
     agent_role: str = ""
     effort: str = ""
+    #: Every deterministic launch-row identity this lineage owns mapped to the
+    #: concise delegated instruction authored for it, INCLUDING attempts that
+    #: #314 collapsed into this record. The viewer replaces each durable
+    #: ``subagent-launch:<id>`` user row with its concise prompt; without the
+    #: superseded attempts here it could only reconcile the newest launch and
+    #: would leak every earlier attempt's full role/team/system preamble.
+    launch_prompts: dict[str, str] = field(default_factory=dict)
 
 
 class ChildSession(Protocol):
@@ -257,6 +266,7 @@ class _ChildRecord:
     # execution ownership out of each session's own job manager.
     parent_job_id: str | None = None
     prompt: str = ""
+    effective_prompt: str = ""
     launch_message_id: str = ""
     agent_role: str = ""
     effort: str = ""
@@ -324,6 +334,11 @@ class _ChildRecord:
     #: Attempt handles superseded by this record. Persisted so a parent can
     #: keep using an id it mentioned before either process or child resumed.
     attempt_aliases: list[str] = field(default_factory=list)
+    #: Concise instruction for each SUPERSEDED attempt, keyed by that attempt's
+    #: ``subagent-launch:<id>`` identity. Captured when #314 collapses a prior
+    #: attempt into this record so the viewer can render every historical
+    #: launch row as its concise prompt, not just the current one.
+    prior_launch_prompts: dict[str, str] = field(default_factory=dict)
 
 
 class SubagentComms:
@@ -369,6 +384,7 @@ class SubagentComms:
         *,
         parent_job_id: str | None = None,
         prompt: str = "",
+        effective_prompt: str = "",
         launch_message_id: str = "",
         agent_role: str = "",
         effort: str = "",
@@ -405,6 +421,7 @@ class SubagentComms:
             existing.label = label
             existing.parent_job_id = parent_job_id
             existing.prompt = prompt
+            existing.effective_prompt = effective_prompt
             existing.launch_message_id = launch_message_id
             existing.agent_role = agent_role
             existing.effort = effort
@@ -414,6 +431,7 @@ class SubagentComms:
             label=label,
             parent_job_id=parent_job_id,
             prompt=prompt,
+            effective_prompt=effective_prompt,
             launch_message_id=launch_message_id,
             agent_role=agent_role,
             effort=effort,
@@ -449,6 +467,17 @@ class SubagentComms:
             record.attempt_aliases = list(
                 dict.fromkeys([*prior.attempt_aliases, prior.job_id, *record.attempt_aliases])
             )
+            # Keep every collapsed attempt's concise prompt keyed by its own
+            # deterministic launch identity. The prior's transcript rows (its
+            # original launch turn and any it in turn folded) still live in the
+            # shared session directory this continuation replays, so the viewer
+            # needs each one's authored prompt to avoid re-exposing that
+            # attempt's full effective-prompt preamble (review round 4 R4-1).
+            merged_prior = dict(prior.prior_launch_prompts)
+            if prior.launch_message_id and prior.prompt:
+                merged_prior[prior.launch_message_id] = prior.prompt
+            merged_prior.update(record.prior_launch_prompts)
+            record.prior_launch_prompts = merged_prior
             self._records.pop(prior.job_id, None)
         for alias in record.attempt_aliases:
             self._aliases[alias] = job_id
@@ -536,6 +565,12 @@ class SubagentComms:
         child_session_id = getattr(record.child, "session_id", None)
         if child_session_id:
             session_id = str(child_session_id)
+        # The current launch plus every collapsed predecessor, so the viewer
+        # reconciles ALL durable launch rows this lineage owns to their concise
+        # prompts rather than only the newest attempt (review round 4 R4-1).
+        launch_prompts = dict(record.prior_launch_prompts)
+        if record.launch_message_id and record.prompt:
+            launch_prompts[record.launch_message_id] = record.prompt
         return SubagentNode(
             job_id=record.job_id,
             label=record.label,
@@ -543,9 +578,11 @@ class SubagentComms:
             session_id=session_id,
             session_dir=record.session_dir,
             prompt=record.prompt,
+            effective_prompt=record.effective_prompt,
             launch_message_id=record.launch_message_id,
             agent_role=record.agent_role,
             effort=record.effort,
+            launch_prompts=launch_prompts,
         )
 
     def job(self, job_id: str) -> Any | None:
@@ -728,6 +765,7 @@ class SubagentComms:
                     "label": record.label,
                     "parent_job_id": record.parent_job_id,
                     "prompt": record.prompt,
+                    "effective_prompt": record.effective_prompt,
                     "launch_message_id": record.launch_message_id,
                     "agent_role": record.agent_role,
                     "effort": record.effort,
@@ -738,6 +776,10 @@ class SubagentComms:
                     "paused": record.paused,
                     "settled_at": record.settled_at,
                     "attempt_aliases": list(record.attempt_aliases),
+                    # Concise prompt for each collapsed attempt, so a resumed
+                    # session that reopens this record still renders every
+                    # historical launch row as its short instruction.
+                    "prior_launch_prompts": dict(record.prior_launch_prompts),
                 }
             )
         return rows
@@ -776,6 +818,17 @@ class SubagentComms:
                     *winner.get("attempt_aliases", []),
                 ]
                 winner["attempt_aliases"] = list(dict.fromkeys(alias for alias in aliases if alias))
+                # Fold the collapsed attempt's own launch prompt (and any it had
+                # already collapsed) under the winner, so a legacy snapshot with
+                # one record per resume still yields a concise prompt for every
+                # historical launch row rather than the newest alone.
+                folded = dict(row.get("prior_launch_prompts") or {})
+                launch_id = str(row.get("launch_message_id") or "")
+                launch_prompt = str(row.get("prompt") or "")
+                if launch_id and launch_prompt:
+                    folded[launch_id] = launch_prompt
+                folded.update(winner.get("prior_launch_prompts") or {})
+                winner["prior_launch_prompts"] = folded
                 continue
             copied = dict(row)
             winners.append(copied)
@@ -792,6 +845,7 @@ class SubagentComms:
                 label=str(row.get("label") or job_id),
                 parent_job_id=(str(row["parent_job_id"]) if row.get("parent_job_id") else None),
                 prompt=str(row.get("prompt") or ""),
+                effective_prompt=str(row.get("effective_prompt") or ""),
                 launch_message_id=str(row.get("launch_message_id") or ""),
                 agent_role=str(row.get("agent_role") or ""),
                 effort=str(row.get("effort") or ""),
@@ -805,6 +859,11 @@ class SubagentComms:
                 ),
                 error_text=(str(row["error_text"]) if row.get("error_text") is not None else None),
                 attempt_aliases=[str(alias) for alias in row.get("attempt_aliases", []) if alias],
+                prior_launch_prompts={
+                    str(key): str(value)
+                    for key, value in (row.get("prior_launch_prompts") or {}).items()
+                    if key and value
+                },
             )
             self._records[job_id] = record
             for alias in record.attempt_aliases:
@@ -1426,12 +1485,48 @@ class SubagentComms:
         jobs = self._jobs()
         if jobs is None:
             return None, "no job manager attached to this session"
+        # The role and tier are carried FORWARD, not re-defaulted. Everything
+        # that makes a child what it is hangs off ``agent``: ``_resolve_role``
+        # picks the preamble (a role's instructions, a specialist's own
+        # ``system_prompt.md``, or ``SCOUT_PREAMBLE``), and the profile it
+        # returns decides the tool allowlist. That allowlist is a CAPABILITY
+        # BOUNDARY rather than advice (see ``_build_child_session``): resumed
+        # without it, a reviewer regains ``edit``/``write`` and can "helpfully"
+        # fix the very code it was asked to review, a scout loses its
+        # read-only promise, and the MCP tools restricted roles are denied
+        # come back wholesale. It also re-stamps ``origin.json`` with the
+        # agent, so a defaulted resume overwrites the real role on disk.
+        # ``run_subagent`` defaults ``agent`` to ``"task"``, so omitting these
+        # silently downgraded every resumed child to a generic no-role one.
+        agent = record.agent_role or "task"
+        effort = record.effort or None
+        # A resume is a SECOND LAUNCH, so it must re-resolve the tier into a
+        # model the way the first one did (``run_subagent`` explains why the
+        # tier does not survive that resolution and rides separately). Passing
+        # ``effort`` alone would return a child launched at ``hi`` on the
+        # parent's model while the panel still displayed ``hi``.
+        #
+        # Guarded rather than called outright: ``_session`` is a full
+        # ``Session`` in production, but this class is also driven by the
+        # reduced hosts and test doubles that supply only the queue/steer/
+        # subscribe surface (see ``ChildSession``). A parent that cannot price
+        # a tier must still be able to resume its child on the parent's model,
+        # so a missing resolver degrades instead of raising.
+        model_spec: ModelSpec | None = None
+        resolve = getattr(self._session, "_resolve_subagent_model", None)
+        if callable(resolve):
+            resolved = resolve(agent, effort)
+            if isinstance(resolved, ModelSpec):
+                model_spec = resolved
         new_job_id = run_subagent(
             label=record.label,
             prompt=message,
             parent_session=self._session,
             jobs_manager=jobs,
+            model_spec=model_spec,
             resume_dir=record.session_dir,
+            agent=agent,
+            effort=effort,
         )
         # The pause is over the moment its continuation exists. Left set, the
         # old record would keep advertising ``paused`` in the roster forever

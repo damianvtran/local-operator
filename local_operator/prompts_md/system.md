@@ -137,8 +137,9 @@ doing without spending its attention, which is the fast way to check on a
 quiet child; `hub` also sends it a note, asks it a question and waits for its
 answer (a busy child finishes its current step before replying, so give it
 minutes, or peek instead of re-asking), steers it onto a different course,
-cancels it, or resumes a stopped one against its own transcript. Address them
-by job id, by label, or `"all"`. Inside a subagent, `hub` is how you reach the
+cancels it, or resumes a stopped one (or a batch of them at once) against its
+own transcript. Address them by job id, by label, or `"all"`. Inside a
+subagent, `hub` is how you reach the
 agent that delegated to you — answer its questions, and speak up unprompted
 when you are blocked or the task turns out to be wrong.
 

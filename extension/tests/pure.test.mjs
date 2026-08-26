@@ -36,6 +36,50 @@ test("AX compaction assigns epoch-scoped click refs", async () => {
   } finally { await module.close(); }
 });
 
+test("AX compaction walks through ignored wrapper nodes", async () => {
+  const module = await load("src/ax-compact.ts");
+  try {
+    // Real headful Chrome wraps every page's content in ignored generic
+    // containers (html/body render as role "none", ignored: true) directly
+    // under the RootWebArea. Pruning ignored subtrees therefore drops the
+    // whole page — the live one-line-snapshot bug. This mirrors the exact
+    // shape captured from Chrome 151 on http://127.0.0.1 test pages.
+    const rendered = module.loaded.compactAX([
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Page" }, backendDOMNodeId: 1, childIds: ["2"], properties: [{ name: "focusable", value: { value: true } }] },
+      { nodeId: "2", role: { value: "none" }, ignored: true, childIds: ["3"] },
+      { nodeId: "3", role: { value: "none" }, ignored: true, childIds: ["4", "5"] },
+      { nodeId: "4", role: { value: "heading" }, name: { value: "Title" } },
+      { nodeId: "5", role: { value: "link" }, name: { value: "More" }, backendDOMNodeId: 9 },
+    ], 3);
+    const lines = rendered.snapshot.split("\n");
+    assert.equal(lines.length, 3, "ignored wrappers must not hide the page");
+    // Children of an ignored wrapper indent relative to the last RENDERED
+    // ancestor, not the wrapper chain: depth stays flat through them.
+    assert.match(lines[1], /^  - heading "Title"$/);
+    assert.match(lines[2], /^  - link "More" \[e2\]$/);
+    assert.deepEqual(rendered.refs.e2, { backendNodeId: 9, epoch: 3 });
+  } finally { await module.close(); }
+});
+
+test("AX compaction terminates on cyclic and duplicated childIds", async () => {
+  const module = await load("src/ax-compact.ts");
+  try {
+    // The walk trusts protocol data; a malformed payload with a cycle
+    // (2 -> 3 -> 2) or the same child listed twice must neither hang the
+    // service worker nor emit duplicate lines (review round 1, MINOR-1).
+    const rendered = module.loaded.compactAX([
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Page" }, childIds: ["2", "2"] },
+      { nodeId: "2", role: { value: "heading" }, name: { value: "Loop" }, childIds: ["3"] },
+      { nodeId: "3", role: { value: "link" }, name: { value: "Back" }, backendDOMNodeId: 4, childIds: ["2"] },
+    ], 1);
+    assert.deepEqual(rendered.snapshot.split("\n"), [
+      '- RootWebArea "Page"',
+      '  - heading "Loop"',
+      '    - link "Back" [e1]',
+    ]);
+  } finally { await module.close(); }
+});
+
 test("scroll expressions force instant behavior in every mode", async () => {
   const module = await load("src/scroll-expressions.ts");
   try {
@@ -143,5 +187,50 @@ test("origin render holds the ack through the decision round-trip race", async (
     assert.equal(originPromptView(undefined, decided), "none");
     // Never decided in this popup: the prompt is correct.
     assert.equal(originPromptView("https://example.com", null), "prompt");
+  } finally { await module.close(); }
+});
+
+test("surface tokens resolve only with an exact nonce-bearing handle", async () => {
+  const module = await load("src/state.ts");
+  try {
+    const { surfaceToken, parseSurface, resolveSurfaceToken, atSurfaceCap, MAX_SURFACES } = module.loaded;
+    const surface = { tabId: 42, nonce: "abc123", epoch: 3, createdAt: 1, lastUsedAt: 2 };
+    const token = surfaceToken(surface);
+    assert.equal(token, "bridge:42:abc123");
+    assert.deepEqual(parseSurface(token), { tabId: 42, nonce: "abc123" });
+    const surfaces = { [token]: surface };
+    // Exact token resolves; a guessed nonce or the bare tab id does not — the
+    // nonce is the anti-guessing property that keeps parallel sessions from
+    // driving each other's tabs.
+    assert.equal(resolveSurfaceToken(token, surfaces), surface);
+    assert.equal(resolveSurfaceToken("bridge:42:guessed", surfaces), undefined);
+    assert.equal(resolveSurfaceToken("bridge:42", surfaces), undefined);
+    assert.equal(resolveSurfaceToken(42, surfaces), undefined);
+    // Cap math: at MAX_SURFACES entries a fresh open must be refused.
+    const many = {};
+    for (let i = 0; i < MAX_SURFACES; i += 1) many[`bridge:${i}:n${i}`] = { ...surface, tabId: i };
+    assert.equal(atSurfaceCap(surfaces), false);
+    assert.equal(atSurfaceCap(many), true);
+  } finally { await module.close(); }
+});
+
+test("redacted handles are recognizable by their owner but not driveable", async () => {
+  const module = await load("src/state.ts");
+  try {
+    const { surfaceToken, redactToken, ownsRedacted, resolveSurfaceToken } = module.loaded;
+    const surface = { tabId: 42, nonce: "abcdef0123456789abcdef0123456789", epoch: 1, createdAt: 1, lastUsedAt: 2 };
+    const token = surfaceToken(surface);
+    const redacted = redactToken(token);
+    // Truncated to a 6-char prefix + ellipsis: enough to prefix-match, far
+    // too little to reconstruct the 32-char nonce (finding M1).
+    assert.equal(redacted, "bridge:42:abcdef…");
+    // The owner (holding the full token) recognises the listing entry...
+    assert.equal(ownsRedacted(token, redacted), true);
+    // ...another session's token does not...
+    assert.equal(ownsRedacted("bridge:42:ffffff0123456789abcdef0123456789", redacted), false);
+    // ...and the redacted form itself resolves NOTHING: it is not a handle.
+    assert.equal(resolveSurfaceToken(redacted, { [token]: surface }), undefined);
+    // Unredacted comparison still exact-matches (defensive path).
+    assert.equal(ownsRedacted(token, token), true);
   } finally { await module.close(); }
 });

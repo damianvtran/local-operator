@@ -1,7 +1,7 @@
 import { BridgeCommandError, cdp, requireSurface } from "../cdp";
 import { withOriginGate } from "../origins";
 import { settle } from "../settle";
-import { getSession } from "../state";
+import { getRefs, surfaceToken, type StoredSurface } from "../state";
 
 interface QueryResult { nodeId?: number }
 interface PushResult { nodeIds: number[] }
@@ -29,12 +29,23 @@ async function callOnNode<T>(
   return out.result?.value as T;
 }
 
-async function nodeIdFor(tabId: number, selector: unknown, epoch: number): Promise<number> {
+async function nodeIdFor(surface: StoredSurface, selector: unknown): Promise<number> {
+  const tabId = surface.tabId;
   if (typeof selector !== "string" || !selector) throw new BridgeCommandError("element_not_found", "selector is required");
-  const { refs = {} } = await getSession();
+  // Refs are read from THIS surface's own map: a snapshot taken on another
+  // concurrently-driven tab must never supply the click target here.
+  const refs = await getRefs(surfaceToken(surface));
   const ref = /^e\d+$/.test(selector) ? refs[selector] : undefined;
   if (ref) {
-    if (ref.epoch !== epoch) throw new BridgeCommandError("element_not_found", "the page navigated since that snapshot");
+    if (ref.epoch !== surface.epoch) throw new BridgeCommandError("element_not_found", "the page navigated since that snapshot");
+    // DOM.pushNodesByBackendIdsToFrontend requires the DOM agent to hold the
+    // document for this session first, or Chrome rejects with -32000
+    // "Document needs to be requested first". The CSS-selector branch below
+    // gets this for free from its own getDocument call; the ref branch must
+    // request it explicitly. Found live: every ref-based click failed while
+    // selector-based clicks worked (the pre-#319 snapshot bug meant refs were
+    // never exercised before). depth:0 keeps the payload minimal.
+    await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
     const pushed = await cdp<PushResult>(tabId, "DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: [ref.backendNodeId] });
     const node = pushed.nodeIds[0];
     if (!node) throw new BridgeCommandError("element_not_found", "snapshot ref is stale");
@@ -58,7 +69,7 @@ export async function click(
 ): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
   const before = (await chrome.tabs.get(surface.tabId)).url ?? "";
-  const nodeId = await nodeIdFor(surface.tabId, params.selector ?? params.ref, surface.epoch);
+  const nodeId = await nodeIdFor(surface, params.selector ?? params.ref);
   await cdp(surface.tabId, "DOM.scrollIntoViewIfNeeded", { nodeId });
   const objectId = await objectIdFor(surface.tabId, nodeId);
   // Race a short grace window for a navigation the click may start. A click is
@@ -117,7 +128,7 @@ export async function click(
 export async function typeText(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
   const selector = params.selector ?? params.ref;
-  const nodeId = await nodeIdFor(surface.tabId, selector, surface.epoch);
+  const nodeId = await nodeIdFor(surface, selector);
   await cdp(surface.tabId, "DOM.scrollIntoViewIfNeeded", { nodeId });
   const objectId = await objectIdFor(surface.tabId, nodeId);
   // Replace-not-append (the cmux fill-vs-type lesson): focus, set the value on

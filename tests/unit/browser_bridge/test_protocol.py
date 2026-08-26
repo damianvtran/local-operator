@@ -44,6 +44,26 @@ def test_scroll_and_logs_requests_round_trip() -> None:
     assert Request.model_validate_json(logs.model_dump_json()) == logs
 
 
+def test_tabs_is_a_protocol_method_with_a_daemon_timeout() -> None:
+    # `tabs` is the multi-surface discovery verb: parallel sessions each own a
+    # tab now, so agents need to list what is being driven. A METHODS entry
+    # without a daemon timeout would pass the allowlist and then die as
+    # "unknown method", so the two tables are pinned together here.
+    from local_operator.browser_bridge.daemon import COMMAND_TIMEOUTS
+
+    assert "tabs" in METHODS
+    assert "tabs" in COMMAND_TIMEOUTS
+    # Every advertised method must have a timeout, and vice versa — the ONE
+    # source of truth contract METHODS documents.
+    assert set(METHODS) == set(COMMAND_TIMEOUTS)
+
+
+def test_tab_limit_is_a_typed_error() -> None:
+    # The surface cap refusal must arrive as a typed code the tool can map to
+    # "close one first", not a generic internal error.
+    assert ErrorCode.TAB_LIMIT.value == "tab_limit"
+
+
 def test_generated_method_union_and_types_cover_new_methods() -> None:
     # The generated TS is the extension's only view of the method set; a method
     # added to METHODS without regenerating would let the extension ship a
@@ -53,3 +73,12 @@ def test_generated_method_union_and_types_cover_new_methods() -> None:
     assert "'scroll'" in rendered and "'logs'" in rendered
     assert "interface LogEntry" in rendered
     assert "interface ScrollResult" in rendered
+
+
+def test_generated_ts_emits_origin_prompt_timeout() -> None:
+    # origins.ts imports this from protocol.gen.ts so the extension's 60 s
+    # deny, the daemon's 65 s prompt window, and the session client's HTTP
+    # timeout all derive from one Python constant and cannot drift (finding
+    # A3: the chain extension deny < daemon window < client timeout is what
+    # turns a mid-prompt wait into a typed answer instead of "unreachable").
+    assert "export const ORIGIN_PROMPT_TIMEOUT_MS = 60000 as const;" in gen_ts_render()

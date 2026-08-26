@@ -1057,6 +1057,23 @@ async def _prepare(
         sweep_from_config, config_manager, Path(agent_registry.config_dir), transcript_dir
     )
 
+    # Hard-death process-group reaper (tools/group_reaper.py). Runs beside the
+    # retention sweep and for the same reasons: it is a disk walk over OTHER
+    # processes' ledgers plus ps/os.kill probes, none of which touches THIS
+    # session's construction, so it goes off-loop to stay out of the boot stall;
+    # and it is best-effort, so a sweep error must never fail session start.
+    # It reaps a bash process group only when the lop process that spawned it is
+    # provably dead — the one leak _kill() cannot cover, because a SIGKILLed
+    # owner runs no in-process cleanup and start_new_session already stripped the
+    # group's SIGHUP. Owner liveness is the ONLY signal, so a live session's long
+    # command (e.g. a 10h trainer) is never touched.
+    from local_operator.tools.group_reaper import sweep_orphan_groups
+
+    try:
+        await asyncio.to_thread(sweep_orphan_groups, Path(agent_registry.config_dir))
+    except Exception:  # noqa: BLE001 — best-effort; never block session start
+        logger.debug("orphan process-group sweep failed", exc_info=True)
+
     # Stamp session directories that predate the origin marker, so the
     # ``/resume`` picker stops offering delegated runs on the FIRST launch
     # after an upgrade rather than once natural churn has cleared the store.

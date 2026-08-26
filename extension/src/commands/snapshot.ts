@@ -1,12 +1,12 @@
 import { compactAX, type AXNode } from "../ax-compact";
 import { cdp, requireSurface } from "../cdp";
-import { setRefs } from "../state";
+import { setRefs, surfaceToken } from "../state";
 
 // Serializes the enable→read→disable window below. The worker dispatches
 // daemon frames fire-and-forget (worker.ts onmessage), so two concurrent
 // snapshots could otherwise interleave as enable/enable/read/DISABLE/read —
-// the second read then hits a disabled a11y engine, the exact one-node bug
-// this file fixes. The daemon pipelines commands per tab today, so this is
+// the second read then hits a disabled a11y engine and risks a degraded
+// tree. The daemon pipelines commands per tab today, so this is
 // latent, but the extension should not depend on that scheduling promise.
 // A promise chain (not a refcount) keeps it simple: snapshots are rare and
 // heavy, so serializing them costs nothing observable. Failures are swallowed
@@ -15,12 +15,15 @@ let axQueue: Promise<unknown> = Promise.resolve();
 
 export async function snapshot(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
-  // Accessibility.getFullAXTree only returns a populated tree once
-  // Accessibility.enable has run on THIS debugger session; without it Chrome
-  // answers with just the root node (observed live: one-line snapshots). We
-  // disable again after the read so the a11y engine is not kept hot on the tab
-  // between snapshots — the stored refs are backendDOMNodeIds, which belong to
-  // the DOM (not the AX tree) and remain resolvable after disable.
+  // Enable the a11y domain for the read window as documented CDP hygiene.
+  // NOTE: the live one-line snapshots previously blamed on a missing enable
+  // were actually compactAX pruning the subtrees of ignored wrapper nodes
+  // (see ax-compact.ts) — verified in headful Chrome 151/145 where bare
+  // getFullAXTree on a hidden tab returns a full tree even without enable.
+  // We keep the enable→read→disable window anyway: it is cheap, matches the
+  // documented contract, and disable ensures the a11y engine is not kept hot
+  // on the tab between snapshots — the stored refs are backendDOMNodeIds,
+  // which belong to the DOM (not the AX tree) and remain resolvable after.
   const run = async (): Promise<{ nodes: AXNode[] }> => {
     await cdp(surface.tabId, "Accessibility.enable");
     try {
@@ -33,7 +36,10 @@ export async function snapshot(params: Record<string, unknown>): Promise<Record<
   };
   const result = await (axQueue = axQueue.catch(() => {}).then(run)) as { nodes: AXNode[] };
   const rendered = compactAX(result.nodes, surface.epoch);
-  await setRefs(rendered.refs);
+  // Refs are stored under THIS surface's token: with several tabs driven in
+  // parallel, a global ref map would let one tab's snapshot silently repoint
+  // another tab's click targets.
+  await setRefs(surfaceToken(surface), rendered.refs);
   const tab = await chrome.tabs.get(surface.tabId);
   return { snapshot: rendered.snapshot, url: tab.url ?? "", title: tab.title ?? "" };
 }

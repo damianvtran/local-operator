@@ -98,6 +98,7 @@ from local_operator.imaging import (
     bound_image_for_model,
 )
 from local_operator.media import ImageInfo, sniff_image_file
+from local_operator.tools import group_reaper
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -1254,6 +1255,32 @@ async def execute_bash(
         start_new_session=True,
     )
 
+    # Record this group in the owner's process-group ledger so a HARD death of
+    # THIS lop process (SIGKILL from cmux, OOM, crash) — the one stop path with
+    # no in-process code to run _kill() — can still be reaped at the next
+    # startup. start_new_session already detached the group from the terminal,
+    # so a hard-dead owner would otherwise leak it to init forever. Best-effort
+    # and owner-liveness-only by construction: the group is reaped iff THIS
+    # process is dead, never by runtime/CPU/idle, so a legit long-runner (a 10h
+    # trainer) is safe while its session lives. See tools/group_reaper.py.
+    # suppress(Exception): os.getpgid is POSIX-only (absent on Windows), and
+    # registration must never be the reason a command fails to run. The pgid is
+    # held so the clean-death paths below can unregister the exact line.
+    spawned_pgid: int | None = None
+    with contextlib.suppress(Exception):
+        spawned_pgid = os.getpgid(process.pid)
+        group_reaper.register_group(spawned_pgid, params.command)
+
+    def _unregister_group() -> None:
+        # Drop this group's ledger line once it is confirmed dead, so a clean
+        # run leaves nothing for the startup sweep to consider and a long host
+        # session's ledger cannot grow without bound. Best-effort; a miss is
+        # harmless (the sweep finds the leader gone and drops the line anyway).
+        if spawned_pgid is None:
+            return
+        with contextlib.suppress(Exception):
+            group_reaper.unregister_group(spawned_pgid)
+
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
     # Set once the command is owned by a background job, so the pipe readers
@@ -1410,6 +1437,8 @@ async def execute_bash(
                 transport = getattr(process, "_transport", None)
                 if transport is not None:
                     transport.close()
+                # Clean group death: drop its ledger line (see _unregister_group).
+                _unregister_group()
 
             try:
                 while not bg_wait.done():
@@ -1607,6 +1636,8 @@ async def execute_bash(
     transport = getattr(process, "_transport", None)
     if transport is not None:
         transport.close()
+    # Normal-exit reap complete: the group is dead, so drop its ledger line.
+    _unregister_group()
 
     if abort_waiter is not None and not abort_waiter.done():
         abort_waiter.cancel()
@@ -4672,6 +4703,11 @@ BROWSER_ACTIONS = (
     # approval tier and dispatch as everything else.
     "scroll",
     "logs",
+    # tabs lists every live extension-owned tab (all sessions', read-only
+    # awareness) so parallel agents can see what is being driven and know which
+    # handle to close. Bridge-only like scroll/logs: cmux keeps no multi-surface
+    # registry, so it degrades with the same typed "use the extension" error.
+    "tabs",
 )
 
 #: Actions that only the Local Operator browser extension can serve. cmux has no
@@ -4679,7 +4715,7 @@ BROWSER_ACTIONS = (
 #: partial result these degrade with a clear, actionable error naming the
 #: extension. Kept as a set beside BROWSER_ACTIONS so the degrade check and the
 #: advertised action list can never drift apart.
-BRIDGE_ONLY_BROWSER_ACTIONS = frozenset({"scroll", "logs"})
+BRIDGE_ONLY_BROWSER_ACTIONS = frozenset({"scroll", "logs", "tabs"})
 
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
@@ -4765,9 +4801,12 @@ class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str = Field(
-        description="open (start a surface at a URL) | goto | read (page text) | "
-        "snapshot (accessibility tree with click refs) | screenshot | click | "
-        "type | scroll (move the viewport) | logs (console + errors) | close."
+        description="open (start a surface at a URL; on the extension backend a "
+        "fresh open creates a NEW tab — your session then owns it and reuses it) "
+        "| goto | read (page text) | snapshot (accessibility tree with click "
+        "refs) | screenshot | click | type | scroll (move the viewport) | logs "
+        "(console + errors) | tabs (list all extension-driven tabs, other "
+        "sessions' included) | close (end YOUR tab when done with it)."
     )
     url: str = Field(default="", description="http(s) URL for 'open'/'goto'.")
     path: str = Field(default="", description="Destination file for 'screenshot'.")
@@ -5591,11 +5630,16 @@ async def _bridge_call(
     try:
         return await BridgeClient().call(action, params), None
     except BridgeError as exc:
-        return None, _error(
+        problem = _error(
             tool_call_id,
             "browser",
             format_error(exc, action=action, surface=surface),
         )
+        # Carry the TYPED wire code so callers can branch on it (dead-pin
+        # recovery, handle-drop) instead of substring-matching the human
+        # diagnostic, which broke silently on any rewording (finding m4).
+        problem.details = {"error_code": exc.code.value}
+        return None, problem
     except BridgeUnreachable as exc:
         return None, _error(tool_call_id, "browser", str(exc))
 
@@ -5605,10 +5649,26 @@ async def _bridge_open(
     state: BrowserSurfaceProtocol,
     raw_url: str,
 ) -> ToolResult:
+    # The session's pinned handle decides the mode. With one, `open` RESUMES
+    # that tab (extension-side it navigates exactly that surface); without one
+    # the extension creates a brand-new tab. The extension never falls back to
+    # reusing some other live surface — that reuse is how one session used to
+    # hijack another's tab mid-task when agents ran in parallel.
     params: dict[str, Any] = {"url": raw_url.strip()}
-    if state.surface_id.startswith("bridge:"):
+    resuming = state.surface_id.startswith("bridge:")
+    if resuming:
         params["tab"] = state.surface_id
     result, problem = await _bridge_call(tool_call_id, "open", params, surface=state.surface_id)
+    if (
+        problem is not None
+        and resuming
+        and (problem.details or {}).get("error_code") == "tab_closed"
+    ):
+        # The pinned tab died (user closed it, browser restarted). 'open' is
+        # the recovery verb — same contract as the cmux path — so drop the
+        # dead handle and create a fresh tab instead of surfacing the error.
+        state.surface_id = ""
+        result, problem = await _bridge_call(tool_call_id, "open", {"url": raw_url.strip()})
     if problem is not None:
         return problem
     assert result is not None
@@ -5682,6 +5742,74 @@ def _bridge_logs_result(
     )
 
 
+def _owns_redacted_tab(own_surface: str, redacted: str) -> bool:
+    """Whether the session's full pinned handle names a REDACTED listing entry.
+
+    The extension truncates listed nonces (`bridge:<tabId>:<prefix>…`) so a
+    listing cannot hand out drive capabilities (review finding M1); a session
+    recognises its own tab by prefix-matching the full token it was given at
+    open. Mirrors ownsRedacted in extension/src/state.ts.
+    """
+    if not own_surface or not redacted:
+        return False
+    if redacted.endswith("…"):
+        return own_surface.startswith(redacted[:-1])
+    return own_surface == redacted
+
+
+def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
+    """One listed tab: redacted handle, page, recency — the caller's own marked.
+
+    The "(yours)" marker matters because the listing shows EVERY session's
+    tabs: an agent must close its own when done, and must treat the rest as
+    read-only awareness. The handles are redacted by the extension and are NOT
+    driveable — driving needs the full token 'open' returned to its owner.
+    """
+    token = str(entry.get("tab", ""))
+    title = str(entry.get("title", "")).strip() or "(untitled)"
+    url = str(entry.get("url", "")).strip() or "(no URL)"
+    mine = " (yours)" if _owns_redacted_tab(own_surface, token) else ""
+    when = ""
+    last_used = entry.get("lastUsedAt")
+    if isinstance(last_used, (int, float)) and last_used > 0:
+        stamp = datetime.fromtimestamp(last_used / 1000, tz=UTC)
+        when = f" — last used {stamp.strftime('%H:%M:%S')} UTC"
+    return f"{token}{mine}: {title} — {url}{when}"
+
+
+async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
+    """List every live extension-driven tab (all sessions').
+
+    Discovery deliberately needs no open surface of our own: its main use is a
+    session deciding whether to resume, or being told the surface cap is hit
+    and needing to see what is already open. The extension prunes dead tabs as
+    part of answering, so the list is live by construction.
+    """
+    result, problem = await _bridge_call(tool_call_id, "tabs", {}, surface=state.surface_id)
+    if problem is not None:
+        return problem
+    assert result is not None
+    entries = [entry for entry in result.get("tabs") or [] if isinstance(entry, dict)]
+    if not entries:
+        return _text(
+            tool_call_id,
+            "browser",
+            "No extension-driven browser tabs are open. Use 'open' with a URL to start one.",
+            details={"tab_count": 0},
+        )
+    lines = [_format_bridge_tab(entry, state.surface_id) for entry in entries]
+    return _text(
+        tool_call_id,
+        "browser",
+        f"{len(entries)} extension-driven tab{'s' if len(entries) != 1 else ''} "
+        "(most recently used first; handles are redacted — the listing is "
+        "awareness-only and cannot drive or close a tab. Your own tab is "
+        "marked '(yours)'; drive it with the handle your session already "
+        "holds):\n\n" + "\n".join(lines),
+        details={"tab_count": len(entries), "surface_id": state.surface_id},
+    )
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -5720,7 +5848,8 @@ async def _bridge_action(
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
         # retaining it would make even the recovery verb target stale state.
-        if "is gone; dropped the handle" in problem.text:
+        # Branch on the typed code, not the diagnostic's wording (finding m4).
+        if (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
         return problem
     assert result is not None
@@ -5943,6 +6072,20 @@ async def execute_browser(
         return await _browser_open(tool_call_id, state, params.url)
     if action == "close":
         return await _browser_close(tool_call_id, state)
+    if action == "tabs":
+        # Discovery works without an owned surface (its point is finding out
+        # what is open), but it is extension-only: cmux keeps no multi-surface
+        # registry, so a cmux-pinned session degrades exactly like scroll/logs.
+        if state.surface_id.startswith("surface:") or not bridge_available:
+            return _error(
+                tool_call_id,
+                "browser",
+                "'tabs' is not supported on the cmux backend — use the Local Operator "
+                "browser extension (run 'lop browser status' / 'lop browser install' to "
+                "set it up). cmux has no multi-tab surface registry, so this action only "
+                "works through the extension bridge.",
+            )
+        return await _bridge_tabs(tool_call_id, state)
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
     if state.surface_id.startswith("bridge:"):
@@ -6175,8 +6318,14 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "cannot. 'scroll' pages the view (default one screen down, or by "
             "x/y pixels, a direction keyword, or a selector to reveal) and reports "
             "whether more content remains; 'logs' returns the page's console "
-            "output and uncaught exceptions for debugging web apps. 'scroll' and "
-            "'logs' need the extension backend (cmux says so). Use it for every "
+            "output and uncaught exceptions for debugging web apps. Parallel "
+            "sessions each drive their own tab: a fresh 'open' creates a NEW "
+            "extension tab pinned to this session (later opens navigate it), "
+            "'tabs' lists every extension-driven tab including other sessions' "
+            "(handles are redacted: the listing is awareness-only and cannot "
+            "drive or close anything), and 'close' "
+            "ends your own tab when you are done with it. 'scroll', 'logs' and "
+            "'tabs' need the extension backend (cmux says so). Use it for every "
             "screenshot and page interaction; never install or script a browser "
             "engine instead."
         ),
@@ -6954,7 +7103,7 @@ class HubParams(BaseModel):
             "(becomes part of its instructions). pause: stop it now but keep it "
             "resumable. cancel: stop it for good. resume: relaunch a stopped, paused or "
             "failed subagent against its own transcript so it continues where it left "
-            "off."
+            "off; names several targets to fan one message out to a whole batch at once."
         )
     )
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
@@ -6973,8 +7122,9 @@ class HubParams(BaseModel):
         description=(
             "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
             'labels, or ["all"] for every running subagent. Several ids address '
-            "several subagents. 'ask', 'resume' and 'peek' take exactly one. Omit "
-            "for op='list', which addresses nobody."
+            "several subagents. 'ask' and 'peek' take exactly one; 'resume' fans one "
+            "message out to every target you name, so a batch of failed subagents can "
+            "be resumed in a single call. Omit for op='list', which addresses nobody."
         ),
     )
 
@@ -7129,7 +7279,8 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append("")
         lines.append(
             "Resume one with hub op='resume' and its JOB id, plus an instruction for "
-            "what to do next. The transcript id above is not a job id: it opens the "
+            "what to do next \u2014 or name several JOB ids to resume a whole batch in "
+            "one call. The transcript id above is not a job id: it opens the "
             "child's history for reading and starts no agent."
         )
     return _text(
@@ -7288,9 +7439,15 @@ async def _execute_hub_parent(
             "hub",
             "; ".join(errors) or "no subagent matched; use 'jobs' to list them.",
         )
-    # A question, a resume and a peek each have exactly one subject, so they
-    # refuse a fan-out rather than silently acting on the first match.
-    if params.op in ("ask", "resume", "peek") and len(ids) > 1:
+    # A question and a peek each have exactly one subject — one reply to read,
+    # one transcript window to render — so they refuse a fan-out rather than
+    # silently acting on the first match. Resume is deliberately NOT here: each
+    # resume spawns an INDEPENDENT new job replaying that target's own
+    # transcript, so N targets produce N separate children with no shared reply
+    # and no shared transcript to collide. Fanning one message out to a whole
+    # batch of stopped/failed children (e.g. after a provider stall) is exactly
+    # what resume should do, so it falls through to the loop below.
+    if params.op in ("ask", "peek") and len(ids) > 1:
         return _error(
             tool_call_id,
             "hub",
@@ -7323,15 +7480,62 @@ async def _execute_hub_parent(
         )
 
     if params.op == "resume":
-        new_job_id, error = comms.resume(ids[0], message)
-        if error is not None:
-            return _error(tool_call_id, "hub", error)
+        # Fan-out: resume every target in turn. Unlike ask/peek, each resume
+        # spawns an independent new job on its own transcript, so a batch of
+        # stopped/failed children can be relaunched in one call. ``comms.resume``
+        # returns a ``(new_job_id, error)`` tuple rather than a ``Delivery``, so
+        # we collect per-target receipts here and format them like the
+        # send/steer/cancel block below without borrowing the Delivery shape.
+        resumed: list[tuple[str, str | None, str | None]] = [
+            # (resumed-from id, new job id, error)
+            (job_id, *comms.resume(job_id, message))
+            for job_id in ids
+        ]
+        acted = [receipt for receipt in resumed if receipt[2] is None]
+        header = (
+            f"resume: {len(acted)}/{len(resumed)} subagent(s)"
+            if resumed
+            else "resume: nothing to do"
+        )
+        lines = [header]
+        for from_id, new_job_id, error in resumed:
+            label = comms.label_of(from_id)
+            if error is None:
+                # Each success carries the NEW job id it was resumed as; the
+                # transcript-replay guidance is stated once in the footer
+                # rather than repeated on every line.
+                lines.append(f"- {label} ({from_id}): resumed as job {new_job_id}")
+            else:
+                lines.append(f"- {label} ({from_id}): failed \u2014 {error}")
+        lines.extend(f"- {error}" for error in errors)
+        if acted:
+            # Kept from the single-target wording: a resumed child replays its
+            # own transcript before it reads this instruction, so the parent
+            # must 'wait' for it rather than assume it acted immediately.
+            lines.append(
+                "Each replays its own transcript before reading this instruction. "
+                "Await them with 'wait'."
+            )
         return _text(
             tool_call_id,
             "hub",
-            f"resumed {comms.label_of(ids[0])} as job {new_job_id}; it replays its own "
-            "transcript before reading this instruction. Await it with 'wait'.",
-            details={"op": "resume", "job_id": new_job_id, "resumed_from": ids[0]},
+            "\n".join(lines),
+            details={
+                "op": "resume",
+                # Unlike the send/steer/cancel block below, where "job_ids" is the
+                # target list, a resume spawns fresh jobs: "job_ids" here holds the
+                # NEW successfully-spawned ids, with their sources in "resumed_from".
+                "job_ids": [new_id for _from, new_id, error in resumed if error is None],
+                "resumed_from": [from_id for from_id, _new, error in resumed if error is None],
+                "acted": len(acted),
+                # Mirrored into details as well as the flag: every other useless
+                # site in this module carries the key, and compaction's pruning
+                # pass reads it from there.
+                "useless": not acted,
+            },
+            # Nothing was resumed: a receipt list of pure failures is not an
+            # observation the model should act on as if it had been heard.
+            useless=not acted,
         )
 
     deliveries = []
@@ -7403,8 +7607,9 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
             "longer shows), send a note, ask one a question and get its answer (use "
             "this to find out whether a quiet child is stuck), steer one onto a "
             "different course, pause one so it can be picked up later, cancel one, or "
-            "resume a stopped, paused or failed one against its own transcript so it "
-            'continues where it left off. Address them by job id, by label, or "all".'
+            "resume a stopped, paused or failed one (or a whole batch of them at once) "
+            "against its own transcript so it continues where it left off. Address them "
+            'by job id, by label, or "all".'
         ),
         parameters=HubParams.model_json_schema(),
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
