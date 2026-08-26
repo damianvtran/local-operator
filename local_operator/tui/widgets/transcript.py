@@ -2003,58 +2003,53 @@ class TranscriptView(ScrollableContainer):
     def prepend_blocks(
         self, blocks: Sequence[TranscriptBlock], *, anchor_offset: float | None = None
     ) -> None:
-        """Mount older blocks above the viewport without moving its content.
+        """Mount older blocks above the viewport without moving its content."""
+        self.insert_blocks(0, blocks, anchor_offset=anchor_offset)
 
-        History paging is the only prepend path. Textual cannot preserve the
-        visual anchor automatically, so the anchor is restored explicitly here.
-        The optional offset is captured by the caller before asynchronous I/O
-        starts; using the later value would apply the prepend to wherever the
-        user moved meanwhile.
+    def insert_blocks(
+        self,
+        index: int,
+        blocks: Sequence[TranscriptBlock],
+        *,
+        anchor_offset: float | None = None,
+    ) -> None:
+        """Insert history above visible content while preserving its anchor.
 
-        The anchor is expressed as a BLOCK and that block's offset from the top
-        of the viewport, not as ``virtual_size`` growth. Growth is the obvious
-        formulation and it is subtly wrong: the batch is mounted with its gaps
-        decided while its blocks were still unmounted, where
-        ``spans_multiple_rows()`` has no width to measure against and falls back
-        to 80 columns, and :meth:`_settle_gaps` then re-decides them against real
-        widths. Re-deciding rewrites margin classes, which changes the heights of
-        the blocks ABOVE the anchor, which changes ``virtual_size`` on a LATER
-        layout pass than the one that restored the scroll. Any offset derived
-        from a height sampled before that pass is stale by exactly the rows the
-        settle reclaimed, so the reader's row came to rest up to 2 rows off
-        (measured on a 140-message history page: 142 rows pre-settle, 140 after).
-        A block's own ``virtual_region`` is re-derived by the same layout pass
-        that resizes it, so reading the position back afterwards is correct
-        whichever pass wins the race.
+        Ordinary history inserts at zero. A subagent with a synthetic delegation
+        keeps that fixed prefix and inserts at one. The anchor is the retained
+        block containing the viewport top plus its intra-block offset, never a
+        virtual-height proxy: adaptive gap settlement can legitimately change
+        heights above it on a later layout pass.
         """
         additions = list(blocks)
         if not additions:
             return
+        index = max(0, min(index, len(self._blocks)))
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
-        before = self._blocks[0] if self._blocks else None
-        # The row the reader is looking at, and where it sits in the viewport.
-        # Prepending never moves this block within the ledger, so it survives
-        # the mount and every gap re-decision above it.
-        anchor_block = before
-        anchor_gap = (before.virtual_region.y - old_scroll) if before is not None else 0.0
+        anchor_block = next(
+            (block for block in self._blocks if block.virtual_region.bottom > old_scroll),
+            self._blocks[-1] if self._blocks else None,
+        )
+        anchor_gap = anchor_block.virtual_region.y - old_scroll if anchor_block is not None else 0.0
+        before = self._blocks[index] if index < len(self._blocks) else None
         if before is None:
             self.mount(*additions)
         else:
             self.mount(*additions, before=before)
-        self._blocks[0:0] = additions
+        self._blocks[index:index] = additions
         self._name_col_cache = None
 
         def settle_then_restore() -> None:
-            # Settle FIRST so the heights above the anchor are final, then let
-            # the layout pass that applied them publish new positions before the
-            # anchor is read back.
             self._settle_gaps(additions)
             self._remeasure_empty_state()
 
             def restore_anchor() -> None:
                 if anchor_block is None or anchor_block.parent is not self:
                     return
-                self.scroll_to(y=max(0, anchor_block.virtual_region.y - anchor_gap), animate=False)
+                self.scroll_to(
+                    y=max(0, anchor_block.virtual_region.y - anchor_gap),
+                    animate=False,
+                )
 
             self.call_after_refresh(restore_anchor)
 

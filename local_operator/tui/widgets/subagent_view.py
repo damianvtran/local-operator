@@ -48,6 +48,7 @@ down.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
@@ -202,6 +203,20 @@ def _first_line(text: str) -> str:
     return ""
 
 
+def _duration(value: Any) -> float | None:
+    """A trustworthy elapsed time, or ``None`` for malformed producer data.
+
+    JSON accepts numbers that Python also treats as booleans, while in-memory
+    trajectories can carry NaN or infinities that JSON would reject. None of
+    those values, nor a negative interval, describes elapsed wall time; letting
+    one reach ToolCard can print nonsense or fail while formatting a replay.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    duration = float(value)
+    return duration if math.isfinite(duration) and duration >= 0 else None
+
+
 @dataclass(frozen=True)
 class SubagentEntry:
     """One row of the folded child transcript.
@@ -263,7 +278,7 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
 def fold_transcript_entries(
     entries: Sequence[TranscriptEntry],
     *,
-    tool_results: dict[str, tuple[str, bool]] | None = None,
+    tool_results: dict[str, tuple[str, bool, dict[str, Any] | None, float | None]] | None = None,
 ) -> list[SubagentEntry]:
     """Fold durable transcript rows into the viewer's stable row model.
 
@@ -273,7 +288,6 @@ def fold_transcript_entries(
     event log or positional guesses.
     """
     folded: list[SubagentEntry] = []
-    calls: dict[str, int] = {}
     # Durable page boundaries are arbitrary. A result may arrive in the newer
     # page before its call is loaded from the older one, so retain outcomes
     # across folds instead of treating every page as a complete conversation.
@@ -283,7 +297,19 @@ def fold_transcript_entries(
         if entry.type == ENTRY_MESSAGE and payload.get("role") == "tool":
             call_id = str(payload.get("tool_call_id") or "")
             if call_id:
-                results[call_id] = (_content_text(payload), bool(payload.get("is_error")))
+                provider_payload = payload.get("provider_payload")
+                metadata = provider_payload if isinstance(provider_payload, dict) else {}
+                details = metadata.get("details")
+                duration = _duration(metadata.get("duration_s"))
+                # Tool result text is the model-facing payload; presentation
+                # metadata travels beside it so durable replay can restore the
+                # exact same ToolCard the live parent transcript painted.
+                results[call_id] = (
+                    _content_text(payload),
+                    bool(payload.get("is_error")),
+                    details if isinstance(details, dict) else None,
+                    duration,
+                )
     communication_ids: set[str] = set()
     # Host communication facts supersede their replay-visible custom message:
     # the former include replies and correlation while the latter contain XML
@@ -346,7 +372,6 @@ def fold_transcript_entries(
                 call_id = str(raw_call.get("id") or raw_call.get("tool_call_id") or "")
                 if not call_id:
                     continue
-                calls[call_id] = len(folded)
                 result = results.get(call_id)
                 folded.append(
                     SubagentEntry(
@@ -356,6 +381,8 @@ def fold_transcript_entries(
                         tool_args=dict(raw_call.get("arguments") or {}),
                         outcome=("error" if result[1] else "success") if result else None,
                         result_text=result[0] if result else "",
+                        details=result[2] if result else None,
+                        duration_s=result[3] if result else None,
                     )
                 )
             continue
@@ -457,6 +484,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             result = event.get("result")
             result = result if isinstance(result, dict) else {}
             details = result.get("details")
+            event_duration = _duration(event.get("duration_s"))
             tools[call_id] = SubagentEntry(
                 key=call_id,
                 kind="tool",
@@ -467,13 +495,9 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 result_text=_content_text(result),
                 details=details if isinstance(details, dict) else None,
                 duration_s=(
-                    float(event["duration_s"])
-                    if isinstance(event.get("duration_s"), (int, float))
-                    else (
-                        float(result["duration_s"])
-                        if isinstance(result.get("duration_s"), (int, float))
-                        else None
-                    )
+                    event_duration
+                    if event_duration is not None
+                    else _duration(result.get("duration_s"))
                 ),
             )
         elif etype == "notice":
@@ -679,8 +703,9 @@ def entry_block(entry: SubagentEntry) -> TranscriptBlock:
     Tool rows settle through :meth:`ToolCard.restore` rather than
     ``mark_done``: those compute a duration from the moment the card was
     mounted, which for a replay is how long ago the page painted, not how long
-    the tool took. The trajectory records no durations, so the column stays
-    blank — the contract ``--resume`` replay already follows.
+    the tool took. Both trajectory end events and durable tool messages carry
+    the executor's measured duration, so replay restores that authoritative
+    value and leaves the column blank only for legacy rows that predate it.
     """
     if entry.kind == "prompt":
         return InstructionBlock(entry.text)
@@ -984,6 +1009,13 @@ class SubagentView(Vertical):
         #: The delegated instruction, and the raw string it was derived from.
         self._prompt_raw = ""
         self._instruction = ""
+        self._launch_message_id = ""
+        #: Every deterministic ``subagent-launch:<id>`` identity this lineage
+        #: owns mapped to its concise delegated instruction, including attempts
+        #: #314 collapsed into the current record. Reconciliation replaces each
+        #: matching durable user row with its concise prompt so no collapsed
+        #: attempt leaks its full preamble (review round 4 R4-1).
+        self._launch_prompts: dict[str, str] = {}
         self._status = "running"
         self._queued = False
         self._elapsed = "0s"
@@ -1015,7 +1047,9 @@ class SubagentView(Vertical):
         # replay/fact are both real examples). Retain the bounded-by-user-load
         # raw window and derive display rows from the whole canonical window.
         self._history_rows: list[TranscriptEntry] = []
-        self._history_tool_results: dict[str, tuple[str, bool]] = {}
+        self._history_tool_results: dict[
+            str, tuple[str, bool, dict[str, Any] | None, float | None]
+        ] = {}
         self._history_entries: list[SubagentEntry] = []
         self._history_loading = False
         self._history_exhausted = False
@@ -1086,6 +1120,9 @@ class SubagentView(Vertical):
         outcome: str = "",
         events: Sequence[Any],
         prompt: str = "",
+        effective_prompt: str = "",
+        launch_message_id: str = "",
+        launch_prompts: dict[str, str] | None = None,
         progress: str = "",
         agent_role: str = "",
         effort: str = "",
@@ -1139,6 +1176,25 @@ class SubagentView(Vertical):
         if prompt != self._prompt_raw:
             self._prompt_raw = prompt
             self._instruction = strip_control_sequences(prompt).strip()
+        # ``effective_prompt`` stays in the signature because callers still pass
+        # the launch-time wrapper, but the view keeps no private copy: every
+        # launch-row reconciliation keys off ``_launch_prompts`` and
+        # ``_launch_message_id`` alone, so storing it here only invited a future
+        # reader to think reconciliation depended on it (review round 5 M1).
+        self._launch_message_id = str(launch_message_id or "").strip()
+        # Concise instruction for every durable launch row this lineage owns.
+        # The current launch is derived from `prompt` (kept live above); the
+        # collapsed predecessors arrive already-authored from the comms node.
+        # Both are stripped once here rather than on each reconcile pass.
+        resolved_prompts: dict[str, str] = {}
+        for key, value in (launch_prompts or {}).items():
+            identity = str(key or "").strip()
+            concise = strip_control_sequences(str(value or "")).strip()
+            if identity and concise:
+                resolved_prompts[identity] = concise
+        if self._launch_message_id and self._instruction:
+            resolved_prompts[self._launch_message_id] = self._instruction
+        self._launch_prompts = resolved_prompts
         if self._instruction and "__prompt__" not in self._known:
             # HEAD position, and it is safe only because `AsyncJob.prompt` is
             # assigned at REGISTRATION (harness/subagent.py) — before a runner
@@ -1166,9 +1222,7 @@ class SubagentView(Vertical):
                 self._known[entry.key] = entry
             elif _supersedes(entry, known):
                 self._known[entry.key] = entry
-        live = [self._known[key] for key in self._order]
-        durable_keys = {entry.key for entry in self._history_entries}
-        body = [*self._history_entries, *(entry for entry in live if entry.key not in durable_keys)]
+        body = self._chronological_entries()
 
         tail = self._tail_entry(gone, progress)
         if tail is not None:
@@ -1351,31 +1405,79 @@ class SubagentView(Vertical):
 
             self.call_after_refresh(settle_tail)
 
+    def _chronological_entries(self) -> list[SubagentEntry]:
+        """Compose durable and live rows in conversation order.
+
+        A resumed child's durable transcript already contains the launch turn.
+        New jobs carry its exact Message/TranscriptEntry ID, so replay replaces
+        that row even when later turns repeat the same words. After #314
+        collapses a resumed attempt into the newest record, the transcript still
+        holds every earlier attempt's ``subagent-launch:<id>`` turn, so ALL of
+        them — not just the current launch — are reconciled to their concise
+        authored prompt from ``self._launch_prompts``; otherwise a prior
+        attempt's full role/team/system preamble leaks back as a plain user row.
+        Legacy records without any launch identity keep the synthetic prompt at
+        the head: duplicating old wrapper text is safer than rewriting a user
+        row from a paged window that cannot prove what matching rows precede it.
+        """
+        live = [self._known[key] for key in self._order]
+        durable_keys = {entry.key for entry in self._history_entries}
+        history = list(self._history_entries)
+        prompt_entry = self._known.get("__prompt__")
+        # The synthetic head is the fallback for the CURRENT launch only, so its
+        # suppression tracks that row specifically: a paged window holding a
+        # prior attempt's launch but not the current one still needs the head.
+        current_matched = False
+        for index, candidate in enumerate(history):
+            if candidate.kind != "user":
+                continue
+            concise = self._launch_prompts.get(candidate.key)
+            if concise is None:
+                continue
+            history[index] = SubagentEntry(candidate.key, "prompt", text=concise)
+            if candidate.key == self._launch_message_id:
+                current_matched = True
+        return [
+            *([prompt_entry] if prompt_entry is not None and not current_matched else []),
+            *history,
+            *(
+                entry
+                for entry in live
+                if entry.key != "__prompt__" and entry.key not in durable_keys
+            ),
+        ]
+
     def _reconcile_current_body(
         self, *, anchor: float | None = None, prepend: bool = False
     ) -> None:
-        live = [self._known[key] for key in self._order]
-        durable_keys = {entry.key for entry in self._history_entries}
-        entries = [
-            *self._history_entries,
-            *(entry for entry in live if entry.key not in durable_keys),
-        ]
+        entries = self._chronological_entries()
         tail = self._tail_entry(self._status == "gone", "")
         if tail is not None:
             entries.append(tail)
         if prepend and self._body.is_mounted:
-            common_suffix = 0
-            for previous, current in zip(reversed(self._entries), reversed(entries)):
+            # The new history page is inserted above the old history but below
+            # the synthetic delegation. Find the unchanged prefix and suffix so
+            # the insertion uses TranscriptView's post-layout height anchor
+            # instead of rebuilding from the prompt and letting Textual shift it.
+            prefix = 0
+            for previous, current in zip(self._entries, entries):
                 if previous != current:
                     break
-                common_suffix += 1
-            count = len(entries) - common_suffix
-            if count > 0:
-                new_entries = entries[:count]
+                prefix += 1
+            suffix = 0
+            for previous, current in zip(
+                reversed(self._entries[prefix:]), reversed(entries[prefix:])
+            ):
+                if previous != current:
+                    break
+                suffix += 1
+            count = len(entries) - prefix - suffix
+            if count > 0 and len(self._entries) - prefix == suffix:
+                new_entries = entries[prefix : prefix + count]
                 new_blocks = [entry_block(entry) for entry in new_entries]
-                self._body.prepend_blocks(new_blocks, anchor_offset=anchor)
-                self._blocks[0:0] = new_blocks
-                self._entries[0:0] = new_entries
+                self._body.insert_blocks(prefix, new_blocks, anchor_offset=anchor)
+                self._blocks[prefix:prefix] = new_blocks
+                self._entries[prefix:prefix] = new_entries
                 self._pending = entries
                 return
         self._pending = entries
