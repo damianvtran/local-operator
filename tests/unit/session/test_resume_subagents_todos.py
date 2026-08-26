@@ -204,7 +204,11 @@ async def test_live_continuation_persists_one_logical_row_before_restart(tmp_pat
     )
 
     def _binding_is_durable() -> bool:
-        details = resumed._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE) or {}
+        sidecar = resumed._transcript.directory / SUBAGENT_ROSTER_SIDECAR
+        try:
+            details = json.loads(sidecar.read_text())
+        except (OSError, ValueError):
+            return False
         return [row.get("id") for row in details.get("jobs", [])] == [new_id] and [
             row.get("job_id") for row in details.get("records", [])
         ] == [new_id]
