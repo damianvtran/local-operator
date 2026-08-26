@@ -1,4 +1,5 @@
-import { getSession, parseSurface, type StoredSurface } from "./state";
+import { dropLogCapture } from "./log-capture";
+import { getSurfaces, removeSurface, resolveSurfaceToken, touchSurface, type StoredSurface } from "./state";
 
 const attached = new Set<number>();
 
@@ -13,17 +14,43 @@ export class BridgeCommandError extends Error {
 }
 
 export async function requireSurface(token: unknown): Promise<StoredSurface> {
-  const parsed = parseSurface(token);
-  const { surface } = await getSession();
-  if (!parsed || !surface || parsed.tabId !== surface.tabId || parsed.nonce !== surface.nonce) {
+  // Exact-token lookup in the surfaces map: the nonce is part of the key, so a
+  // handle from another session (or a guessed tab id) resolves to nothing and
+  // keeps the same tab_closed shape callers already handle. This is what lets
+  // parallel sessions share the map without being able to drive each other's
+  // tabs by accident.
+  const surface = resolveSurfaceToken(token, await getSurfaces());
+  if (!surface) {
     throw new BridgeCommandError("tab_closed", "the browser tab handle is stale");
   }
   try {
     await chrome.tabs.get(surface.tabId);
   } catch {
+    // The Chrome tab is gone: full prune, identical to the `tabs` prune site
+    // (review finding m1) — dropping only the map entry leaked the log ring
+    // buffer and left the dead tabId in the `attached` set for the worker's
+    // lifetime.
+    await pruneSurface(String(token), surface.tabId);
     throw new BridgeCommandError("tab_closed", "the browser tab was closed");
   }
+  // Recency for the `tabs` listing; best-effort, never on the command's
+  // critical path for correctness. Conditional on the entry still existing so
+  // it cannot resurrect a concurrently-pruned surface (finding m5).
+  surface.lastUsedAt = Date.now();
+  await touchSurface(String(token), surface.lastUsedAt);
   return surface;
+}
+
+/**
+ * The ONE dead-surface cleanup: map entry, log ring buffer, debugger session.
+ * Every prune site (requireSurface, status, tabs) must go through this — the
+ * three previously diverged and two of them leaked buffers/attachments
+ * (finding m1).
+ */
+export async function pruneSurface(token: string, tabId: number): Promise<void> {
+  dropLogCapture(tabId);
+  await detach(tabId);
+  await removeSurface(token);
 }
 
 export async function attach(tabId: number): Promise<void> {

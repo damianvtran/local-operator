@@ -1,4 +1,4 @@
-import { DEFAULT_PORT, getLocal, getSession } from "../state";
+import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
@@ -159,8 +159,13 @@ async function render(): Promise<void> {
     const detail = document.getElementById("connected-detail");
     if (detail && label) {
       const url = health.current_url;
+      // Parallel sessions can each drive their own tab now; the card stays a
+      // one-line status (no list, no redesign), so with several surfaces the
+      // label carries the count and the trough the most recently driven URL.
+      const surfaceCount = Object.keys(await getSurfaces()).length;
       if (url) {
-        label.textContent = health.current_title || "Driving";
+        label.textContent =
+          surfaceCount > 1 ? `Driving ${surfaceCount} tabs` : health.current_title || "Driving";
         detail.textContent = url;
         label.classList.remove("hidden");
       } else {

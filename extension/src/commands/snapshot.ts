@@ -1,6 +1,6 @@
 import { compactAX, type AXNode } from "../ax-compact";
 import { cdp, requireSurface } from "../cdp";
-import { setRefs } from "../state";
+import { setRefs, surfaceToken } from "../state";
 
 // Serializes the enable→read→disable window below. The worker dispatches
 // daemon frames fire-and-forget (worker.ts onmessage), so two concurrent
@@ -36,7 +36,10 @@ export async function snapshot(params: Record<string, unknown>): Promise<Record<
   };
   const result = await (axQueue = axQueue.catch(() => {}).then(run)) as { nodes: AXNode[] };
   const rendered = compactAX(result.nodes, surface.epoch);
-  await setRefs(rendered.refs);
+  // Refs are stored under THIS surface's token: with several tabs driven in
+  // parallel, a global ref map would let one tab's snapshot silently repoint
+  // another tab's click targets.
+  await setRefs(surfaceToken(surface), rendered.refs);
   const tab = await chrome.tabs.get(surface.tabId);
   return { snapshot: rendered.snapshot, url: tab.url ?? "", title: tab.title ?? "" };
 }
