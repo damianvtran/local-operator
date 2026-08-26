@@ -179,3 +179,23 @@ async def test_typed_error_still_maps_to_bridge_error(
     with pytest.raises(BridgeError) as excinfo:
         await client.call("goto", {"url": "https://example.com"})
     assert excinfo.value.code == ErrorCode.ORIGIN_DENIED
+
+
+def test_origin_not_allowed_error_teaches_the_access_flow() -> None:
+    # The early-fail error is the agent's ONLY discovery path for the approval
+    # dance mid-session, so it must name both follow-up actions and echo the
+    # url; the failure it replaces read as a bridge outage (a session burned an
+    # hour misdiagnosing it).
+    error = BridgeError(
+        ErrorCode.ORIGIN_NOT_ALLOWED,
+        "site https://example.com is not allowed yet",
+        {"origin": "https://example.com", "url": "https://example.com/page"},
+    )
+    text = format_error(error, action="open")
+    assert "site https://example.com is not allowed yet" in text
+    assert "action='request_access' url=https://example.com/page" in text
+    assert "action='await_access' url=https://example.com/page" in text
+    assert "extension popup" in text
+    # The agent is the PRIMARY notification channel: Chrome's banner is
+    # best-effort on macOS, so the instruction to notify must be explicit.
+    assert "NOTIFY THE USER" in text

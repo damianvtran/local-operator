@@ -24,7 +24,12 @@ from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.widgets.subagent_panel import SubagentPanel
+from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.subagent_panel import (
+    MAX_SUBAGENT_ROWS,
+    SubagentPanel,
+    SubagentRow,
+)
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
 
 
@@ -327,6 +332,147 @@ async def test_band_panels_hidden_when_empty_and_shown_when_populated() -> None:
         await pilot.pause()
         assert sub.display is False
         assert todo.display is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_panel_bounds_to_newest_slice_and_expands_in_start_order() -> None:
+    """The default roster preserves the relevant tail without reversing it;
+    its keyboard disclosure reveals every retained child and collapses back."""
+    session = FakeSession()
+    jobs = [_Job(f"sub-{index:02d}", f"task {index:02d}") for index in range(1, 13)]
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+
+        visible = [row.job_id for row in panel.query(SubagentRow) if row.display]
+        assert visible == [f"sub-{index:02d}" for index in range(7, 13)]
+        assert panel.predicted_rows() == MAX_SUBAGENT_ROWS
+        assert str(panel._affordance.content) == "+6 earlier · ctrl+g to expand"
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert [row.job_id for row in panel.query(SubagentRow) if row.display] == [
+            f"sub-{index:02d}" for index in range(1, 13)
+        ]
+        assert str(panel._affordance.content) == "ctrl+g to collapse"
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert [row.job_id for row in panel.query(SubagentRow) if row.display] == visible
+
+
+@pytest.mark.asyncio
+async def test_clicking_subagent_disclosure_preserves_composer_focus_and_input() -> None:
+    """Pointer disclosure is only a visibility gesture; unlike ``ctrl+g``, it
+    must not silently opt the user into keyboard roster navigation or divert
+    the next character away from their draft."""
+    session = FakeSession()
+    session.jobs = _fake_jobs(
+        *[_Job(f"sub-{index:02d}", f"task {index:02d}") for index in range(1, 13)]
+    )
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.text = "draft"
+        editor.move_cursor(editor._end_of_buffer())
+        editor.focus()
+
+        await pilot.click("#subagent-affordance")
+        await pilot.pause()
+        assert app.focused is editor
+        assert app.query_one(SubagentPanel)._expanded is True
+        await pilot.press("x")
+        assert editor.text == "draftx"
+
+        await pilot.click("#subagent-affordance")
+        await pilot.pause()
+        assert app.focused is editor
+        assert app.query_one(SubagentPanel)._expanded is False
+        await pilot.press("y")
+        assert editor.text == "draftxy"
+
+
+@pytest.mark.asyncio
+async def test_subagent_expansion_traverses_every_row_and_escape_restores_composer() -> None:
+    session = FakeSession()
+    session.jobs = _fake_jobs(
+        *[_Job(f"sub-{index:02d}", f"task {index:02d}") for index in range(1, 31)]
+    )
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.text = "draft survives roster navigation"
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert app.focused is app.query_one(SubagentRow)
+        for _ in range(29):
+            await pilot.press("down")
+        await pilot.pause()
+        assert isinstance(app.focused, SubagentRow)
+        assert app.focused.job_id == "sub-30"
+        assert app.query_one(SubagentPanel)._list.scroll_y > 0
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.focused is editor
+        assert editor.text == "draft survives roster navigation"
+
+
+@pytest.mark.asyncio
+async def test_subagent_disclosure_hides_without_overflow_and_resize_recovers_geometry() -> None:
+    session = FakeSession()
+    session.jobs = _fake_jobs(
+        *[_Job(f"sub-{index:02d}", f"task {index:02d}") for index in range(1, 31)]
+    )
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        await pilot.resize_terminal(50, 16)
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.resize_terminal(100, 30)
+        for _ in range(4):
+            await pilot.pause()
+        assert app.screen.virtual_size == app.screen.size, {
+            "panel": app.query_one(SubagentPanel).size,
+            "list": app.query_one(SubagentPanel)._list.size,
+            "band": app.query_one("#band").size,
+            "predicted": app.query_one(SubagentPanel).predicted_rows(),
+        }
+
+        session.jobs = _fake_jobs(*[_Job(f"small-{index}", f"small {index}") for index in range(6)])
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+        assert panel._affordance.display is False
+        assert panel.predicted_rows() == 7
 
 
 @pytest.mark.asyncio

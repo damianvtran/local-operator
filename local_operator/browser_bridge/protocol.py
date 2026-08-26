@@ -42,6 +42,17 @@ METHODS = (
     "tabs",
     "scroll",
     "logs",
+    # Site-permission flow (agent-legible approvals). ``request_access`` raises
+    # the pending approval in the extension and returns immediately;
+    # ``await_access`` blocks for a BOUNDED slice (the extension caps it well
+    # under the command timeout) and the tool loops slices client-side. Split
+    # this way because the old design — one navigation RPC that silently sat
+    # on the 60 s popup prompt — expired unseen (the agent never got a turn to
+    # tell the user to look at the popup) and made the session client time out
+    # with a misleading "bridge unreachable" (sessions misdiagnosed the bridge
+    # as broken and burned an hour on it).
+    "request_access",
+    "await_access",
 )
 
 
@@ -85,6 +96,14 @@ COMMAND_TIMEOUTS = {
     # position; logs just drains a per-tab ring buffer already in memory.
     "scroll": 20.0,
     "logs": 20.0,
+    # request_access only writes the pending record and raises the prompt
+    # surfaces — it returns immediately, never waiting on the human.
+    "request_access": 20.0,
+    # await_access polls the stored decision for one BOUNDED slice (the
+    # extension caps itself at 20 s — access.ts AWAIT_SLICE_MS); the tool
+    # loops slices client-side, so this stays an honest per-RPC bound and
+    # never needs the awaiting_origin deadline-extension machinery above.
+    "await_access": 25.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
@@ -107,6 +126,11 @@ class ErrorCode(StrEnum):
     ELEMENT_NOT_FOUND = "element_not_found"
     ORIGIN_DENIED = "origin_denied"
     ORIGIN_PROMPT_PENDING = "origin_prompt_pending"
+    # A top-level open/goto to an origin the user has not approved. Raised
+    # EARLY, before any prompt exists, so the agent can run the explicit
+    # request_access -> notify user -> await_access flow instead of blocking a
+    # navigation on a popup prompt the user never saw.
+    ORIGIN_NOT_ALLOWED = "origin_not_allowed"
     DEBUGGER_CONFLICT = "debugger_conflict"
     # The extension refuses to open more concurrent tabs than its cap (see
     # MAX_SURFACES in extension/src/state.ts): parallel sessions each own a

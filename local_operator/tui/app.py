@@ -181,6 +181,7 @@ from local_operator.tui.widgets.status_line import (
 from local_operator.tui.widgets.subagent_panel import (
     JobStats,
     SubagentPanel,
+    SubagentRow,
     job_elapsed,
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
@@ -1178,6 +1179,9 @@ class OperatorApp(App[None]):
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
         Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
+        # The subagent roster's matching disclosure. `ctrl+g` is free in the
+        # app and TextArea, and bubbles so an active picker keeps first refusal.
+        Binding("ctrl+g", "toggle_subagents", "Expand/collapse subagents", show=False),
         Binding("p", "subagent_parent", "Parent subagent", show=False),
         Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
         Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
@@ -5856,6 +5860,13 @@ class OperatorApp(App[None]):
         ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
         those.
         """
+        # Expanded roster navigation temporarily owns focus so arrows can reach
+        # every child. Its first Esc returns to the draft-bearing composer;
+        # only a subsequent Esc enters the stop ladder below.
+        if isinstance(self.focused, SubagentRow):
+            if self._subagent_panel is not None:
+                self._subagent_panel.exit_navigation()
+            return
         if self._close_aside():
             return
         if self._subagent_view is not None and self._session is not None:
@@ -8573,12 +8584,10 @@ class OperatorApp(App[None]):
     def _subagent_rows_leave_room(self, screen_height: int) -> bool:
         """True unless the subagent list is already close to filling the screen.
 
-        ``SubagentPanel`` mounts one row per task job with no cap of its own
-        (unlike ``TodoPanel``, which budgets against the screen), so a long
-        enough child list overruns the dock without any help from the inset —
-        that overflow is this app's on ``main`` too and is out of scope here.
-        What IS in scope is not making it worse, and the inset's row is exactly
-        what tips a list that currently just fits.
+        ``SubagentPanel`` owns the roster budget and exposes the rows it will
+        actually paint. Counting that settled prediction rather than every
+        retained job keeps the inset aligned with the bounded preview and the
+        scroll-capped expanded state.
 
         Counted, not measured. A job count is available synchronously and cannot
         change between the frame that paints and the frame after it; every
@@ -8593,12 +8602,9 @@ class OperatorApp(App[None]):
         panel = self._subagent_panel
         if panel is None or not panel.display:
             return True
-        jobs = getattr(self._session, "jobs", None)
-        if jobs is None:  # reduced hosts, or before the session is adopted
-            return True
         try:
-            rows = len([job for job in jobs.list() if getattr(job, "type", "") == "task"])
-        except Exception:  # unreadable ledger; nothing to protect against
+            rows = int(panel.predicted_rows())
+        except Exception:  # unreadable panel; nothing to protect against
             return True
         # A displayed WakePanel spends up to ``MAX_WAKE_ROWS`` content rows the
         # subagent budget does not know about; counting its settled prediction
@@ -10491,6 +10497,12 @@ class OperatorApp(App[None]):
                 # block repaints, and nothing else repaints an offscreen
                 # block. A list that never painted (opened, closed) skips it.
                 self._repaint_themed_widgets()
+
+    def action_toggle_subagents(self) -> None:
+        """``ctrl+g`` — flip the dock roster between recent and complete."""
+        if self._subagent_panel is not None and self._subagent_panel.display:
+            self._subagent_panel.toggle_expanded(enter_navigation=True)
+            self._refresh_band()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
