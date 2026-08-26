@@ -8608,6 +8608,11 @@ class OperatorApp(App[None]):
             # trajectory carries it. `None` — a job type that records none —
             # is distinct from `""`, and neither prints a row.
             prompt=str(getattr(job, "prompt", None) or getattr(node, "prompt", "") or ""),
+            effective_prompt=str(
+                getattr(job, "effective_prompt", None)
+                or getattr(node, "effective_prompt", "")
+                or ""
+            ),
             events=getattr(job, "trajectory", None) or [],
             progress=str((getattr(job, "latest_details", None) or {}).get("progress") or ""),
             # Launch-time identity: the child's role and effort tier, recorded

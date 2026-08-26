@@ -1377,6 +1377,7 @@ async def test_durable_launch_turn_is_replaced_in_place(
     await transcript.append_message(Message.assistant("After launch row."))
     job = _job_with([], status="completed")
     job.prompt = "Delegated parent instruction."
+    job.effective_prompt = durable_prompt
     job.agent_role = agent_role
     session = FakeSession()
     session.jobs = _fake_jobs(job)
@@ -1397,16 +1398,18 @@ async def test_durable_launch_turn_is_replaced_in_place(
 
 
 @pytest.mark.asyncio
-async def test_unrecognized_suffix_cannot_replace_a_later_user_row(tmp_path) -> None:
+async def test_specialist_identity_cannot_replace_a_later_suffix_collision(tmp_path) -> None:
     transcript = Transcript(tmp_path / "child")
-    launch = await transcript.append_message(Message.user("Delegated parent instruction."))
+    effective = "Specialist guidance.\n\nDelegated parent instruction."
+    launch = await transcript.append_message(Message.user(effective))
     await transcript.append_message(Message.assistant("Work happened."))
     collision = await transcript.append_message(
         Message.user("Please quote:\n\nDelegated parent instruction.")
     )
     job = _job_with([], status="completed")
     job.prompt = "Delegated parent instruction."
-    job.agent_role = "task"
+    job.effective_prompt = effective
+    job.agent_role = "dashboard-specialist"
     session = FakeSession()
     session.jobs = _fake_jobs(job)
     session._subagent_comms = type(

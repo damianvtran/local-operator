@@ -30,7 +30,12 @@ def _comms_with_settled_child(tmp_path: Path, jobs: FakeJobs) -> SubagentComms:
     session_dir.mkdir()
     (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
     jobs.add("job1", status="running")
-    comms.record_launch("job1", "explore the repo")
+    comms.record_launch(
+        "job1",
+        "explore the repo",
+        prompt="Inspect it.",
+        effective_prompt="Specialist guidance.\n\nInspect it.",
+    )
     comms.attach("job1", FakeChild(), session_dir)  # type: ignore[arg-type]
     comms.record_outcome("job1", "completed")
     comms.detach("job1")
@@ -47,6 +52,8 @@ def test_snapshot_captures_the_resumable_fields(tmp_path) -> None:
     assert row["label"] == "explore the repo"
     assert row["session_dir"] == str(tmp_path / "child")
     assert row["outcome"] == "completed"
+    assert row["prompt"] == "Inspect it."
+    assert row["effective_prompt"] == "Specialist guidance.\n\nInspect it."
 
 
 def test_a_never_started_child_is_not_snapshotted(tmp_path) -> None:
@@ -75,6 +82,10 @@ def test_restore_rebuilds_a_resumable_record(tmp_path) -> None:
     assert info.status == "completed"
     assert info.resumable is True
     assert info.session_id == "child"
+    node = fresh.node("job1")
+    assert node is not None
+    assert node.prompt == "Inspect it."
+    assert node.effective_prompt == "Specialist guidance.\n\nInspect it."
 
 
 def test_restore_preserves_a_failure_outcome(tmp_path) -> None:

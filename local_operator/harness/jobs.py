@@ -187,6 +187,11 @@ class AsyncJob(BaseModel):
     # ``trajectory`` — a probing host must be able to tell "not recorded"
     # apart from "launched with an empty instruction".
     prompt: str | None = None
+    # Exact user message submitted to the child after role, specialist and team
+    # assembly. Kept separately from ``prompt`` because the latter is the plain
+    # instruction the parent authored and the transcript viewer displays; this
+    # identity lets durable replay find the launch row without suffix guesses.
+    effective_prompt: str | None = None
     # -- child accounting (``task`` jobs) ------------------------------------
     # Both default ``None``, never 0/"": a reader must be able to tell "not
     # recorded" from "recorded as nothing". Written by the subagent runner and

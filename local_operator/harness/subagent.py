@@ -234,18 +234,20 @@ def run_subagent(
     can point at the same model, and a child on the parent's own model still
     ran at a chosen level the band should name.
     """
+    effective_prompt, profile = _effective_prompt(prompt, agent, parent_session)
     queued = jobs_manager.at_capacity()
     job_id = jobs_manager.register(
         "task",
         label,
         _make_runner(
             label=label,
-            prompt=prompt,
+            effective_prompt=effective_prompt,
             parent_session=parent_session,
             jobs_manager=jobs_manager,
             model_spec=model_spec,
             resume_dir=resume_dir,
             agent=agent,
+            profile=profile,
         ),
         queued=queued,
     )
@@ -257,6 +259,7 @@ def run_subagent(
         # case and is deliberately left until the runner, because an empty list
         # would claim the child had begun and produced nothing.
         job.prompt = prompt
+        job.effective_prompt = effective_prompt
         # Same registration-time rule as ``prompt``: the role and effort tier
         # identify the child before its runner exists, and a queued job that
         # never starts still shows both in the page title and the status band.
@@ -272,6 +275,7 @@ def run_subagent(
             label,
             parent_job_id=getattr(parent_session, "_job_id", None),
             prompt=prompt,
+            effective_prompt=effective_prompt,
             agent_role=agent,
             effort=effort or "",
         )
@@ -280,15 +284,37 @@ def run_subagent(
     return job_id
 
 
+def _effective_prompt(
+    prompt: str, agent: str, parent_session: "Session"
+) -> tuple[str, "AgentProfile | None"]:
+    """The exact launch message after reusable and team instruction layers."""
+    profile = _resolve_role(agent, parent_session)
+    if profile is not None:
+        effective_prompt = profile.preamble + prompt
+    elif agent == "scout":
+        effective_prompt = SCOUT_PREAMBLE + prompt
+    else:
+        specialist_prompt = _specialist_instructions(agent, parent_session)
+        effective_prompt = specialist_prompt + "\n\n" + prompt if specialist_prompt else prompt
+    team = getattr(parent_session, "active_team", None)
+    if team is not None:
+        try:
+            effective_prompt = team.member_preamble(agent) + effective_prompt
+        except Exception:  # noqa: BLE001 — a bad brief must not lose the child
+            logger.warning("could not stamp team preamble for %r", agent, exc_info=True)
+    return effective_prompt, profile
+
+
 def _make_runner(
     *,
     label: str,
-    prompt: str,
+    effective_prompt: str,
     parent_session: "Session",
     jobs_manager: "AsyncJobManager",
     model_spec: ModelSpec | None,
     resume_dir: "Path | None" = None,
     agent: str = "task",
+    profile: "AgentProfile | None" = None,
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -297,33 +323,6 @@ def _make_runner(
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
     comms = getattr(parent_session, "subagent_comms", None)
-    # Resolved ONCE per launch, not per turn: the profile decides the child's
-    # preamble and tool surface, both of which are fixed for the run.
-    profile = _resolve_role(agent, parent_session)
-    if profile is not None:
-        effective_prompt = profile.preamble + prompt
-    elif agent == "scout":
-        effective_prompt = SCOUT_PREAMBLE + prompt
-    else:
-        # A specialist on a team roster is not a role, so resolve_profile
-        # returns None. Still stamp its own system_prompt.md as the reusable
-        # BASE before the team brief, or a User Dashboard Agent would launch
-        # as a blank child.
-        specialist_prompt = _specialist_instructions(agent, parent_session)
-        if specialist_prompt:
-            effective_prompt = specialist_prompt + "\n\n" + prompt
-        else:
-            effective_prompt = prompt
-    # A parent running as a team manager stamps the GROUP brief onto every
-    # child so members inherit collaboration and project context without the
-    # manager restating it in the task prompt. The role preamble above is the
-    # reusable base; this is the layer that must not live on the agent.
-    team = getattr(parent_session, "active_team", None)
-    if team is not None:
-        try:
-            effective_prompt = team.member_preamble(agent) + effective_prompt
-        except Exception:  # noqa: BLE001 — a bad brief must not lose the child
-            logger.warning("could not stamp team preamble for %r", agent, exc_info=True)
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]

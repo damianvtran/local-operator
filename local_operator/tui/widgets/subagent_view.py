@@ -222,35 +222,6 @@ def _duration(value: Any) -> float | None:
     return duration if math.isfinite(duration) and duration >= 0 else None
 
 
-def _matches_effective_prompt(candidate: str, prompt: str, agent_role: str) -> bool:
-    """Whether a durable user row is the launch prompt assembled for a child.
-
-    Exact text is the plain-task form. Prefixed matches are accepted only for
-    structures the launcher actually emits: bracketed role/scout/team preambles,
-    or a specialist's instruction blob separated from its task by a blank line.
-    An arbitrary later user row ending in the task text is not launch history.
-    """
-    candidate_plain = strip_control_sequences(candidate).strip()
-    prompt_plain = strip_control_sequences(prompt).strip()
-    if not prompt_plain:
-        return False
-    if _normalized_prompt(candidate_plain) == _normalized_prompt(prompt_plain):
-        return True
-    if not candidate_plain.endswith(prompt_plain):
-        return False
-    prefix = candidate_plain[: -len(prompt_plain)]
-    if not prefix.endswith("\n\n"):
-        return False
-    wrapper = prefix.rstrip()
-    if wrapper.startswith("[team: ") or wrapper.startswith("[scout mode:"):
-        return True
-    if agent_role and wrapper.startswith(f"[role: {agent_role}]"):
-        return True
-    # Specialist prompts have no synthetic marker; their non-role name plus
-    # the launcher's mandatory blank-line seam is the only stable structure.
-    return bool(agent_role and agent_role not in {"task", "scout"} and wrapper)
-
-
 @dataclass(frozen=True)
 class SubagentEntry:
     """One row of the folded child transcript.
@@ -1043,6 +1014,7 @@ class SubagentView(Vertical):
         #: The delegated instruction, and the raw string it was derived from.
         self._prompt_raw = ""
         self._instruction = ""
+        self._effective_prompt = ""
         self._status = "running"
         self._queued = False
         self._elapsed = "0s"
@@ -1147,6 +1119,7 @@ class SubagentView(Vertical):
         outcome: str = "",
         events: Sequence[Any],
         prompt: str = "",
+        effective_prompt: str = "",
         progress: str = "",
         agent_role: str = "",
         effort: str = "",
@@ -1200,6 +1173,7 @@ class SubagentView(Vertical):
         if prompt != self._prompt_raw:
             self._prompt_raw = prompt
             self._instruction = strip_control_sequences(prompt).strip()
+        self._effective_prompt = strip_control_sequences(effective_prompt).strip()
         if self._instruction and "__prompt__" not in self._known:
             # HEAD position, and it is safe only because `AsyncJob.prompt` is
             # assigned at REGISTRATION (harness/subagent.py) — before a runner
@@ -1413,25 +1387,23 @@ class SubagentView(Vertical):
     def _chronological_entries(self) -> list[SubagentEntry]:
         """Compose durable and live rows in conversation order.
 
-        A resumed child's durable transcript already contains the launch turn,
-        sometimes wrapped in harness context before the plain job prompt. The
-        latest exact/suffix match is canonical because later ordinary user
-        turns may quote the same words. Replace that row in place, retaining its
-        durable key, and use the synthetic head row only until it is paged in.
-        This keeps chronology stable while history arrives asynchronously
-        without blindly suppressing a child's first genuine user message.
+        A resumed child's durable transcript already contains the launch turn.
+        The launcher records that exact assembled message separately from the
+        plain prompt displayed here, so replay can replace only the canonical
+        durable row rather than guessing from suffix prose. Legacy records have
+        no assembled identity and safely fall back to the exact plain prompt.
         """
         live = [self._known[key] for key in self._order]
         durable_keys = {entry.key for entry in self._history_entries}
         history = list(self._history_entries)
         prompt_entry = self._known.get("__prompt__")
         matched = None
-        if self._instruction:
+        launch_identity = self._effective_prompt or self._instruction
+        launch_norm = _normalized_prompt(launch_identity)
+        if launch_norm:
             for index in range(len(history) - 1, -1, -1):
                 candidate = history[index]
-                if candidate.kind == "user" and _matches_effective_prompt(
-                    candidate.text, self._instruction, self._agent_role
-                ):
+                if candidate.kind == "user" and _normalized_prompt(candidate.text) == launch_norm:
                     matched = index
                     break
         if matched is not None:
