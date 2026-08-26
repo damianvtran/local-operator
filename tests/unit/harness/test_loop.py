@@ -1130,7 +1130,7 @@ class TestSystemBlocksAreReadAtEveryCall:
 
         tool = AgentTool(name="echo", parameters={"type": "object"}, execute=execute)
         context = LoopContext(system_blocks=["stable", "goal: old"], tools=[tool])
-        config = make_config(stream, get_system_blocks=lambda: live[0])
+        config = make_config(stream, get_system_blocks=lambda _model: live[0])
 
         async for _ in AgentLoop().run([Message.user("go")], context, config, None):
             pass
@@ -1146,7 +1146,7 @@ class TestSystemBlocksAreReadAtEveryCall:
         executed: list[str] = []
         context = LoopContext(system_blocks=["snapshot"], tools=[echo_tool(executed)])
 
-        async def resolve() -> list[str]:
+        async def resolve(_model: ModelSpec) -> list[str]:
             await asyncio.sleep(0)
             return ["live"]
 
@@ -1167,7 +1167,7 @@ class TestSystemBlocksAreReadAtEveryCall:
         events = AgentLoop().run(
             [Message.user("go")],
             context,
-            make_config(stream, get_system_blocks=lambda: live[0]),
+            make_config(stream, get_system_blocks=lambda _model: live[0]),
             None,
         )
 
@@ -1186,10 +1186,10 @@ class TestSystemBlocksAreReadAtEveryCall:
         )
         context = LoopContext(system_blocks=["snapshot"])
 
-        async def blocks() -> list[str]:
+        async def blocks(model: ModelSpec) -> list[str]:
             await asyncio.sleep(0)
             current[0] = new
-            return ["live"]
+            return [f"Model: {model.model_id}"]
 
         async for _ in AgentLoop().run(
             [Message.user("go")],
@@ -1199,8 +1199,11 @@ class TestSystemBlocksAreReadAtEveryCall:
         ):
             pass
 
-        assert stream.requests[0].model == new
-        assert stream.requests[0].system_blocks == ["live"]
+        # A change DURING an async block build belongs to the next call; this
+        # request stays internally consistent instead of pairing new-model wire
+        # options with an old-model environment block.
+        assert stream.requests[0].model == MODEL
+        assert stream.requests[0].system_blocks == ["Model: m"]
 
     @pytest.mark.asyncio
     async def test_a_broken_block_resolver_uses_the_snapshot(self, caplog):
@@ -1208,7 +1211,7 @@ class TestSystemBlocksAreReadAtEveryCall:
         executed: list[str] = []
         context = LoopContext(system_blocks=["snapshot"], tools=[echo_tool(executed)])
 
-        def broken() -> list[str]:
+        def broken(_model: ModelSpec) -> list[str]:
             raise RuntimeError("block resolver exploded")
 
         with caplog.at_level(logging.ERROR):

@@ -2027,8 +2027,8 @@ class Session:
     def model_label(self) -> str:
         return f"{self._model.provider}/{self._model.model_id}"
 
-    def _system_blocks(self) -> list[str] | Awaitable[list[str]]:
-        """Invoke the block provider with the live model label.
+    def _system_blocks(self, model: ModelSpec | None = None) -> list[str] | Awaitable[list[str]]:
+        """Invoke the block provider with one internally consistent model label.
 
         The provider gained an optional ``model_label`` argument so the env
         block can name the running model (see ``build_system_blocks``). A
@@ -2037,17 +2037,22 @@ class Session:
         probed by catching ``TypeError``, which would mask a genuine TypeError
         raised INSIDE a one-arg provider and re-invoke it) and it is called with
         no argument. The label is therefore strictly additive: no caller is
-        forced to grow a parameter it does not use.
+        forced to grow a parameter it does not use. ``model`` is supplied by the
+        loop before an async block build so that build and the request use the
+        same snapshot; other callers omit it and read the session's live model.
         """
+        model_label = (
+            f"{model.provider}/{model.model_id}" if model is not None else self.model_label
+        )
         if not self._blocks_provider_takes_label:
             return self._system_blocks_provider()
         if self._blocks_provider_arity_certain:
             # Signature was readable and takes the label: any TypeError from here
             # is a genuine bug inside the provider and must surface, not be
             # swallowed by a zero-arg retry.
-            return self._system_blocks_provider(self.model_label)
+            return self._system_blocks_provider(model_label)
         try:
-            return self._system_blocks_provider(self.model_label)
+            return self._system_blocks_provider(model_label)
         except TypeError:
             # Unreadable signature guessed one-arg and guessed wrong: this
             # provider is genuinely zero-arg. Remember it and call the

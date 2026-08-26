@@ -3567,6 +3567,51 @@ class TestASwitchedModelTakesEffectAtTheNextCall:
         assert self._labels(stream) == ["test/m", "test/other"]
 
     @pytest.mark.asyncio
+    async def test_async_prompt_build_and_request_share_one_model_snapshot(self, tmp_path):
+        """A switch during prompt construction applies next call, never half-call."""
+        holder: dict[str, Session] = {}
+        labels: list[str] = []
+        stream = ScriptedStream(
+            [
+                [
+                    StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+                [StreamTextDelta(delta="again"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+        async def blocks(model_label: str) -> list[str]:
+            labels.append(model_label)
+            await asyncio.sleep(0)
+            # Call 1 is the turn-start snapshot; call 3 builds the second
+            # provider step after the tool result.
+            if len(labels) == 3:
+                holder["session"].set_model(self.OTHER)
+            return [f"Model: {model_label}"]
+
+        session = make_session(
+            tmp_path,
+            stream,
+            tools=[echo_tool([])],
+            system_blocks_provider=blocks,
+        )
+        holder["session"] = session
+        try:
+            await session.prompt("go")
+            await session.prompt("again")
+        finally:
+            await session.dispose()
+
+        assert self._labels(stream) == ["test/m", "test/m", "test/other"]
+        assert [request.system_blocks for request in stream.requests] == [
+            ["Model: test/m"],
+            ["Model: test/m"],
+            ["Model: test/other"],
+        ]
+
+    @pytest.mark.asyncio
     async def test_a_switch_mid_stream_never_re_targets_the_call_in_flight(self, tmp_path):
         """The boundary is BETWEEN calls: one response is never split in two.
 

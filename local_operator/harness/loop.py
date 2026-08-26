@@ -780,7 +780,9 @@ class AgentLoop:
         return live if live is not None else config.model
 
     @staticmethod
-    async def _current_system_blocks(context: LoopContext, config: LoopConfig) -> list[str]:
+    async def _current_system_blocks(
+        context: LoopContext, config: LoopConfig, model: "ModelSpec"
+    ) -> list[str]:
         """Resolve session-scoped prompt blocks immediately before one call.
 
         ``context.system_blocks`` remains the compatible snapshot for hosts that
@@ -792,7 +794,7 @@ class AgentLoop:
         if resolver is None:
             return list(context.system_blocks)
         try:
-            live = resolver()
+            live = resolver(model)
             if inspect.isawaitable(live):
                 live = await live
         except Exception:  # host accessor bug — never fatal to a running turn
@@ -836,13 +838,14 @@ class AgentLoop:
         yield MessageStartEvent(message=assistant)
 
         try:
-            # Resolve every live session setting at the LAST safe point: after
-            # step-start handlers have run, and with no await or yield between
-            # building the request and invoking the provider. Blocks come first
-            # because their resolver may await; model comes after that await so a
-            # simultaneous /model switch cannot be captured one call late.
-            system_blocks = await self._current_system_blocks(context, config)
+            # Resolve every live session setting at the LAST safe point after
+            # step-start handlers have run. The model snapshot is passed INTO the
+            # async block build so its env label and the request model cannot tear
+            # across that await. If /model changes during the build, the next call
+            # sees it; this call remains internally consistent, exactly like an
+            # already-open provider stream does.
             model = self._current_model(config)
+            system_blocks = await self._current_system_blocks(context, config, model)
             if effort_ceiling is not None:
                 # An empty-truncation retreat is in force. The host's resolver
                 # returns ITS model, so clamp the RESOLVED spec or the retry goes
