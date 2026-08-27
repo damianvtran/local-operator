@@ -987,7 +987,7 @@ def test_every_builtin_tool_has_a_glyph_in_both_sets() -> None:
 
 
 def test_the_gate_switches_the_whole_table_not_just_some_of_it(monkeypatch) -> None:
-    """One switch, both directions, no half-Nerd row."""
+    """One switch, both directions, no half-Nerd row. Explicit-override cases."""
     monkeypatch.delenv(glyph_mod._ENV_DISABLE, raising=False)
     monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: True)
     assert nerd_icons_enabled() is True
@@ -1002,6 +1002,119 @@ def test_the_gate_switches_the_whole_table_not_just_some_of_it(monkeypatch) -> N
     monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: False)
     assert nerd_icons_enabled() is False
     assert tool_icon("grep") == PLAIN_TOOL_ICONS["grep"]
+
+
+#: Env marker sets that must autodetect as Nerd-capable, one per bundling
+#: emulator, keyed by a readable id for the parametrize table.
+_NERD_CAPABLE_ENVS = {
+    "ghostty_resources": {"GHOSTTY_RESOURCES_DIR": "/opt/ghostty"},
+    "ghostty_bin": {"GHOSTTY_BIN": "/opt/ghostty/bin"},
+    "ghostty_term_program": {"TERM_PROGRAM": "ghostty"},
+    # cmux embeds ghostty and sets TERM=dumb, yet still draws Nerd glyphs: a
+    # positive emulator marker must win over a dumb TERM.
+    "cmux_ghostty_dumb_term": {"GHOSTTY_BIN": "/opt/ghostty/bin", "TERM": "dumb"},
+    "kitty_window_id": {"KITTY_WINDOW_ID": "1"},
+    "kitty_term": {"TERM": "xterm-kitty"},
+    "wezterm_pane": {"WEZTERM_PANE": "0"},
+    "wezterm_executable": {"WEZTERM_EXECUTABLE": "/usr/bin/wezterm"},
+    "wezterm_term_program": {"TERM_PROGRAM": "WezTerm"},
+}
+
+#: Env marker sets with NO bundled Nerd fallback — these must degrade to plain
+#: so the user never sees a tofu box.
+_PLAIN_ENVS = {
+    "apple_terminal": {"TERM_PROGRAM": "Apple_Terminal", "TERM": "xterm-256color"},
+    "plain_xterm": {"TERM": "xterm-256color"},
+    "empty": {},
+    "dumb_no_marker": {"TERM": "dumb"},
+}
+
+
+@pytest.mark.parametrize("env", list(_NERD_CAPABLE_ENVS.values()), ids=list(_NERD_CAPABLE_ENVS))
+def test_autodetect_enables_nerd_icons_for_bundling_terminals(env) -> None:
+    """A ghostty/cmux/kitty/wezterm marker means a bundled symbol font, so the
+    expanded glyphs render without any user setup — detection is by env marker,
+    injectable so the test never touches the real environment."""
+    assert glyph_mod._nerd_capable_terminal(env) is True
+
+
+@pytest.mark.parametrize("env", list(_PLAIN_ENVS.values()), ids=list(_PLAIN_ENVS))
+def test_autodetect_falls_back_to_plain_for_unknown_terminals(env) -> None:
+    """Apple_Terminal and every unrecognised terminal ship no Nerd fallback,
+    so autodetect must say plain: a tofu box is worse than an ASCII icon."""
+    assert glyph_mod._nerd_capable_terminal(env) is False
+
+
+def test_gate_autodetects_when_config_is_unset(monkeypatch) -> None:
+    """Config unset (None = auto) hands the decision to marker detection: the
+    bundling terminals get real glyphs, Apple_Terminal and unknowns get plain,
+    all with zero config from the user."""
+    monkeypatch.delenv(glyph_mod._ENV_DISABLE, raising=False)
+    # None models an absent config key — the tri-state "auto" state.
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: None)
+
+    for env in _NERD_CAPABLE_ENVS.values():
+        monkeypatch.setattr(glyph_mod, "_nerd_capable_terminal", lambda e=env: True)
+        assert nerd_icons_enabled() is True
+        assert tool_icon("bash") == NERD_TOOL_ICONS["bash"]
+
+    monkeypatch.setattr(glyph_mod, "_nerd_capable_terminal", lambda: False)
+    assert nerd_icons_enabled() is False
+    assert tool_icon("bash") == PLAIN_TOOL_ICONS["bash"]
+
+
+def test_gate_autodetects_ghostty_and_apple_terminal_end_to_end(monkeypatch) -> None:
+    """Full path through the real ``os.environ`` read: no kill switch, config
+    unset, and the process's own env carrying a ghostty marker vs an
+    Apple_Terminal marker."""
+    monkeypatch.delenv(glyph_mod._ENV_DISABLE, raising=False)
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: None)
+    for var in (
+        "GHOSTTY_RESOURCES_DIR",
+        "GHOSTTY_BIN",
+        "KITTY_WINDOW_ID",
+        "WEZTERM_PANE",
+        "WEZTERM_EXECUTABLE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    monkeypatch.setenv("GHOSTTY_BIN", "/opt/ghostty/bin")
+    monkeypatch.setenv("TERM", "dumb")  # cmux/ghostty case: marker beats dumb TERM
+    assert nerd_icons_enabled() is True
+
+    monkeypatch.delenv("GHOSTTY_BIN", raising=False)
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert nerd_icons_enabled() is False
+
+
+def test_explicit_config_overrides_autodetection_both_ways(monkeypatch) -> None:
+    """An explicit bool is the user's decision and wins over the terminal: True
+    forces glyphs on Apple_Terminal (patched font installed by hand), False
+    forces them off on ghostty."""
+    monkeypatch.delenv(glyph_mod._ENV_DISABLE, raising=False)
+
+    # Explicit True on an Apple_Terminal env — detection would say plain.
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: True)
+    monkeypatch.setattr(glyph_mod, "_nerd_capable_terminal", lambda env=None: False)
+    assert nerd_icons_enabled() is True
+    assert tool_icon("bash") == NERD_TOOL_ICONS["bash"]
+
+    # Explicit False on a ghostty env — detection would say Nerd.
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: False)
+    monkeypatch.setattr(glyph_mod, "_nerd_capable_terminal", lambda env=None: True)
+    assert nerd_icons_enabled() is False
+    assert tool_icon("bash") == PLAIN_TOOL_ICONS["bash"]
+
+
+def test_env_kill_switch_beats_config_and_autodetection(monkeypatch) -> None:
+    """The kill switch is checked first: it wins over an explicit True config
+    and over a Nerd-capable terminal alike (CI, snapshot harnesses)."""
+    monkeypatch.setenv(glyph_mod._ENV_DISABLE, "1")
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: True)
+    monkeypatch.setattr(glyph_mod, "_nerd_capable_terminal", lambda env=None: True)
+    assert nerd_icons_enabled() is False
+    assert tool_icon("bash") == PLAIN_TOOL_ICONS["bash"]
 
 
 def test_unknown_and_mcp_tools_resolve_to_their_own_fallbacks(monkeypatch) -> None:

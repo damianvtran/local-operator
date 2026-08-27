@@ -13,10 +13,16 @@ from typing import Any
 #: Display flags and their defaults. Tests may poke ``_cache`` directly.
 _DEFAULTS: dict[str, Any] = {
     "display.shimmer": True,
-    # Nerd Font glyphs on tool rows. Defaults ON because the audience runs
-    # patched fonts, and OFF is one `config edit` (or the env kill switch in
-    # `tui/glyphs.py`) away for a terminal that would draw them as boxes.
-    "display.nerd_icons": True,
+    # Nerd Font glyphs on tool rows. Default is None = AUTO: unset means
+    # `tui/glyphs.py` decides from the terminal-emulator env markers (a
+    # bundled Nerd symbol fallback font is enumerable per emulator), so a
+    # bare Terminal.app gets plain icons and ghostty/kitty/wezterm get the
+    # expanded set with zero user setup. An EXPLICIT bool in config overrides
+    # both ways: True forces glyphs on for a user who installed a patched
+    # font in an otherwise-unknown terminal, False forces them off. The
+    # None-vs-bool distinction IS the tri-state — `settings_get` returns None
+    # only when the key is absent from `values`, which is what "auto" reads.
+    "display.nerd_icons": None,
     # The OSC 0 window/tab title carrying the session name and run state
     # (`tui/terminal_title.py`). Defaults ON: a terminal without OSC 0 ignores
     # the sequence entirely, and the title is saved on start and restored on
