@@ -42,6 +42,27 @@ class FakeHandle:
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
         self._event_handler = None
         self.event_pending: PendingRequest | None = None
+        from local_operator.session.frontend_state import (
+            FrontendModelSpec,
+            FrontendSessionState,
+            FrontendStateStore,
+        )
+
+        self._frontend = FrontendStateStore(
+            FrontendSessionState(
+                session_id="s1",
+                epoch="fake-owner",
+                cwd="/tmp",
+                conversation_title="fake",
+                selected_model=FrontendModelSpec(
+                    provider="test", model_id="model", context_window=1_000_000
+                ),
+                effective_model=FrontendModelSpec(
+                    provider="test", model_id="model", context_window=1_000_000
+                ),
+                context_window=1_000_000,
+            )
+        )
 
     @property
     def session_projection_seed(self) -> SessionProjection:
@@ -50,11 +71,25 @@ class FakeHandle:
     def subscribe(self, on_projection):  # noqa: ANN001, ANN202
         return lambda: None
 
+    @property
+    def frontend_state_seed(self):  # noqa: ANN202
+        return self._frontend.state
+
+    def subscribe_frontend(self, on_update):  # noqa: ANN001, ANN202
+        return self._frontend.subscribe(on_update)
+
     def subscribe_events(self, on_event):  # noqa: ANN001, ANN202
         self._event_handler = on_event
         return lambda: None
 
     def emit_event(self, event) -> None:  # noqa: ANN001
+        # Production Session folds the canonical seed before raw fan-out. This
+        # reduced socket handle mirrors that owner ordering explicitly.
+        self._frontend._fold_live_event(event)
+        if event.type == "agent_start":
+            self._frontend.mutate(streaming=True, generation=event.generation)
+        elif event.type == "agent_end":
+            self._frontend.mutate(streaming=False)
         if self._event_handler is not None:
             self._event_handler(event.model_dump(mode="json"))
 
@@ -90,6 +125,27 @@ class FakeHandle:
 
     async def slash(self, command, args):  # noqa: ANN001, ANN202
         return await self._record("slash", command, args)
+
+    async def complete_aside(self, turns):  # noqa: ANN001, ANN202
+        self.calls.append(("complete_aside", (turns,), {}))
+        return "aside answer"
+
+    async def slash_images(self, command, args, images):  # noqa: ANN001, ANN202
+        return await self._record("slash", command, args, images)
+
+    async def run_slash_authoritative(self, command, args, images):  # noqa: ANN001, ANN202
+        self.calls.append(("run_slash_authoritative", (command, args, images), {}))
+        # The owner returns a typed result the invoker renders locally; this
+        # reduced owner answers every routed command with a goal-shaped notice.
+        return {"kind": "notice", "text": f"owner ran /{command}", "style": "info"}
+
+    async def adopt_aside(self, messages):  # noqa: ANN001, ANN202
+        self.calls.append(("adopt_aside", (messages,), {}))
+        return "forked aside"
+
+    def cancel_subagents_count(self):  # noqa: ANN202
+        self.calls.append(("cancel_subagents_count", (), {}))
+        return 2
 
     async def new_conversation(self):  # noqa: ANN202
         return await self._record("new_conversation")
@@ -181,8 +237,8 @@ async def _until(
 
 
 @pytest.mark.asyncio
-async def test_protocol_version_is_four_and_cap_constant() -> None:
-    assert PROTOCOL_VERSION == 4
+async def test_protocol_version_is_five_and_cap_constant() -> None:
+    assert PROTOCOL_VERSION == 5
     assert ATTACH_MAX_CLIENTS == 4
 
 
@@ -252,14 +308,21 @@ async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() 
             "127.0.0.1", record.control_port, limit=1 << 20
         )
         attach_writer.write(
-            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
             + b"\n"
         )
         await attach_writer.drain()
         assert json.loads(await attach_reader.readline())["op"] == "projection"
         seed = json.loads(await attach_reader.readline())
-        assert seed["op"] == "attach_sync"
-        assert seed["data"]["streaming"] is False
+        assert seed["op"] == "frontend_sync"
+        assert seed["data"]["snapshot"]["streaming"] is False
 
         handle.emit_event(AgentStartEvent(generation=9))
         handle.emit_event(NoticeEvent(text="live", kind="info"))
@@ -281,13 +344,9 @@ async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() 
 
 
 @pytest.mark.asyncio
-async def test_event_pending_is_overlaid_only_for_event_clients() -> None:
-    """A TUI approval reaches followers without changing phone daemon bytes."""
+async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> None:
+    """A TUI gate reaches followers while phone projection bytes stay ordinary."""
     handle = FakeHandle()
-    pending = PendingRequest(
-        request_id="approval-1", kind="approval", title="bash", detail="echo hi"
-    )
-    handle.event_pending = pending
     registrant = Registrant(handle, kind="tui")
     registrant.start()
     daemon_writer = attach_writer = None
@@ -298,20 +357,32 @@ async def test_event_pending_is_overlaid_only_for_event_clients() -> None:
             "127.0.0.1", record.control_port
         )
         attach_writer.write(
-            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
             + b"\n"
         )
         await attach_writer.drain()
         follower = json.loads(await attach_reader.readline())
-        assert json.loads(await attach_reader.readline())["op"] == "attach_sync"
-        # _dial consumed the daemon welcome; trigger a fresh ordinary repaint
-        # and compare it to the event client's overlaid form.
+        sync = json.loads(await attach_reader.readline())
+        assert follower["data"]["pending"] is None
+        assert sync["data"]["snapshot"]["pending_gate"] is None
+
+        handle._frontend.mutate(
+            pending_gate=PendingRequest(
+                request_id="approval-1", kind="approval", title="bash", detail="echo hi"
+            ).to_json()
+        )
+        update = await _until(attach_reader, "frontend_update")
+        assert update["data"]["changes"]["pending_gate"]["request_id"] == "approval-1"
         await registrant._push()
         daemon = json.loads(await daemon_reader.readline())
-        follower_repaint = json.loads(await attach_reader.readline())
         assert daemon["data"]["pending"] is None
-        assert follower["data"]["pending"]["request_id"] == "approval-1"
-        assert follower_repaint["data"]["pending"]["request_id"] == "approval-1"
     finally:
         for writer in (daemon_writer, attach_writer):
             if writer is not None:
@@ -321,7 +392,7 @@ async def test_event_pending_is_overlaid_only_for_event_clients() -> None:
 
 @pytest.mark.asyncio
 async def test_event_seed_covers_events_before_client_is_ready() -> None:
-    """A mid-turn join gets open state once in attach_sync, then later events."""
+    """A mid-turn join gets open state once in frontend_sync, then later events."""
     from local_operator.harness.types import AgentStartEvent, NoticeEvent
 
     handle = FakeHandle()
@@ -334,15 +405,22 @@ async def test_event_seed_covers_events_before_client_is_ready() -> None:
         await asyncio.sleep(0.05)
         reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
         writer.write(
-            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
             + b"\n"
         )
         await writer.drain()
         assert json.loads(await reader.readline())["op"] == "projection"
         seed = json.loads(await reader.readline())
-        assert seed["op"] == "attach_sync"
-        assert seed["data"]["streaming"] is True
-        assert seed["data"]["generation"] == 4
+        assert seed["op"] == "frontend_sync"
+        assert seed["data"]["snapshot"]["streaming"] is True
+        assert seed["data"]["snapshot"]["generation"] == 4
         handle.emit_event(NoticeEvent(text="after seed", kind="info"))
         frame = await _until(reader, "event")
         assert frame["data"]["text"] == "after seed"
@@ -602,12 +680,19 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
             "127.0.0.1", record.control_port, limit=1 << 20
         )
         slow_writer.write(
-            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
             + b"\n"
         )
         await slow_writer.drain()
         assert json.loads(await slow_reader.readline())["op"] == "projection"
-        assert json.loads(await slow_reader.readline())["op"] == "attach_sync"
+        assert json.loads(await slow_reader.readline())["op"] == "frontend_sync"
         assert len(registrant._clients) == 1
         slow_conn = next(iter(registrant._clients.values()))
 
@@ -615,12 +700,19 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
             "127.0.0.1", record.control_port, limit=1 << 20
         )
         healthy_writer.write(
-            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
             + b"\n"
         )
         await healthy_writer.drain()
         assert json.loads(await healthy_reader.readline())["op"] == "projection"
-        assert json.loads(await healthy_reader.readline())["op"] == "attach_sync"
+        assert json.loads(await healthy_reader.readline())["op"] == "frontend_sync"
 
         async def block_only_slow(conn, frame):  # noqa: ANN001, ANN202
             if conn is slow_conn and frame.get("op") == "event":

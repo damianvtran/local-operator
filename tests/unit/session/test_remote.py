@@ -47,7 +47,7 @@ async def test_remote_session_rehydrates_seed_then_streams_concrete_events(
     try:
         record = await _wait_record(tmp_path)
         # Join in the middle of a live tool: these events precede the socket,
-        # so only attach_sync can rebuild them on the follower.
+        # so only the canonical v5 snapshot can rebuild them on the follower.
         handle.emit_event(AgentStartEvent(generation=6))
         handle.emit_event(
             ToolExecutionStartEvent(
@@ -172,6 +172,36 @@ async def test_multi_question_ask_advances_same_request_across_two_followers(
 
 
 @pytest.mark.asyncio
+async def test_remote_aside_runs_on_owner_without_joining_transcript(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        deltas: list[str] = []
+        answer = await remote.complete_aside(
+            [Message.user("Why this approach?")],
+            on_delta=deltas.append,
+        )
+        assert answer == "aside answer"
+        assert deltas == ["aside answer"]
+        assert handle.calls[-1][0] == "complete_aside"
+        assert remote.history() == []
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
 async def test_remote_prompt_steer_and_approval_route_to_owner(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -228,6 +258,77 @@ async def test_remote_prompt_steer_and_approval_route_to_owner(tmp_path: Path, m
             True,
             False,
         )
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_slash_returns_typed_result_rendered_by_invoker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A routed slash returns the owner's typed outcome, not a transport receipt."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        outcome = await remote.route_shared_slash("goal", "ship it")
+        # The typed SlashResult dict crosses the socket; the invoker renders it.
+        assert isinstance(outcome, dict)
+        assert outcome["kind"] == "notice"
+        assert outcome["text"] == "owner ran /goal"
+        assert handle.calls[-1][0] == "run_slash_authoritative"
+        assert handle.calls[-1][1][0:2] == ("goal", "ship it")
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_adopt_aside_and_cancel_route_to_owner(tmp_path: Path, monkeypatch) -> None:
+    """Ctrl+F fork and double-Esc cancel reach the owner's real operations."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        # /btw Ctrl+F: the fork routes the pair to the owner's adopt_aside.
+        pair = [
+            Message.user("q", id="aaaaaaa1-1111-4111-8111-111111111111"),
+            Message.assistant("a", id="aaaaaaa2-1111-4111-8111-111111111111"),
+        ]
+        await remote.adopt_aside(pair)
+        assert handle.calls[-1][0] == "adopt_aside"
+        forwarded = handle.calls[-1][1][0]
+        assert isinstance(forwarded, list) and len(forwarded) == 2
+
+        # Double-Esc: the synchronous method issues the authoritative op and
+        # the owner's confirmed count resolves through the callback.
+        resolved: list[int] = []
+        remote.set_cancel_resolution(resolved.append)
+        optimistic = remote.cancel_subagents()
+        assert optimistic == 0  # no canonical jobs staged => nothing offered
+        for _ in range(100):
+            if resolved:
+                break
+            await asyncio.sleep(0.02)
+        assert resolved == [2]  # the owner's REAL count, not a guessed zero
+        assert any(call[0] == "cancel_subagents_count" for call in handle.calls)
     finally:
         if remote is not None:
             await remote.dispose()

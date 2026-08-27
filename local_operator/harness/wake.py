@@ -515,11 +515,13 @@ class WakeScheduler:
         deliver: Callable[[DueWake], Awaitable[None] | None],
         persist: Callable[[list[WakeSchedule]], Awaitable[None] | None],
         on_retire: Callable[[WakeSchedule, WakeRetireReason], Awaitable[None] | None] | None = None,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         self._now = now
         self._deliver = deliver
         self._persist = persist
         self._on_retire = on_retire
+        self._on_change = on_change
         self._schedules: list[WakeSchedule] = []
         self._timer: asyncio.TimerHandle | None = None
         # Tick tasks spawned by the armed timer; kept as a set so dispose()
@@ -604,6 +606,7 @@ class WakeScheduler:
             except Exception:
                 logger.warning("wake persist failed", exc_info=True)
             self._arm()
+            self._notify_change()
 
     async def pump(self, now_ms: int | None = None) -> int:
         """Fire every due wake (delivering each and advancing it), persist if
@@ -662,6 +665,8 @@ class WakeScheduler:
                     # every remaining wake dead for the life of the session.
                     logger.warning("wake persist failed", exc_info=True)
             self._arm()
+            if fired:
+                self._notify_change()
             return fired
 
     def dispose(self) -> None:
@@ -676,6 +681,14 @@ class WakeScheduler:
         self._tick_tasks.clear()
 
     # -- internals ----------------------------------------------------------
+
+    def _notify_change(self) -> None:
+        if self._on_change is None:
+            return
+        try:
+            self._on_change()
+        except Exception:  # noqa: BLE001 — observation cannot break scheduling
+            logger.warning("wake on_change failed", exc_info=True)
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:

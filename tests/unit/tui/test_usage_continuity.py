@@ -713,24 +713,15 @@ async def test_every_writer_of_the_cost_cell_keeps_the_floor_mark(tmp_path: Path
             await pilot.pause()
             assert app._status._cost.startswith(RESTORED_COST_PREFIX), app._status._cost
 
-            # A live model call mid-turn, and then the turn's own end.
-            app.post_message(
-                ContextUsageReported(
-                    50_000,
-                    Usage(input_tokens=1_000, output_tokens=500, context_tokens=50_000),
-                )
+            # The canonical store is the only production cost writer. Fold one
+            # live provider call there and let the app render its update.
+            session._frontend_state_store.accrue_usage(
+                session,
+                Usage(input_tokens=1_000, output_tokens=500, context_tokens=50_000),
             )
             await pilot.pause()
             assert app._status._cost.startswith(RESTORED_COST_PREFIX), app._status._cost
 
-            app.post_message(
-                TurnEnded(
-                    False,
-                    None,
-                    context_tokens=50_000,
-                    usage=Usage(input_tokens=1_000, output_tokens=500, context_tokens=50_000),
-                )
-            )
             await pilot.pause()
             settled = app._status._cost
             assert settled.startswith(RESTORED_COST_PREFIX), settled

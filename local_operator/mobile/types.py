@@ -133,6 +133,10 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
                     "images": images,
                 }
             )
+    elif op == "complete_aside":
+        turns = frame.get("turns")
+        if not isinstance(turns, list) or not all(isinstance(item, dict) for item in turns):
+            raise ValueError("turns must be a list of message objects")
     elif op == "approval_answer":
         if not isinstance(frame.get("request_id"), str) or not frame["request_id"]:
             raise ValueError("request_id must be a non-empty string")
@@ -145,6 +149,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("request_id must be a non-empty string")
         if not isinstance(frame.get("value"), str):
             raise ValueError("value must be a string")
+    elif op in ("slash", "slash_result"):
+        if not isinstance(frame.get("command"), str) or not frame["command"]:
+            raise ValueError("command must be a non-empty string")
+        if not isinstance(frame.get("args"), str):
+            raise ValueError("args must be a string")
+    elif op == "adopt_aside":
+        messages = frame.get("messages")
+        if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
+            raise ValueError("messages must be a list of message objects")
     elif op == "recall_steer":
         # v4: a follower unsending a queued steer names the message identity it
         # queued (the ContinuationCommand id that became the Message id). The
@@ -188,13 +201,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
 #: same frame shapes either side of the bump.
 #:
 #: v4 (full-TUI attach) is ADDITIVE: an attach client's auth frame may carry
-#: ``"events": true`` to subscribe to the owner's raw ``AgentEvent`` relay
-#: (``event`` frames) plus the one-shot ``attach_sync`` live-turn seed, and
-#: the ``recall_steer`` op lets a follower unsend a queued steer. A v3 attach
+#: ``"events": true`` to subscribe to the owner's raw ``AgentEvent`` relay,
+#: and the ``recall_steer`` op lets a follower unsend a queued steer. A v3 attach
 #: client that omits the flag gets exactly the v3 behaviour (projection
 #: frames only), and daemon connections never see the new frames, so the
 #: phone path is byte-identical across the bump.
-PROTOCOL_VERSION = 4
+# v5 adds an attach-only canonical frontend state channel. Phone/daemon
+# connections still receive projection frames only; the new capability is
+# negotiated explicitly by full TUI clients.
+PROTOCOL_VERSION = 5
 
 #: Which side of the owner relationship a control connection speaks for.
 #: ``daemon`` (the default when the auth frame omits ``client``) may rebind
@@ -250,6 +265,7 @@ class SessionRecord:
     protocol: int = PROTOCOL_VERSION
     started_at: float = field(default_factory=time.time)
     heartbeat_at: float = field(default_factory=time.time)
+    capabilities: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -276,6 +292,7 @@ ControlOp = Literal[
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
     "slash",  # {command, args} — execute a TUI slash command
+    "complete_aside",  # {turns} — authoritative off-record provider request
     "new_conversation",  # {} — the TUI's /new
     "resume_session",  # {session_id} — rebind the host to another transcript
     "approval_answer",  # {request_id, approved, remember}
@@ -311,10 +328,8 @@ EventOp = Literal[
     # Fidelity by construction — the follower renders the same events the
     # owner's own EventController consumes, so nothing is inverse-folded.
     "event",  # {data: <AgentEvent dump>}
-    # v4: one-shot live-turn seed pushed right after the welcome projection to
-    # event clients, so a mid-turn join can rebuild the in-flight bubble and
-    # running tool cards (see LiveTurnSeed).
-    "attach_sync",  # {data: <LiveTurnSeed>}
+    "frontend_sync",  # v5 attach-only atomic FrontendSessionState snapshot
+    "frontend_update",  # v5 attach-only ordered state replacement
 ]
 
 
@@ -593,52 +608,6 @@ class SessionProjection:
 #: scrolling. History fetches page backwards beyond it. Matches omp mobile's
 #: finding that a phone renders a tail, not a log.
 PROJECTION_TRANSCRIPT_LIMIT = 80
-
-
-@dataclass
-class LiveTurnSeed:
-    """The in-flight turn, for an event client joining mid-turn (v4).
-
-    Durable history covers everything up to the last persisted boundary and
-    the event relay covers everything from "now" — this seed is the gap
-    between them. Messages persist at turn boundaries, so a follower joining
-    mid-turn would otherwise show no streaming bubble and no running tool
-    cards until the turn ended. The owner's ``LiveTurnTracker`` maintains it
-    from the same event stream the relay forwards; it is bounded state (one
-    accumulated assistant message plus the open tool calls of one batch).
-
-    ``open_tools`` carries the serialized ``tool_call_compose`` /
-    ``tool_execution_start`` events (``model_dump(mode="json")``) for calls
-    started but not yet ended, in emission order, so a joining client can
-    replay them through its normal event path and rebuild the running cards
-    exactly as a continuously-connected client painted them.
-    """
-
-    streaming: bool = False
-    generation: int = 0
-    #: Accumulated in-flight assistant text (MessageUpdateEvent carries the
-    #: accumulated message, so the tracker keeps only the latest).
-    assistant_text: str = ""
-    #: Whether an assistant message is currently open (message_start seen,
-    #: message_end not). Distinct from ``assistant_text`` being empty: a
-    #: bubble can be open with no tokens yet.
-    assistant_open: bool = False
-    #: The open assistant message's id, so a joiner can dedupe the synthetic
-    #: seed bubble against the same message's own later ``message_end`` (the
-    #: relay delivers the real end; the seed only pre-paints the middle).
-    assistant_message_id: str = ""
-    open_tools: list[dict[str, Any]] = field(default_factory=list)
-
-    def to_json(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @staticmethod
-    def from_json(data: dict[str, Any]) -> "LiveTurnSeed":
-        # Same tolerant rebuild as the other wire dataclasses: unknown keys
-        # from a newer owner are dropped, missing keys default (rolling
-        # upgrade mid-push must not kill the join).
-        known = {f for f in LiveTurnSeed.__dataclass_fields__}
-        return LiveTurnSeed(**{k: v for k, v in (data or {}).items() if k in known})
 
 
 def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> SessionProjection:

@@ -1172,6 +1172,30 @@ class StatusLine:
         self._stop_spinner()
 
     # -- duration ------------------------------------------------------------
+    def seed_duration(
+        self,
+        *,
+        active_seconds: float,
+        activity_started_at: float | None,
+        now_epoch: float | None = None,
+    ) -> None:
+        """Install session-owned active time without restarting it at attach.
+
+        The state contract carries wall-clock epoch for the in-flight edge; this
+        widget keeps monotonic time internally, so convert only the elapsed age
+        and let subsequent ticks remain immune to system-clock adjustments.
+        """
+        self._active_seconds = max(0.0, float(active_seconds))
+        if activity_started_at is None:
+            self._turn_started_at = None
+        else:
+            age = max(
+                0.0,
+                float(now_epoch if now_epoch is not None else time.time()) - activity_started_at,
+            )
+            self._turn_started_at = self._clock() - age
+        self.refresh()
+
     def _mark_turn_boundary(self, streaming: bool) -> None:
         """Start or bank the active-time clock on a streaming transition.
 

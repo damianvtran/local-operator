@@ -494,23 +494,33 @@ class TodoPanel(Container):
         Never raises: a status surface must not be able to take the app down.
         """
         try:
+            frontend = getattr(session, "frontend_state", None)
             selected_id = (
                 session_id if session_id is not None else getattr(session, "session_id", "")
             )
-            restored = None
-            if transcript_directory is not None:
-                restored = self._restored_todos.get(transcript_directory)
-                if restored is None and transcript_directory not in self._todo_loads:
-                    # Selection changes initiate one worker read. The 1 Hz
-                    # refresh path only observes the cache and never opens disk.
-                    self._todo_loads[transcript_directory] = asyncio.create_task(
-                        self._load_restored_todos(session, selected_id or "", transcript_directory)
-                    )
-            phases = (
-                todo_items(selected_id or "", restored)
-                if transcript_directory is not None
-                else todo_items(selected_id or "")
-            )
+            if frontend is not None and selected_id == getattr(session, "session_id", ""):
+                # The live owner/follower session reads canonical state;
+                # historical child pages fall through to their own durable
+                # transcript below.
+                phases = [phase.model_dump(mode="json") for phase in frontend.todos]
+            else:
+                restored = None
+                if transcript_directory is not None:
+                    restored = self._restored_todos.get(transcript_directory)
+                    if restored is None and transcript_directory not in self._todo_loads:
+                        # Selection changes initiate one worker read. The 1 Hz
+                        # refresh path only observes the cache and never opens
+                        # disk.
+                        self._todo_loads[transcript_directory] = asyncio.create_task(
+                            self._load_restored_todos(
+                                session, selected_id or "", transcript_directory
+                            )
+                        )
+                phases = (
+                    todo_items(selected_id or "", restored)
+                    if transcript_directory is not None
+                    else todo_items(selected_id or "")
+                )
             # The phase name and the reason both ride IN the fingerprint: a
             # phase rename, an item moving between phases, or a re-block with a
             # new reason all change what the panel says, and a guard blind to

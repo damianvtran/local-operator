@@ -54,7 +54,12 @@ from local_operator.tui.widgets.editor import (
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    RichBlock,
+    TranscriptView,
+    UserBlock,
+)
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 
@@ -821,6 +826,640 @@ def test_exit_quit_collapsed_to_one_command() -> None:
     assert "quit" not in names  # not a separate command
     exit_command = next(c for c in SLASH_COMMANDS if c.name == "exit")
     assert exit_command.aliases == ("quit",)
+
+
+@pytest.mark.asyncio
+async def test_every_authoritative_slash_routes_to_owner_with_supported_images() -> None:
+    from local_operator.harness.types import ImageContent
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+    )
+    from local_operator.tui.widgets.editor import Attachment
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append((command, args, len(images)))
+            return "routed"
+
+    routed: list[tuple[str, str, int]] = []
+    session = RoutedSession()
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command=command,
+                scope=CommandScope.AUTHORITATIVE_SESSION,
+                operation="slash",
+                supports_images=command in {"agent", "team"},
+            )
+            for command in (
+                "agent",
+                "team",
+                "loop",
+                "compact",
+                "goal",
+                "model",
+                "effort",
+                "rename",
+                "approvals",
+                "btw",
+            )
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        image = ImageContent(data="cG5n", mime_type="image/png")
+        attachment = Attachment(image=image, marker="[Image #1]")
+        for capability in session.frontend_state.slash_capabilities:
+            attachments = {1: attachment} if capability.supports_images else None
+            arg = "coder inspect [Image #1]" if attachments else "value"
+            app._run_slash_command(f"/{capability.command} {arg}", attachments)
+            await pilot.pause()
+    assert [name for name, _, _ in routed] == [
+        capability.command for capability in session.frontend_state.slash_capabilities
+    ]
+    assert [(name, count) for name, _, count in routed if name in {"agent", "team"}] == [
+        ("agent", 1),
+        ("team", 1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_follower_renders_typed_slash_results_locally() -> None:
+    """A follower's routed slash renders the owner's typed outcome HERE, not a
+    transport receipt — and bare /model opens the invoker's own picker."""
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+    )
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append(command)
+            if command == "goal":
+                return {
+                    "kind": "notice",
+                    "text": "goal set — applies from the next turn",
+                    "style": "info",
+                    "data": {"stored": args},
+                }
+            if command == "mcp":
+                return {
+                    "kind": "notice",
+                    "text": "authenticated MCP server 'linear'; 12 tools available.",
+                    "style": "success",
+                }
+            return {"kind": "noop"}
+
+    routed: list[str] = []
+    session = RoutedSession()
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command=name, scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+            )
+            for name in ("goal", "model", "mcp")
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        # /goal renders the typed notice in the INVOKING transcript.
+        app._run_slash_command("/goal ship it")
+        for _ in range(60):
+            await pilot.pause()
+            if any("goal set" in (b.text() or "") for b in app.query(NoticeBlock)):
+                break
+        assert any(
+            "goal set — applies from the next turn" in (b.text() or "")
+            for b in app.query(NoticeBlock)
+        )
+        assert "goal" in routed
+
+        # /mcp login renders the grant receipt locally; no AttributeError.
+        app._run_slash_command("/mcp login linear")
+        for _ in range(60):
+            await pilot.pause()
+            if any("authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock)):
+                break
+        assert any("authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock))
+
+        # Bare /model opens the invoker's own picker; nothing routes.
+        routed.clear()
+        app._run_slash_command("/model")
+        await pilot.pause()
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        assert editor.text.startswith("/model ")
+        assert routed == []
+
+
+@pytest.mark.asyncio
+async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager() -> None:
+    """The follower's MCP facade is read-only (no get_server_config), so a grant
+    subcommand must ROUTE to the owner rather than reach the local handler —
+    the exact AttributeError crash from review U1/BLOCKER-1."""
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+        SnapshotMcpManager,
+        _slash_capabilities,
+    )
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+        # The read-only facade the production RemoteSession hands the app — the
+        # one whose get_server_config absence crashed the local /mcp handler.
+        mcp_manager: Any
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append((command, args))
+            return {
+                "kind": "notice",
+                "text": "authenticated MCP server 'linear'; 3 tools available.",
+                "style": "success",
+            }
+
+    routed: list[tuple[str, str]] = []
+    session = RoutedSession()
+    session.mcp_manager = SnapshotMcpManager()
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command="mcp", scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+            )
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        for subcommand in ("login linear", "logout linear", "reauth linear"):
+            app._run_slash_command(f"/mcp {subcommand}")
+            await pilot.pause()
+        for _ in range(60):
+            await pilot.pause()
+            if len(routed) == 3:
+                break
+        # All three grant subcommands routed; none reached the crashing local
+        # handler. The bare listing stays local (renders, does not route).
+        assert routed == [
+            ("mcp", "login linear"),
+            ("mcp", "logout linear"),
+            ("mcp", "reauth linear"),
+        ]
+        routed.clear()
+        app._run_slash_command("/mcp")
+        await pilot.pause()
+        await pilot.pause()
+        assert routed == []
+
+        # Round 5, MAJOR: against a full-capability owner the bare-/mcp
+        # pullback sets remote_capability = None, and the U10 refusal guard
+        # used to read that deliberate pullback as "unadvertised" — every
+        # production follower lost the listing behind a refusal notice. The
+        # carve-out must render the canonical LOCAL listing: no refusal, no
+        # route, and the MCP servers block actually mounted in the transcript.
+        from local_operator.mcp.config import MCPStdioServerConfig
+
+        full_capabilities = FrontendSessionState(
+            session_id=session.session_id,
+            epoch="owner",
+            slash_capabilities=_slash_capabilities(),
+        )
+        session.frontend_state = full_capabilities
+        for _ in range(20):
+            await pilot.pause()
+            if getattr(app._session, "frontend_state", None) is full_capabilities:
+                break
+        configs = {"linear": MCPStdioServerConfig(command="linear-mcp")}
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            app._run_slash_command("/mcp")
+            for _ in range(20):
+                await pilot.pause()
+                if app.query(RichBlock):
+                    break
+        listing_blocks = [b for b in app.query(RichBlock)]
+        assert listing_blocks, "bare /mcp must mount the canonical local listing block"
+        listing = "\n".join(_renderable_plain(b.renderable) for b in listing_blocks)
+        assert "MCP servers" in listing
+        assert "linear" in listing
+        assert not any(
+            "not available from this session's owner" in (b.text() or "")
+            for b in app.query(NoticeBlock)
+        )
+        assert routed == []
+
+        # The grant form still routes authoritatively under the full list.
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            app._run_slash_command("/mcp login linear")
+            for _ in range(60):
+                await pilot.pause()
+                if any(
+                    "authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock)
+                ):
+                    break
+        assert routed == [("mcp", "login linear")]
+        assert any("authenticated MCP server" in (b.text() or "") for b in app.query(NoticeBlock))
+
+
+@pytest.mark.asyncio
+async def test_unadvertised_shared_slash_refuses_instead_of_running_locally() -> None:
+    """U10 (UX round 4): a shared command the owner's capability list omits
+    must not silently run on the follower — it would mutate only this
+    process and never reach the owner."""
+    from local_operator.session.frontend_state import (
+        CommandScope,
+        FrontendSessionState,
+        SlashCapability,
+    )
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append(command)
+            return {"kind": "noop"}
+
+    routed: list[str] = []
+    session = RoutedSession()
+    # The owner advertises /rename as authoritative but NOT /goal — the
+    # version-skew/reduced-owner shape U10 walked.
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=[
+            SlashCapability(
+                command="rename", scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+            )
+        ],
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        app._run_slash_command("/goal ship it")
+        for _ in range(60):
+            await pilot.pause()
+            if any(
+                "not available from this session's owner" in (b.text() or "")
+                for b in app.query(NoticeBlock)
+            ):
+                break
+        # The shared slash was REFUSED in clear copy — it did not route (the
+        # owner never advertised it) and it did not run locally (the
+        # follower's goal is untouched).
+        assert any(
+            "not available from this session's owner" in (b.text() or "")
+            for b in app.query(NoticeBlock)
+        )
+        assert routed == []
+        assert session.goal == ""
+
+        # A command the owner DID advertise still routes.
+        app._run_slash_command("/rename New title")
+        for _ in range(60):
+            await pilot.pause()
+            if routed:
+                break
+        assert routed == ["rename"]
+
+        # A follower-local command (not in the capability list at all) still
+        # runs locally — the guard only refuses SHARED commands.
+        app._run_slash_command("/help")
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_owner_slash_result_producers_match_local_handler_vocabulary() -> None:
+    """The owner's typed-result producers say what the local handlers say —
+    goal, rename, context, effort — so a follower's receipt is identical."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        goal = await app.run_slash_authoritative("goal", "ship it")
+        assert goal["kind"] == "notice"
+        assert "goal set — applies from the next turn" in goal["text"]
+        assert session.goal == "ship it"
+
+        bare_goal = await app.run_slash_authoritative("goal", "")
+        assert "goal: ship it" in bare_goal["text"]
+
+        renamed = await app.run_slash_authoritative("rename", "New title")
+        assert "renamed: New title" in renamed["text"]
+        assert session.conversation_name == "New title"
+
+        unknown = await app.run_slash_authoritative("mcp", "bogus x")
+        assert "unknown mcp subcommand" in unknown["text"]
+        assert unknown["style"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_every_authoritative_capability_has_a_real_owner_producer() -> None:
+    """MAJOR-1 (round 2): no routed command may answer success without acting.
+
+    The capability builder marks every non-frontend-local slash authoritative;
+    the owner's typed dispatcher must therefore implement every one of them —
+    a hand-picked subset is how ``/loop``, ``/compact``, ``/approvals`` and
+    non-bare ``/model`` answered ``ran /…`` while doing nothing. This walks
+    the REAL capability list so a new command without a producer fails here.
+    """
+    from local_operator.session.frontend_state import CommandScope, _slash_capabilities
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        authoritative = [
+            cap.command
+            for cap in _slash_capabilities()
+            if cap.scope is CommandScope.AUTHORITATIVE_SESSION
+        ]
+        assert authoritative, "the capability list must exist"
+        for command in authoritative:
+            if command == "context":
+                # The context producer needs a REAL breakdown shape; the fake
+                # session reports none, which is itself a legitimate outcome.
+                session._context_breakdown = {  # type: ignore[attr-defined]
+                    "instructions": 1,
+                    "tool_inventory": 1,
+                    "tool_schemas": 1,
+                    "environment": 1,
+                    "knowledge_mcp_goal": 1,
+                    "messages": 1,
+                    "total": 6,
+                    "context_window": 100,
+                    "cache_read": 0,
+                }
+            outcome = await app.run_slash_authoritative(command, "bogus value")
+            text = str(outcome.get("text", ""))
+            # The old fallback receipt is a false success: any producer that
+            # still answers it is an unimplemented command.
+            assert (
+                text != f"ran /{command}"
+            ), f"/{command} has no owner producer — it reported success without acting"
+
+
+@pytest.mark.asyncio
+async def test_routed_loop_compact_approvals_and_model_act_on_the_owner() -> None:
+    """MAJOR-1 (round 2): the four round-2 commands execute, not no-op."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        # /approvals auto: the OWNER's gate mode actually changes.
+        outcome = await app.run_slash_authoritative("approvals", "auto")
+        assert app._approve_all is True
+        assert "tool approvals: auto" in outcome["text"]
+        outcome = await app.run_slash_authoritative("approvals", "ask")
+        assert app._approve_all is False
+        # Bare /approvals reports the live mode honestly.
+        report = await app.run_slash_authoritative("approvals", "")
+        assert "tool approvals: ask" in report["text"]
+
+        # /compact: the owner's session is asked for a REAL pass.
+        session.compact_outcome = CompactionOutcome(ran=True, detail="done")
+        outcome = await app.run_slash_authoritative("compact", "")
+        for _ in range(60):
+            await pilot.pause()
+            if session.compactions:
+                break
+        assert session.compactions == 1, "the compact pass must actually run"
+        assert "compacting context" in outcome["text"]
+
+        # /loop with no goal refuses BEFORE starting; with a goal it runs a
+        # real iteration through the session (the worker drives prompts).
+        refused = await app.run_slash_authoritative("loop", "2")
+        assert "set a goal first" in refused["text"]
+        session.set_goal("ship it")
+        outcome = await app.run_slash_authoritative("loop", "1")
+        assert "looping toward the goal" in outcome["text"]
+        for _ in range(200):
+            await pilot.pause()
+            if not app._loop_running:
+                break
+        assert session.prompts, "the loop must drive at least one real turn"
+
+        # Non-bare /model: the owner's session switches for real.
+        switched = await app.run_slash_authoritative("model", "openrouter/deepseek/deepseek-chat")
+        assert "model:" in switched["text"]
+        assert switched["kind"] == "notice"
+        # /model default is DECLINED, not silently applied on the wrong machine.
+        declined = await app.run_slash_authoritative("model", "default openrouter/x")
+        assert declined["style"] == "warning"
+        assert "persists to the local machine" in declined["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None:
+    """MAJOR-2 (round 2): the -1 failure sentinel renders an honest retry line."""
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    class RemoteishSession(FakeSession):
+        is_remote = True
+        frontend_state: FrontendSessionState
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._resolver: Any | None = None
+
+        def set_cancel_resolution(self, resolver: Any | None) -> None:
+            self._resolver = resolver
+
+    session = RemoteishSession()
+    session.frontend_state = FrontendSessionState(session_id="sess", epoch="owner")
+    session.streaming = True
+    session.running_children = 2
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        # The owner call FAILS: the resolver the second press installed gets
+        # the failure sentinel, exactly as RemoteSession._resolve_cancel
+        # delivers it on a socket/owner exception. Staged after the presses
+        # rather than inside cancel_subagents so the app's own resolver is
+        # what receives it (the real seam is asynchronous).
+        resolver = session._resolver
+        assert resolver is not None, "the second press must arm the resolution seam"
+        resolver(-1)
+        # The failure resolution is one hop past the press: the offer frame
+        # paints "stopping 2 subagents…" first, then the sentinel rewrites
+        # it. Wait for the rewrite, not a fixed number of pauses.
+        for _ in range(100):
+            await pilot.pause()
+            texts = [b.text() or "" for b in app.query(NoticeBlock)]
+            if any("could not confirm" in text for text in texts):
+                break
+        texts = [b.text() or "" for b in app.query(NoticeBlock)]
+        assert any("could not confirm" in text for text in texts), texts
+        assert not any("stopped 2 subagents" in text for text in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_takeover_preserves_the_status_band_verbatim() -> None:
+    """D2 (round 2): a transport rotation must not move the band's segments."""
+    from local_operator.session.frontend_state import (
+        CostKnowledge,
+        FrontendSessionState,
+    )
+
+    state = FrontendSessionState(
+        session_id="sess",
+        epoch="owner",
+        conversation_title="Unified session parity",
+        active_agent="coder",
+        active_team="lopdev",
+        cumulative_parent_cost=3.92,
+        cost_knowledge=CostKnowledge.FLOOR,
+        context_tokens=402_000,
+        context_is_estimate=False,
+        context_window=1_000_000,
+    )
+
+    class StatefulSession(FakeSession):
+        def __init__(self, st: FrontendSessionState) -> None:
+            super().__init__()
+            self._st = st
+
+        @property
+        def frontend_state(self) -> FrontendSessionState:
+            return self._st
+
+        @property
+        def active_agent(self) -> str:
+            return self._st.active_agent
+
+        @property
+        def active_team_name(self) -> str:
+            return self._st.active_team
+
+        @property
+        def conversation_name(self) -> str:
+            return self._st.conversation_title
+
+    class Remoteish(StatefulSession):
+        is_remote = True
+
+        def set_takeover_callback(self, callback: Any) -> None:
+            self.takeover_callback = callback
+
+    remote = Remoteish(state)
+    replacement = StatefulSession(state.model_copy(update={"epoch": "new-owner"}))
+    app = OperatorApp(lambda: _factory(remote))
+    async with app.run_test(size=(118, 36)) as pilot:
+        for _ in range(60):
+            await pilot.pause()
+            if app._session is remote:
+                break
+        status = app._status
+        assert status is not None
+        # A REAL follower boots with the canonical cost already painted (the
+        # sync snapshot installs it before the first frame); a fake without
+        # the frontend-subscribe seam has to be settled into that state
+        # explicitly, or the test would measure boot cost ≠ post-takeover
+        # cost and pass on a band that started WRONG rather than stayed right.
+        app._apply_frontend_state(remote.frontend_state)
+        await pilot.pause()
+        before = {
+            "agent_profile": status._agent_profile,
+            "team": status._team,
+            "conversation_name": status._conversation_name,
+            "cost": status._cost,
+        }
+        assert before["cost"] == "≥$3.92", before
+        await app._adopt_takeover_session(replacement)
+        for _ in range(5):
+            await pilot.pause()
+        after = {
+            "agent_profile": status._agent_profile,
+            "team": status._team,
+            "conversation_name": status._conversation_name,
+            "cost": status._cost,
+        }
+        assert after == before, f"the band must not shift through takeover: {before} → {after}"
+
+
+@pytest.mark.asyncio
+async def test_follower_model_picker_lists_the_owners_models() -> None:
+    """D3 (round 2): the picker's rows come from the OWNER's catalogue, so a
+    credential-less follower's bare /model still lists selectable models."""
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    class OwnerCatalogueSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        def owner_model_catalogue(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "provider": "anthropic",
+                    "model_id": "claude-sonnet-4-6",
+                    "label": "Claude Sonnet 4.6",
+                    "context_window": 1_000_000,
+                    "input_price": 3.0,
+                    "output_price": 15.0,
+                    "connected": True,
+                    "aggregated": False,
+                }
+            ]
+
+    session = OwnerCatalogueSession()
+    session.frontend_state = FrontendSessionState(session_id="sess", epoch="owner")
+    # The follower's OWN controller has no usable provider at all: without
+    # the owner merge the picker would render zero selectable rows.
+    app = OperatorApp(lambda: _factory(session), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        app._populate_model_picker()
+        for _ in range(30):
+            await pilot.pause()
+        picker = app.query_one(Editor).model_picker
+        selectors = [row.selector for row in picker._rows]
+        assert "anthropic/claude-sonnet-4-6" in selectors, selectors
 
 
 @pytest.mark.asyncio

@@ -1477,6 +1477,8 @@ async def wire_mcp_into_session(
             logger.debug("MCP settled outcome rebuild failed", exc_info=True)
             return
         session.mcp_startup = outcome
+        if hasattr(session, "_frontend_state_store"):
+            session.refresh_frontend_state()
         if not has_ui:
             # A late failure that the gate never printed still deserves the
             # stderr line the settling guard above withheld.
@@ -1541,6 +1543,8 @@ async def wire_mcp_into_session(
         # Reconnects and tools/list_changed can replace AgentTool objects. Keep
         # the selected origins and swap in only their fresh schemas.
         refresh_selected(new_mcp_tools)
+        if hasattr(session, "_frontend_state_store"):
+            session.refresh_frontend_state()
 
     manager.set_on_tools_changed(on_tools_changed)
     return manager
@@ -1556,6 +1560,8 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     """
     session.add_dispose_hook(manager.disconnect_all)
     session.mcp_manager = manager
+    if hasattr(session, "_frontend_state_store"):
+        session.refresh_frontend_state()
     # Breaker incidents become session incidents: the model learns a server's
     # tools are gone instead of hammering them (MCP-07's observable half).
     manager.on_incident = session._on_mcp_incident

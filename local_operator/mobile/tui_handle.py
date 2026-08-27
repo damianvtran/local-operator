@@ -66,6 +66,21 @@ async def _await_future(future: asyncio.Future[Any]) -> Any:
 _image_blocks = image_blocks
 
 
+def _decode_attachments(images: list[dict[str, str]] | None) -> dict[int, Any]:
+    """Rebuild the composer's index→attachment map from wire image blocks.
+
+    Shared by ``slash_images`` and the routed-slash path so both hand the
+    dispatch the same ``{1: Attachment, …}`` shape the composer would have
+    produced had the images been attached locally.
+    """
+    from local_operator.tui.widgets.editor import Attachment
+
+    return {
+        index: Attachment(image=image, marker=f"[Image #{index}]")
+        for index, image in enumerate(_image_blocks(images), start=1)
+    }
+
+
 class TuiSessionHandle(SessionHandle):
     def __init__(self, app: "OperatorApp") -> None:
         self._app = app
@@ -109,12 +124,6 @@ class TuiSessionHandle(SessionHandle):
         # too (``ask_answer`` hops onto it before touching this), so the
         # single-winner race is decided by one owner, not by dict atomicity.
         self._ask_pending: dict[str, Any] = {}
-        # Approval pending state is follower-only. The phone path did not
-        # receive TUI approvals before protocol v4 and must stay byte-identical;
-        # Registrant overlays this field only onto event-client projection
-        # frames. Ask pending remains in the ordinary fold because phones
-        # already supported TUI asks before this change.
-        self._event_pending: PendingRequest | None = None
         # Child transcripts can contain thousands of attachment-backed entries.
         # Keep their I/O off Textual's loop and bound work to one coalescing
         # worker per child so a streaming burst cannot queue stale full reads.
@@ -156,7 +165,6 @@ class TuiSessionHandle(SessionHandle):
         self._projection.todos.clear()
         self._projection.subagents.clear()
         self._projection.pending = None
-        self._event_pending = None
         self._cancel_detail_tasks()
         self._fold = ProjectionFold(self._projection)
         # A /new or /resume mid-ask abandons the old picker; drop its mapping
@@ -219,6 +227,15 @@ class TuiSessionHandle(SessionHandle):
         self._warm_subagent_details()
         self._unsubscribe = unsubscribe
         return unsubscribe
+
+    @property
+    def frontend_state_seed(self):  # type: ignore[no-untyped-def]
+        """Canonical state seed for full-TUI attach clients only."""
+        return self._session().frontend_state
+
+    async def subscribe_frontend(self, on_update):  # type: ignore[no-untyped-def]
+        """Capture snapshot+subscription atomically on Textual's owner loop."""
+        return await self._on_app(lambda: self._session().subscribe_frontend(on_update))
 
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the registrant's v4 relay.
@@ -400,14 +417,102 @@ class TuiSessionHandle(SessionHandle):
         return f"effort: {effort}"
 
     async def slash(self, command: str, args: str) -> str:
+        return await self.slash_images(command, args, None)
+
+    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+        """Run an off-record provider request on the authoritative session."""
+        from local_operator.harness.types import Message
+
+        messages = [Message.model_validate(turn) for turn in turns]
+        session = self._session()
+        owner_loop = await self._on_app(asyncio.get_running_loop)
+        future = asyncio.run_coroutine_threadsafe(session.complete_aside(messages), owner_loop)
+        return await asyncio.wrap_future(future)
+
+    async def slash_images(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None,
+    ) -> str:
         line = f"/{command}" + (f" {args}" if args else "")
 
         def apply() -> None:
-            self._app._run_slash_command(line)
+            self._app._run_slash_command(line, _decode_attachments(images))
 
         await self._on_app(apply)
         self._refresh_state()
         return f"ran {line}"
+
+    async def run_slash_authoritative(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None,
+    ) -> dict[str, Any]:
+        """Run one shared slash command and return its typed outcome.
+
+        The owner-side backend for a follower's ``route_shared_slash``. Unlike
+        ``slash_images`` — which runs the command's UI in the OWNER's terminal
+        and returns a ``ran /…`` receipt — this asks the app for a
+        :class:`SlashResult` payload the INVOKING terminal renders locally, so
+        ``/goal``/``/rename``/``/mcp``/``/context`` answer where they were
+        typed. The producer is a coroutine (the MCP grant awaits a browser
+        round trip), so it is scheduled on the app loop and its completion
+        awaited here — unbounded, because an OAuth grant legitimately outlives
+        the UI-hop timeout ``_on_app`` enforces, and a cancelled request
+        unwinds the grant cleanly through the task.
+        """
+        owner_loop = await self._on_app(asyncio.get_running_loop)
+        done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+
+        def schedule() -> None:
+            task = owner_loop.create_task(
+                self._app.run_slash_authoritative(command, args, list(images or []))
+            )
+
+            def finish(completed: asyncio.Task[Any]) -> None:
+                if completed.cancelled():
+                    done.get_loop().call_soon_threadsafe(
+                        _set_unless_done, done, None, asyncio.CancelledError()
+                    )
+                    return
+                error = completed.exception()
+                done.get_loop().call_soon_threadsafe(
+                    _set_unless_done,
+                    done,
+                    None if error else completed.result(),
+                    error,
+                )
+
+            task.add_done_callback(finish)
+
+        self._app.call_from_thread(schedule)
+        result = await done
+        return result if isinstance(result, dict) else {"kind": "notice", "text": f"ran /{command}"}
+
+    async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
+        """Fork a follower's aside exchange into the authoritative conversation."""
+        from local_operator.harness.types import Message
+
+        parsed = [Message.model_validate(message) for message in messages]
+        session = self._session()
+        owner_loop = await self._on_app(asyncio.get_running_loop)
+        future = asyncio.run_coroutine_threadsafe(session.adopt_aside(parsed), owner_loop)
+        await asyncio.wrap_future(future)
+        self._refresh_state()
+        return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+
+    def cancel_subagents_count(self) -> int:
+        """Cancel every running subagent on the owner; return the REAL count."""
+        session = self._session()
+        cancel = getattr(session, "cancel_subagents", None)
+        if not callable(cancel):
+            return 0
+        result = cancel("interrupted")
+        stopped = result if isinstance(result, int) else 0
+        self._refresh_state()
+        return stopped
 
     async def new_conversation(self) -> str:
         def apply() -> None:
@@ -551,29 +656,24 @@ class TuiSessionHandle(SessionHandle):
         """
         request_id = secrets.token_hex(8)
         setattr(card, "_mobile_request_id", request_id)
-        self._event_pending = PendingRequest(
-            request_id=request_id,
-            kind="approval",
-            title=str(getattr(card, "tool_name", "") or "tool approval"),
-            detail=str(getattr(card, "description", "") or ""),
+        self._publish_pending_gate(
+            PendingRequest(
+                request_id=request_id,
+                kind="approval",
+                title=str(getattr(card, "tool_name", "") or "tool approval"),
+                detail=str(getattr(card, "description", "") or ""),
+            )
         )
-        if self._on_projection is not None:
-            self._on_projection()
 
     def note_approval_settled(self, card: Any) -> None:
         """Remove exactly this prompt's projected approval, on every exit path."""
         request_id = str(getattr(card, "_mobile_request_id", "") or "")
         if not request_id:
             return
-        if self._event_pending is not None and self._event_pending.request_id == request_id:
-            self._event_pending = None
-        if self._on_projection is not None:
-            self._on_projection()
-
-    @property
-    def event_pending(self) -> PendingRequest | None:
-        """Follower-only gate overlaid by Registrant on event clients."""
-        return self._event_pending
+        state = getattr(self._session(), "frontend_state", None)
+        pending = getattr(state, "pending_gate", None)
+        if pending is not None and pending.request_id == request_id:
+            self._publish_pending_gate(None)
 
     def note_ask_pending(self, card: Any) -> None:
         """Project a freshly mounted TUI ask picker to the phone as an
@@ -605,6 +705,7 @@ class TuiSessionHandle(SessionHandle):
         if total > 1:
             logger.info("mobile tui ask: %d questions, projecting question-by-question", total)
         self._push_current_question(request_id, card)
+        self._publish_pending_gate(self._fold.projection.pending)
         if self._on_projection is not None:
             self._on_projection()
 
@@ -634,6 +735,7 @@ class TuiSessionHandle(SessionHandle):
         snapshots the CURRENT question because the fold now holds it."""
         self._fold.pop_pending(request_id)
         self._push_current_question(request_id, card)
+        self._publish_pending_gate(self._fold.projection.pending)
         if self._on_projection is not None:
             self._on_projection()
 
@@ -691,8 +793,18 @@ class TuiSessionHandle(SessionHandle):
             return
         self._ask_pending.pop(request_id, None)
         self._fold.pop_pending(request_id)
+        self._publish_pending_gate(None)
         if self._on_projection is not None:
             self._on_projection()
+
+    def _publish_pending_gate(self, pending: PendingRequest | None) -> None:
+        """Publish the owner gate into the canonical full-TUI contract."""
+        session = self._session()
+        store = getattr(session, "_frontend_state_store", None)
+        if store is None:
+            return
+        payload = pending.to_json() if pending is not None else None
+        store.mutate(pending_gate=payload)
 
     def _request_id_for_card(self, card: Any) -> str | None:
         for request_id, pending_card in self._ask_pending.items():

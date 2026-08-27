@@ -452,6 +452,25 @@ async def test_tool_result_images_render_after_the_card(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_peer_event_mounts_user_receipt_and_real_image(monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    from local_operator.harness.types import ImageContent
+    from local_operator.tui.events import UserMessageStart
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    app, _ = await _pilot_app()
+    image = ImageContent(data=_png(160, 100), mime_type="image/png")
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app.post_message(UserMessageStart("from peer [Image #1]", [image]))
+        await pilot.pause()
+        assert len(list(app.query(UserBlock))) == 1
+        blocks = list(app.query(ImageBlock))
+        assert len(blocks) == 1
+        assert "▀" in _plain(blocks[0])
+
+
+@pytest.mark.asyncio
 async def test_resume_replays_prompt_and_tool_images(monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
     from local_operator.harness.types import Message, ToolCall
