@@ -690,8 +690,15 @@ def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
                 # word that merely CONTAINS "not"/"n't" (nothing, cannot, another)
                 # no longer causes an unbounded false-continue.
                 tokens = _NEGATION_TOKEN_RE.findall(payload)
+                # The contraction suffix is checked for BOTH apostrophe forms:
+                # the tokeniser accepts a curly apostrophe (U+2019), which most
+                # editors and phones autocorrect a straight one into, so
+                # `can't`/`can’t` must both count as a negator. Missing the curly
+                # form would let `VERDICT: ACHIEVED but can’t verify` read as a
+                # false RELEASE — the one trust-breaking outcome R2 closed.
                 negated = any(
-                    tok in ("NOT", "NOT_ACHIEVED") or tok.endswith("N'T") for tok in tokens
+                    tok in ("NOT", "NOT_ACHIEVED") or tok.endswith(("N'T", "N\u2019T"))
+                    for tok in tokens
                 )
                 achieved = not negated
             continue
@@ -11218,7 +11225,7 @@ class OperatorApp(App[None]):
         # directly with `/loop <goal text>` instead of only via `/goal` first.
         if not getattr(session, "goal", ""):
             notice(
-                "set a goal first with /goal <text>, or loop toward one now: " "/loop <goal text>",
+                "set a goal first with /goal <text>, or loop toward one now: /loop <goal text>",
                 "warning",
             )
             return

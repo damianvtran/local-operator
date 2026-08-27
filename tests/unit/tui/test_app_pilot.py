@@ -4242,6 +4242,10 @@ def test_parse_loop_verdict_units() -> None:
     assert _parse_loop_verdict("VERDICT: NOT ACHIEVED")[0] is False
     assert _parse_loop_verdict("VERDICT: NOT_ACHIEVED")[0] is False
     assert _parse_loop_verdict("VERDICT: ACHIEVED but can't verify")[0] is False
+    # R6 — a curly apostrophe (U+2019, what editors/phones autocorrect to) in
+    # the contraction must count as a negator too, or `can’t` reads as a false
+    # RELEASE. False-continue is the safe side; a false release is the bug.
+    assert _parse_loop_verdict("VERDICT: ACHIEVED but can\u2019t verify")[0] is False
 
 
 # -- MCP status band + startup toast -----------------------------------------
