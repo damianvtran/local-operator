@@ -54,6 +54,7 @@ export function loopbackHostGrantLabel(key: string): string | null {
     if (!Array.isArray(parsed) || parsed.length !== 2) return null;
     const [protocol, hostname] = parsed;
     if (typeof protocol !== "string" || typeof hostname !== "string") return null;
+    if (protocol !== "http:" && protocol !== "https:") return null;
     const url = new URL(`${protocol}//${hostname}/`);
     if (!isLoopbackHost(url) || loopbackHostGrantKey(url) !== key) return null;
     return `${url.protocol}//${url.host}`;
