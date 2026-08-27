@@ -323,3 +323,43 @@ test("redacted handles are recognizable by their owner but not driveable", async
     assert.equal(ownsRedacted(token, token), true);
   } finally { await module.close(); }
 });
+
+test("reconnect timing: alarm is the guaranteed floor, setTimeout the alive-only fast path", async () => {
+  const module = await load("src/reconnect.ts");
+  try {
+    const {
+      RECONNECT_ALARM_PERIOD_MINUTES,
+      MAX_BACKOFF_MS,
+      backoffDelayMs,
+      shouldArmFastPath,
+      shouldDialOnAlarm,
+    } = module.loaded;
+
+    // The alarm period must stay at/above Chrome's 30s clamp. Below 0.5 min
+    // Chrome refuses to honour the period (the old 0.5-min bug sat on the edge
+    // where the tick was delayed/dropped and the automatic rewake never fired).
+    assert.ok(RECONNECT_ALARM_PERIOD_MINUTES >= 0.5, "alarm period below Chrome's 30s clamp");
+
+    // Fast-path backoff is exponential and capped so a dead daemon is not
+    // hammered while a live socket still recovers in seconds.
+    assert.equal(backoffDelayMs(0), 1_000);
+    assert.equal(backoffDelayMs(3), 8_000);
+    assert.equal(backoffDelayMs(99), MAX_BACKOFF_MS);
+
+    // The setTimeout fast path arms ONLY while the worker is alive (a suspended
+    // worker cannot run it — the alarm covers that) and never stacks a second
+    // pending timer.
+    assert.equal(shouldArmFastPath({ alive: true, fastPathPending: false }), true);
+    assert.equal(shouldArmFastPath({ alive: true, fastPathPending: true }), false);
+    assert.equal(shouldArmFastPath({ alive: false, fastPathPending: false }), false);
+
+    // The guaranteed-wake alarm dials whenever the socket is neither connected
+    // nor mid-dial. This is the cold-wake-after-suspension case: globals have
+    // reset to false, so the alarm re-dials with NO page interaction — the fix.
+    assert.equal(shouldDialOnAlarm({ connected: false, connecting: false }), true);
+    // ...but stays a no-op when a socket is up or a dial is already in flight,
+    // so the alarm never storms a second socket past connect()'s own guard.
+    assert.equal(shouldDialOnAlarm({ connected: true, connecting: false }), false);
+    assert.equal(shouldDialOnAlarm({ connected: false, connecting: true }), false);
+  } finally { await module.close(); }
+});
