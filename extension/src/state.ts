@@ -24,6 +24,10 @@ export interface StoredSurface {
   groupBaseLabel?: string;
   groupOrdinal?: number;
   groupAppliedLabel?: string;
+  // Advisory ownership proof for the current browser lifetime. Group IDs are
+  // ephemeral, so a mismatch is never repaired on an ordinary command; only
+  // explicit open/resume may establish and persist a fresh LO-owned group.
+  appliedGroupId?: number;
 }
 
 export interface SnapshotRef {

@@ -50,6 +50,19 @@ async function tabOrUndefined(tabId: number): Promise<chrome.tabs.Tab | undefine
   try { return await chrome.tabs.get(tabId); } catch { return undefined; }
 }
 
+async function isAppliedGroup(surface: StoredSurface, groupId: number): Promise<boolean> {
+  if (surface.appliedGroupId !== groupId || !surface.groupAppliedLabel) return false;
+  try {
+    const group = await chrome.tabGroups.get(groupId);
+    // IDs can be recycled after browser/worker churn. Matching the exact title
+    // and colour LO last applied prevents a recycled personal group with the
+    // same numeric ID from becoming writable through stale session storage.
+    return group.title === surface.groupAppliedLabel && group.color === "cyan";
+  } catch {
+    return false;
+  }
+}
+
 async function allocateTitle(
   surface: StoredSurface,
   ownerKey: string,
@@ -94,7 +107,12 @@ async function existingSiblingGroup(
   for (const candidate of Object.values(await getSurfaces())) {
     if (candidate.tabId === surface.tabId || candidate.ownerKey !== ownerKey) continue;
     const tab = await tabOrUndefined(candidate.tabId);
-    if (tab?.windowId === windowId && typeof tab.groupId === "number" && tab.groupId !== NO_GROUP) {
+    if (
+      tab?.windowId === windowId
+      && typeof tab.groupId === "number"
+      && tab.groupId !== NO_GROUP
+      && await isAppliedGroup(candidate, tab.groupId)
+    ) {
       return tab.groupId;
     }
   }
@@ -115,9 +133,12 @@ export async function reconcileCommandTab(params: Record<string, unknown>): Prom
 /** Reconcile trusted session metadata with native browser chrome.
  *
  * `explicit` is reserved for open/resume. Ordinary commands update the title
- * of a still-grouped tab but respect manual ungrouping; open/resume is the
- * user's explicit rejoin point. Native group ids are deliberately rediscovered
- * from live tabs and never persisted because Chromium recycles them.
+ * only while the live group still matches the advisory ID LO persisted when it
+ * created/joined that group. A mismatch means the user moved the tab into a
+ * personal group, which must remain untouched. Open/resume may remove the tab
+ * from that personal group by creating/joining an LO-owned group, but it never
+ * updates the personal group itself. IDs remain advisory because Chromium can
+ * recycle them; a stale mismatch therefore fails safely until explicit resume.
  */
 export function reconcileTabGroup(
   surface: StoredSurface,
@@ -138,12 +159,15 @@ export function reconcileTabGroup(
       surface.groupOrdinal = allocation.ordinal;
 
       const grouped = typeof tab.groupId === "number" && tab.groupId !== NO_GROUP;
-      if (!grouped && !explicit && surface.groupAppliedLabel) {
+      const stillOwned = grouped && await isAppliedGroup(surface, tab.groupId);
+      if (!explicit && !stillOwned) {
+        // Covers both manual ungrouping and a move into a personal group. Never
+        // infer ownership from an LO-looking title: titles are user-controlled.
         await putSurface(surface);
         return;
       }
 
-      let groupId = grouped ? tab.groupId : undefined;
+      let groupId = stillOwned ? tab.groupId : undefined;
       let created = false;
       if (groupId === undefined) {
         const sibling = await existingSiblingGroup(surface, ownerKey, tab.windowId);
@@ -160,6 +184,7 @@ export function reconcileTabGroup(
         ...(created ? { collapsed: false } : {}),
       });
       surface.groupAppliedLabel = allocation.title;
+      surface.appliedGroupId = groupId;
       await putSurface(surface);
     } catch {
       // Grouping is never part of the browsing success contract. This also
