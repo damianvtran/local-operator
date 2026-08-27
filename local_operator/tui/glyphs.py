@@ -27,18 +27,44 @@ counterpart. The tool row's width arithmetic budgets the icon at one cell;
 a two-cell glyph would push the right-aligned status column off the card,
 so the measurement is a hard gate rather than a warning.
 
-The gate itself (:func:`nerd_icons_enabled`) mirrors ``shimmer_enabled``:
-an environment kill switch for CI and for terminals without a patched font,
-and a ``display.nerd_icons`` config flag for a persistent preference.
+The gate itself (:func:`nerd_icons_enabled`) is TRI-STATE. A renderer cannot
+interactively probe a terminal for glyph COVERAGE — a DA/XTGETTCAP/OSC query
+needs its reply read off stdin, and stdin belongs to Textual's input loop
+while the app runs (see :func:`notify.detect_protocol` for the same
+constraint). But it CAN read the environment markers an emulator injects and
+name the emulator, exactly as :func:`notify.detect_protocol` and
+:func:`images.detect_mode` do, and the emulators that bundle a Nerd symbol
+fallback font are a known, enumerable set. So the gate resolves in order:
+
+1. env kill switch ``LOCAL_OPERATOR_NO_NERD_ICONS`` -> off (CI, snapshots);
+2. an EXPLICIT ``display.nerd_icons`` bool in config -> honoured both ways
+   (True lets a user who installed a patched font force glyphs on even in an
+   unrecognised terminal; False forces them off);
+3. unset (the default, stored as ``None`` = auto) -> :func:`_nerd_capable_terminal`
+   decides from the env markers.
+
+The default FLIPPED from unconditional-on to auto because unconditional-on
+handed every macOS Terminal.app user a row of tofu boxes with no recourse
+short of editing config: Apple_Terminal ships no Nerd symbol fallback, so the
+Font Awesome PUA codepoints below render as replacement squares. Autodetect
+returns True only for terminals CONFIRMED to carry a symbol fallback font;
+everything else gets the plain table, because a plain ASCII icon is strictly
+better than a tofu box.
 """
 
 from __future__ import annotations
 
 import os
+from typing import Mapping
 
 from rich.cells import cell_len
 
 from local_operator.tui.settings import settings_get
+
+#: The type the detection helper accepts, mirroring ``notify.EnvMap``. A plain
+#: dict satisfies it, which is what lets tests inject an environment without
+#: mutating the process's real ``os.environ``.
+EnvMap = Mapping[str, str]
 
 #: Environment kill switch — a terminal without a patched font, or a
 #: snapshot harness that wants a stable ASCII-ish frame.
@@ -142,16 +168,56 @@ _SAFE_NERD_MCP = _single_cell(NERD_ICON_MCP, PLAIN_ICON_MCP)
 _SAFE_NERD_DEFAULT = _single_cell(NERD_ICON_DEFAULT, PLAIN_ICON_DEFAULT)
 
 
-def nerd_icons_enabled() -> bool:
-    """Whether Nerd Font glyphs may be drawn (env kill switch + settings flag).
+def _nerd_capable_terminal(env: EnvMap | None = None) -> bool:
+    """Whether ``env``'s terminal is CONFIRMED to render Nerd Font PUA glyphs.
 
-    False means the terminal cannot be trusted with the private use area —
-    an unpatched font renders those codepoints as a replacement box, which is
-    strictly worse than the plain glyph it would have shown instead.
+    True only for emulators that ship a Nerd symbol fallback font, so the
+    Font Awesome private-use codepoints resolve to real glyphs instead of
+    tofu. Detection is from the marker each emulator injects, the same
+    technique as :func:`notify.detect_protocol` — reused here rather than
+    imported to keep the modules decoupled (glyphs is a leaf; a cross-import
+    would couple it to the notification stack).
+
+    Note on ``TERM``: this deliberately does NOT gate on ``TERM`` being
+    non-``dumb``. cmux embeds ghostty and sets ``TERM=dumb`` while still
+    injecting ``GHOSTTY_*`` and drawing Nerd glyphs fine, so a positive
+    emulator marker wins over a ``dumb`` TERM. Anything without a positive
+    marker (Apple_Terminal, plain xterm, an ssh into a minimal image, an
+    unknown emulator) is False: when in doubt, plain beats tofu.
+    """
+    source = os.environ if env is None else env
+    # ghostty (and cmux, which embeds it) — bundles JetBrainsMono Nerd Font.
+    if source.get("GHOSTTY_RESOURCES_DIR") or source.get("GHOSTTY_BIN"):
+        return True
+    # kitty — bundles Symbols Nerd Font as its symbol_map fallback.
+    if source.get("KITTY_WINDOW_ID") or source.get("TERM", "") == "xterm-kitty":
+        return True
+    # wezterm — ships Nerd Font Symbols as a default fallback font.
+    if source.get("WEZTERM_PANE") or source.get("WEZTERM_EXECUTABLE"):
+        return True
+    term_program = source.get("TERM_PROGRAM", "").lower()
+    if term_program in ("ghostty", "wezterm"):
+        return True
+    return False
+
+
+def nerd_icons_enabled() -> bool:
+    """Whether Nerd Font glyphs may be drawn — tri-state, see module docstring.
+
+    Order: env kill switch, then an explicit ``display.nerd_icons`` bool
+    (honoured both ways), then marker-based autodetection when the flag is
+    unset (stored as ``None`` = auto). False means the terminal cannot be
+    trusted with the private use area: an unpatched font renders those
+    codepoints as a replacement box, strictly worse than the plain glyph.
     """
     if os.environ.get(_ENV_DISABLE):
         return False
-    return bool(settings_get("display.nerd_icons", True))
+    # None => the key is absent from config: fall through to autodetection.
+    # An explicit True/False is the user's override and wins both ways.
+    flag = settings_get("display.nerd_icons", None)
+    if flag is not None:
+        return bool(flag)
+    return _nerd_capable_terminal()
 
 
 def tool_icon(tool_name: str) -> str:
