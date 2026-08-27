@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Set up and use the Local Operator browser extension to drive the user's real Chromium browser — install, pairing, permissions, focus safety, and the cmux/playwright fallbacks.
+description: Drive the user's real browser via the Local Operator extension — setup, pairing, launching a closed browser, async site approvals, multi-tab surfaces, focus safety.
 ---
 
 # Browser: drive the user's real browser with the Local Operator extension
@@ -53,6 +53,31 @@ always see which tab the agent has. Tell them it is expected, not a warning.
 
 Treat the tool's absence as a one-minute setup step, not a dead end. Do the
 work with the user — do not dump commands and wait.
+
+### 0. Make sure the paired browser is actually open
+
+The most common "broken bridge" is simply that the paired browser is not
+running — especially when it is not the user's daily browser (they live in
+Arc, the extension is in Chrome). Check first, silently:
+
+```sh
+pgrep -x "Google Chrome"
+```
+
+If it is not running, ask the user before starting it the FIRST time (a
+standing "yes, launch Chrome when you need it" is enough forever after),
+then launch it backgrounded:
+
+```sh
+open -g -a "Google Chrome"
+```
+
+`open -g` launches it in the background without stealing focus or raising a
+window — the extension connects to the daemon within seconds of the browser
+starting. Never launch with
+`--remote-debugging-port` or developer flags: the extension is the debugger,
+and a debug-port browser on a real logged-in profile is an open door for any
+local process.
 
 ### 1. Check status
 
@@ -156,27 +181,59 @@ batch them:
 Never ask for passwords, tokens, or session cookies — the extension uses the
 browser's existing login state; the user signs in themselves.
 
-## Per-site permissions (default-deny)
+## Per-site permissions (default-deny) — the three-step approval dance
 
 The extension gates navigation by origin, enforced in the browser where no
-local process can click for it. The **first** time the agent opens a new site,
-the extension prompts the user in the popup: **Allow once / Always allow /
-Deny**. A redirect into a new origin prompts again at that hop.
+local process can click for it. Access is denied by default, and the approval
+flow is ASYNC and agent-legible — never a silent long block:
 
-What this means for you:
+1. **`open`/`goto` to a not-yet-allowed origin fails in milliseconds** with a
+   typed `origin_not_allowed` error naming the origin. No prompt exists yet.
+   This fast failure is deliberate: it returns your turn so you can notify
+   the user properly instead of timing out against an unseen popup.
+2. **`request_access` (url)** raises the approval prompt in the extension
+   popup (badge + best-effort Chrome notification) and returns immediately
+   with `state: pending`. The request stays live for ~10 minutes.
+   **Then NOTIFY THE USER YOURSELF — this step is mandatory.** Use the `ask`
+   tool or a message: the harness notification is the RELIABLE channel.
+   Chrome's own notification frequently never reaches the user (macOS
+   Notification Center authorization is commonly missing), and the popup
+   badge is invisible unless they happen to click the toolbar icon. Tell
+   them the origin and that the buttons are in the extension popup
+   (toolbar icon → **Allow once** / **Always allow** / **Deny**).
+3. **`await_access` (url, timeout_s — default 120, max 240)** waits for the
+   decision and returns one of FIVE states:
+   - `allowed` — proceed; your next navigation to the origin succeeds.
+   - `denied` — final; do not re-request unless the user changes their mind.
+   - `pending` — still undecided; message the user again and call
+     `await_access` again (the ~10-minute request survives between calls).
+   - `superseded` — another session's request displaced your prompt (one
+     pending slot). Wait for that session's prompt to resolve, then
+     `request_access` again.
+   - `none` — no live request for you (expired unanswered, or never
+     raised). `request_access` again and re-notify the user.
 
-- The first `open`/`goto` to a new site may pause until the user answers. If a
-  navigation returns `origin_denied` (or the prompt timed out), **do not retry
-  the same origin** — tell the user the site needs approval and ask them to
-  Allow it from the popup, then retry once.
-- If you know you will visit several sites, tell the user up front so the
-  prompts are expected.
+After `allowed`, the next `open`/`goto` to that origin succeeds. **Allow
+once** mints a single-use grant bound to YOUR session — another session
+cannot spend it, it covers exactly one navigation, and it expires if left
+unspent for ~10 minutes (navigate promptly after approval). **Always allow**
+persists forever (revocable in the extension's Settings → Allowed sites).
+
+Other rules:
+
+- `denied` is final for the task at hand: **do not retry or re-request the
+  same origin** unless the user says they've changed their mind.
+- A redirect INTO a new origin mid-navigation still prompts synchronously at
+  that hop (a running command cannot fail early); if a navigation returns
+  `origin_denied` after a redirect, explain which hop needed approval.
+- If you know you will visit several sites, `request_access` them and tell
+  the user up front in ONE message so they can approve in a batch.
 - Subresources are not gated (this is a navigation gate, not a network filter).
 - `http`/`https` only; the extension refuses `chrome://`, `file://`, etc.
 
 ## Using the tool
 
-Same `browser` tool, one surface at a time. Actions:
+Same `browser` tool. Actions:
 
 - `open` (start a surface at an http/https URL) · `goto` (navigate the surface)
 - `read` (page text; `selector` scopes it) · `snapshot` (accessibility tree
@@ -186,27 +243,77 @@ Same `browser` tool, one surface at a time. Actions:
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)
+- `tabs` (list every live extension-owned tab — see multi-tab below)
+- `request_access` / `await_access` (async site approval — see above)
 - `close` (drop the surface and its tab)
 
 Prefer `snapshot` to discover click targets (it returns stable refs), `read`
 for content, `screenshot` for visual verification, `logs` when a page
 misbehaves. Capture before/after screenshots for any visual change.
 
+### Multi-tab: parallel sessions each own a tab
+
+The extension drives MULTIPLE tabs concurrently (capped at 8), so parallel
+agents/sessions never fight over one surface:
+
+- **A fresh `open` (no existing surface) always creates a NEW background
+  tab** — it never hijacks another session's tab. Your session then pins that
+  surface and every later action drives it.
+- **Your surface persists**: `open` again navigates YOUR tab (resume), it
+  does not spawn more. One session = one tab unless you deliberately need
+  more.
+- **`tabs` lists all live extension-owned tabs** — URL, title, created/last
+  used — with handles REDACTED (`bridge:123:abc…`). Listings are awareness
+  only: you can see what other sessions are doing but cannot drive their tabs
+  (driving requires the full handle only the owning session holds).
+- **`close` when you are done.** Tabs you leave behind sit in the user's
+  browser and count against the cap; a `tab_limit` error means the fleet
+  should close finished tabs, not that the bridge is broken.
+- cmux backend: `tabs`, `request_access`, `await_access`, `scroll`, and
+  `logs` are extension-only; on cmux they return a typed not-supported error.
+
 ## Troubleshooting (what each error means)
 
 Every failure is one actionable string; act on it rather than retrying blindly:
 
 - **"extension not connected: the bridge daemon is running but no browser is
-  attached"** — the user's browser is closed or the extension is disabled. Ask
-  them to open the browser (it reconnects automatically) or enable the
-  extension at `chrome://extensions`.
+  attached"** — the paired browser is closed, the extension is disabled, or
+  the MV3 service worker is suspended. Work through this checklist IN ORDER,
+  and don't silently churn — after the first failed check, tell the user
+  what's wrong and what you're doing about it:
+  1. **Is the paired browser even running?** Check before asking the user
+     anything: `pgrep -x "Google Chrome"` (or the browser they paired). This
+     matters especially when the paired browser is NOT the user's primary one
+     — a user who lives in Arc but paired Chrome will forget Chrome exists.
+     If it isn't running, ask the user for permission to start it, then
+     launch it BACKGROUNDED so it never steals focus:
+     `open -g -a "Google Chrome"` (macOS). Never add `--remote-debugging-port`
+     or other debug flags — the extension IS the debugger; a debug-port
+     browser on a real profile is a security hole.
+  2. **Browser running but still disconnected?** The service worker may be
+     idle-suspended and (known defect) does not always rewake on its own
+     alarm. Opening any page in that browser wakes it:
+     `open -g -a "Google Chrome" "https://example.com"` — or ask the user to
+     click the extension's toolbar icon (opening the popup wakes the worker
+     instantly). Reconnection then happens within seconds.
+  3. **Still nothing?** The extension may be disabled or removed — ask the
+     user to check `chrome://extensions`.
 - **"browser bridge not paired"** — run `lop browser pair` and have the user
   enter the code.
 - **"browser bridge unreachable: the daemon … is not answering"** — run
   `lop browser status`; `lop browser install` (re)starts it. Logs:
   `lop browser logs`.
-- **"navigation to <origin> was denied"** — per-site permission; ask the user
-  to Allow it in the popup. Do not retry the same origin unprompted.
+- **"site <origin> is not allowed yet" (`origin_not_allowed`)** — normal, not
+  an error to fight: run the three-step approval dance (`request_access` →
+  notify the user via `ask`/message → `await_access`). See the permissions
+  section above.
+- **"navigation to <origin> was denied"** — the user denied it (or a redirect
+  hop's synchronous prompt expired). Do not retry the same origin unprompted;
+  if it was a redirect hop, explain which origin needs approval.
+- **"the browser bridge accepted '<method>' but did not answer within Ns…"**
+  — the daemon is fine; the command is likely stuck in the browser, e.g.
+  waiting on a site-permission decision. Point the user at the extension
+  popup rather than restarting anything (the error text says exactly this).
 - **"tab is gone" / "tab crashed"** — the user closed or crashed it; `open` the
   URL again to get a fresh surface.
 - **"another debugger is attached"** — ask the user to close DevTools on that
