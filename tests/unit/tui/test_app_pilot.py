@@ -3718,6 +3718,13 @@ class GoalSession(FakeSession):
         #: the loop mid-flight (the fake is otherwise instantaneous and the
         #: worker settles before the test can look at `_loop_running`).
         self.prompt_gate: asyncio.Event | None = None
+        #: When set to the running app, `prompt` POSTS a real `TurnEnded` via
+        #: `post_message` on settle, exactly like the live controller
+        #: (`tui/events.py` `_post`). This reproduces the queued-dispatch
+        #: ordering that the plain fake could not — the R1 regression relies on
+        #: it, because the completion toast fires from `on_turn_ended` off that
+        #: queued event, not synchronously from `prompt`.
+        self.post_turn_ended_to: Any = None
 
     @property
     def goal(self) -> str:
@@ -3733,6 +3740,13 @@ class GoalSession(FakeSession):
         if self.prompt_gate is not None:
             await self.prompt_gate.wait()
         self.prompts.append(text)
+        if self.post_turn_ended_to is not None:
+            # Mirror the live controller: a settled turn is announced through the
+            # message pump, not returned inline, so the completion notify races
+            # the worker's suppress-flag reset.
+            self.post_turn_ended_to.post_message(
+                TurnEnded(aborted=False, error=None, context_tokens=1000)
+            )
 
     async def complete_aside(
         self,
@@ -3822,6 +3836,72 @@ async def test_loop_rejects_out_of_range() -> None:
 
 
 @pytest.mark.asyncio
+async def test_loop_botched_count_does_not_launch_goal_loop() -> None:
+    # U2 — a number-shaped typo (`3e`, `5x`, `3.5`) must NOT silently start an
+    # unbounded goal loop toward the literal typo; it errors with a hint.
+    for typo in ("3e", "5x", "3.5", "12."):
+        session = GoalSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            await _type_command(pilot, app, f"loop {typo}")
+            # Give any (erroneously launched) worker a chance to run a turn.
+            for _ in range(6):
+                await pilot.pause()
+            text = _transcript_text(app)
+        assert app._loop_running is False, f"{typo!r} launched a loop"
+        assert session.prompts == [], f"{typo!r} ran a turn"
+        assert "mistyped count" in text, f"{typo!r} gave no disambiguating hint"
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_with_digit_prefix_words_still_launches() -> None:
+    # A real goal that merely begins with a digit ("2fa the login flow") is
+    # written in words and must still start goal mode, not hit the typo guard.
+    session = GoalSession()
+    session.prompt_gate = asyncio.Event()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop 2fa the login flow")
+        assert app._loop_running is True
+        assert app._loop_goal == "2fa the login flow"
+        session.prompt_gate.set()
+        await _settle_loop(pilot, app)
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_launch_notice_names_the_goal() -> None:
+    # U1 — the goal text must appear on screen at launch so there is a record of
+    # what the loop is pursuing.
+    session = GoalSession()
+    session.prompt_gate = asyncio.Event()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop finish the parser")
+        text = _transcript_text(app)
+        assert "looping toward: finish the parser" in text
+        session.prompt_gate.set()
+        await _settle_loop(pilot, app)
+
+
+@pytest.mark.asyncio
+async def test_loop_no_goal_hint_surfaces_inline_form() -> None:
+    # U3 — bare `/loop` with no standing goal should point at the inline goal
+    # form, not only at `/goal`.
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop")
+        # Collapse wrap so an 80-col line break inside the hint doesn't matter.
+        text = " ".join(_transcript_text(app).split())
+    assert "loop toward one now: /loop <goal text>" in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_loop_stops_on_turn_error() -> None:
     session = GoalSession()
     session.set_goal("g")
@@ -3863,6 +3943,24 @@ async def _settle_loop(pilot, app, limit: int = 60) -> None:
         await pilot.pause()
         if not app._loop_running:
             return
+
+
+def _record_completion_notifies(app) -> list[int | None]:
+    """Wrap `app._notify` so a test can count 'complete' notifications.
+
+    Returns the list the wrapper appends to; the real notify still runs (it is a
+    no-op headless, but the call is what a test asserts on).
+    """
+    fired: list[int | None] = []
+    real_notify = app._notify
+
+    def rec(kind: str, *, running_children: int | None = None) -> bool:
+        if kind == "complete":
+            fired.append(running_children)
+        return real_notify(kind, running_children=running_children)
+
+    app._notify = rec  # type: ignore[assignment]
+    return fired
 
 
 @pytest.mark.asyncio
@@ -3946,15 +4044,10 @@ async def test_loop_goal_notifies_once_on_release() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        completion_notifies: list[int | None] = []
-        real_notify = app._notify
-
-        def _record_notify(kind: str, *, running_children: int | None = None) -> bool:
-            if kind == "complete":
-                completion_notifies.append(running_children)
-            return real_notify(kind, running_children=running_children)
-
-        app._notify = _record_notify  # type: ignore[assignment]
+        # Post a real TurnEnded per turn (live-controller ordering) so the per-
+        # turn toasts would fire if suppression leaked — they must not.
+        session.post_turn_ended_to = app
+        completion_notifies = _record_completion_notifies(app)
         session.judge_verdicts = [
             "VERDICT: CONTINUE\nnot yet",
             "VERDICT: CONTINUE\nstill not",
@@ -3962,6 +4055,8 @@ async def test_loop_goal_notifies_once_on_release() -> None:
         ]
         await _type_command(pilot, app, "loop do the thing")
         await _settle_loop(pilot, app)
+        for _ in range(6):
+            await pilot.pause()
     assert len(session.prompts) == 3
     # Exactly one completion notify — the release toast, not a per-turn toast.
     assert len(completion_notifies) == 1
@@ -4047,17 +4142,26 @@ async def test_loop_goal_stop_cancels() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        # R1 regression: the fake POSTS a real TurnEnded on settle like the live
+        # controller, so a spurious completion toast after the suppress-flag
+        # reset would fire here. Assert exactly ZERO 'complete' notifies.
+        session.post_turn_ended_to = app
+        completion_notifies = _record_completion_notifies(app)
         session.judge_verdicts = ["VERDICT: CONTINUE\nnot yet"] * 50
         await _type_command(pilot, app, "loop do the thing")
         assert app._loop_running is True
         await _type_command(pilot, app, "loop stop")
         session.prompt_gate.set()
         await _settle_loop(pilot, app)
+        # Extra pumps so any still-queued TurnEnded has dispatched.
+        for _ in range(6):
+            await pilot.pause()
         text = _transcript_text(app)
     assert "loop cancelled" in text
     assert app._loop_running is False
     assert app._loop_goal == ""
     assert app._loop_suppress_completion is False
+    assert completion_notifies == []  # no false "task complete" on a cancelled loop
 
 
 @pytest.mark.asyncio
@@ -4070,6 +4174,10 @@ async def test_loop_goal_reload_safety() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        # R1 regression on the reload path too: a queued TurnEnded from the
+        # disposed session must not fire a completion toast after reset.
+        session.post_turn_ended_to = app
+        completion_notifies = _record_completion_notifies(app)
         session.judge_verdicts = ["VERDICT: CONTINUE\nnot yet"] * 50
         await _type_command(pilot, app, "loop do the thing")
         assert app._loop_running is True
@@ -4077,11 +4185,14 @@ async def test_loop_goal_reload_safety() -> None:
         app._session = GoalSession()
         session.prompt_gate.set()
         await _settle_loop(pilot, app)
+        for _ in range(6):
+            await pilot.pause()
         text = _transcript_text(app)
     assert "stopped by reload" in text
     assert app._loop_running is False
     assert app._loop_goal == ""
     assert app._loop_suppress_completion is False
+    assert completion_notifies == []  # no false "task complete" on a reloaded loop
 
 
 @pytest.mark.asyncio
@@ -4119,6 +4230,18 @@ def test_parse_loop_verdict_units() -> None:
     assert _parse_loop_verdict("just some prose\nno verdict here") == (None, "")
     # A verdict with no reason line => (bool, "").
     assert _parse_loop_verdict("VERDICT: ACHIEVED") == (True, "")
+
+    # R2 — token-level negation. An ordinary word that merely CONTAINS "not"/
+    # "n't" (nothing, cannot, another, note) must NOT flip a genuine ACHIEVED to
+    # CONTINUE: substring matching did exactly that and spun the loop forever.
+    assert _parse_loop_verdict("VERDICT: ACHIEVED, nothing else remains")[0] is True
+    assert _parse_loop_verdict("VERDICT: ACHIEVED - on to another goal")[0] is True
+    assert _parse_loop_verdict("VERDICT: ACHIEVED. Cannot do more.")[0] is True
+    assert _parse_loop_verdict("VERDICT: ACHIEVED, note the caveat")[0] is True
+    # But a real whole-word negator still reads as CONTINUE.
+    assert _parse_loop_verdict("VERDICT: NOT ACHIEVED")[0] is False
+    assert _parse_loop_verdict("VERDICT: NOT_ACHIEVED")[0] is False
+    assert _parse_loop_verdict("VERDICT: ACHIEVED but can't verify")[0] is False
 
 
 # -- MCP status band + startup toast -----------------------------------------

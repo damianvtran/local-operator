@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -469,7 +470,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # session's user MessageStartEvent is consumed silently rather than
     # painted — two different receipts for two different events (the typed
     # command, and the prompt the turn later announces).
-    SlashCommand("loop", "Iterate autonomously toward the goal", consumes_prompt=True),
+    SlashCommand(
+        "loop",
+        # Advertises BOTH forms so the goal mode is discoverable from the palette
+        # without reading the source: free text is a goal a judge decides is met,
+        # a number is a bounded iteration count.
+        "Loop toward a goal: /loop <goal text>, or /loop <n> for n turns",
+        consumes_prompt=True,
+    ),
     # NOT an exception, and the reason IS the feature. The question does reach
     # the model, but only for one off-the-record request that never joins the
     # conversation (`SessionProtocol.complete_aside`) — so a user row in the
@@ -579,6 +587,64 @@ def slash_command_for(text: str) -> SlashCommand | None:
     return next((entry for entry in SLASH_COMMANDS if name in entry.names), None)
 
 
+#: Recognises a `/loop` argument that is number-SHAPED but not a clean integer
+#: — a fat-fingered count like `3e`, `5x`, `3.5`, `12.`, `1e3`. Deliberately
+#: NARROW: a single whitespace-free token that starts with a digit and contains
+#: only digits, letters, or a dot. A real goal written in words ("2fa the login
+#: flow") has spaces and so is never caught; a clean integer is parsed before
+#: this is ever consulted. The point is that a mistyped count must not silently
+#: launch an unbounded, judge-gated loop toward the literal typo as its goal.
+_BOTCHED_COUNT_RE = re.compile(r"\d[A-Za-z0-9.]*$")
+
+
+#: Longest goal string echoed into the launch notice. Independent of the
+#: session's `MAX_GOAL_CHARS` (2000, for the model-facing tail): this is a
+#: single terminal receipt line, so a multi-hundred-char goal is truncated to
+#: stay readable. The FULL goal still drives the loop and the judge; only the
+#: on-screen label is clipped.
+_LOOP_GOAL_LABEL_CHARS = 120
+
+
+def _loop_goal_label(goal: str) -> str:
+    """A safe, bounded rendering of the goal for the launch notice.
+
+    The goal is untrusted user text that never gets sanitised elsewhere in goal
+    mode (it is not stored via `set_goal`), so the one place it reaches the
+    screen must strip control/escape sequences — a pasted `\\x1b[2J` must not
+    clear the terminal — and collapse whitespace so a multi-line paste stays one
+    notice line. Over-long goals are truncated with an ellipsis; the loop still
+    pursues the whole string.
+    """
+    cleaned = " ".join(strip_control_sequences(goal).split())
+    if len(cleaned) > _LOOP_GOAL_LABEL_CHARS:
+        cleaned = cleaned[: _LOOP_GOAL_LABEL_CHARS - 1].rstrip() + "…"
+    return cleaned
+
+
+def _looks_like_botched_count(arg: str) -> bool:
+    """Whether ``arg`` reads as a mistyped integer count rather than a goal.
+
+    Called only after ``int(arg)`` has already failed, so a clean integer never
+    reaches here. Returns ``True`` for a single number-shaped token (starts with
+    a digit, no spaces, only alphanumerics/dot) so `/loop 3e` and `/loop 3.5`
+    are rejected with a disambiguating hint instead of starting an uncapped run.
+    """
+    token = arg.strip()
+    # A goal is written in words; anything with whitespace is not a botched count.
+    if not token or " " in token or "\t" in token:
+        return False
+    return bool(_BOTCHED_COUNT_RE.fullmatch(token))
+
+
+#: Tokeniser for the negation check in `_parse_loop_verdict`. Splits the
+#: uppercased verdict payload into words made of letters, digits, and an
+#: internal apostrophe (straight or curly), so a whole-word negator is testable
+#: as a token rather than a substring — the fix for the `NOTHING`/`CANNOT`
+#: false-continue. `NOT_ACHIEVED` (with an underscore) survives as one token so
+#: the spec's compound negative reads as a single negator.
+_NEGATION_TOKEN_RE = re.compile(r"[A-Z0-9_]+(?:['\u2019][A-Z]+)?")
+
+
 def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
     """Parse a goal-mode judge answer into ``(achieved, reason)``.
 
@@ -593,10 +659,18 @@ def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
       "not achieved" style answer (or any line that names both tokens) reads as
       continue, never as a false release. A false release is the one
       trust-breaking error under the notify-once contract.
-    - The tokens are matched on the payload AFTER ``VERDICT:``, and because
-      ``ACHIEVED`` is not a substring of ``CONTINUE`` (nor vice versa) the two
-      cannot collide. We do NOT infer a verdict from free prose: an answer with
-      no ``VERDICT:`` line at all is a judge failure, not a guess.
+    - Negation is matched at the TOKEN level, not as a substring. `NOT` is a
+      substring of ordinary words a model naturally writes on the verdict line
+      (`NOTHING`, `ANOTHER`, `CANNOT`, `NOTE`), and `N'T` of `CAN'T`/`DON'T`;
+      an unbounded substring scan turned `VERDICT: ACHIEVED, nothing else
+      remains` into a false CONTINUE, spinning the loop forever (goal mode has
+      no iteration ceiling and a readable CONTINUE resets the failure breaker).
+      So we split the payload into alphanumeric-plus-apostrophe tokens and only
+      treat a WHOLE-word negator (`NOT`, a contraction ending in `N'T`, or the
+      compound `NOT_ACHIEVED`) as flipping ACHIEVED to CONTINUE.
+
+    We do NOT infer a verdict from free prose: an answer with no ``VERDICT:``
+    line at all is a judge failure (``None``), not a guess.
     """
     reason = ""
     achieved: bool | None = None
@@ -611,12 +685,15 @@ def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
             if "CONTINUE" in payload:
                 achieved = False
             elif "ACHIEVED" in payload:
-                # Defensive against an off-spec "VERDICT: NOT ACHIEVED": the two
-                # spec tokens are ACHIEVED / CONTINUE, but a model that ignores
-                # the instruction and negates ACHIEVED must read as CONTINUE, not
-                # as a false release (the one trust-breaking error). A legitimate
-                # "ACHIEVED" payload never carries a negation word.
-                achieved = "NOT" not in payload and "N'T" not in payload
+                # Token-level negation check (see docstring): only a whole-word
+                # negator flips a genuine ACHIEVED to CONTINUE, so an ordinary
+                # word that merely CONTAINS "not"/"n't" (nothing, cannot, another)
+                # no longer causes an unbounded false-continue.
+                tokens = _NEGATION_TOKEN_RE.findall(payload)
+                negated = any(
+                    tok in ("NOT", "NOT_ACHIEVED") or tok.endswith("N'T") for tok in tokens
+                )
+                achieved = not negated
             continue
         # The first non-empty line after a readable verdict is the reason.
         if achieved is not None and not reason:
@@ -655,11 +732,13 @@ LOOP_GOAL_PROMPT = (
 #: The off-the-record judge prompt asked (via `complete_aside`) after each
 #: goal-mode turn settles. It forces a machine-parseable verdict on its own
 #: line. The two verdict tokens are lexically DISTINCT on purpose: `ACHIEVED`
-#: is a substring of `NOT_ACHIEVED`, so a "not achieved" style answer would be
-#: misread as achieved by a naive substring match. `CONTINUE` shares no such
-#: prefix with `ACHIEVED`, so the parser cannot confuse them. Judge strictly:
-#: a false release notifies "done" when it is not, which is the one
-#: trust-breaking outcome under the notify-once contract, so bias to CONTINUE.
+#: and `CONTINUE` share no prefix, so `_parse_loop_verdict` can tell them apart
+#: even when a model appends prose to the verdict line. The parser matches the
+#: tokens (and any negator) at the WORD level, not as substrings — a genuine
+#: `VERDICT: ACHIEVED, nothing remains` must not read as CONTINUE just because
+#: an ordinary word contains "not". Judge strictly: a false release notifies
+#: "done" when it is not, the one trust-breaking outcome under the notify-once
+#: contract, so the prompt biases to CONTINUE when unsure.
 LOOP_JUDGE_PROMPT = (
     "You are judging whether a standing goal has been fully achieved, based on "
     "the conversation above (the work done so far).\n\n"
@@ -11105,6 +11184,22 @@ class OperatorApp(App[None]):
             try:
                 iterations = int(arg)
             except ValueError:
+                # A number-shaped argument that is NOT a clean integer is almost
+                # certainly a fat-fingered count (`3e`, `5x`, `3.5`), not a goal
+                # written in words. Launching an UNBOUNDED, judge-gated loop
+                # toward the goal "3e" on a typo is a real token-budget footgun,
+                # so refuse with a hint that disambiguates the two forms rather
+                # than silently starting an uncapped run. A genuine goal that
+                # happens to begin with a digit (`2fa work`) is written as more
+                # than one token and so is not caught here.
+                if _looks_like_botched_count(arg):
+                    self._system_notice(
+                        f"'{arg.strip()}' looks like a mistyped count — "
+                        f"use /loop <n> (1..{MAX_LOOP_ITERATIONS}) for a bounded run, "
+                        "or /loop <goal in words> for a goal",
+                        "warning",
+                    )
+                    return
                 # Non-integer text is the goal. Goal mode carries its own
                 # ephemeral goal, so the "set a goal first" guard below (which
                 # gates numeric mode) deliberately does NOT apply here.
@@ -11118,9 +11213,14 @@ class OperatorApp(App[None]):
         else:
             iterations = DEFAULT_LOOP_ITERATIONS
         # Numeric mode still reads the STANDING goal (the tail it works toward),
-        # so it keeps refusing when none is set. Goal mode never reaches here.
+        # so it keeps refusing when none is set. The message surfaces the inline
+        # goal form too — a user with no standing goal can loop toward one
+        # directly with `/loop <goal text>` instead of only via `/goal` first.
         if not getattr(session, "goal", ""):
-            notice("set a goal first: /goal <text>", "warning")
+            notice(
+                "set a goal first with /goal <text>, or loop toward one now: " "/loop <goal text>",
+                "warning",
+            )
             return
         self._loop_cancelled = False
         notice(f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel")
@@ -11137,7 +11237,16 @@ class OperatorApp(App[None]):
         so the `_loop_running` guard still enforces one loop at a time.
         """
         self._loop_cancelled = False
-        notice("looping toward the goal — /loop stop to cancel")
+        # NAME the goal in the launch notice. Goal mode deliberately does not
+        # paint a user row or set the band (it never calls `set_goal`), so
+        # without this line there is NO on-screen record of what the loop is
+        # pursuing — a user who scrolls up cannot answer "what is this loop
+        # doing?". It is also the anchor that makes a number-shaped typo
+        # recoverable: the launch line reads back the literal goal. The goal is
+        # untrusted user text, so it is control-char-stripped (a pasted escape
+        # sequence must not rewrite the terminal) and length-capped for the
+        # notice only — the full string still drives the loop.
+        notice(f"looping toward: {_loop_goal_label(goal)} — /loop stop to cancel")
         self.run_worker(self._loop_goal_worker(goal), thread=False, group="loop")
 
     async def _loop_worker(self, iterations: int) -> None:
@@ -11287,19 +11396,30 @@ class OperatorApp(App[None]):
                 try:
                     await session.prompt(prompt)
                 except Exception as error:  # surface and stop; never spin
+                    if self._status is not None:
+                        self._status.update(streaming=False)
                     notice(f"loop stopped: {error}", "error")
                     # A failed prompt never announces, so take the stale echo
                     # entry back out (same hazard as numeric mode / `_start_turn`).
                     self._consume_user_echo(prompt)
                     break
-                finally:
-                    if self._status is not None:
-                        self._status.update(streaming=False)
+                # NOTE: the status is deliberately NOT reset to idle here — it
+                # stays in a working state across the judge call below so the
+                # loop never looks frozen while the verdict is being computed.
                 completed += 1
                 # --- yield boundary reached: judge the settled turn ---
                 if self._loop_cancelled or session is not self._session:
+                    if self._status is not None:
+                        self._status.update(streaming=False)
                     break
+                # Keep the status in a working state ACROSS the judge call. The
+                # judge is a real `complete_aside` network round-trip that can
+                # take seconds; without this the surface looks frozen between
+                # `loop N` and `loop N+1` while it is in fact spending tokens on
+                # the verdict. Cleared once the verdict is in hand (below).
                 achieved, reason = await self._judge_goal(session, goal)
+                if self._status is not None:
+                    self._status.update(streaming=False)
                 if achieved is True:
                     released = True
                     break
@@ -11315,14 +11435,36 @@ class OperatorApp(App[None]):
                     # is for consecutive MALFUNCTION, not for a judge that is
                     # healthily telling us to keep going.
                     judge_failures = 0
+                    # A low-key receipt so the judge gate is LEGIBLE on the happy
+                    # path: without it, goal mode looks identical to a dumb
+                    # N-times loop. `note` level (same channel as `loop N`), not
+                    # a toast — the notify-once contract is about the RELEASE,
+                    # while this just shows the loop is judged, not blind. Only
+                    # when the judge gave a reason, to avoid an empty line.
+                    if reason:
+                        notice(f"continuing: {reason}", "note")
         finally:
-            # All three fields reset here, unconditionally. A worker that
-            # crashed with `_loop_suppress_completion` still True would silently
-            # mute the completion toast for the rest of the process (and the next
-            # session on a reload) — the `finally` is the only correct place.
+            # `_loop_running`/`_loop_goal` reset synchronously and
+            # unconditionally: the next `/loop` reads them immediately to answer
+            # "already running", and a crash must never leave them stuck.
+            #
+            # `_loop_suppress_completion` is DIFFERENT and its clear is DEFERRED
+            # (see `_release_loop_completion_suppression`). The live controller
+            # posts `TurnEnded` via `post_message` (queued to the pump, not
+            # delivered synchronously), so when a cancel/reload/breaker/error
+            # `break` exits right after `await session.prompt(...)` returns, the
+            # final turn's `TurnEnded` is still sitting in the queue. Clearing
+            # the flag here would let that queued event dispatch into
+            # `on_turn_ended` with suppression already off, firing a spurious
+            # "task complete" toast on a loop the user cancelled — a false
+            # release, the one trust-breaking outcome. `call_later` posts the
+            # clear as a `Callback` to the SAME FIFO queue, so it runs only
+            # AFTER any already-queued `TurnEnded` has been suppressed. The
+            # release path is unaffected: it calls `_notify` directly, and its
+            # own `await _judge_goal` already drained the final `TurnEnded`.
             self._loop_running = False
             self._loop_goal = ""
-            self._loop_suppress_completion = False
+            self.call_later(self._release_loop_completion_suppression)
         # Terminal outcome (mirrors the numeric worker's tail). Only the release
         # path fires the toast — one notification, exactly when the judge said
         # the goal was met, which is the whole notify-once contract.
@@ -11340,6 +11482,21 @@ class OperatorApp(App[None]):
             notice(f"goal achieved after {completed} turn(s): {reason}", "info")
             self._notify("complete", running_children=self._outstanding_delegated_jobs())
         # (judge-failure and turn-error paths already emitted their own notice.)
+
+    def _release_loop_completion_suppression(self) -> None:
+        """Clear the goal-loop completion-toast suppression, deferred one pump
+        cycle past the worker's exit so a still-queued final ``TurnEnded``
+        cannot fire a spurious "task complete" on a cancelled/reloaded loop.
+
+        Guarded on ``_loop_running``: if a NEW goal loop has already started in
+        the interval (it re-sets the flag ``True``), this stale callback from
+        the previous worker must not clear the new loop's suppression — the new
+        worker owns the flag now and will post its own deferred clear when it
+        ends. Without the guard, a `/loop` typed within one pump cycle of the
+        last one ending could unmute the fresh loop's per-turn toasts.
+        """
+        if not self._loop_running:
+            self._loop_suppress_completion = False
 
     # -- providers / accounts / usage --------------------------------------
     def _cmd_search(self, arg: str, notice: NoticeFn) -> None:
