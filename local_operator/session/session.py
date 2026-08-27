@@ -5731,9 +5731,26 @@ class Session:
         what owns cost accounting, so ``on_usage`` hands the provider's own
         figures back rather than this method guessing at them.
 
-        No tools, and ``tool_choice="none"``: an aside that could edit a file
-        would be a turn wearing a popup, and the answer is meant to come from
-        context the agent already has.
+        The live tool schema, with ``tool_choice="none"``: an aside that could
+        edit a file would be a turn wearing a popup, and the answer is meant to
+        come from context the agent already has, so nothing may be called. The
+        tools are still SENT because the tools block is the FRONT of the
+        provider cache prefix — tools -> system -> messages on Anthropic, and
+        part of the cached request body on the OpenAI-compatible and Gemini
+        wires. A real working turn sends ``list(context.tools)``
+        (``harness/loop.py``), so an aside that dropped them to ``[]`` would
+        change the prefix at position 0 and force the provider to re-process the
+        whole conversation at full/cache-write price instead of a cache READ.
+        Sending the SAME tool schema the turn sends is what keeps the aside
+        warm against the turn's cached prefix. ``tool_choice="none"`` preserves
+        the "reads the turn, calls nothing" contract on every wire (and the
+        Gemini builder is taught to honour it, since it otherwise ignores
+        ``tool_choice`` and non-empty tools would newly ALLOW a call).
+
+        Caveat: on Anthropic a ``tool_choice`` that differs from the turn's
+        can still invalidate the growing MESSAGE-tail cache while the
+        tools+system HEAD stays warm — the head is the large, stable win here;
+        the tail delta is bounded by the turn's own tail.
 
         Safe to call mid-turn, and the pairing below is what makes that true —
         see :meth:`_wire_legal_snapshot`.
@@ -5745,7 +5762,10 @@ class Session:
             model=self._model,
             system_blocks=list(blocks),
             messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
-            tools=[],
+            # Live tools (not []): keep the aside on the SAME cache prefix the
+            # working turn builds. See the docstring for why this is a cache
+            # read rather than a full re-process. tool_choice stays "none".
+            tools=list(self._context.tools),
             tool_choice="none",
         )
         parts: list[str] = []

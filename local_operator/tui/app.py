@@ -12355,6 +12355,25 @@ class OperatorApp(App[None]):
         cost = self._cost_for(usage)
         if cost is not None:
             self._total_cost += cost
+        # Cache instrumentation (debug-only, off by default): an aside is meant
+        # to ride the working turn's cached prefix, so cache_read should be a
+        # large fraction of the prompt while input (the uncached remainder)
+        # stays small. When that inverts — high input, low cache_read — the
+        # aside has diverged from the turn's prefix and is re-processing the
+        # conversation at full price, which is exactly the regression the tools
+        # restoration fixes. Logged, not surfaced, so the "no extra row" aside
+        # contract holds; enable it with the module logger at DEBUG to measure.
+        if logger.isEnabledFor(logging.DEBUG):
+            cache_read = getattr(usage, "cache_read_tokens", 0)
+            cache_write = getattr(usage, "cache_write_tokens", 0)
+            uncached = getattr(usage, "input_tokens", 0)
+            logger.debug(
+                "aside usage: cache_read=%s cache_write=%s input=%s output=%s",
+                cache_read,
+                cache_write,
+                uncached,
+                getattr(usage, "output_tokens", 0),
+            )
 
     def _aside_can_fork(self) -> bool:
         """Whether ``^f`` would work right now — the card cannot know alone.
