@@ -1,5 +1,6 @@
 import {
   loopbackHostGrantKey,
+  loopbackHostGrantLabel,
   type HostGrant,
   type HostGrantsState,
   validHostGrantSchema,
@@ -28,7 +29,9 @@ export function normalizedHostGrants(value: unknown): HostGrantsState | null {
   const entries = Object.entries(value.grants);
   // A malformed current-version record may belong to a newer writer using a
   // shape this build cannot preserve losslessly. Refuse the whole mutation.
-  if (entries.some(([, grant]) => !validGrant(grant))) return null;
+  if (entries.some(([key, grant]) => loopbackHostGrantLabel(key) === null || !validGrant(grant))) {
+    return null;
+  }
   return { version: 1, grants: Object.fromEntries(entries) };
 }
 
