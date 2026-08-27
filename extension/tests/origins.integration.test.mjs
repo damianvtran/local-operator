@@ -394,16 +394,60 @@ test("two settings-context revokes serialize through the worker queue", async ()
   }
 });
 
-test("malformed v1 host snapshot is preserved and mutations fail closed", async () => {
+test("malformed v1 host keys are preserved and mutations fail closed", async () => {
+  const invalidKeys = [
+    "opaque",
+    "http:|localhost",
+    JSON.stringify(["http:", "example.com"]),
+    JSON.stringify(["ftp:", "localhost"]),
+    JSON.stringify(["http:", "localhost", "extra"]),
+    JSON.stringify(["http:", "local\\u0000host"]),
+    JSON.stringify(["http:", "::1"]),
+    JSON.stringify(["http:", "[0:0:0:0:0:0:0:1]"]),
+  ];
+  for (const invalidKey of invalidKeys) {
+    const chrome = installChromeStub();
+    const bundle = await loadAccessGrants();
+    try {
+      const malformed = {
+        version: 1,
+        grants: { [invalidKey]: { scope: "all_ports", createdAt: 1 } },
+      };
+      chrome.areas.local.set("hostGrants", malformed);
+      const grants = await bundle.import();
+      assert.equal(await grants.grantLoopbackHost(new URL("http://localhost:5173")), false, invalidKey);
+      assert.equal(
+        await grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"])),
+        false,
+        invalidKey,
+      );
+      assert.deepEqual(chrome.areas.local.get("hostGrants"), malformed, invalidKey);
+    } finally {
+      await bundle.close();
+      chrome.restore();
+    }
+  }
+});
+
+test("canonical loopback keys remain mutable", async () => {
   const chrome = installChromeStub();
   const bundle = await loadAccessGrants();
   try {
-    const malformed = { version: 1, grants: { opaque: "newer-data" } };
-    chrome.areas.local.set("hostGrants", malformed);
+    const validKeys = [
+      JSON.stringify(["http:", "localhost"]),
+      JSON.stringify(["https:", "127.0.0.1"]),
+      JSON.stringify(["http:", "[::1]"]),
+    ];
+    chrome.areas.local.set("hostGrants", {
+      version: 1,
+      grants: Object.fromEntries(validKeys.map((key) => [key, { scope: "all_ports", createdAt: 1 }])),
+    });
     const grants = await bundle.import();
-    assert.equal(await grants.grantLoopbackHost(new URL("http://localhost:5173")), false);
-    assert.equal(await grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"])), false);
-    assert.deepEqual(chrome.areas.local.get("hostGrants"), malformed);
+    assert.equal(await grants.revokeLoopbackHost(validKeys[0]), true);
+    assert.equal(await grants.grantLoopbackHost(new URL("https://localhost:443")), true);
+    const stored = chrome.areas.local.get("hostGrants");
+    assert.equal(stored.grants[validKeys[0]], undefined);
+    assert.equal(stored.grants[JSON.stringify(["https:", "localhost"])].scope, "all_ports");
   } finally {
     await bundle.close();
     chrome.restore();
