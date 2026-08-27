@@ -5872,7 +5872,6 @@ async def _bridge_access(
         state_value = str(result.get("state", ""))
         origin = str(result.get("origin", url))
         grant_scope = str(result.get("grant_scope", ""))
-        grant_scope = str(result.get("grant_scope", ""))
         details = {"origin": origin, "state": state_value}
         if grant_scope:
             details["grant_scope"] = grant_scope

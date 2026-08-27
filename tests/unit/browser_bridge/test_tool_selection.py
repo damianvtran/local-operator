@@ -448,6 +448,7 @@ async def test_request_access_reports_loopback_all_ports_scope(monkeypatch) -> N
         ToolContext(browser=BrowserSurface()),
     )
     assert "http://[::1] is allowed on all ports" in result.text
+    assert result.details is not None
     assert result.details["grant_scope"] == "loopback_all_ports"
 
 
