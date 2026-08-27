@@ -302,6 +302,86 @@ def _open_rotating_handler(
     return handler, path
 
 
+def _redirect_fd_stderr(logfd: int) -> Optional[int]:
+    """Point the process's REAL stderr file descriptor (fd 2) at the log file.
+
+    :func:`file_logging` and Textual's own ``redirect_stderr`` only swap the
+    Python-level ``sys.stderr`` object and the logging handlers bound to it.
+    That is enough for anything written *through Python*, but it does nothing
+    about code below the interpreter that calls the raw ``write(2)`` syscall on
+    file descriptor 2 directly. Those bytes never pass through ``sys.stderr``,
+    so every Python-level redirect misses them and they land straight on top of
+    whatever Textual has painted on the alternate screen, smearing the frame
+    and the composer until the next full repaint.
+
+    The concrete offender on macOS is libmalloc: under memory pressure (and on
+    lock/unlock and sleep/wake, which churn the allocator the same way) it
+    emits ``MallocStackLogging: can't turn off malloc stack logging because it
+    was not enabled.`` by writing it to fd 2 itself, underneath CPython. We
+    have zero ``malloc`` references in the tree — this is the OS, not us — which
+    is exactly why no Python-level guard can catch it. Redirecting the OS-level
+    fd 2 into the rotating log file does: the native bytes are captured where
+    they can be grepped in ``local-operator.log`` (the operator's choice over
+    ``/dev/null`` — these diagnostics correlate with real RAM-pressure events
+    and are worth keeping), and the frame stays clean. This mirrors the fix in
+    openai/codex PR #24459 ("prevent macos stderr from corrupting composer").
+
+    macOS-only by design: Linux and Windows do not emit this, and moving fd 2
+    out from under them would be needless risk for no benefit. Returns the
+    saved original fd 2 (to restore on exit) or ``None`` when the guard did not
+    install — off-darwin, or a syscall failed and the caller should leave fd 2
+    untouched rather than send it somewhere invalid.
+
+    Rotation trade-off: ``dup2(logfd, 2)`` makes fd 2 share the log file's
+    *open file description* as it stands right now, independent of ``logfd``
+    itself. When ``RotatingFileHandler`` rolls over it closes and reopens its
+    own stream, but fd 2 keeps its reference to the install-time description, so
+    native bytes emitted after a mid-session rotation keep flowing to the
+    pre-rotation inode (the rolled ``.1`` file) until the block exits. That is
+    accepted deliberately: the bytes are still captured, just in the rolled
+    file, and mid-session rotation is rare. The alternative — re-pointing fd 2
+    on every rollover — would couple this allocator guard to logging internals
+    for a case that almost never happens.
+    """
+    # Guard: this defect is macOS-specific, so the fd surgery is too.
+    if sys.platform != "darwin":
+        return None
+    try:
+        # Preserve the real terminal (or whatever owns fd 2) so exit restores it
+        # exactly, including on exception.
+        saved_fd = os.dup(2)
+    except OSError:
+        return None
+    try:
+        os.dup2(logfd, 2)
+    except OSError:
+        # Could not redirect; do not leave a dangling saved fd behind.
+        try:
+            os.close(saved_fd)
+        except OSError:
+            pass
+        return None
+    return saved_fd
+
+
+def _restore_fd_stderr(saved_fd: Optional[int]) -> None:
+    """Undo :func:`_redirect_fd_stderr`, putting the original fd 2 back.
+
+    Best-effort and non-raising in both syscalls: this runs in ``file_logging``'s
+    ``finally``, where a teardown exception would mask the real one.
+    """
+    if saved_fd is None:
+        return
+    try:
+        os.dup2(saved_fd, 2)
+    except OSError:  # noqa: BLE001 — teardown must not raise
+        pass
+    try:
+        os.close(saved_fd)
+    except OSError:  # noqa: BLE001 — teardown must not raise
+        pass
+
+
 def _write_header(handler: logging.Handler, path: Path) -> None:
     """State the file's own path and bound as its first record.
 
@@ -360,6 +440,7 @@ def file_logging(
     state = _detach_console_handlers()
     handler, path = _open_rotating_handler(max_bytes, backup_count)
     root_logger = logging.getLogger()
+    saved_stderr_fd: Optional[int] = None
     if handler is not None and path is not None:
         # Passes the guard installed above by design: `_is_console_handler`
         # rejects FileHandler, so the file handler is the one thing that can
@@ -367,12 +448,32 @@ def file_logging(
         root_logger.addHandler(handler)
         _write_header(handler, path)
         _current_log_file = path
+        # Reuse the file the handler just opened for the fd-level stderr guard
+        # (see `_redirect_fd_stderr`): its underlying fd is our redirect target.
+        # Only the OUTER `file_logging` block reaches here — the re-entrancy
+        # early-return above means a nested block never re-installs the guard —
+        # so its lifetime is tied to the same ownership window as the handler.
+        # If no file could be opened (`handler is None`) fd 2 is left alone.
+        # `stream` is a FileHandler concretion, not on the base Handler type,
+        # so reach it defensively and treat a rolled/closed stream as "no fd".
+        stream = getattr(handler, "stream", None)
+        logfd: Optional[int] = None
+        if stream is not None:
+            try:
+                logfd = stream.fileno()
+            except (OSError, ValueError):
+                logfd = None
+        if logfd is not None:
+            saved_stderr_fd = _redirect_fd_stderr(logfd)
     _file_logging_active = True
     try:
         yield path
     finally:
         _file_logging_active = False
         _current_log_file = None
+        # Restore the real fd 2 first, before the handler that owns the redirect
+        # target is closed, so the terminal is back the instant the TUI exits.
+        _restore_fd_stderr(saved_stderr_fd)
         if handler is not None:
             root_logger.removeHandler(handler)
             try:

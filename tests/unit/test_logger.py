@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import logging.handlers
+import os
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +27,8 @@ from local_operator.logger import (
     LOG_MAX_BYTES,
     LOG_TOTAL_MAX_BYTES,
     _is_console_handler,
+    _redirect_fd_stderr,
+    _restore_fd_stderr,
     configure_cli_logging,
     configure_console_logging,
     current_log_file,
@@ -344,3 +347,156 @@ def test_rotation_reaps_old_files_and_holds_the_ceiling(log_home: Path) -> None:
 
     # The newest data survived: reaping must drop the OLDEST file, not the live one.
     assert "x" in log_home.read_text(encoding="utf-8")
+
+
+# --- Native (fd-level) stderr guard -----------------------------------------
+#
+# macOS libmalloc writes `MallocStackLogging: ...` straight to OS fd 2 with a
+# raw write(2), underneath CPython, so no Python-level redirect (Textual's
+# `redirect_stderr`, our handler swap) can catch it. The guard redirects the
+# real fd 2 into the log file while the TUI owns the terminal. These verify the
+# fd LIFECYCLE (dup/dup2/restore) at the descriptor level, not by matching a
+# string — the platform diagnostic itself is not reproducible in CI, so
+# `sys.platform` is forced to "darwin" and a raw `os.write(2, ...)` stands in
+# for the allocator's native write.
+
+
+def _fd_identity(fd: int) -> tuple[int, int]:
+    """(device, inode) of whatever a file descriptor currently points at.
+
+    Two descriptors pointing at the same open file share this pair; a redirect
+    that repoints fd 2 changes it. Comparing identities is how a test sees the
+    guard move fd 2 without depending on any message text.
+    """
+    info = os.fstat(fd)
+    return (info.st_dev, info.st_ino)
+
+
+def test_redirect_fd_stderr_is_a_no_op_off_darwin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Linux and Windows do not emit the diagnostic; fd 2 must be left alone."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    target = tmp_path / "sink.log"
+    with open(target, "w", encoding="utf-8") as sink:
+        before = _fd_identity(2)
+        saved = _redirect_fd_stderr(sink.fileno())
+        try:
+            assert saved is None
+            assert _fd_identity(2) == before
+        finally:
+            _restore_fd_stderr(saved)
+
+
+def test_redirect_fd_stderr_moves_and_restores_fd_two_on_darwin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The helper in isolation: native writes land in the target, fd 2 restored.
+
+    Platform-independent by construction (``sys.platform`` forced), so the fd
+    surgery is exercised on the Linux CI host even though the real diagnostic
+    only occurs on macOS.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = tmp_path / "sink.log"
+    with open(target, "w", encoding="utf-8") as sink:
+        before = _fd_identity(2)
+        saved = _redirect_fd_stderr(sink.fileno())
+        try:
+            assert saved is not None
+            # fd 2 now shares the sink's open file, not the pre-block target.
+            assert _fd_identity(2) != before
+            assert _fd_identity(2) == _fd_identity(sink.fileno())
+            os.write(2, b"native malloc noise\n")
+        finally:
+            _restore_fd_stderr(saved)
+        # Exactly the original target again, and nothing painted on it.
+        assert _fd_identity(2) == before
+    assert "native malloc noise" in target.read_text(encoding="utf-8")
+
+
+def test_file_logging_captures_native_fd2_writes_on_darwin(
+    log_home: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """End to end through ``file_logging``: a raw ``write(2)`` lands in the log.
+
+    This is the real bug's shape: bytes written to fd 2 directly, bypassing
+    ``sys.stderr`` entirely. They must reach the rotating log file and never the
+    terminal, and fd 2 must differ from its pre-block target only inside the
+    block.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    before = _fd_identity(2)
+
+    with file_logging() as path:
+        assert path == log_home
+        # Inside the block fd 2 is redirected away from the terminal.
+        assert _fd_identity(2) != before
+        os.write(2, b"native malloc noise\n")
+
+    # Restored the instant the block exits, so `exec`/REPL/server stderr works.
+    assert _fd_identity(2) == before
+    # The native bytes were captured in the log, not painted on the terminal.
+    assert "native malloc noise" in log_home.read_text(encoding="utf-8")
+    assert "native malloc noise" not in capfd.readouterr().err
+
+
+def test_file_logging_restores_fd2_after_an_exception_on_darwin(
+    log_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The restore lives in ``finally``; an app crash must still hand fd 2 back."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    before = _fd_identity(2)
+
+    with pytest.raises(ValueError):
+        with file_logging():
+            assert _fd_identity(2) != before
+            raise ValueError("app crashed")
+
+    assert _fd_identity(2) == before
+
+
+def test_nested_file_logging_does_not_reinstall_or_restore_fd2_early(
+    log_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard is tied to the OUTER block only, like the handler detach.
+
+    A nested ``file_logging`` early-returns before the redirect code, so it must
+    neither move fd 2 again nor hand it back when it exits — otherwise the inner
+    exit would restore the terminal while the TUI is still painting.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    before = _fd_identity(2)
+
+    with file_logging():
+        redirected = _fd_identity(2)
+        assert redirected != before
+        with file_logging():
+            # Inner block must not repoint fd 2 to a second target.
+            assert _fd_identity(2) == redirected
+        # Inner exit must NOT have restored fd 2 early.
+        assert _fd_identity(2) == redirected
+
+    assert _fd_identity(2) == before
+
+
+def test_file_logging_leaves_fd2_alone_when_no_log_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No file handler means no redirect target; fd 2 must never move.
+
+    The guard is best-effort exactly like the file handler: sending fd 2 to a
+    closed or absent fd would be worse than the diagnostic it captures.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    blocked = tmp_path / "cfg"
+    blocked.mkdir()
+    (blocked / "logs").write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(blocked))
+    before = _fd_identity(2)
+
+    with file_logging() as path:
+        assert path is None
+        assert _fd_identity(2) == before
+
+    assert _fd_identity(2) == before
