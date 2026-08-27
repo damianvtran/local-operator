@@ -68,7 +68,6 @@ test("settings list and revoke exact and all-port grants independently", async (
       "http://localhost · all ports",
       "http://localhost:5173 · this port",
     ]);
-    assert.deepEqual(module.loaded.removeExactGrant(rows[1], origins), {});
     assert.equal(hostGrants.grants[key].scope, "all_ports", "broader grant remains");
     assert.equal(rows[0].key, key, "host revoke targets the canonical authority");
     assert.equal(origins["http://localhost:5173"], "allow", "exact grant remains");
@@ -79,6 +78,28 @@ test("settings list and revoke exact and all-port grants independently", async (
       "malformed host state must not hide exact grants",
     );
   } finally { await module.close(); }
+});
+
+test("settings mutation helper reports negative acknowledgements and transport failures", async () => {
+  const previousChrome = globalThis.chrome;
+  try {
+    globalThis.chrome = { runtime: { sendMessage: async () => ({ applied: false }) } };
+    let module = await load("src/options/mutation-flow.ts");
+    assert.deepEqual(await module.loaded.runWorkerMutation({ event: "x" }, "Done"), {
+      ok: false,
+      message: "Could not update site access. Try again.",
+    });
+    await module.close();
+    globalThis.chrome.runtime.sendMessage = async () => { throw new Error("worker stopped"); };
+    module = await load("src/options/mutation-flow.ts");
+    assert.deepEqual(await module.loaded.runWorkerMutation({ event: "x" }, "Done"), {
+      ok: false,
+      message: "Could not reach the extension worker. Try again.",
+    });
+    await module.close();
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
 });
 
 test("AX compaction assigns epoch-scoped click refs", async () => {

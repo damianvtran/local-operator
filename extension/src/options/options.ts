@@ -1,5 +1,6 @@
 import { DEFAULT_PORT, getLocal } from "../state";
-import { grantRows, removeExactGrant } from "./grant-list";
+import { grantRows } from "./grant-list";
+import { runWorkerMutation } from "./mutation-flow";
 
 const port = document.getElementById("port") as HTMLInputElement;
 const sites = document.getElementById("sites") as HTMLUListElement;
@@ -61,20 +62,12 @@ async function render(): Promise<void> {
     remove.textContent = "Remove";
     remove.setAttribute("aria-label", `Remove ${entry.label} access`);
     remove.addEventListener("click", async () => {
-      const local = await getLocal();
-      if (entry.scope === "host") {
-        const response = (await chrome.runtime.sendMessage({
-          event: "host_grant_revoke",
-          canonicalKey: entry.key,
-        })) as { applied?: boolean } | undefined;
-        if (!response?.applied) return;
-      } else {
-        await chrome.storage.local.set({
-          origins: removeExactGrant(entry, local.origins ?? {}),
-        });
-      }
-      flash(`Removed ${entry.label}.`);
-      await render();
+      const message = entry.scope === "host"
+        ? { event: "host_grant_revoke", canonicalKey: entry.key }
+        : { event: "origin_grant_revoke", origin: entry.key };
+      const result = await runWorkerMutation(message, `Removed ${entry.label}.`);
+      flash(result.message);
+      if (result.ok) await render();
     });
     row.append(name, remove);
     sites.append(row);
@@ -94,10 +87,14 @@ port.addEventListener("change", async () => {
 
 document.getElementById("unpair")?.addEventListener("click", async () => {
   const beforeUnpair = await getLocal();
-  const cleared = (await chrome.runtime.sendMessage({ event: "clear_access_grants" })) as
-    | { applied?: boolean }
-    | undefined;
-  if (!cleared?.applied) return;
+  const cleared = await runWorkerMutation(
+    { event: "clear_access_grants" },
+    "This browser is unpaired. Local Operator can no longer use it.",
+  );
+  if (!cleared.ok) {
+    flash(cleared.message);
+    return;
+  }
   // Tell the running daemon so it severs the LIVE socket, not just the next
   // reconnect (findings A5/U1). Best-effort: the daemon may be down.
   const { port: saved = DEFAULT_PORT } = beforeUnpair;
@@ -123,7 +120,7 @@ document.getElementById("unpair")?.addEventListener("click", async () => {
   } catch {
     // Daemon unreachable; the local token wipe still stands.
   }
-  flash("This browser is unpaired. Local Operator can no longer use it.");
+  flash(cleared.message);
   await render();
 });
 

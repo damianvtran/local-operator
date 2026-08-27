@@ -5,10 +5,9 @@ import {
   validHostGrantSchema,
 } from "./origin-policy";
 
-/** All broad-grant mutations execute in the single MV3 worker context. Options
- * sends runtime messages instead of touching the snapshot, and popup decisions
- * already arrive here. Chrome runs one service-worker instance, so this queue
- * serializes every read-modify-write; suspension cannot overlap two instances. */
+/** Every persistent access mutation executes in the one MV3 worker context.
+ * Popup approval and Settings messages both enter this queue, so exact and
+ * broad grants cannot race revoke/unpair through separate storage snapshots. */
 let mutationQueue: Promise<unknown> = Promise.resolve();
 
 function enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -20,15 +19,35 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
 function validGrant(value: unknown): value is HostGrant {
   return !!value && typeof value === "object" && !Array.isArray(value) &&
     (value as { scope?: unknown }).scope === "all_ports" &&
-    typeof (value as { createdAt?: unknown }).createdAt === "number";
+    typeof (value as { createdAt?: unknown }).createdAt === "number" &&
+    Number.isFinite((value as { createdAt: number }).createdAt);
 }
 
 export function normalizedHostGrants(value: unknown): HostGrantsState | null {
   if (!validHostGrantSchema(value)) return null;
-  const grants = Object.fromEntries(
-    Object.entries(value.grants).filter(([, grant]) => validGrant(grant)),
-  );
-  return { version: 1, grants };
+  const entries = Object.entries(value.grants);
+  // A malformed current-version record may belong to a newer writer using a
+  // shape this build cannot preserve losslessly. Refuse the whole mutation.
+  if (entries.some(([, grant]) => !validGrant(grant))) return null;
+  return { version: 1, grants: Object.fromEntries(entries) };
+}
+
+export function grantExactOrigin(origin: string): Promise<boolean> {
+  return enqueue(async () => {
+    const { origins = {} } = await chrome.storage.local.get(["origins"]);
+    await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
+    return true;
+  });
+}
+
+export function revokeExactOrigin(origin: string): Promise<boolean> {
+  return enqueue(async () => {
+    const { origins = {} } = await chrome.storage.local.get(["origins"]);
+    const next = { ...origins };
+    delete next[origin];
+    await chrome.storage.local.set({ origins: next });
+    return true;
+  });
 }
 
 export function grantLoopbackHost(url: URL): Promise<boolean> {
@@ -36,7 +55,7 @@ export function grantLoopbackHost(url: URL): Promise<boolean> {
   if (!canonicalKey) return Promise.resolve(false);
   return enqueue(async () => {
     const { hostGrants } = await chrome.storage.local.get(["hostGrants"]);
-    if (hostGrants !== undefined && !validHostGrantSchema(hostGrants)) return false;
+    if (hostGrants !== undefined && !normalizedHostGrants(hostGrants)) return false;
     const current = normalizedHostGrants(hostGrants) ?? { version: 1 as const, grants: {} };
     await chrome.storage.local.set({
       hostGrants: {
