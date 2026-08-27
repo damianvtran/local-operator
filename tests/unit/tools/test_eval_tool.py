@@ -383,6 +383,62 @@ async def test_stdout_budget_capped_with_recovery_route(context) -> None:
     assert "result: 'the answer'" in result.text
 
 
+@pytest.mark.asyncio
+async def test_render_does_not_block_the_event_loop(context) -> None:
+    """A spilled result must not stall the loop Textual renders on.
+
+    Regression for the operator's "TUI freezes on eval" report. Building an
+    oversized result runs ``spill_truncate``, whose store-eviction sweep is
+    O(entries) synchronous disk I/O; run inline on the event loop it froze the
+    render loop for ~84 ms on a 30 KB result (seconds once the store was busy).
+    The fix offloads that tail with ``asyncio.to_thread``, so the loop must stay
+    responsive here even with a heavily populated spill store making the sweep
+    genuinely expensive.
+
+    We measure the longest gap between 5 ms heartbeat callbacks scheduled on the
+    same loop while the eval runs: an inline sweep delays every heartbeat and
+    shows up as one large gap; an offloaded sweep leaves the heartbeats on time.
+    """
+    from local_operator.tools.spill import get_store
+
+    # Populate the store so the eviction sweep has real per-entry work to do —
+    # this is what turned a small inline sweep into a visible freeze.
+    store = get_store()
+    for i in range(400):
+        store.write(f"entry {i} " * 2000, tool_name="eval", session_id=f"s{i % 8}")
+
+    loop = asyncio.get_running_loop()
+    interval = 0.005
+    state = {"last": loop.time(), "max_gap": 0.0, "on": True}
+
+    def _beat() -> None:
+        now = loop.time()
+        state["max_gap"] = max(state["max_gap"], now - state["last"])
+        state["last"] = now
+        if state["on"]:
+            loop.call_later(interval, _beat)
+
+    loop.call_later(interval, _beat)
+    await asyncio.sleep(0.05)  # let the heartbeat settle before measuring
+    state["max_gap"] = 0.0
+    state["last"] = loop.time()
+
+    # ~30 KB of stdout: over the 8 KiB spill threshold, so it takes the spill
+    # path and triggers the eviction sweep.
+    result = await _call(context, "print('lorem ipsum ' * 2000)")
+    await asyncio.sleep(0.05)
+    state["on"] = False
+
+    assert result.is_error is False
+    # No single synchronous gap longer than a few rendered frames. The offloaded
+    # path measures well under this; the old inline path blew past it. The bound
+    # is generous (loaded CI hosts add scheduling jitter) yet still far below the
+    # ~84 ms+ the unfixed path produced.
+    assert (
+        state["max_gap"] < 0.05
+    ), f"event loop stalled {state['max_gap'] * 1000:.0f} ms during eval render"
+
+
 # ---------------------------------------------------------------------------
 # shape
 # ---------------------------------------------------------------------------
