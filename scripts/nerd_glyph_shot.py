@@ -52,7 +52,9 @@ def _seed_env(mode: str) -> None:
 
 
 #: (tool_name, args) pairs spanning every icon category the fix touches.
-_ROWS = [
+#: Args typed ``dict[str, object]`` to match ``ToolCard.__init__``'s parameter;
+#: without the annotation pyright infers ``dict[str, str]`` and rejects the call.
+_ROWS: list[tuple[str, dict[str, object]]] = [
     ("bash", {"command": "pytest -q"}),
     ("read", {"path": "local_operator/tui/glyphs.py"}),
     ("edit", {"path": "local_operator/tui/glyphs.py"}),

@@ -27,6 +27,19 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    # Pin the tool-row icon mode host-independently. `nerd_icons_enabled()` now
+    # autodetects from terminal-emulator env markers (glyphs.py), so the icon a
+    # row leads with depends on the HOST: a dev box in ghostty/cmux renders the
+    # Nerd glyphs, a bare CI runner with no markers renders the ASCII fallback.
+    # The rendering/snapshot tests here assert row CONTENT written against the
+    # historical Nerd-on default, so without a pin they pass locally and fail on
+    # CI (the plain `write` icon is `+`, which `test_unknown_counts_render_nothing`
+    # asserts is absent). Seed a positive ghostty marker so the whole suite
+    # renders in Nerd mode everywhere; the kill switch is cleared so a host that
+    # exports it cannot force the opposite. Tests that exercise the detection
+    # itself set their own markers/settings and override this within the test.
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NERD_ICONS", raising=False)
+    monkeypatch.setenv("GHOSTTY_BIN", "/usr/bin/ghostty")
     # The splash starts a one-shot PyPI probe on mount. Unit tests must not
     # pay a 5 s timeout (or a real GET) for news they are not asserting.
     # Patch the worker, not ``check_latest``: ``/update`` needs the real
