@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Set up and use the Local Operator browser extension to drive the user's real Chromium browser — install, pairing, launching the browser when it's closed, the async site-approval flow (request_access/await_access + notify the user), multi-tab surfaces, focus safety, and the cmux fallback.
+description: Drive the user's real browser via the Local Operator extension — setup, pairing, launching a closed browser, async site approvals, multi-tab surfaces, focus safety.
 ---
 
 # Browser: drive the user's real browser with the Local Operator extension
