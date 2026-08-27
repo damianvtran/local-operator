@@ -4714,6 +4714,7 @@ BROWSER_ACTIONS = (
     # the popup prompt — expired unseen and read as "bridge unreachable".
     "request_access",
     "await_access",
+    "cancel_access",
 )
 
 #: Actions that only the Local Operator browser extension can serve. cmux has no
@@ -4722,7 +4723,7 @@ BROWSER_ACTIONS = (
 #: extension. Kept as a set beside BROWSER_ACTIONS so the degrade check and the
 #: advertised action list can never drift apart.
 BRIDGE_ONLY_BROWSER_ACTIONS = frozenset(
-    {"scroll", "logs", "tabs", "request_access", "await_access"}
+    {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
 )
 
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
@@ -4815,13 +4816,16 @@ class BrowserParams(BaseModel):
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
         "(console + errors) | tabs (list all extension-driven tabs, other "
         "sessions' included) | request_access (raise the site-approval prompt "
-        "for a not-yet-allowed origin; returns pending/allowed/denied/superseded "
-        "immediately) | await_access (wait for the user's decision on that "
-        "prompt) | close (end YOUR tab when done with it)."
+        "for a not-yet-allowed origin; returns pending/allowed/denied immediately) "
+        "| await_access (wait for the user's decision on that prompt) | "
+        "cancel_access (cancel YOUR pending exact-origin request) | close (end "
+        "YOUR tab when done with it)."
     )
     url: str = Field(
         default="",
-        description="http(s) URL for 'open'/'goto'/'request_access'/'await_access'.",
+        description=(
+            "http(s) URL for 'open'/'goto'/'request_access'/'await_access'/" "'cancel_access'."
+        ),
     )
     path: str = Field(default="", description="Destination file for 'screenshot'.")
     selector: str = Field(
@@ -5121,7 +5125,7 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     Googles a non-URL and still exits 0, and a flag-shaped value in a
     positional or ``--text`` slot is parsed as an option.
     """
-    if action in ("open", "goto", "request_access", "await_access"):
+    if action in ("open", "goto", "request_access", "await_access", "cancel_access"):
         # The access actions take the SAME url validation as open/goto: they
         # exist to pre-approve exactly the navigation open/goto would make, so
         # a value those verbs would refuse must be refused here too.
@@ -5747,7 +5751,9 @@ BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 _BRIDGE_AWAIT_SLICE_MS = 20_000
 
 
-def _access_result_text(state: str, origin: str) -> str:
+def _access_result_text(
+    state: str, origin: str, *, position: int | None = None, pending_count: int | None = None
+) -> str:
     """One agent-facing line per access state, including the next step — the
     agent discovers this flow through error/result text, not documentation."""
     if state == "allowed":
@@ -5763,7 +5769,9 @@ def _access_result_text(state: str, origin: str) -> str:
         # authorization), so if the agent does not message the user the prompt
         # sits unseen until its TTL — the exact incident this flow replaces.
         return (
-            f"approval for {origin} is pending. FIRST notify the user (via the ask "
+            f"approval for {origin} is pending"
+            + (f" ({position} of {pending_count})" if position and pending_count else "")
+            + ". FIRST notify the user (via the ask "
             "tool or a message) to approve it in the Local Operator extension popup "
             "(toolbar icon, badge '!') — the badge alone is not reliably seen — THEN "
             "call action='await_access' with the same url to wait for the decision."
@@ -5780,8 +5788,9 @@ def _access_result_text(state: str, origin: str) -> str:
             "session's prompt to resolve, then call action='request_access' again "
             "if this origin is still needed."
         )
-    # "none": no live request for the caller — expired, never raised, or
-    # superseded by a request it did not own.
+    if state == "cancelled":
+        return f"your pending access request for {origin} was cancelled."
+    # "none": no live request for the caller — expired or never raised.
     return (
         f"no live access request for {origin} (it may have expired unanswered, or "
         "never been raised). Call action='request_access' with the url to raise a "
@@ -5795,7 +5804,7 @@ async def _bridge_access(
     params: BrowserParams,
     context: ToolContext | None,
 ) -> ToolResult:
-    """request_access / await_access — surface-free by design: they exist for
+    """request_access / await_access / cancel_access — surface-free by design: they exist for
     the moment when 'open' has just FAILED, so requiring an open surface here
     would deadlock the recovery path."""
     url = params.url.strip()
@@ -5813,8 +5822,40 @@ async def _bridge_access(
         return _text(
             tool_call_id,
             "browser",
+            _access_result_text(
+                state_value,
+                origin,
+                position=result.get("position"),
+                pending_count=result.get("pending_count"),
+            ),
+            details={
+                "origin": origin,
+                "state": state_value,
+                **{
+                    key: result[key]
+                    for key in ("position", "pending_count", "expires_at")
+                    if key in result
+                },
+            },
+        )
+    if action == "cancel_access":
+        result, problem = await _bridge_call(
+            tool_call_id, "cancel_access", {"url": url, "requester": requester}
+        )
+        if problem is not None:
+            return problem
+        assert result is not None
+        state_value = str(result.get("state", "none"))
+        origin = str(result.get("origin", url))
+        return _text(
+            tool_call_id,
+            "browser",
             _access_result_text(state_value, origin),
-            details={"origin": origin, "state": state_value},
+            details={
+                "origin": origin,
+                "state": state_value,
+                **({"pending_count": result["pending_count"]} if "pending_count" in result else {}),
+            },
         )
     # await_access: loop bounded extension-side slices until the decision, the
     # caller's deadline, or a terminal state. Each slice is its own RPC well
@@ -5849,8 +5890,21 @@ async def _bridge_access(
             return _text(
                 tool_call_id,
                 "browser",
-                _access_result_text(state_value, origin),
-                details={"origin": origin, "state": state_value},
+                _access_result_text(
+                    state_value,
+                    origin,
+                    position=result.get("position"),
+                    pending_count=result.get("pending_count"),
+                ),
+                details={
+                    "origin": origin,
+                    "state": state_value,
+                    **{
+                        key: result[key]
+                        for key in ("position", "pending_count", "expires_at")
+                        if key in result
+                    },
+                },
             )
 
 
@@ -6223,7 +6277,7 @@ async def execute_browser(
     # open — use 'open' first" would send the agent in a circle. They need the
     # bridge (cmux has no permission model), so a cmux-pinned surface or a
     # bridge-less host degrades with the same typed error as scroll/logs.
-    if action in ("request_access", "await_access"):
+    if action in ("request_access", "await_access", "cancel_access"):
         if state.surface_id.startswith("surface:") or not bridge_available:
             return _error(
                 tool_call_id,

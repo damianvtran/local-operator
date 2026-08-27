@@ -1,4 +1,4 @@
-import { awaitAccess, requestAccess } from "./commands/access";
+import { awaitAccess, cancelAccessCommand, requestAccess } from "./commands/access";
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
@@ -7,7 +7,7 @@ import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
-import { expireAccessRequest, resolveOrigin, setPendingObserver } from "./origins";
+import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
 import {
   RECONNECT_ALARM_NAME,
@@ -42,6 +42,7 @@ const HANDLERS: Record<
   // explains why slices, not a daemon long-poll).
   request_access: requestAccess,
   await_access: awaitAccess,
+  cancel_access: cancelAccessCommand,
 };
 
 // How long a dial may sit unresolved before we force it closed and retry. A
@@ -59,9 +60,6 @@ let alive = false;
 // worker is alive; it dies with a suspending worker and the alarm floor takes
 // over — nothing may depend on it firing.
 let fastPathTimer: ReturnType<typeof setTimeout> | undefined;
-// The request id currently being handled, so an origin pause can tell the
-// daemon WHICH command to keep alive past the base timeout (finding A3).
-let activeRequestId = "";
 
 function send(frame: object): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
@@ -77,19 +75,26 @@ function send(frame: object): void {
 // it to message the user through the harness, which notifies reliably. This
 // banner stays because it costs nothing and helps the machines where it works.
 const PENDING_NOTIFICATION_ID = "lop-origin-pending";
-setPendingObserver((pending) => {
-  if (pending) {
-    send({ event: "awaiting_origin", id: activeRequestId, origin: pending.origin });
+setPendingObserver((snapshot) => {
+  for (const entry of snapshot.queue) {
+    if (entry.kind === "in_command" && entry.commandId) {
+      send({ event: "awaiting_origin", id: entry.commandId, origin: entry.origin });
+    }
+  }
+  const count = snapshot.queue.length;
+  if (count) {
+    const first = snapshot.queue[0]!;
     chrome.notifications?.create(PENDING_NOTIFICATION_ID, {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
       title: "Local Operator needs your OK",
-      message: `Allow the agent to open ${pending.hostname}? Click the extension icon in the toolbar to decide.`,
+      message:
+        count === 1
+          ? `Allow the agent to open ${first.displayAuthority}? Click the extension icon in the toolbar to decide.`
+          : `${count} site requests are waiting. Click the extension icon in the toolbar to decide.`,
       priority: 2,
     });
-  } else {
-    chrome.notifications?.clear(PENDING_NOTIFICATION_ID);
-  }
+  } else chrome.notifications?.clear(PENDING_NOTIFICATION_ID);
 });
 
 // Clicking the banner opens the consent popup directly — one click instead of
@@ -123,7 +128,6 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: `unknown method ${request.method}`, data: {} } });
     return;
   }
-  activeRequestId = request.id;
   try {
     const result = await handler(request.params, request.id);
     // Push the driven page so the daemon (and the Connected popup) can show
@@ -295,10 +299,13 @@ chrome.runtime.onInstalled.addListener(() => {
 // socket. `connecting` is never persisted, so a suspend can never leave it
 // wedged true across a restart — a fresh worker always starts able to dial.
 alive = true;
+void restoreAccessQueue();
 void connect();
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.pendingOrigin) void chrome.runtime.sendMessage({ event: "origin_prompt", pending: changes.pendingOrigin.newValue });
+  if (area === "session" && changes.accessQueue) {
+    void chrome.runtime.sendMessage({ event: "origin_prompt", queue: changes.accessQueue.newValue });
+  }
 });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Decisions are keyed by ORIGIN (finding A6) and carry the prompt
@@ -310,7 +317,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // teardown). A fire-and-forget here let Chrome settle the popup's
     // sendMessage and suspend this worker mid-persistence, losing the
     // user's approval (round-2 M2).
-    resolveOrigin(String(message.origin), message.decision, String(message.promptId ?? ""))
+    resolveOrigin(String(message.origin), message.decision, String(message.entryId ?? message.promptId ?? ""))
       .then((applied) => sendResponse({ applied }))
       .catch(() => sendResponse({ applied: false }));
     return true;

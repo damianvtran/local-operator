@@ -191,9 +191,12 @@ flow is ASYNC and agent-legible — never a silent long block:
    typed `origin_not_allowed` error naming the origin. No prompt exists yet.
    This fast failure is deliberate: it returns your turn so you can notify
    the user properly instead of timing out against an unseen popup.
-2. **`request_access` (url)** raises the approval prompt in the extension
-   popup (badge + best-effort Chrome notification) and returns immediately
-   with `state: pending`. The request stays live for ~10 minutes.
+2. **`request_access` (url)** appends a requester-bound approval to the extension
+   popup's FIFO queue (badge count + one best-effort Chrome notification) and
+   returns immediately with `state: pending`, `position`, `pending_count`, and
+   `expires_at`. An identical live requester+origin request deduplicates without
+   extending its ~10-minute lifetime. The queue holds 16 live requests; a typed
+   `access_queue_full` response tells you to wait, approve, or cancel before retrying.
    **Then NOTIFY THE USER YOURSELF — this step is mandatory.** Use the `ask`
    tool or a message: the harness notification is the RELIABLE channel.
    Chrome's own notification frequently never reaches the user (macOS
@@ -202,16 +205,18 @@ flow is ASYNC and agent-legible — never a silent long block:
    them the origin and that the buttons are in the extension popup
    (toolbar icon → **Allow once** / **Always allow** / **Deny**).
 3. **`await_access` (url, timeout_s — default 120, max 240)** waits for the
-   decision and returns one of FIVE states:
+   decision and returns a terminal or pending state:
    - `allowed` — proceed; your next navigation to the origin succeeds.
    - `denied` — final; do not re-request unless the user changes their mind.
    - `pending` — still undecided; message the user again and call
      `await_access` again (the ~10-minute request survives between calls).
-   - `superseded` — another session's request displaced your prompt (one
-     pending slot). Wait for that session's prompt to resolve, then
-     `request_access` again.
-   - `none` — no live request for you (expired unanswered, or never
-     raised). `request_access` again and re-notify the user.
+   - `cancelled` — this requester cancelled its own exact-origin request.
+   - `superseded` — legacy receipt from a pre-queue extension; new queued
+     requests are never superseded.
+   - `none` — no live request for you (expired unanswered, or never raised).
+     `request_access` again and re-notify the user.
+4. **`cancel_access` (url)** removes only your own pending exact-origin request
+   and returns `cancelled`; it never dismisses another session's request.
 
 After `allowed`, the next `open`/`goto` to that origin succeeds. **Allow
 once** mints a single-use grant bound to YOUR session — another session
@@ -244,7 +249,7 @@ Same `browser` tool. Actions:
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)
 - `tabs` (list every live extension-owned tab — see multi-tab below)
-- `request_access` / `await_access` (async site approval — see above)
+- `request_access` / `await_access` / `cancel_access` (queued site approval — see above)
 - `close` (drop the surface and its tab)
 
 Prefer `snapshot` to discover click targets (it returns stable refs), `read`
@@ -269,7 +274,7 @@ agents/sessions never fight over one surface:
 - **`close` when you are done.** Tabs you leave behind sit in the user's
   browser and count against the cap; a `tab_limit` error means the fleet
   should close finished tabs, not that the bridge is broken.
-- cmux backend: `tabs`, `request_access`, `await_access`, `scroll`, and
+- cmux backend: `tabs`, `request_access`, `await_access`, `cancel_access`, `scroll`, and
   `logs` are extension-only; on cmux they return a typed not-supported error.
 
 ## Troubleshooting (what each error means)
