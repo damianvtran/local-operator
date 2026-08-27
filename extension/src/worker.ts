@@ -7,6 +7,7 @@ import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
+import { clearAllAccessGrants, revokeLoopbackHost } from "./host-grants";
 import { expireAccessRequest, resolveOrigin, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
 import {
@@ -304,6 +305,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Decisions are keyed by ORIGIN (finding A6) and carry the prompt
   // GENERATION the popup rendered (round-2 B1): resolveOrigin rejects a
   // decision for a prompt that was replaced after the popup drew it.
+  if (message?.event === "host_grant_revoke") {
+    revokeLoopbackHost(String(message.canonicalKey))
+      .then((applied) => sendResponse({ applied }))
+      .catch(() => sendResponse({ applied: false }));
+    return true;
+  }
+  if (message?.event === "clear_access_grants") {
+    clearAllAccessGrants()
+      .then((applied) => sendResponse({ applied }))
+      .catch(() => sendResponse({ applied: false }));
+    return true;
+  }
   if (message?.event === "origin_decision") {
     // The worker treats popup messages as hostile input. resolveOrigin validates
     // both the decision vocabulary and loopback eligibility before persistence.

@@ -75,11 +75,11 @@ function installChromeStub() {
   return { session, areas, restore: () => { delete globalThis.chrome; } };
 }
 
-async function loadOrigins() {
+async function loadModule(entry = "src/origins.ts") {
   const dir = await mkdtemp(join(tmpdir(), "lop-origins-it-"));
   const outfile = join(dir, "module.mjs");
   await build({
-    entryPoints: ["src/origins.ts"],
+    entryPoints: [entry],
     bundle: true,
     platform: "node",
     format: "esm",
@@ -90,6 +90,9 @@ async function loadOrigins() {
     close: () => rm(dir, { recursive: true, force: true }),
   };
 }
+
+const loadOrigins = () => loadModule("src/origins.ts");
+const loadHostGrants = () => loadModule("src/host-grants.ts");
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 const ORIGIN = "https://example.com";
@@ -269,33 +272,71 @@ test("future host-grant schema is preserved when a decision is attempted", async
   }
 });
 
-test("completed host revoke wins even when an earlier grant write lands later", async () => {
+test("worker queue prevents delayed approval from resurrecting completed revoke", async () => {
   const chrome = installChromeStub();
-  const bundle = await loadOrigins();
+  const bundle = await loadHostGrants();
   try {
-    const origins = await bundle.import();
-    const canonicalKey = JSON.stringify(["http:", "localhost"]);
-    chrome.areas.local.set("hostGrants", { version: 1 });
-    // Deterministic interleaving: the revoke starts later and completes first;
-    // the older approval then physically lands after it.
-    chrome.areas.local.set("hostGrantOp:v1:revoke", {
-      canonicalKey,
-      action: "revoke",
-      at: 20,
-    });
-    chrome.areas.local.set("hostGrantOp:v1:late-grant", {
-      canonicalKey,
-      action: "grant",
-      at: 10,
-    });
-    assert.equal(await origins.originAllowed(new URL("http://localhost:9999")), false);
+    const grants = await bundle.import();
+    const originalGet = globalThis.chrome.storage.local.get;
+    let releaseRead;
+    const readBlocked = new Promise((resolve) => { releaseRead = resolve; });
+    let first = true;
+    globalThis.chrome.storage.local.get = async (keys) => {
+      if (first) {
+        first = false;
+        await readBlocked;
+      }
+      return originalGet(keys);
+    };
+    const url = new URL("http://localhost:5173");
+    const approval = grants.grantLoopbackHost(url);
+    const revoke = grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"]));
+    releaseRead();
+    assert.equal(await approval, true);
+    assert.equal(await revoke, true);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
 
-    chrome.areas.local.set("hostGrantOp:v1:new-grant", {
-      canonicalKey: JSON.stringify(["http:", "127.0.0.1"]),
-      action: "grant",
-      at: 30,
-    });
-    assert.equal(await origins.originAllowed(new URL("http://127.0.0.1:9999")), true);
+test("worker snapshot stays bounded across churn and survives restart", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadHostGrants();
+  try {
+    let grants = await bundle.import();
+    const url = new URL("http://localhost:5173");
+    const key = JSON.stringify(["http:", "localhost"]);
+    for (let index = 0; index < 100; index += 1) {
+      assert.equal(await grants.grantLoopbackHost(url), true);
+      assert.equal(await grants.revokeLoopbackHost(key), true);
+    }
+    assert.deepEqual([...chrome.areas.local.keys()], ["hostGrants"]);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
+    grants = await bundle.import("restart");
+    assert.equal(await grants.grantLoopbackHost(url), true);
+    assert.equal(Object.keys(chrome.areas.local.get("hostGrants").grants).length, 1);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("two settings-context revokes serialize through the worker queue", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadHostGrants();
+  try {
+    const grants = await bundle.import();
+    const localhost = new URL("http://localhost:5173");
+    const ipv4 = new URL("http://127.0.0.1:3000");
+    await grants.grantLoopbackHost(localhost);
+    await grants.grantLoopbackHost(ipv4);
+    await Promise.all([
+      grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"])),
+      grants.revokeLoopbackHost(JSON.stringify(["http:", "127.0.0.1"])),
+    ]);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
   } finally {
     await bundle.close();
     chrome.restore();
