@@ -36,18 +36,25 @@ function installChrome({ groupReject = false, updateReject = false, APIs = true 
         return id;
       } } : {}),
     },
-    ...(APIs ? { tabGroups: { update: async (id, options) => {
-      updateCalls.push([id, structuredClone(options)]);
-      if (updateReject) throw new Error("managed browser rejected title");
-      groups.set(id, { ...(groups.get(id) ?? { id }), ...options });
-      return groups.get(id);
-    } } } : {}),
+    ...(APIs ? { tabGroups: {
+      get: async (id) => { if (!groups.has(id)) throw new Error("dead group"); return { ...groups.get(id) }; },
+      update: async (id, options) => {
+        updateCalls.push([id, structuredClone(options)]);
+        if (updateReject) throw new Error("managed browser rejected title");
+        groups.set(id, { ...(groups.get(id) ?? { id }), ...options });
+        return groups.get(id);
+      },
+    } } : {}),
   };
   return {
     tabs, groups, groupCalls, updateCalls,
     seed: (surface, tab) => { surfaces[`bridge:${surface.tabId}:${surface.nonce}`] = structuredClone(surface); tabs.set(tab.id, { groupId: -1, ...tab }); },
     surface: (tabId) => Object.values(surfaces).find((surface) => surface.tabId === tabId),
     ungroup: (tabId) => { tabs.get(tabId).groupId = -1; },
+    moveToGroup: (tabId, groupId, group = { title: "Personal", color: "red", collapsed: true }) => {
+      tabs.get(tabId).groupId = groupId;
+      groups.set(groupId, { id: groupId, ...group });
+    },
     restore: () => { delete globalThis.chrome; },
   };
 }
@@ -135,6 +142,96 @@ test("defensive sanitizer never exposes requester or invisible controls", async 
     );
     assert.equal(chrome.groups.get(10).title, "LO · Session");
     assert.doesNotMatch(chrome.groups.get(10).title, /full-secret-uuid/);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("ordinary rename never mutates a personal group after manual regrouping", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    const owned = surface(1); chrome.seed(owned, { id: 1, windowId: 1 });
+    await bundle.loaded.reconcileTabGroup(owned, params("A", "Name"), true);
+    chrome.moveToGroup(1, 77);
+    const updatesBefore = chrome.updateCalls.length;
+
+    await bundle.loaded.reconcileTabGroup(chrome.surface(1), params("A", "Renamed"), false);
+
+    assert.equal(chrome.updateCalls.length, updatesBefore, "ordinary command must not update personal group");
+    assert.deepEqual(chrome.groups.get(77), {
+      id: 77,
+      title: "Personal",
+      color: "red",
+      collapsed: true,
+    });
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("explicit resume rejoins an LO group without mutating the personal group", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    const owned = surface(1); chrome.seed(owned, { id: 1, windowId: 1 });
+    await bundle.loaded.reconcileTabGroup(owned, params("A", "Name"), true);
+    chrome.moveToGroup(1, 77);
+    const updatesBefore = chrome.updateCalls.length;
+
+    await bundle.loaded.reconcileTabGroup(chrome.surface(1), params("A", "Renamed"), true);
+
+    assert.deepEqual(chrome.groups.get(77), {
+      id: 77,
+      title: "Personal",
+      color: "red",
+      collapsed: true,
+    });
+    assert.equal(chrome.updateCalls.length, updatesBefore + 1);
+    assert.deepEqual(chrome.groupCalls.at(-1), { tabIds: [1] });
+    assert.equal(chrome.groups.get(11).title, "LO · Renamed");
+    assert.equal(chrome.surface(1).appliedGroupId, 11);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("recycled advisory group id with personal metadata fails safe", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    const stale = surface(1, {
+      ownerKey: "session:A",
+      groupBaseLabel: "LO · Name",
+      groupOrdinal: 1,
+      groupAppliedLabel: "LO · Name",
+      appliedGroupId: 88,
+    });
+    chrome.seed(stale, { id: 1, windowId: 1, groupId: 88 });
+    chrome.moveToGroup(1, 88);
+
+    await bundle.loaded.reconcileTabGroup(stale, params("A", "Renamed"), false);
+
+    assert.equal(chrome.updateCalls.length, 0);
+    assert.equal(chrome.groups.get(88).title, "Personal");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("stale advisory group id fails safe until explicit resume", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    const stale = surface(1, {
+      ownerKey: "session:A",
+      groupBaseLabel: "LO · Name",
+      groupOrdinal: 1,
+      groupAppliedLabel: "LO · Name",
+      appliedGroupId: 404,
+    });
+    chrome.seed(stale, { id: 1, windowId: 1, groupId: 88 });
+    chrome.moveToGroup(1, 88);
+
+    await bundle.loaded.reconcileTabGroup(stale, params("A", "Renamed"), false);
+    assert.equal(chrome.updateCalls.length, 0);
+    assert.equal(chrome.groups.get(88).title, "Personal");
+
+    await bundle.loaded.reconcileTabGroup(chrome.surface(1), params("A", "Renamed"), true);
+    assert.deepEqual(chrome.groupCalls, [{ tabIds: [1] }]);
+    assert.equal(chrome.groups.get(10).title, "LO · Renamed");
   } finally { await bundle.close(); chrome.restore(); }
 });
 
