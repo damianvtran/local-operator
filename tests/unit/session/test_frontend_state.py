@@ -267,6 +267,38 @@ def test_large_job_snapshots_share_only_immutable_retained_events() -> None:
     assert store.state.jobs[0].trajectory[0]["delta"] != "corrupted"
 
 
+def test_shared_job_usage_descendants_and_future_extras_are_immutable() -> None:
+    """Every nested JobState value is safe to share, including unknown future fields."""
+    job = JobState.model_validate(
+        {
+            "id": "child",
+            "type": "task",
+            "usage": Usage(input_tokens=4, output_tokens=2).model_dump(mode="json"),
+            "descendant_usage": [
+                FrontendUsage(input_tokens=8, output_tokens=3).model_dump(mode="json")
+            ],
+            "future_payload": {"nested": [1]},
+        }
+    )
+    store = FrontendStateStore(_state(jobs=[job]))
+    snapshot = store.state
+
+    assert snapshot.jobs[0].usage is not None
+    with pytest.raises(Exception, match="frozen"):
+        snapshot.jobs[0].usage.input_tokens = 99
+    with pytest.raises(Exception, match="frozen"):
+        snapshot.jobs[0].descendant_usage[0].output_tokens = 99
+    future_payload = getattr(snapshot.jobs[0], "future_payload")
+    with pytest.raises(TypeError, match="immutable"):
+        future_payload["nested"].append(2)
+
+    canonical = store.state.jobs[0]
+    assert canonical.usage is not None and canonical.usage.input_tokens == 4
+    assert canonical.descendant_usage[0].output_tokens == 3
+    assert getattr(canonical, "future_payload") == {"nested": [1]}
+    assert store.state.sequence == 0
+
+
 def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:
     """An alias attempt cannot hide a trajectory event from the next wire delta."""
     initial = _state(jobs=[JobState(id="child", type="task", trajectory=[])])

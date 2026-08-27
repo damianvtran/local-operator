@@ -218,6 +218,15 @@ class _FrozenDict(dict[str, Any]):
 def _freeze_value(value: Any) -> Any:
     if isinstance(value, (_FrozenList, _FrozenDict)):
         return value
+    if isinstance(value, FrontendUsage):
+        return _freeze_frontend_usage(value)
+    if isinstance(value, Usage):
+        return _freeze_usage(value)
+    if isinstance(value, BaseModel):
+        # Unknown future job extras have no stable attribute contract. Preserve
+        # all their data as a recursively immutable mapping rather than sharing
+        # a mutable model the older follower cannot know how to freeze safely.
+        return _freeze_value(value.model_dump(mode="python"))
     if isinstance(value, dict):
         return _FrozenDict({str(key): _freeze_value(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
@@ -226,13 +235,19 @@ def _freeze_value(value: Any) -> Any:
 
 
 def _freeze_job(job: "JobState") -> "JobState":
-    """Freeze the large nested payload while retaining list/dict compatibility."""
-    return job.model_copy(
-        update={
-            "trajectory": _freeze_value(job.trajectory),
-            "latest_details": _freeze_value(job.latest_details),
-        }
+    """Freeze every declared and future nested value on a shared job snapshot."""
+    values = {
+        name: _freeze_value(value)
+        for name, value in job.__dict__.items()
+        if name not in {"usage", "descendant_usage"}
+    }
+    values["usage"] = _freeze_usage(job.usage) if job.usage is not None else None
+    values["descendant_usage"] = _FrozenList(
+        _freeze_frontend_usage(component) for component in job.descendant_usage
     )
+    for name, value in (job.model_extra or {}).items():
+        values[name] = _freeze_value(value)
+    return job.model_copy(update=values)
 
 
 class JobState(BaseModel):
@@ -346,6 +361,40 @@ class FrontendUsage(Usage):
     """Lossless wire usage, including future cost component metadata."""
 
     model_config = ConfigDict(extra="allow")
+
+
+class _FrozenUsage(Usage):
+    """Usage-compatible immutable value retained inside a shared job snapshot."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    def __deepcopy__(self, _memo: dict[int, Any] | None = None) -> "_FrozenUsage":
+        return self
+
+
+class _FrozenFrontendUsage(FrontendUsage):
+    """FrontendUsage-compatible immutable descendant accounting value."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    def __deepcopy__(self, _memo: dict[int, Any] | None = None) -> "_FrozenFrontendUsage":
+        return self
+
+
+def _freeze_usage(value: Usage) -> _FrozenUsage:
+    frozen = _FrozenUsage.model_validate(value.model_dump(mode="python"))
+    updates = {name: _freeze_value(item) for name, item in frozen.__dict__.items()}
+    for name, item in (frozen.model_extra or {}).items():
+        updates[name] = _freeze_value(item)
+    return frozen.model_copy(update=updates)
+
+
+def _freeze_frontend_usage(value: FrontendUsage) -> _FrozenFrontendUsage:
+    frozen = _FrozenFrontendUsage.model_validate(value.model_dump(mode="python"))
+    updates = {name: _freeze_value(item) for name, item in frozen.__dict__.items()}
+    for name, item in (frozen.model_extra or {}).items():
+        updates[name] = _freeze_value(item)
+    return frozen.model_copy(update=updates)
 
 
 class FrontendSessionState(BaseModel):

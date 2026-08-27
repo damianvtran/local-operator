@@ -9083,6 +9083,11 @@ class OperatorApp(App[None]):
         # Captured before anything is blurred: this is where Esc puts the
         # user back, and it is almost always the composer.
         self._subagent_focus_restore = self.focused
+        # The expanded roster borrows nearly the whole transcript budget. It is
+        # a navigation surface, not child-page content, so collapse it before
+        # layout or a 120x40 child view can settle at zero rows.
+        if self._subagent_panel is not None:
+            self._subagent_panel.collapse_for_child_view()
         view = SubagentView(job_id)
         self._subagent_view = view
         self._transcript_view().display = False

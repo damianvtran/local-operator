@@ -1250,6 +1250,13 @@ class SubagentPanel(Container):
             self._apply_visibility()
         self._focus_navigation_row()
 
+    def collapse_for_child_view(self) -> None:
+        """Give the child page the rows the expanded roster was temporarily using."""
+        if not self._expanded:
+            return
+        self._expanded = False
+        self._apply_visibility()
+
     def exit_navigation(self) -> None:
         """Return keyboard ownership to the composer without touching its draft."""
         try:
