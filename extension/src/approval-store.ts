@@ -42,10 +42,33 @@ export interface EnqueueResult extends QueueStatus {
   full?: boolean;
 }
 
+export const ACCESS_EXPIRY_ALARM = "lop-access-expiry";
+
 export type QueueObserver = (snapshot: QueueSnapshot) => void;
 let observer: QueueObserver | null = null;
 export function setQueueObserver(next: QueueObserver): void {
   observer = next;
+}
+
+/** One alarm owns every ephemeral approval deadline. Recomputing from durable
+ * state after each mutation prevents a later 10-minute request from replacing
+ * an earlier 60-second redirect deadline. */
+export function nextAccessExpiry(snapshot: QueueSnapshot): number | undefined {
+  const deadlines = [
+    ...snapshot.queue.map((entry) => entry.expiresAt),
+    ...Object.values(snapshot.results).map((receipt) => receipt.expiresAt),
+    ...Object.values(snapshot.onceGrants).map((grant) => grant.expiresAt),
+  ];
+  return deadlines.length ? Math.min(...deadlines) : undefined;
+}
+
+export async function armNextExpiry(snapshot: QueueSnapshot): Promise<void> {
+  const when = nextAccessExpiry(snapshot);
+  if (when === undefined) {
+    await chrome.alarms.clear(ACCESS_EXPIRY_ALARM);
+  } else {
+    chrome.alarms.create(ACCESS_EXPIRY_ALARM, { when });
+  }
 }
 
 function legacyRequester(record: { requester?: string; requestId?: string } | undefined): string {
@@ -59,40 +82,52 @@ async function normalizedLocked(now: number): Promise<QueueSnapshot> {
   const session = await getSession();
   let queue = liveQueue(session.accessQueue, now);
   let results = cleanResults(session.accessResults, now);
-  let onceGrants = { ...(session.onceGrants ?? {}) } as OnceGrants;
-  let migrated = session.accessQueueVersion === ACCESS_QUEUE_VERSION;
-  if (!migrated) {
+  let onceGrants = Object.fromEntries(
+    Object.entries(session.onceGrants ?? {}).filter(([, grant]) => now < grant.expiresAt),
+  ) as OnceGrants;
+  const needsMigration = session.accessQueueVersion !== ACCESS_QUEUE_VERSION;
+  if (needsMigration) {
     const legacy = session.accessRequest;
     const pending = session.pendingOrigin;
-    if (legacy && now < legacy.expiresAt) {
-      const requester = legacyRequester(legacy);
+    const legacyLive = !!legacy && now < legacy.expiresAt;
+    const legacyOwner = legacyRequester(legacy);
+    const pendingOwner = legacyRequester(pending);
+    // The old async receipt and popup slot were independently writable. Merge
+    // only when both authority keys match; otherwise preserve both generations
+    // so an A async request plus a B redirect cannot corrupt or erase either.
+    const matching =
+      legacyLive &&
+      !!pending &&
+      legacy!.origin === pending.origin &&
+      legacyOwner === pendingOwner;
+    let sequence = Math.max(0, ...queue.map((entry) => entry.sequence));
+    if (legacyLive) {
       const entry = newEntry(
-        legacy.origin,
-        legacy.hostname,
-        requester,
+        legacy!.origin,
+        legacy!.hostname,
+        legacyOwner,
         "async",
-        legacy.requestedAt,
-        1,
-        pending?.requestId,
-        pending?.promptId || undefined,
+        legacy!.requestedAt,
+        ++sequence,
+        matching ? pending?.requestId : undefined,
+        matching ? pending?.promptId : undefined,
       );
-      entry.expiresAt = legacy.expiresAt;
-      if (legacy.decision) {
-        const state = legacy.decision === "deny" ? "denied" : "allowed";
+      entry.expiresAt = legacy!.expiresAt;
+      if (legacy!.decision) {
+        const state = legacy!.decision === "deny" ? "denied" : "allowed";
         const receipt = receiptFor(entry, state, now);
-        results[resultKey(entry.entryId, requester)] = receipt;
-      } else {
-        queue.push(entry);
-      }
-    } else if (pending) {
+        results[resultKey(entry.entryId, legacyOwner)] = receipt;
+      } else queue.push(entry);
+    }
+    if (pending && !matching) {
       queue.push(
         newEntry(
           pending.origin,
           pending.hostname,
-          legacyRequester(pending),
+          pendingOwner,
           "in_command",
           now,
-          1,
+          ++sequence,
           pending.requestId,
           pending.promptId,
         ),
@@ -106,7 +141,6 @@ async function normalizedLocked(now: number): Promise<QueueSnapshot> {
         onceGrants[requesterOriginKey(key, grant.requester)] = { ...grant, origin: key };
       }
     }
-    migrated = true;
   }
   queue.sort((a, b) => a.sequence - b.sequence);
   await chrome.storage.session.set({
@@ -115,8 +149,10 @@ async function normalizedLocked(now: number): Promise<QueueSnapshot> {
     accessResults: cleanResults(results, now),
     onceGrants,
   });
-  if (migrated) await chrome.storage.session.remove(["accessRequest", "pendingOrigin"]);
-  return { queue, results: cleanResults(results, now), onceGrants };
+  if (needsMigration) await chrome.storage.session.remove(["accessRequest", "pendingOrigin"]);
+  const snapshot = { queue, results: cleanResults(results, now), onceGrants };
+  await armNextExpiry(snapshot);
+  return snapshot;
 }
 
 async function persistLocked(snapshot: QueueSnapshot): Promise<void> {
@@ -126,6 +162,7 @@ async function persistLocked(snapshot: QueueSnapshot): Promise<void> {
     accessResults: snapshot.results,
     onceGrants: snapshot.onceGrants,
   });
+  await armNextExpiry(snapshot);
 }
 
 export function sweepQueue(now: number = Date.now()): Promise<QueueSnapshot> {
@@ -152,12 +189,17 @@ export function enqueueAccess(
   requester: string,
   kind: AccessKind,
   commandId?: string,
+  onAdmitted?: (entry: AccessQueueEntry) => void,
 ): Promise<EnqueueResult> {
   return withSessionMutation(async () => {
     const now = Date.now();
     const snapshot = await normalizedLocked(now);
     const existing = findPending(snapshot.queue, url.origin, requester, kind, now);
     if (existing) {
+      // Registration occurs while the session mutation lock is held. A popup
+      // decision cannot consume this generation before its waiter exists.
+      onAdmitted?.(existing);
+      await armNextExpiry(snapshot);
       return {
         origin: url.origin,
         state: "pending",
@@ -173,6 +215,7 @@ export function enqueueAccess(
     }
     const nextSequence = Math.max(0, ...snapshot.queue.map((entry) => entry.sequence)) + 1;
     const entry = newEntry(url.origin, url.host, requester, kind, now, nextSequence, commandId);
+    onAdmitted?.(entry);
     snapshot.queue.push(entry);
     await persistLocked(snapshot);
     observer?.(snapshot);

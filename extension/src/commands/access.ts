@@ -37,7 +37,8 @@ export async function requestAccess(
       { pending_count: result.pending_count },
     );
   }
-  chrome.alarms.create("lop-access-expiry", { when: result.expires_at });
+  // enqueueAccess centrally arms the earliest durable deadline. Arming this
+  // request's own expiry here would let a later request delay an earlier one.
   const { entry: _entry, full: _full, ...response } = result;
   return { ...response };
 }
