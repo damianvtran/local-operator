@@ -3705,6 +3705,19 @@ class GoalSession(FakeSession):
         super().__init__()
         self._goal = ""
         self.fail_on_prompt = False
+        #: Verdicts the goal-mode judge returns, consumed one per call. Default
+        #: (empty list) => after the staged verdicts run out, answer ACHIEVED,
+        #: so a test that stages nothing terminates rather than spinning the
+        #: pilot forever.
+        self.judge_verdicts: list[str] = []
+        #: Number of consecutive `complete_aside` calls that should RAISE before
+        #: any staged verdict is returned — exercises the judge-error path.
+        self.judge_raises = 0
+        self.judge_calls = 0
+        #: When set, `prompt` awaits it before recording — lets a test observe
+        #: the loop mid-flight (the fake is otherwise instantaneous and the
+        #: worker settles before the test can look at `_loop_running`).
+        self.prompt_gate: asyncio.Event | None = None
 
     @property
     def goal(self) -> str:
@@ -3717,7 +3730,28 @@ class GoalSession(FakeSession):
     async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         if self.fail_on_prompt:
             raise RuntimeError("boom")
+        if self.prompt_gate is not None:
+            await self.prompt_gate.wait()
         self.prompts.append(text)
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Scriptable judge: raise `judge_raises` times, then serve staged
+        # verdicts, then default to ACHIEVED so an unstaged test terminates.
+        self.judge_calls += 1
+        if on_usage is not None:
+            on_usage(SimpleNamespace())
+        if self.judge_raises > 0:
+            self.judge_raises -= 1
+            raise RuntimeError("judge boom")
+        if self.judge_verdicts:
+            return self.judge_verdicts.pop(0)
+        return "VERDICT: ACHIEVED\ndefault stop"
 
 
 async def _type_command(pilot, app, command: str) -> None:
@@ -3772,17 +3806,18 @@ async def test_loop_runs_bounded_iterations() -> None:
 
 
 @pytest.mark.asyncio
-async def test_loop_rejects_out_of_range_and_garbage() -> None:
+async def test_loop_rejects_out_of_range() -> None:
+    # An out-of-range INTEGER is still an error. Non-integer text is no longer
+    # an error at all — it is a goal (see the goal-mode dispatch tests below),
+    # the one user-facing behaviour this feature removes.
     session = GoalSession()
     session.set_goal("g")
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         await _type_command(pilot, app, "loop 99")
-        await _type_command(pilot, app, "loop abc")
         text = _transcript_text(app)
     assert "between 1 and" in text
-    assert "usage: /loop" in text
     assert session.prompts == []
 
 
@@ -3813,6 +3848,277 @@ async def test_interrupt_cancels_running_loop() -> None:
         app._loop_running = True
         app.action_interrupt()
         assert app._loop_cancelled is True
+
+
+# -- /loop goal mode ---------------------------------------------------------
+
+
+async def _settle_loop(pilot, app, limit: int = 60) -> None:
+    """Pump the pilot until the loop worker settles.
+
+    Bounded so a regression that never releases fails as a timeout in the
+    assertions rather than hanging the suite forever.
+    """
+    for _ in range(limit):
+        await pilot.pause()
+        if not app._loop_running:
+            return
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_dispatch_is_not_numeric() -> None:
+    # `/loop <non-integer>` is a GOAL, not a usage error — the whole feature.
+    session = GoalSession()
+    # Hold the first turn so the loop is observable mid-flight.
+    session.prompt_gate = asyncio.Event()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop finish the parser")
+        # The goal is captured before the worker exits; assert while it runs.
+        assert app._loop_running is True
+        assert app._loop_goal == "finish the parser"
+        # Release the turn; the default ACHIEVED verdict then ends the loop.
+        session.prompt_gate.set()
+        await _settle_loop(pilot, app)
+        text = _transcript_text(app)
+    assert "usage: /loop" not in text
+    assert session.prompts  # at least one turn ran
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_releases_when_judge_says_achieved() -> None:
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session.judge_verdicts = [
+            "VERDICT: CONTINUE\nnot yet",
+            "VERDICT: ACHIEVED\ndone",
+        ]
+        await _type_command(pilot, app, "loop do the thing")
+        await _settle_loop(pilot, app)
+        text = _transcript_text(app)
+    assert len(session.prompts) == 2
+    assert session.judge_calls == 2
+    assert "goal achieved after 2" in text
+    # All three fields reset by the worker's finally.
+    assert app._loop_running is False
+    assert app._loop_goal == ""
+    assert app._loop_suppress_completion is False
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_suppresses_turn_ended_toast() -> None:
+    # The crux, tested at the seam: while the suppress flag is set, a settling
+    # TurnEnded fires NO completion notify; with it clear, the same event does.
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        completion_notifies: list[int | None] = []
+        real_notify = app._notify
+
+        def _record_notify(kind: str, *, running_children: int | None = None) -> bool:
+            if kind == "complete":
+                completion_notifies.append(running_children)
+            return real_notify(kind, running_children=running_children)
+
+        app._notify = _record_notify  # type: ignore[assignment]
+        # Held loop: a per-turn settle must not notify.
+        app._loop_suppress_completion = True
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1_000))
+        await pilot.pause()
+        await pilot.pause()
+        assert completion_notifies == []
+        # Not held: the same event notifies as usual (numeric mode / normal turns).
+        app._loop_suppress_completion = False
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1_000))
+        await pilot.pause()
+        await pilot.pause()
+    assert len(completion_notifies) == 1
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_notifies_once_on_release() -> None:
+    # End to end: N held turns produce exactly one completion notify, on release.
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        completion_notifies: list[int | None] = []
+        real_notify = app._notify
+
+        def _record_notify(kind: str, *, running_children: int | None = None) -> bool:
+            if kind == "complete":
+                completion_notifies.append(running_children)
+            return real_notify(kind, running_children=running_children)
+
+        app._notify = _record_notify  # type: ignore[assignment]
+        session.judge_verdicts = [
+            "VERDICT: CONTINUE\nnot yet",
+            "VERDICT: CONTINUE\nstill not",
+            "VERDICT: ACHIEVED\ndone",
+        ]
+        await _type_command(pilot, app, "loop do the thing")
+        await _settle_loop(pilot, app)
+    assert len(session.prompts) == 3
+    # Exactly one completion notify — the release toast, not a per-turn toast.
+    assert len(completion_notifies) == 1
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_ignores_standing_goal_guard() -> None:
+    # Goal mode starts with NO standing goal set; numeric mode still refuses.
+    session = GoalSession()
+    session.prompt_gate = asyncio.Event()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert session.goal == ""
+        await _type_command(pilot, app, "loop do the thing")
+        assert app._loop_running is True
+        session.prompt_gate.set()
+        await _settle_loop(pilot, app)
+        # Numeric with no goal still refuses.
+        await _type_command(pilot, app, "loop 2")
+        text = _transcript_text(app)
+    assert "set a goal first" in text
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_does_not_clobber_standing_goal() -> None:
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "goal keep me")
+        assert session.goal == "keep me"
+        session.judge_verdicts = ["VERDICT: ACHIEVED\ndone"]
+        await _type_command(pilot, app, "loop something else")
+        await _settle_loop(pilot, app)
+    assert session.goal == "keep me"
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_judge_error_continues_with_warning() -> None:
+    # A judge that raises once must NOT stop or release; it continues with a
+    # visible warning, then releases on the next readable verdict.
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session.judge_raises = 1
+        session.judge_verdicts = ["VERDICT: ACHIEVED\ndone"]
+        await _type_command(pilot, app, "loop do the thing")
+        await _settle_loop(pilot, app)
+        text = _transcript_text(app)
+    # Turn 1 -> judge raises (continue), turn 2 -> ACHIEVED release.
+    assert len(session.prompts) == 2
+    assert "judge unavailable, continuing" in text
+    assert "goal achieved after 2" in text
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_judge_failure_breaker() -> None:
+    # A judge that never returns a readable verdict trips the breaker after
+    # MAX_LOOP_JUDGE_FAILURES, rather than spinning forever.
+    from local_operator.tui.app import MAX_LOOP_JUDGE_FAILURES
+
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        # Empty string => no VERDICT line => unreadable => failure strike.
+        session.judge_verdicts = [""] * (MAX_LOOP_JUDGE_FAILURES + 5)
+        await _type_command(pilot, app, "loop do the thing")
+        await _settle_loop(pilot, app)
+        text = _transcript_text(app)
+    assert len(session.prompts) == MAX_LOOP_JUDGE_FAILURES
+    assert "judge could not decide" in text
+    assert app._loop_suppress_completion is False
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_stop_cancels() -> None:
+    session = GoalSession()
+    # Hold the first turn so the stop lands while the loop is genuinely running.
+    session.prompt_gate = asyncio.Event()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session.judge_verdicts = ["VERDICT: CONTINUE\nnot yet"] * 50
+        await _type_command(pilot, app, "loop do the thing")
+        assert app._loop_running is True
+        await _type_command(pilot, app, "loop stop")
+        session.prompt_gate.set()
+        await _settle_loop(pilot, app)
+        text = _transcript_text(app)
+    assert "loop cancelled" in text
+    assert app._loop_running is False
+    assert app._loop_goal == ""
+    assert app._loop_suppress_completion is False
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_reload_safety() -> None:
+    # Swapping app._session mid-loop must stop the worker cleanly and reset all
+    # three fields (esp. the suppress flag, which would otherwise mute the NEXT
+    # session's completion toasts).
+    session = GoalSession()
+    session.prompt_gate = asyncio.Event()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        session.judge_verdicts = ["VERDICT: CONTINUE\nnot yet"] * 50
+        await _type_command(pilot, app, "loop do the thing")
+        assert app._loop_running is True
+        # Simulate a reload: the session the worker captured is no longer live.
+        app._session = GoalSession()
+        session.prompt_gate.set()
+        await _settle_loop(pilot, app)
+        text = _transcript_text(app)
+    assert "stopped by reload" in text
+    assert app._loop_running is False
+    assert app._loop_goal == ""
+    assert app._loop_suppress_completion is False
+
+
+@pytest.mark.asyncio
+async def test_loop_goal_turn_error_stops() -> None:
+    session = GoalSession()
+    session.fail_on_prompt = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop do the thing")
+        await _settle_loop(pilot, app)
+        text = _transcript_text(app)
+    assert "loop stopped" in text
+    assert app._loop_running is False
+    assert app._loop_goal == ""
+    assert app._loop_suppress_completion is False
+
+
+def test_parse_loop_verdict_units() -> None:
+    from local_operator.tui.app import _parse_loop_verdict
+
+    # Clean verdicts.
+    assert _parse_loop_verdict("VERDICT: ACHIEVED\nall done") == (True, "all done")
+    assert _parse_loop_verdict("VERDICT: CONTINUE\nnot yet") == (False, "not yet")
+    # Lowercase / mixed case is fine (parser upper-cases).
+    assert _parse_loop_verdict("verdict: achieved\nok")[0] is True
+    # A "not achieved" phrasing must NOT read as achieved — the substring trap.
+    assert _parse_loop_verdict("VERDICT: NOT ACHIEVED\nnope")[0] is not True
+    # CONTINUE wins even if both tokens somehow appear.
+    assert _parse_loop_verdict("VERDICT: CONTINUE ACHIEVED")[0] is False
+    # Leading prose before the verdict line is tolerated.
+    assert _parse_loop_verdict("thinking...\nVERDICT: ACHIEVED\nreason")[0] is True
+    # No verdict line at all => unreadable => None.
+    assert _parse_loop_verdict("") == (None, "")
+    assert _parse_loop_verdict("just some prose\nno verdict here") == (None, "")
+    # A verdict with no reason line => (bool, "").
+    assert _parse_loop_verdict("VERDICT: ACHIEVED") == (True, "")
 
 
 # -- MCP status band + startup toast -----------------------------------------

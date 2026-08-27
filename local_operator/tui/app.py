@@ -579,6 +579,51 @@ def slash_command_for(text: str) -> SlashCommand | None:
     return next((entry for entry in SLASH_COMMANDS if name in entry.names), None)
 
 
+def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
+    """Parse a goal-mode judge answer into ``(achieved, reason)``.
+
+    ``achieved`` is ``True`` (ACHIEVED), ``False`` (CONTINUE), or ``None`` when
+    no ``VERDICT:`` line is readable — which the caller treats as a fail-safe
+    CONTINUE plus a judge-failure strike, never as a release. A pure module-level
+    function so a unit test can hammer it with garbage without standing up the app.
+
+    Two robustness rules are load-bearing:
+
+    - ``CONTINUE`` is checked BEFORE ``ACHIEVED`` on the verdict payload, so a
+      "not achieved" style answer (or any line that names both tokens) reads as
+      continue, never as a false release. A false release is the one
+      trust-breaking error under the notify-once contract.
+    - The tokens are matched on the payload AFTER ``VERDICT:``, and because
+      ``ACHIEVED`` is not a substring of ``CONTINUE`` (nor vice versa) the two
+      cannot collide. We do NOT infer a verdict from free prose: an answer with
+      no ``VERDICT:`` line at all is a judge failure, not a guess.
+    """
+    reason = ""
+    achieved: bool | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        upper = stripped.upper()
+        if "VERDICT:" in upper:
+            payload = upper.split("VERDICT:", 1)[1]
+            # CONTINUE first: a stray "not achieved" must never read as achieved.
+            if "CONTINUE" in payload:
+                achieved = False
+            elif "ACHIEVED" in payload:
+                # Defensive against an off-spec "VERDICT: NOT ACHIEVED": the two
+                # spec tokens are ACHIEVED / CONTINUE, but a model that ignores
+                # the instruction and negates ACHIEVED must read as CONTINUE, not
+                # as a false release (the one trust-breaking error). A legitimate
+                # "ACHIEVED" payload never carries a negation word.
+                achieved = "NOT" not in payload and "N'T" not in payload
+            continue
+        # The first non-empty line after a readable verdict is the reason.
+        if achieved is not None and not reason:
+            reason = stripped
+    return achieved, reason
+
+
 #: ``/loop`` defaults and hard ceiling. A loop spends real tokens per
 #: iteration, so it is bounded by construction — an unbounded "keep going"
 #: is how an agent burns a budget unattended.
@@ -593,6 +638,48 @@ LOOP_PROMPT = (
     "the tools available, then briefly state what advanced and what remains. "
     "If the goal is already fully met, say so plainly and stop."
 )
+
+#: The prompt each GOAL-mode iteration (`/loop <goal text>`) submits. Unlike
+#: `LOOP_PROMPT`, it EMBEDS the goal text directly rather than referencing "the
+#: standing goal": goal mode deliberately does not call `set_goal`, so the
+#: system prompt's volatile tail is untouched and there is no standing goal in
+#: the context to reference. The goal is user text, so we format the TEMPLATE
+#: with the goal as the argument (`str.format` on the template) — braces inside
+#: the goal are then opaque replacement values, never format directives.
+LOOP_GOAL_PROMPT = (
+    "Work toward this goal:\n\n{goal}\n\n"
+    "Make concrete progress with the tools available, then briefly state what "
+    "advanced and what remains. If the goal is already fully met, say so plainly."
+)
+
+#: The off-the-record judge prompt asked (via `complete_aside`) after each
+#: goal-mode turn settles. It forces a machine-parseable verdict on its own
+#: line. The two verdict tokens are lexically DISTINCT on purpose: `ACHIEVED`
+#: is a substring of `NOT_ACHIEVED`, so a "not achieved" style answer would be
+#: misread as achieved by a naive substring match. `CONTINUE` shares no such
+#: prefix with `ACHIEVED`, so the parser cannot confuse them. Judge strictly:
+#: a false release notifies "done" when it is not, which is the one
+#: trust-breaking outcome under the notify-once contract, so bias to CONTINUE.
+LOOP_JUDGE_PROMPT = (
+    "You are judging whether a standing goal has been fully achieved, based on "
+    "the conversation above (the work done so far).\n\n"
+    "GOAL: {goal}\n\n"
+    "Answer with a single line, exactly one of:\n"
+    "  VERDICT: ACHIEVED\n"
+    "  VERDICT: CONTINUE\n"
+    "Then, on the next line, one short sentence of reason. Judge strictly: "
+    "answer ACHIEVED only if the goal is fully and verifiably met, not merely "
+    "in progress. If unsure, answer CONTINUE."
+)
+
+#: Consecutive-judge-failure breaker for goal mode. There is deliberately NO
+#: hard iteration ceiling in goal mode (a healthy judge answering CONTINUE runs
+#: unbounded, by design — `/loop stop`/Esc are the user's escape), but a judge
+#: that never returns a READABLE verdict (provider error, or unparseable
+#: output) would otherwise spin forever with no way out but a manual stop. This
+#: ceiling is on consecutive judge MALFUNCTION, not on progress: it trips only
+#: after this many unreadable verdicts in a row, and resets on any readable one.
+MAX_LOOP_JUDGE_FAILURES = 3
 
 #: How often the band re-counts running background jobs. Nothing emits an
 #: event when a job settles, so the subagent segment either polls or goes
@@ -1583,6 +1670,21 @@ class OperatorApp(App[None]):
         # the turn boundary (never mid-turn, so a turn is never half-applied).
         self._loop_running: bool = False
         self._loop_cancelled: bool = False
+        #: Goal-mode state for `/loop <goal text>`. `_loop_goal` is BOTH the
+        #: mode flag and the payload: goal mode is active iff it is truthy while
+        #: `_loop_running`. Carrying the goal here (not via `set_goal`) keeps the
+        #: standing `/goal` and the system prompt's tail untouched — a `/loop do
+        #: X` must not silently overwrite a goal the user set for the session.
+        self._loop_goal: str = ""
+        #: While a held goal loop is running, the per-turn completion toast that
+        #: the `TurnEnded` handler fires on every clean turn is SUPPRESSED — the
+        #: loop owns a single release toast fired only when the judge says the
+        #: goal is achieved, so an unbounded goal loop does not spam a toast per
+        #: turn (the fatigue this feature exists to remove). Cleared in the
+        #: worker's `finally`; a stuck-True flag would mute completions for the
+        #: rest of the process (and across sessions), so that reset is
+        #: load-bearing, never best-effort.
+        self._loop_suppress_completion: bool = False
         #: AbortSignal for the in-flight bang-mode command, if any. Owned by
         #: the app rather than the session because bang-mode is a TUI gesture
         #: — the session's abort stops a TURN, and a user-typed `sleep 30`
@@ -10996,24 +11098,47 @@ class OperatorApp(App[None]):
         if self._loop_running:
             notice("a loop is already running — /loop stop to cancel", "warning")
             return
-        if not getattr(session, "goal", ""):
-            notice("set a goal first: /goal <text>", "warning")
-            return
-        iterations = DEFAULT_LOOP_ITERATIONS
+        # Dispatch on the argument SHAPE: an integer (or empty) is numeric mode,
+        # unchanged; any other non-empty text is a GOAL, not a typo. Goal mode is
+        # additive — `/loop`, `/loop <n>`, `/loop stop` behave exactly as before.
         if arg:
             try:
                 iterations = int(arg)
             except ValueError:
-                self._system_notice(f"usage: /loop [n] (1..{MAX_LOOP_ITERATIONS})", "warning")
+                # Non-integer text is the goal. Goal mode carries its own
+                # ephemeral goal, so the "set a goal first" guard below (which
+                # gates numeric mode) deliberately does NOT apply here.
+                self._start_goal_loop(arg, notice)
                 return
-        if iterations < 1 or iterations > MAX_LOOP_ITERATIONS:
-            self._system_notice(
-                f"iterations must be between 1 and {MAX_LOOP_ITERATIONS}", "warning"
-            )
+            if iterations < 1 or iterations > MAX_LOOP_ITERATIONS:
+                self._system_notice(
+                    f"iterations must be between 1 and {MAX_LOOP_ITERATIONS}", "warning"
+                )
+                return
+        else:
+            iterations = DEFAULT_LOOP_ITERATIONS
+        # Numeric mode still reads the STANDING goal (the tail it works toward),
+        # so it keeps refusing when none is set. Goal mode never reaches here.
+        if not getattr(session, "goal", ""):
+            notice("set a goal first: /goal <text>", "warning")
             return
         self._loop_cancelled = False
         notice(f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel")
         self.run_worker(self._loop_worker(iterations), thread=False, group="loop")
+
+    def _start_goal_loop(self, goal: str, notice: NoticeFn) -> None:
+        """Launch goal mode (`/loop <goal text>`) — loop turns until a judge
+        says the goal is achieved, then notify once.
+
+        Kept separate from `_cmd_loop`'s numeric path because the two modes
+        differ in almost everything (unbounded vs bounded, judge vs count,
+        embedded goal vs standing goal, suppressed vs per-turn toast); a shared
+        launcher would only obscure that. Reuses the same worker `group="loop"`
+        so the `_loop_running` guard still enforces one loop at a time.
+        """
+        self._loop_cancelled = False
+        notice("looping toward the goal — /loop stop to cancel")
+        self.run_worker(self._loop_goal_worker(goal), thread=False, group="loop")
 
     async def _loop_worker(self, iterations: int) -> None:
         """Run up to ``iterations`` goal-advancing turns, sequentially."""
@@ -11076,6 +11201,145 @@ class OperatorApp(App[None]):
             notice(f"loop stopped by reload after {completed} iteration(s)", "warning")
         else:
             notice(f"loop finished after {completed} iteration(s)")
+
+    async def _judge_goal(self, session: Any, goal: str) -> tuple[bool | None, str]:
+        """Ask the off-the-record judge whether ``goal`` is achieved.
+
+        Runs ONE `complete_aside` — the same no-trace primitive `/btw` uses:
+        it reads the live conversation (so the judge sees what the last turn
+        actually did), writes nothing to the transcript, runs no tools, and
+        bills through `_charge_aside` so the judge's tokens fold into the
+        session cost exactly as an aside does (a forked call is not free).
+
+        Returns `(achieved, reason)` where `achieved is None` means the verdict
+        was unreadable — the caller's fail-safe CONTINUE plus a failure strike.
+        A provider error is caught and reported the same way: `CancelledError`
+        is a `BaseException`, so an Esc mid-judge is NOT swallowed here and the
+        worker unwinds cleanly through its `finally` (same reasoning as the
+        aside worker). We do not pass `on_delta`: the judge answer must not
+        stream to any visible surface.
+        """
+        # Belt-and-suspenders: `/loop` already routes to the session OWNER,
+        # where `complete_aside` is the real implementation (a follower's raises),
+        # but guard in case a future path reaches the worker on a session lacking
+        # it — treat a missing primitive as a judge failure, not a crash.
+        if not hasattr(session, "complete_aside"):
+            return None, ""
+        turns = [Message.user(LOOP_JUDGE_PROMPT.format(goal=goal))]
+        try:
+            answer = await session.complete_aside(turns, on_usage=self._charge_aside)
+        except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
+            self._append_block(NoticeBlock(f"judge unavailable, continuing: {error}", "warning"))
+            return None, ""
+        achieved, reason = _parse_loop_verdict(answer)
+        if achieved is None:
+            self._append_block(NoticeBlock("judge returned no verdict, continuing", "warning"))
+        return achieved, reason
+
+    async def _loop_goal_worker(self, goal: str) -> None:
+        """Run goal mode: loop turns toward ``goal`` until the judge releases.
+
+        Separate from `_loop_worker` on purpose — the two share only their
+        guards, and a single worker branching on mode at five points would be
+        harder to read than two workers that each do one thing. There is no hard
+        iteration ceiling (decision: a healthy judge answering CONTINUE runs
+        unbounded); the only stops are `/loop stop`/Esc, a reload, a turn error,
+        the judge saying ACHIEVED, or the consecutive-judge-failure breaker.
+        """
+
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._append_block(NoticeBlock(body, kind))
+
+        session = self._session
+        if session is None:
+            return
+        self._loop_running = True
+        self._loop_goal = goal
+        # Suppress the per-turn completion toast for the whole held loop; the
+        # release path below fires the single toast. Set here, cleared in the
+        # `finally` — the reset is load-bearing (see the field's init comment).
+        self._loop_suppress_completion = True
+        completed = 0
+        judge_failures = 0
+        released = False
+        reason = ""
+        try:
+            while True:
+                if self._loop_cancelled:
+                    break
+                # Re-checked every iteration, not captured once: `/reload`
+                # replaces `self._session` underneath a running loop, and the
+                # captured reference would go on driving the DISPOSED session.
+                # Same guard the numeric worker documents.
+                if session is not self._session:
+                    break
+                # A NOTICE, not a UserBlock: the per-turn prompt is app-authored
+                # chrome, exactly as in numeric mode.
+                notice(f"loop {completed + 1} (goal mode)", "note")
+                if self._status is not None:
+                    self._status.update(streaming=True)
+                # Format ONCE and reuse the exact string for both the echo
+                # registration and the prompt: the echo registry matches on the
+                # submitted string byte-for-byte, so a second `.format` here
+                # could drift and leave the user MessageStartEvent unconsumed.
+                prompt = LOOP_GOAL_PROMPT.format(goal=goal)
+                self._pending_user_echoes.append(prompt)
+                try:
+                    await session.prompt(prompt)
+                except Exception as error:  # surface and stop; never spin
+                    notice(f"loop stopped: {error}", "error")
+                    # A failed prompt never announces, so take the stale echo
+                    # entry back out (same hazard as numeric mode / `_start_turn`).
+                    self._consume_user_echo(prompt)
+                    break
+                finally:
+                    if self._status is not None:
+                        self._status.update(streaming=False)
+                completed += 1
+                # --- yield boundary reached: judge the settled turn ---
+                if self._loop_cancelled or session is not self._session:
+                    break
+                achieved, reason = await self._judge_goal(session, goal)
+                if achieved is True:
+                    released = True
+                    break
+                if achieved is None:
+                    # Unreadable verdict: fail-safe CONTINUE, but count the
+                    # strike so a permanently broken judge cannot spin forever.
+                    judge_failures += 1
+                    if judge_failures >= MAX_LOOP_JUDGE_FAILURES:
+                        notice("loop stopped: judge could not decide", "error")
+                        break
+                else:
+                    # A readable CONTINUE clears the strike counter — the breaker
+                    # is for consecutive MALFUNCTION, not for a judge that is
+                    # healthily telling us to keep going.
+                    judge_failures = 0
+        finally:
+            # All three fields reset here, unconditionally. A worker that
+            # crashed with `_loop_suppress_completion` still True would silently
+            # mute the completion toast for the rest of the process (and the next
+            # session on a reload) — the `finally` is the only correct place.
+            self._loop_running = False
+            self._loop_goal = ""
+            self._loop_suppress_completion = False
+        # Terminal outcome (mirrors the numeric worker's tail). Only the release
+        # path fires the toast — one notification, exactly when the judge said
+        # the goal was met, which is the whole notify-once contract.
+        if self._loop_cancelled:
+            notice(f"loop cancelled after {completed} turn(s)")
+        elif session is not self._session:
+            notice(f"loop stopped by reload after {completed} turn(s)", "warning")
+        elif released:
+            # The NoticeBlock is the unconditional in-transcript receipt (visible
+            # whether or not the terminal is focused); `_notify` is the
+            # focus-gated attention-grab, and it passes the real outstanding-child
+            # count so a loop that spun up subagents does not fire a false finish
+            # while they are still working (the existing deferral machinery then
+            # delivers it when the last child lands).
+            notice(f"goal achieved after {completed} turn(s): {reason}", "info")
+            self._notify("complete", running_children=self._outstanding_delegated_jobs())
+        # (judge-failure and turn-error paths already emitted their own notice.)
 
     # -- providers / accounts / usage --------------------------------------
     def _cmd_search(self, arg: str, notice: NoticeFn) -> None:
@@ -14039,7 +14303,16 @@ class OperatorApp(App[None]):
             # gate has not started at all, and a backgrounded bash job also
             # re-enters the conversation when it settles.
             outstanding = self._outstanding_delegated_jobs()
-            if self._notify("complete", running_children=outstanding):
+            if self._loop_suppress_completion:
+                # A held goal loop (`/loop <goal text>`) owns the SINGLE release
+                # toast, fired only when the judge says the goal is achieved (see
+                # `_loop_goal_worker`). Every goal-mode turn reaches this handler,
+                # so without this short-circuit an unbounded loop would fire a
+                # completion toast per turn — the notification fatigue the goal
+                # mode exists to remove. Numeric mode does not set the flag, so
+                # its per-turn behaviour is unchanged.
+                pass
+            elif self._notify("complete", running_children=outstanding):
                 self._completion_deferred = False
             elif outstanding:
                 # A fresh deferral starts with an empty handled-set, or ids
