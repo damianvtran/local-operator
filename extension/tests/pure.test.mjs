@@ -14,13 +14,66 @@ async function load(entry) {
   return { loaded, close: () => rm(dir, { recursive: true, force: true }) };
 }
 
-test("origin policy only permits stored HTTP origins", async () => {
+test("origin policy preserves exact grants and scopes loopback all-port grants", async () => {
   const module = await load("src/origin-policy.ts");
   try {
-    const url = module.loaded.safeHttpUrl("https://example.com/path");
-    assert.equal(module.loaded.storedOriginAllowed({ "https://example.com": "allow" }, url), true);
-    assert.equal(module.loaded.storedOriginAllowed({}, url), false);
+    const exact = module.loaded.safeHttpUrl("https://example.com/path");
+    assert.equal(module.loaded.storedOriginAllowed({ "https://example.com": "allow" }, exact), true);
+    assert.equal(module.loaded.storedOriginAllowed({}, exact), false);
     assert.throws(() => module.loaded.safeHttpUrl("chrome://settings"));
+
+    const eligible = ["http://LOCALHOST:5173", "http://127.0.0.1:3000", "http://[::1]:8000"];
+    for (const href of eligible) assert.equal(module.loaded.isLoopbackHost(new URL(href)), true, href);
+    const ineligible = [
+      "http://localhost.:5173",
+      "http://api.localhost:5173",
+      "http://127.0.0.2",
+      "http://0.0.0.0",
+      "http://[::ffff:127.0.0.1]",
+      "http://192.168.1.1",
+      "http://example.com",
+      "http://locаlhost", // Cyrillic 'a' is not ASCII localhost.
+    ];
+    for (const href of ineligible) assert.equal(module.loaded.isLoopbackHost(new URL(href)), false, href);
+    assert.throws(() => module.loaded.safeHttpUrl("http://127.1"), /127\.0\.0\.1 exactly/);
+
+    assert.equal(module.loaded.displayAuthority(new URL("http://localhost:5173")), "localhost:5173");
+    assert.equal(module.loaded.displayAuthority(new URL("http://localhost:80")), "localhost");
+    assert.equal(module.loaded.displayAuthority(new URL("https://localhost:443")), "localhost");
+    assert.equal(module.loaded.displayAuthority(new URL("http://[::1]:8000")), "[::1]:8000");
+
+    const source = new URL("http://localhost:5173");
+    const key = module.loaded.loopbackHostGrantKey(source);
+    const hostGrants = { version: 1, grants: { [key]: { scope: "all_ports", createdAt: 1 } } };
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://localhost:9999"), hostGrants), true);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("https://localhost:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://127.0.0.1:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://api.localhost:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, source, { ...hostGrants, version: 2 }), false);
+    assert.equal(module.loaded.loopbackHostGrantLabel(key), "http://localhost");
+  } finally { await module.close(); }
+});
+
+test("settings list and revoke exact and all-port grants independently", async () => {
+  const module = await load("src/options/grant-list.ts");
+  try {
+    const key = JSON.stringify(["http:", "localhost"]);
+    const origins = { "http://localhost:5173": "allow" };
+    const hostGrants = {
+      version: 1,
+      grants: { [key]: { scope: "all_ports", createdAt: 1 } },
+    };
+    const rows = module.loaded.grantRows(origins, hostGrants);
+    assert.deepEqual(rows.map((row) => row.label), [
+      "http://localhost · all ports",
+      "http://localhost:5173 · this port",
+    ]);
+    const exactRemoved = module.loaded.removeGrant(rows[1], origins, hostGrants);
+    assert.deepEqual(exactRemoved.origins, {});
+    assert.equal(hostGrants.grants[key].scope, "all_ports", "broader grant remains");
+    const hostRemoved = module.loaded.removeGrant(rows[0], origins, hostGrants);
+    assert.deepEqual(hostRemoved.hostGrants.grants, {});
+    assert.equal(origins["http://localhost:5173"], "allow", "exact grant remains");
   } finally { await module.close(); }
 });
 

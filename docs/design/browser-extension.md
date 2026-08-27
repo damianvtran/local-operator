@@ -705,9 +705,13 @@ Out of scope v1, and why:
   story reviewers want; submit early, and keep a sideload path documented
   (`chrome://extensions` → developer mode) so the feature is usable before
   approval.
-- **Origin-prompt fatigue**: default-deny with per-origin persistence is the
-  right trade, but watch real transcripts for prompt-storms (redirect chains
-  through consent/SSO domains). The "Always allow" affordance plus gating
+- **Origin-prompt fatigue**: default-deny with exact-origin persistence is the
+  right trade. The popup shows the full authority, including nondefault ports.
+  Only literal `localhost`, `127.0.0.1`, and `[::1]` prompts offer an explicit
+  same-scheme, same-host all-port grant; trailing dots, subdomains, shorthand
+  IPv4, mapped IPv6, and names that merely resolve to loopback remain exact-
+  origin only. Watch real transcripts for prompt-storms (redirect chains
+  through consent/SSO domains). The standing-grant affordances plus gating
   navigations only (not subresources) should keep it to one prompt per new
   site.
 - **Two release lines**: extension and Python versions drift by design;
@@ -731,8 +735,9 @@ Out of scope v1, and why:
    token prefix; every cmux truth-check (PNG magic, fill compare, live
    URL/title reporting) retained on the Python side.
 5. Security = loopback bind + Origin pin + human-confirmed pairing
-   (terminal→browser code direction) + extension-enforced per-origin
-   default-deny; the debugger infobar embraced as visibility.
+   (terminal→browser code direction) + extension-enforced site-access grants
+   (exact-origin by default, explicit loopback all-port only) and default-deny;
+   the debugger infobar embraced as visibility.
 6. esbuild + vanilla TS extension, repo-root directory excluded from the wheel
    by the existing packages.find include, released to the store on its own
    version line with `PROTO_VERSION` as the compatibility contract.

@@ -84,7 +84,7 @@ setPendingObserver((pending) => {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
       title: "Local Operator needs your OK",
-      message: `Allow the agent to open ${pending.hostname}? Click the extension icon in the toolbar to decide.`,
+      message: `Allow the agent to open ${pending.authority}? Click the extension icon in the toolbar to decide.`,
       priority: 2,
     });
   } else {
@@ -305,6 +305,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // GENERATION the popup rendered (round-2 B1): resolveOrigin rejects a
   // decision for a prompt that was replaced after the popup drew it.
   if (message?.event === "origin_decision") {
+    // The worker treats popup messages as hostile input. resolveOrigin validates
+    // both the decision vocabulary and loopback eligibility before persistence.
     // sendResponse + `return true` keeps the MV3 event alive until the
     // decision is DURABLY recorded (record, grant, allowlist, prompt
     // teardown). A fire-and-forget here let Chrome settle the popup's

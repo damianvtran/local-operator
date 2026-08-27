@@ -7,6 +7,17 @@ backend, and it is advertised only when a cmux CLI can be reached.
 Implementation: the `browser` section of `local_operator/tools/builtin.py`.
 Tests: `tests/unit/tools/test_browser_tool.py`.
 
+## Site approval scopes
+
+The browser extension denies new sites by default. Persistent approval is exact
+origin, including scheme and port, and the popup shows the normalized authority
+so nondefault ports remain visible. For literal `localhost`, `127.0.0.1`, and
+`[::1]` only, the popup also offers **Always all ports**. That explicit grant
+covers the same scheme and exact hostname across ports; it never crosses to
+HTTPS, a sibling loopback address, a localhost subdomain, a private-network
+address, or a name that merely resolves to loopback. Settings lists and revokes
+exact-origin and loopback all-port grants independently.
+
 ## Actions
 
 | action | what it does | cmux command underneath |
