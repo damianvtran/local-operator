@@ -17,7 +17,7 @@ import {
   matchingGrantScope,
   safeHttpUrl,
 } from "./origin-policy";
-import { grantLoopbackHost } from "./host-grants";
+import { grantExactOrigin, grantLoopbackHost } from "./access-grants";
 import { ORIGIN_PROMPT_TIMEOUT_MS } from "./protocol.gen";
 import { getLocal, getSession, withSessionMutation } from "./state";
 
@@ -55,8 +55,7 @@ export async function originGrantScope(url: URL): Promise<"origin" | "loopback_a
 async function persistDecision(origin: string, decision: OriginDecision): Promise<boolean> {
   const url = safeHttpUrl(origin);
   if (decision === "always") {
-    const { origins = {} } = await getLocal();
-    await chrome.storage.local.set({ origins: { ...origins, [url.origin]: "allow" } });
+    return grantExactOrigin(url.origin);
   } else if (decision === "all_ports") {
     // The popup is untrusted input. Re-parse and re-classify at the storage
     // boundary so a forged message cannot mint a broad public-site grant.
