@@ -5747,10 +5747,10 @@ class Session:
         Gemini builder is taught to honour it, since it otherwise ignores
         ``tool_choice`` and non-empty tools would newly ALLOW a call).
 
-        Known caveat for the reviewer: on Anthropic a ``tool_choice`` that
-        differs from the turn's can still invalidate the growing MESSAGE-tail
-        cache while the tools+system HEAD stays warm — the head is the large,
-        stable win here; the tail delta is bounded by the turn's own tail.
+        Caveat: on Anthropic a ``tool_choice`` that differs from the turn's
+        can still invalidate the growing MESSAGE-tail cache while the
+        tools+system HEAD stays warm — the head is the large, stable win here;
+        the tail delta is bounded by the turn's own tail.
 
         Safe to call mid-turn, and the pairing below is what makes that true —
         see :meth:`_wire_legal_snapshot`.
