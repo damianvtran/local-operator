@@ -174,6 +174,7 @@ async def test_scroll_wire_params_only_set_fields(monkeypatch) -> None:
     assert captured["params"] == {
         "tab": "bridge:9:nonce",
         "requester": "call:t",
+        "session_label": "Session",
         "y": 400.0,
     }
     # Result reports the landing position and that more remains below.
@@ -389,7 +390,11 @@ async def test_request_access_works_without_a_surface(monkeypatch) -> None:
         assert action == "request_access"
         # The tool binds the approval to an identity (session when the host
         # provides one, else the tool call id — never anonymous).
-        assert params == {"url": "https://example.com", "requester": "call:t"}
+        assert params == {
+            "url": "https://example.com",
+            "requester": "call:t",
+            "session_label": "Session",
+        }
         return {"origin": "https://example.com", "state": "pending"}, None
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)
@@ -510,6 +515,74 @@ async def test_session_identity_is_stable_across_the_whole_flow(monkeypatch) -> 
     assert [entry[0] for entry in seen] == ["request_access", "await_access", "open"]
     identities = {entry[1] for entry in seen}
     assert identities == {"session:sess-42"}, f"identity drifted: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_browser_session_label_is_sanitized_and_host_derived(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    seen: list[dict[str, Any]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        seen.append(dict(params))
+        return {"tab": "bridge:5:n0nce", "url": "https://example.com/", "title": "x"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(
+        session_id="secret-session-uuid",
+        session_name="  Q1\u202e launch\u200b   notes " + "🙂" * 40,
+        browser=BrowserSurface(),
+    )
+    result = await builtin.execute_browser(
+        "call-1",
+        {
+            "action": "open",
+            "url": "https://example.com",
+            # BrowserParams forbids these model-controlled overrides entirely.
+        },
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error
+    assert seen[0]["requester"] == "session:secret-session-uuid"
+    assert seen[0]["session_label"] == "Q1 launch notes…"
+    assert "secret-session-uuid" not in seen[0]["session_label"]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("", "Session"),
+        ("\x00\x7f\x85\u202d\u2066\ufeff", "Session"),
+        ("  one\t two\nthree  ", "one two three"),
+        ("e\u0301" * 31, "e\u0301" * 30 + "…"),
+    ],
+)
+def test_browser_session_label_edge_cases(name: str, expected: str) -> None:
+    assert builtin._browser_session_label(ToolContext(session_name=name)) == expected
+
+
+@pytest.mark.asyncio
+async def test_rename_changes_label_without_changing_requester(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    seen: list[tuple[str, str]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        seen.append((str(params["requester"]), str(params["session_label"])))
+        return {"origin": "https://example.com", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(session_id="same", session_name="Before", browser=BrowserSurface())
+    await builtin.execute_browser(
+        "t1", {"action": "request_access", "url": "https://example.com"}, None, None, context
+    )
+    context.session_name = "After"
+    await builtin.execute_browser(
+        "t2", {"action": "request_access", "url": "https://example.com"}, None, None, context
+    )
+    assert seen == [("session:same", "Before"), ("session:same", "After")]
 
 
 @pytest.mark.asyncio
