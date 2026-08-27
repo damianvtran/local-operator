@@ -580,7 +580,12 @@ async def _run_in_background(
                 except _WorkerCrash as exc:
                     tail = exc.stderr[-_CRASH_STDERR_TAIL_CHARS:].strip() or "(no stderr)"
                     return f"Python kernel crashed.\n--- stderr (tail) ---\n{tail}"
-                return _background_summary(response, context)
+                # Off the loop: _background_summary runs spill_truncate, whose
+                # store-eviction sweep is O(entries) synchronous disk I/O (see
+                # _render). This runner coroutine is scheduled on the render
+                # loop, so an inline sweep would freeze the TUI exactly as the
+                # foreground path did.
+                return await asyncio.to_thread(_background_summary, response, context)
             if abort_waiter is not None and abort_waiter in done:
                 return "CANCELLED: background kernel killed mid-run"
             return f"TIMEOUT after {timeout}s: background kernel killed mid-run"
@@ -818,10 +823,10 @@ async def execute_eval(
     # Success: the kernel stays resident for the next call.
     kernel.last_used = time.monotonic()
     _remember(key, kernel)
-    return _render(tool_call_id, response or {}, context, on_update)
+    return await _render(tool_call_id, response or {}, context, on_update)
 
 
-def _render(
+async def _render(
     tool_call_id: str,
     response: dict[str, Any],
     context: ToolContext | None,
@@ -834,12 +839,28 @@ def _render(
     ``details`` is never serialized to providers, so the human sees it and
     the model does not. Everything the model reads is routed through
     ``spill_truncate`` for the shared 8 KiB budget with a spill handle.
+
+    The ``spill_truncate`` tail is offloaded with ``asyncio.to_thread`` because
+    it runs on the same event loop Textual renders on, and it is not cheap: a
+    result over the 8 KiB spill threshold triggers the spill store's LRU
+    eviction sweep, which stats and reads one sidecar file per stored entry
+    (O(entries), synchronous disk I/O) before writing the new entry. Run inline
+    it froze the render loop — measured at ~84 ms for a 30 KB result and ~0.8-1.2 s
+    for a 900 KB result once the store held ~1.5 k entries — which is the eval
+    freeze the operator reported. Bash offloads the identical oversized-output
+    tail for the same reason; this brings eval in line. Only ``display`` stays on
+    the loop: it is a bounded join published immediately so the human sees it
+    without waiting for the spill/truncate work behind it.
     """
     ok = bool(response.get("ok"))
     stdout = str(response.get("stdout") or "")
     stderr = str(response.get("stderr") or "")
     result_repr = response.get("result")
     result_repr = str(result_repr) if result_repr is not None else None
+    # Kept raw and stringified lazily in the error branch of
+    # _build_render_result: on the common success path the message is discarded,
+    # so building it here would be wasted work on every call (review round 1, m1).
+    error = response.get("error")
     display = [str(item) for item in response.get("display") or []]
 
     if display and on_update is not None:
@@ -850,6 +871,36 @@ def _render(
             )
         )
 
+    return await asyncio.to_thread(
+        _build_render_result,
+        tool_call_id,
+        ok,
+        stdout,
+        stderr,
+        result_repr,
+        error,
+        display,
+        context,
+    )
+
+
+def _build_render_result(
+    tool_call_id: str,
+    ok: bool,
+    stdout: str,
+    stderr: str,
+    result_repr: str | None,
+    error: Any,
+    display: list[str],
+    context: ToolContext | None,
+) -> ToolResult:
+    """Assemble the ToolResult body off the event loop.
+
+    Synchronous by design — ``asyncio.to_thread`` is the only caller (see
+    :func:`_render`). Everything here — the ``_bash_output_summary`` join and
+    the ``spill_truncate`` that may sweep and rewrite the spill store — is
+    CPU/disk work that must not run on the render loop.
+    """
     # The result leads so head-biased truncation keeps it: it is the one line
     # the call existed to produce.
     if ok:
@@ -863,8 +914,8 @@ def _render(
             details = {**(details or {}), "display": display}
         return _text(tool_call_id, "eval", text, details=details)
 
-    error = str(response.get("error") or "(no error reported)")
-    body = "\n".join([error, _bash_output_summary(stdout, stderr)])
+    error_text = str(error or "(no error reported)")
+    body = "\n".join([error_text, _bash_output_summary(stdout, stderr)])
     text, spill_details = spill_truncate(body, "eval", context, TOOL_OUTPUT_LIMIT_CHARS)
     return ToolResult(
         tool_call_id=tool_call_id,
