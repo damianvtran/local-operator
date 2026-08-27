@@ -137,6 +137,54 @@ test("decision between enqueue publication and return cannot miss the waiter", a
   } finally { await bundle.close(); chrome.restore(); }
 });
 
+test("identical in-command admissions are independently visible and decidable", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    const first = origins.askOrigin(url("https://same-hop.example"), "same-command");
+    const second = origins.askOrigin(url("https://same-hop.example"), "same-command");
+    while (chrome.session("accessQueue")?.length !== 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    const [a, b] = chrome.session("accessQueue");
+    assert.notEqual(a.entryId, b.entryId);
+    await origins.resolveOrigin(a.origin, "deny", a.entryId);
+    assert.equal(await first, false);
+    assert.equal(chrome.session("accessQueue").length, 1, "deny removes only the selected navigation");
+    await origins.resolveOrigin(b.origin, "once", b.entryId);
+    assert.equal(await second, true);
+    assert.equal(chrome.session("onceGrants")?.["https://same-hop.example\nsame-command"], undefined);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("always allow reconciles every identical in-command waiter", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    const first = origins.askOrigin(url("https://fleet-hop.example"), "same-command");
+    const second = origins.askOrigin(url("https://fleet-hop.example"), "same-command");
+    while (chrome.session("accessQueue")?.length !== 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    const selected = chrome.session("accessQueue")[0];
+    await origins.resolveOrigin(selected.origin, "always", selected.entryId);
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    assert.equal(chrome.session("accessQueue").length, 0);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("TTL sweep settles every identical in-command waiter", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    const first = origins.askOrigin(url("https://expire-both.example"), "same-command");
+    const second = origins.askOrigin(url("https://expire-both.example"), "same-command");
+    while (chrome.session("accessQueue")?.length !== 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    const expiresAt = Math.max(...chrome.session("accessQueue").map((entry) => entry.expiresAt));
+    await origins.sweepQueue(expiresAt);
+    assert.deepEqual(await Promise.all([first, second]), [false, false]);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
 test("TTL sweep resolves an in-command waiter as denied without popup action", async () => {
   const chrome = installChromeStub();
   const bundle = await loadModule("src/origins.ts");

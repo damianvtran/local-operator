@@ -194,11 +194,12 @@ export function enqueueAccess(
   return withSessionMutation(async () => {
     const now = Date.now();
     const snapshot = await normalizedLocked(now);
-    const existing = findPending(snapshot.queue, url.origin, requester, kind, now);
+    // Only narrated async requests deduplicate. Two paused documents under one
+    // command carry the same requester/origin/kind/commandId but represent two
+    // independently blocked navigations. Sharing one generation would either
+    // overwrite a waiter or make one Allow once authorize both.
+    const existing = kind === "async" ? findPending(snapshot.queue, url.origin, requester, kind, now) : undefined;
     if (existing) {
-      // Registration occurs while the session mutation lock is held. A popup
-      // decision cannot consume this generation before its waiter exists.
-      onAdmitted?.(existing);
       await armNextExpiry(snapshot);
       return {
         origin: url.origin,
@@ -295,7 +296,10 @@ export function decideAccess(entryId: string, decision: OriginDecision): Promise
       const receipt = receiptFor(entry, state, now);
       snapshot.results[resultKey(entry.entryId, entry.requester)] = receipt;
     }
-    if (decision === "once") {
+    if (decision === "once" && selected.kind === "async") {
+      // An in-command entry spends its one use by resuming that paused document
+      // immediately. Minting a stored grant as well would silently authorize a
+      // second future navigation.
       snapshot.onceGrants[requesterOriginKey(selected.origin, selected.requester)] = {
         origin: selected.origin,
         requester: selected.requester,
