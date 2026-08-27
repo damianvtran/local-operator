@@ -58,7 +58,10 @@ _ROWS = [
     ("edit", {"path": "local_operator/tui/glyphs.py"}),
     ("grep", {"query": "nerd_icons_enabled"}),
     ("task", {"prompt": "run the review gate"}),
-    ("mcp__linear_create_issue", {"title": "tofu on Apple Terminal"}),
+    # display_name() strips the ``mcp__linear_`` prefix to the call segment,
+    # so pick one whose call fits the 8-cell name spine without truncation
+    # (``search`` -> ``search``); a longer call would clip and muddy the shot.
+    ("mcp__linear_search", {"query": "tofu on Apple Terminal"}),
 ]
 
 

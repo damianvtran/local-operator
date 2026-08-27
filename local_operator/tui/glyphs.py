@@ -119,8 +119,12 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     "grep": "/",  # the /pattern/ sigil
     "todo": "▪",  # one item in a list
     "wake": "○",  # a clock face
-    "list_variables": "x",  # the algebraic unknown
-    "read_variable": "x",
+    # `=` (algebraic assignment), NOT `x`: the earlier `x` shared its SHAPE
+    # with the `✗` failure verdict the status column prints, the one plain
+    # glyph echoing an outcome mark. `=` says "a value bound to a name" with
+    # no verdict collision, and stays a single Latin-1 cell.
+    "list_variables": "=",
+    "read_variable": "=",
     "browser": "@",  # the URL sigil
     "web_search": "?",  # a search query, in the verified ASCII fallback repertoire
     "web_fetch": "\u2193",  # a downward arrow: content pulled down from a URL
@@ -189,12 +193,19 @@ def _nerd_capable_terminal(env: EnvMap | None = None) -> bool:
     # ghostty (and cmux, which embeds it) — bundles JetBrainsMono Nerd Font.
     if source.get("GHOSTTY_RESOURCES_DIR") or source.get("GHOSTTY_BIN"):
         return True
-    # kitty — bundles Symbols Nerd Font as its symbol_map fallback.
-    if source.get("KITTY_WINDOW_ID") or source.get("TERM", "") == "xterm-kitty":
+    # kitty — bundles Symbols Nerd Font as its symbol_map fallback. ``startswith``
+    # rather than equality so TERM variants (``xterm-kitty-direct``) still match,
+    # matching notify.detect_protocol's kitty check exactly.
+    if source.get("KITTY_WINDOW_ID") or source.get("TERM", "").startswith("xterm-kitty"):
         return True
     # wezterm — ships Nerd Font Symbols as a default fallback font.
     if source.get("WEZTERM_PANE") or source.get("WEZTERM_EXECUTABLE"):
         return True
+    # iTerm2 (iterm.app) and Warp (warpterminal) are deliberately OMITTED from
+    # this set even though notify.detect_protocol lists them: neither bundles a
+    # Nerd symbol fallback font, so the PUA codepoints would tofu there. A
+    # patched-font iTerm user opts in via the explicit ``display.nerd_icons``
+    # config flag rather than being auto-enabled into replacement boxes.
     term_program = source.get("TERM_PROGRAM", "").lower()
     if term_program in ("ghostty", "wezterm"):
         return True
