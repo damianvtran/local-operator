@@ -44,16 +44,12 @@ test("origin policy preserves exact grants and scopes loopback all-port grants",
 
     const source = new URL("http://localhost:5173");
     const key = module.loaded.loopbackHostGrantKey(source);
-    const storageKey = module.loaded.hostGrantOperationStorageKey("grant-1");
-    const local = {
-      hostGrants: { version: 1 },
-      [storageKey]: { canonicalKey: key, action: "grant", at: 1 },
-    };
-    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://localhost:9999"), local), true);
-    assert.equal(module.loaded.storedOriginAllowed({}, new URL("https://localhost:9999"), local), false);
-    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://127.0.0.1:9999"), local), false);
-    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://api.localhost:9999"), local), false);
-    assert.equal(module.loaded.storedOriginAllowed({}, source, { ...local, hostGrants: { version: 2 } }), false);
+    const hostGrants = { version: 1, grants: { [key]: { scope: "all_ports", createdAt: 1 } } };
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://localhost:9999"), hostGrants), true);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("https://localhost:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://127.0.0.1:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://api.localhost:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, source, { version: 2, grants: {} }), false);
     assert.equal(module.loaded.loopbackHostGrantLabel(key), "http://localhost");
   } finally { await module.close(); }
 });
@@ -63,18 +59,17 @@ test("settings list and revoke exact and all-port grants independently", async (
   try {
     const key = JSON.stringify(["http:", "localhost"]);
     const origins = { "http://localhost:5173": "allow" };
-    const storageKey = "hostGrantOp:v1:grant-1";
-    const local = {
-      hostGrants: { version: 1 },
-      [storageKey]: { canonicalKey: key, action: "grant", at: 1 },
+    const hostGrants = {
+      version: 1,
+      grants: { [key]: { scope: "all_ports", createdAt: 1 } },
     };
-    const rows = module.loaded.grantRows(origins, local);
+    const rows = module.loaded.grantRows(origins, hostGrants);
     assert.deepEqual(rows.map((row) => row.label), [
       "http://localhost · all ports",
       "http://localhost:5173 · this port",
     ]);
     assert.deepEqual(module.loaded.removeExactGrant(rows[1], origins), {});
-    assert.equal(local[storageKey].action, "grant", "broader grant remains");
+    assert.equal(hostGrants.grants[key].scope, "all_ports", "broader grant remains");
     assert.equal(rows[0].key, key, "host revoke targets the canonical authority");
     assert.equal(origins["http://localhost:5173"], "allow", "exact grant remains");
 

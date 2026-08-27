@@ -1,4 +1,3 @@
-import { hostGrantOperationStorageKey } from "../origin-policy";
 import { DEFAULT_PORT, getLocal } from "../state";
 import { grantRows, removeExactGrant } from "./grant-list";
 
@@ -51,7 +50,7 @@ async function render(): Promise<void> {
   port.value = String(saved);
   await renderStatus();
   sites.replaceChildren();
-  const entries = grantRows(origins, local);
+  const entries = grantRows(origins, local.hostGrants);
   sitesEmpty.classList.toggle("hidden", entries.length > 0);
   for (const entry of entries) {
     const row = document.createElement("li");
@@ -64,15 +63,11 @@ async function render(): Promise<void> {
     remove.addEventListener("click", async () => {
       const local = await getLocal();
       if (entry.scope === "host") {
-        // Timestamp before storage starts. A revoke initiated after an approval
-        // wins even if that earlier worker write physically lands afterward.
-        await chrome.storage.local.set({
-          [hostGrantOperationStorageKey(crypto.randomUUID())]: {
-            canonicalKey: entry.key,
-            action: "revoke",
-            at: Date.now(),
-          },
-        });
+        const response = (await chrome.runtime.sendMessage({
+          event: "host_grant_revoke",
+          canonicalKey: entry.key,
+        })) as { applied?: boolean } | undefined;
+        if (!response?.applied) return;
       } else {
         await chrome.storage.local.set({
           origins: removeExactGrant(entry, local.origins ?? {}),
@@ -99,8 +94,10 @@ port.addEventListener("change", async () => {
 
 document.getElementById("unpair")?.addEventListener("click", async () => {
   const beforeUnpair = await getLocal();
-  const hostGrantKeys = Object.keys(beforeUnpair).filter((key) => key.startsWith("hostGrantOp:v1:"));
-  await chrome.storage.local.remove(["token", "origins", "hostGrants", ...hostGrantKeys]);
+  const cleared = (await chrome.runtime.sendMessage({ event: "clear_access_grants" })) as
+    | { applied?: boolean }
+    | undefined;
+  if (!cleared?.applied) return;
   // Tell the running daemon so it severs the LIVE socket, not just the next
   // reconnect (findings A5/U1). Best-effort: the daemon may be down.
   const { port: saved = DEFAULT_PORT } = beforeUnpair;
