@@ -1,20 +1,19 @@
 export type StoredVerdict = "allow" | "deny";
 
-export interface HostGrantOperation {
-  canonicalKey: string;
-  action: "grant" | "revoke";
-  at: number;
+export interface HostGrant {
+  scope: "all_ports";
+  createdAt: number;
 }
 
-/** The schema marker is deliberately separate from append-only operations.
- * Each decision writes a unique chrome.storage key, so worker and Settings
- * contexts never race by rewriting shared state. */
+/** Versioned separately from exact-origin decisions so older extensions keep
+ * enforcing the origin allowlist they understand instead of misreading a
+ * broader authority. Unknown versions deliberately fail closed. */
 export interface HostGrantsState {
   version: 1;
+  grants: Record<string, HostGrant>;
 }
 
 export type GrantScope = "origin" | "loopback_all_ports";
-export const HOST_GRANT_STORAGE_PREFIX = "hostGrantOp:v1:";
 
 export function safeHttpUrl(raw: unknown): URL {
   if (typeof raw !== "string") throw new Error("URL is required");
@@ -22,11 +21,6 @@ export function safeHttpUrl(raw: unknown): URL {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("only http:// and https:// can be opened");
   }
-  // WHATWG URL turns IPv4 shorthand such as 127.1 into 127.0.0.1. That is
-  // convenient for navigation but unsafe for a grant classifier whose contract
-  // explicitly admits only the literal loopback identities. Compare the raw
-  // host token before returning the normalized URL so shorthand cannot acquire
-  // the exact host's authority.
   if (parsed.hostname === "127.0.0.1") {
     const authority = raw.match(/^https?:\/\/([^/?#]+)/i)?.[1] ?? "";
     const rawHost = authority.startsWith("[")
@@ -45,21 +39,13 @@ export function isLoopbackHost(url: URL): boolean {
   return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
 }
 
-/** URL.host is the browser's normalized display authority. It includes a
- * nondefault port and correctly brackets IPv6 without hand-built syntax. */
 export function displayAuthority(url: URL): string {
   return url.host;
 }
 
-/** JSON's array encoding is a structured, collision-free serializer for the
- * normalized scheme and exact hostname. The port is intentionally absent. */
 export function loopbackHostGrantKey(url: URL): string | null {
   if (!isLoopbackHost(url)) return null;
   return JSON.stringify([url.protocol, url.hostname]);
-}
-
-export function hostGrantOperationStorageKey(operationId: string): string {
-  return `${HOST_GRANT_STORAGE_PREFIX}${operationId}`;
 }
 
 export function loopbackHostGrantLabel(key: string): string | null {
@@ -78,53 +64,31 @@ export function loopbackHostGrantLabel(key: string): string | null {
 
 export function validHostGrantSchema(value: unknown): value is HostGrantsState {
   return !!value && typeof value === "object" && !Array.isArray(value) &&
-    (value as { version?: unknown }).version === 1;
-}
-
-export function validHostGrantOperation(value: unknown): value is HostGrantOperation {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const operation = value as Partial<HostGrantOperation>;
-  return typeof operation.canonicalKey === "string" &&
-    loopbackHostGrantLabel(operation.canonicalKey) !== null &&
-    (operation.action === "grant" || operation.action === "revoke") &&
-    typeof operation.at === "number" && Number.isFinite(operation.at);
-}
-
-/** Latest logical operation for one authority. Operation time is captured
- * before async storage begins; therefore a revoke started after an approval
- * wins even if the earlier approval's write physically lands last. Ties fail
- * closed by preferring revoke. */
-export function latestHostGrantOperation(
-  local: Record<string, unknown>,
-  canonicalKey: string,
-): HostGrantOperation | null {
-  if (!validHostGrantSchema(local.hostGrants)) return null;
-  let latest: HostGrantOperation | null = null;
-  for (const [storageKey, value] of Object.entries(local)) {
-    if (!storageKey.startsWith(HOST_GRANT_STORAGE_PREFIX) || !validHostGrantOperation(value)) continue;
-    if (value.canonicalKey !== canonicalKey) continue;
-    if (!latest || value.at > latest.at || (value.at === latest.at && value.action === "revoke")) {
-      latest = value;
-    }
-  }
-  return latest;
+    (value as { version?: unknown }).version === 1 &&
+    !!(value as { grants?: unknown }).grants &&
+    typeof (value as { grants?: unknown }).grants === "object" &&
+    !Array.isArray((value as { grants?: unknown }).grants);
 }
 
 export function matchingGrantScope(
   origins: Record<string, StoredVerdict>,
-  local: Record<string, unknown>,
+  hostGrants: unknown,
   url: URL,
 ): GrantScope | null {
   if (origins[url.origin] === "allow") return "origin";
+  if (!validHostGrantSchema(hostGrants)) return null;
   const key = loopbackHostGrantKey(url);
   if (!key) return null;
-  return latestHostGrantOperation(local, key)?.action === "grant" ? "loopback_all_ports" : null;
+  const grant = hostGrants.grants[key];
+  return grant?.scope === "all_ports" && typeof grant.createdAt === "number"
+    ? "loopback_all_ports"
+    : null;
 }
 
 export function storedOriginAllowed(
   origins: Record<string, StoredVerdict>,
   url: URL,
-  local: Record<string, unknown> = {},
+  hostGrants?: unknown,
 ): boolean {
-  return matchingGrantScope(origins, local, url) !== null;
+  return matchingGrantScope(origins, hostGrants, url) !== null;
 }
