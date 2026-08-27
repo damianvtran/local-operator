@@ -18,9 +18,28 @@ export type { OriginDecision } from "./access-queue";
 // origin: two commands paused on the same redirect must resume independently.
 const waiting = new Map<string, (decision: OriginDecision) => void>();
 let onPendingChange: ((snapshot: QueueSnapshot) => void) | null = null;
+
+function reconcileWaiters(snapshot: QueueSnapshot): void {
+  for (const [entryId, resolve] of waiting) {
+    if (snapshot.queue.some((entry) => entry.entryId === entryId)) continue;
+    const receipt = Object.values(snapshot.results).find((candidate) => candidate.entryId === entryId);
+    if (!receipt) continue;
+    waiting.delete(entryId);
+    resolve(receipt.state === "allowed" ? "always" : "deny");
+  }
+}
+
+// Decisions, cancellation, and TTL expiry all fold through durable receipts.
+// Install reconciliation when this module loads, not when worker UI wiring is
+// attached, so storage integration and restarted-worker paths have the same
+// completion guarantee.
+setQueueObserver((snapshot) => {
+  reconcileWaiters(snapshot);
+  onPendingChange?.(snapshot);
+});
+
 export function setPendingObserver(observer: (snapshot: QueueSnapshot) => void): void {
   onPendingChange = observer;
-  setQueueObserver(observer);
 }
 
 export async function originAllowed(url: URL): Promise<boolean> {
@@ -33,8 +52,8 @@ export interface OriginAdmission {
   viaOnceGrant: boolean;
 }
 
-export function consumeOnceGrant(url: URL, requester: string): Promise<boolean> {
-  return withSessionMutation(async () => {
+export async function consumeOnceGrant(url: URL, requester: string): Promise<boolean> {
+  const consumed = await withSessionMutation(async () => {
     const session = await getSession();
     const grants = { ...(session.onceGrants ?? {}) };
     const key = requesterOriginKey(url.origin, requester);
@@ -44,10 +63,12 @@ export function consumeOnceGrant(url: URL, requester: string): Promise<boolean> 
     await chrome.storage.session.set({ onceGrants: grants });
     return true;
   });
+  if (consumed) await sweepQueue();
+  return consumed;
 }
 
 async function consumeGrantFor(url: URL, sessionRequester: string, commandId: string): Promise<boolean> {
-  return withSessionMutation(async () => {
+  const consumed = await withSessionMutation(async () => {
     const session = await getSession();
     const grants = { ...(session.onceGrants ?? {}) };
     const directKey = requesterOriginKey(url.origin, sessionRequester);
@@ -64,6 +85,8 @@ async function consumeGrantFor(url: URL, sessionRequester: string, commandId: st
     await chrome.storage.session.set({ onceGrants: grants });
     return true;
   });
+  if (consumed) await sweepQueue();
+  return consumed;
 }
 
 export async function ensureTopLevelAccess(
@@ -96,11 +119,17 @@ export async function restoreAccessQueue(): Promise<void> {
 export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
   if (await originAllowed(url)) return true;
   if (await consumeOnceGrant(url, requestId)) return true;
-  const queued = await enqueueAccess(url, requestId, "in_command", requestId);
+  let resolveWaiter!: (decision: OriginDecision) => void;
+  const decision = new Promise<OriginDecision>((resolve) => { resolveWaiter = resolve; });
+  const queued = await enqueueAccess(url, requestId, "in_command", requestId, (entry) => {
+    // enqueueAccess invokes this callback under the same mutation lock that
+    // publishes the entry. No decision or expiry sweep can interleave between
+    // visibility and registration.
+    waiting.set(entry.entryId, resolveWaiter);
+  });
   if (!queued.entry) return false;
   await updatePromptSurfaces(await sweepQueue());
-  const decision = await new Promise<OriginDecision>((resolve) => waiting.set(queued.entry!.entryId, resolve));
-  return decision !== "deny";
+  return (await decision) !== "deny";
 }
 
 export async function resolveOrigin(
@@ -111,13 +140,9 @@ export async function resolveOrigin(
   if (!entryId) return false;
   const result = await decideAccess(entryId, decision);
   if (!result.applied) return false;
-  for (const entry of result.decided) {
-    const resolve = waiting.get(entry.entryId);
-    if (resolve) {
-      waiting.delete(entry.entryId);
-      resolve(decision === "always" ? "always" : entry.entryId === entryId ? decision : "always");
-    }
-  }
+  // decideAccess persisted receipts before releasing the mutation lock; the
+  // queue observer resolves every matching waiter from those receipts.
+  reconcileWaiters(result.snapshot);
   await updatePromptSurfaces(result.snapshot);
   return true;
 }
@@ -132,7 +157,7 @@ export async function raiseAccessRequest(url: URL, requester: string): Promise<A
   await updatePromptSurfaces(await sweepQueue());
   return result.entry;
 }
-export { cancelAccess };
+export { cancelAccess, sweepQueue };
 
 interface PausedRequest {
   requestId: string;

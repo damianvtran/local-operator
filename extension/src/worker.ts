@@ -7,6 +7,7 @@ import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
+import { ACCESS_EXPIRY_ALARM } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
 import {
@@ -276,11 +277,10 @@ function ensureReconnectAlarm(): void {
 ensureReconnectAlarm();
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONNECT_ALARM_NAME && shouldDialOnAlarm({ connected, connecting })) void connect();
-  // TTL sweep for an async access request nobody is polling: without it an
-  // abandoned request would leave the "!" badge and popup prompt up until the
-  // next access RPC happened to run the lazy sweep. The alarm is created by
-  // request_access with the record's own expiry time.
-  if (alarm.name === "lop-access-expiry") void expireAccessRequest();
+  // The sweep persists receipts, resolves in-command waiters through the queue
+  // observer, and centrally re-arms the earliest remaining queue/result/grant
+  // deadline. No caller owns this alarm independently.
+  if (alarm.name === ACCESS_EXPIRY_ALARM) void expireAccessRequest();
 });
 chrome.runtime.onStartup.addListener(() => {
   alive = true;

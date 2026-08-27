@@ -12,6 +12,7 @@ import { join } from "node:path";
 function installChromeStub() {
   const areas = { session: new Map(), local: new Map() };
   const listeners = [];
+  const alarms = new Map();
   const makeArea = (name) => ({
     get: async (keys) => {
       const out = {};
@@ -38,25 +39,38 @@ function installChromeStub() {
       local: makeArea("local"),
       onChanged: { addListener: (fn) => listeners.push(fn) },
     },
+    alarms: {
+      create: (name, info) => alarms.set(name, info),
+      clear: async (name) => alarms.delete(name),
+    },
+    action: {
+      setBadgeBackgroundColor: async () => {}, setBadgeText: async () => {}, setTitle: async () => {},
+    },
+    debugger: {
+      onEvent: { addListener: () => {}, removeListener: () => {} },
+      onDetach: { addListener: () => {} }, sendCommand: async () => ({}),
+    },
   };
   return {
     session: (key) => areas.session.get(key),
     local: (key) => areas.local.get(key),
     setSession: (key, value) => areas.session.set(key, value),
+    alarm: (name) => alarms.get(name),
     restore: () => { delete globalThis.chrome; },
   };
 }
 
-async function loadStore() {
+async function loadModule(entry = "src/approval-store.ts") {
   const dir = await mkdtemp(join(tmpdir(), "lop-queue-it-"));
   const outfile = join(dir, "module.mjs");
-  await build({ entryPoints: ["src/approval-store.ts"], bundle: true, platform: "node", format: "esm", outfile });
+  await build({ entryPoints: [entry], bundle: true, platform: "node", format: "esm", outfile });
   return {
     import: (tag = "") => import(pathToFileURL(outfile) + (tag ? `?${tag}` : "")),
     close: () => rm(dir, { recursive: true, force: true }),
   };
 }
 
+const loadStore = () => loadModule();
 const url = (origin) => new URL(origin + "/page");
 
 test("concurrent enqueue preserves FIFO and separates same-origin requesters", async () => {
@@ -107,6 +121,99 @@ test("allow once grants only one requester while always reconciles exact-origin 
     assert.equal(chrome.local("origins")["https://same.example"], "allow");
     assert.equal(chrome.session("accessQueue").length, 0);
     assert.equal((await store.accessStatus("https://same.example", "session:B")).state, "allowed");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("decision between enqueue publication and return cannot miss the waiter", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    origins.setPendingObserver((snapshot) => {
+      const entry = snapshot.queue[0];
+      if (entry) void origins.resolveOrigin(entry.origin, "once", entry.entryId);
+    });
+    assert.equal(await origins.askOrigin(url("https://fast.example"), "cmd-fast"), true);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("TTL sweep resolves an in-command waiter as denied without popup action", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    const pending = origins.askOrigin(url("https://expire.example"), "cmd-expire");
+    while (!chrome.session("accessQueue")?.length) await new Promise((resolve) => setTimeout(resolve, 0));
+    const expiresAt = chrome.session("accessQueue")[0].expiresAt;
+    await origins.sweepQueue(expiresAt);
+    assert.equal(await pending, false);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("migration preserves distinct async and in-command legacy records", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadStore();
+  try {
+    const store = await bundle.import();
+    const now = Date.now();
+    chrome.setSession("accessRequest", {
+      origin: "https://a.example", hostname: "a.example", requester: "session:A",
+      requestedAt: now, expiresAt: now + 600_000,
+    });
+    chrome.setSession("pendingOrigin", {
+      origin: "https://b.example", hostname: "b.example", requestId: "cmd-B", promptId: "generation-B",
+    });
+    await store.sweepQueue(now);
+    const queue = chrome.session("accessQueue");
+    assert.deepEqual(queue.map((entry) => [entry.origin, entry.kind, entry.entryId]), [
+      ["https://a.example", "async", queue[0].entryId],
+      ["https://b.example", "in_command", "generation-B"],
+    ]);
+    await store.sweepQueue(now + 1);
+    assert.equal(chrome.session("accessQueue").length, 2, "migration is idempotent");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("migration handles each equal, request-only, and pending-only combination", async () => {
+  for (const mode of ["equal", "request-only", "pending-only"]) {
+    const chrome = installChromeStub();
+    const bundle = await loadStore();
+    try {
+      const store = await bundle.import(mode);
+      const now = Date.now();
+      if (mode !== "pending-only") chrome.setSession("accessRequest", {
+        origin: "https://legacy.example", hostname: "legacy.example", requester: "session:L",
+        requestedAt: now, expiresAt: now + 60_000,
+      });
+      if (mode !== "request-only") chrome.setSession("pendingOrigin", {
+        origin: "https://legacy.example", hostname: "legacy.example", requestId: "session:L", promptId: "legacy-generation",
+      });
+      await store.sweepQueue(now);
+      const queue = chrome.session("accessQueue");
+      assert.equal(queue.length, 1, mode);
+      assert.equal(queue[0].kind, mode === "pending-only" ? "in_command" : "async");
+      if (mode === "equal") assert.equal(queue[0].entryId, "legacy-generation");
+    } finally { await bundle.close(); chrome.restore(); }
+  }
+});
+
+test("earliest expiry alarm survives later async enqueue and advances after sweep", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadStore();
+  try {
+    const store = await bundle.import();
+    const originalNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      const short = await store.enqueueAccess(url("https://short.example"), "cmd-short", "in_command", "cmd-short");
+      assert.equal(chrome.alarm(store.ACCESS_EXPIRY_ALARM).when, short.expires_at);
+      now += 1_000;
+      const long = await store.enqueueAccess(url("https://long.example"), "session:long", "async");
+      assert.equal(chrome.alarm(store.ACCESS_EXPIRY_ALARM).when, short.expires_at, "later enqueue cannot delay earlier expiry");
+      await store.sweepQueue(short.expires_at);
+      assert.equal(chrome.alarm(store.ACCESS_EXPIRY_ALARM).when, long.expires_at);
+    } finally { Date.now = originalNow; }
   } finally { await bundle.close(); chrome.restore(); }
 });
 
