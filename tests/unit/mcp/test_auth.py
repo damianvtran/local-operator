@@ -1866,3 +1866,221 @@ class TestInflightRefreshCoordination:
         # Must not raise; our own locked refresh is never called (no endpoint).
         await self._drive_auth_flow(provider)
         assert refresh_calls["n"] == 0
+
+    async def _drive_401_flow(self, provider, responder) -> list[Any]:
+        """Pump ``async_auth_flow`` the way httpx does, recording every request
+        the flow yields and answering each with ``responder(request)``.
+
+        The responder's return value for the ORIGINAL request is normally a
+        401 (that is the case under test). With the fix, the flow RE-YIELDS the
+        original request (Authorization rewritten to an adopted token) as the
+        retry — the responder sees it as a second yield, exactly as the real
+        httpx client would. Without anything to adopt, the 401 passes through
+        to the SDK and its full-flow machinery (discovery etc.) shows up as
+        further yields.
+        """
+        import httpx
+
+        yielded: list[httpx.Request] = []
+        gen = provider.async_auth_flow(httpx.Request("POST", self.URL, content=b"payload"))
+        try:
+            request = await gen.__anext__()
+            while True:
+                yielded.append(request)
+                response = responder(request)
+                try:
+                    request = await gen.asend(response)
+                except StopAsyncIteration:
+                    return yielded
+        finally:
+            await gen.aclose()
+
+    @pytest.mark.asyncio
+    async def test_401_adopts_peer_token_and_retries_original_request(self) -> None:
+        """The residual Notion bug: a sibling process rotated the grant, which
+        REVOKED our still-unexpired access token server-side. Our request 401s;
+        the flow must adopt the peer's token from the store and RE-YIELD the
+        original request with it (for the same httpx client to send) — never
+        yielding a discovery/registration/browser-grant request."""
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        # Our in-memory token is still VALID locally (unexpired) — coordination
+        # at the top of the flow correctly does nothing for it.
+        await storage.set_tokens(
+            OAuthToken(access_token="revoked-but-unexpired", refresh_token="r1", expires_in=3600)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+
+        provider = build_oauth_provider(
+            self.URL, self._cfg(), store=store, endpoints=self._endpoints()
+        )
+        # Force initialization NOW, while the store still holds OUR token: the
+        # SDK loads current_tokens once in _initialize, so rotating the store
+        # AFTER this point is what leaves the provider holding the revoked
+        # token in memory — the exact multi-process state under test. (Rotating
+        # before _initialize would just load the fresh token at boot, which is
+        # the already-working restart path.)
+        async with provider.context.lock:
+            await provider._initialize()
+
+        # The sibling process rotated the grant after we loaded: the shared
+        # store now holds a fresh token, and the old access token is revoked
+        # server-side (emulated by the responder below).
+        await storage.set_tokens(
+            OAuthToken(access_token="fresh-by-peer", refresh_token="r2", expires_in=3600)
+        )
+
+        import httpx
+
+        calls: list[tuple[httpx.Request, str]] = []
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            calls.append((request, request.headers.get("Authorization", "")))
+            # The resource server 401s the revoked token; the retry carrying the
+            # adopted token succeeds.
+            if request.headers.get("Authorization") == "Bearer fresh-by-peer":
+                return httpx.Response(200, request=request)
+            return httpx.Response(401, request=request)
+
+        yielded = await self._drive_401_flow(provider, responder)
+
+        # Exactly TWO requests reached the caller: the original (401) and the
+        # adoption retry. Nothing else — the 401 never reached the SDK, so its
+        # full-flow machinery (discovery, registration, authorization) never
+        # produced a request.
+        assert len(yielded) == 2
+        # The retry is the SAME request object re-yielded with the adopted
+        # token — the SDK's own end-of-flow retry contract, sent by the same
+        # httpx client that sent the original.
+        assert yielded[1] is yielded[0]
+        assert calls[0][1] == "Bearer revoked-but-unexpired"
+        assert calls[1][1] == "Bearer fresh-by-peer"
+        # The adopted token is now the in-memory token too, so a later request
+        # (or the SDK's own end-of-flow retry) uses it rather than the corpse.
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.access_token == "fresh-by-peer"
+
+    @pytest.mark.asyncio
+    async def test_401_with_identical_stored_token_passes_through_to_sdk(self) -> None:
+        """The store holds exactly the token that just 401'd: the grant is dead
+        everywhere, not merely revoked for us. The 401 must pass through to the
+        SDK unchanged (its full-flow branch becomes reachable, as before the
+        fix) and NO adoption retry may be re-yielded."""
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="dead-token", refresh_token="r1", expires_in=3600)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+
+        # interactive=False: if the 401 wrongly reaches the SDK's full-flow
+        # branch and gets as far as authorization, the flow must RAISE
+        # (McpAuthRequiredError) rather than open a browser in the test run.
+        provider = build_oauth_provider(
+            self.URL, self._cfg(), store=store, endpoints=self._endpoints(), interactive=False
+        )
+
+        import httpx
+
+        yields: list[tuple[httpx.Request, str]] = []
+        seen_401 = {"done": False}
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            yields.append((request, request.headers.get("Authorization", "")))
+            if not seen_401["done"]:
+                # The original request: answer with the 401 challenge.
+                seen_401["done"] = True
+                return httpx.Response(401, request=request)
+            # Anything yielded AFTER the 401 is the SDK's full-flow machinery
+            # (protected-resource discovery first) — proof the challenge
+            # reached the SDK rather than being answered by an adoption retry.
+            # Fail it so the flow terminates without a browser grant.
+            return httpx.Response(404, request=request)
+
+        with contextlib.suppress(Exception):
+            # The failed discovery may or may not raise out of the flow (SDK
+            # version dependent); the yields below are the assertion.
+            await self._drive_401_flow(provider, responder)
+
+        # The FIRST yield is the original request, still bearing the dead token
+        # (adoption did NOT rewrite it — the stored token was identical).
+        assert yields[0][1] == "Bearer dead-token"
+        # The 401 reached the SDK: its full-flow branch yielded at least one
+        # discovery/registration request after the original.
+        assert len(yields) >= 2, "the 401 never reached the SDK's full-flow branch"
+        # No adoption retry: exactly ONE request went to the resource URL (the
+        # original). Everything after it is the SDK's own machinery on other
+        # URLs (discovery/registration), which the SDK may yield several of.
+        to_resource = [y for y in yields if str(y[0].url) == self.URL]
+        assert len(to_resource) == 1
+        assert yields[1][0].url != yields[0][0].url
+
+    @pytest.mark.asyncio
+    async def test_second_401_after_adoption_retry_passes_through(self) -> None:
+        """Adoption is bounded to ONE retry per flow: when the adopted token
+        ALSO 401s (the grant is genuinely dead server-side), that second 401
+        passes through to the SDK's full-flow branch — adoption never loops."""
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="revoked-but-unexpired", refresh_token="r1", expires_in=3600)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+
+        # interactive=False: the second 401 passing through must RAISE out of
+        # the SDK's authorization step, never open a browser in the test run.
+        provider = build_oauth_provider(
+            self.URL, self._cfg(), store=store, endpoints=self._endpoints(), interactive=False
+        )
+        # Load OUR token into memory first (see the adoption test above for why
+        # the rotation must come after _initialize).
+        async with provider.context.lock:
+            await provider._initialize()
+
+        # A peer rotated the grant, but the resource server 401s EVERY bearer
+        # token (emulating a grant the user revoked server-side).
+        await storage.set_tokens(
+            OAuthToken(access_token="also-dead", refresh_token="r2", expires_in=3600)
+        )
+
+        import httpx
+
+        yields: list[tuple[httpx.Request, str]] = []
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            yields.append((request, request.headers.get("Authorization", "")))
+            # The resource server 401s every bearer token on this URL; the
+            # SDK's discovery sub-requests (a different URL) get a 404 so the
+            # flow terminates without a browser grant.
+            if str(request.url) == self.URL:
+                return httpx.Response(401, request=request)
+            return httpx.Response(404, request=request)
+
+        with contextlib.suppress(Exception):
+            await self._drive_401_flow(provider, responder)
+
+        # The caller saw: the original (401), the ONE adoption retry (same
+        # object, adopted token, 401 again), and then the SDK's full-flow
+        # machinery (discovery requests on other URLs — possibly several) —
+        # proof the second 401 passed through and adoption did not loop.
+        assert yields[0][1] == "Bearer revoked-but-unexpired"
+        assert yields[1][0] is yields[0][0]  # the retry re-yields the original
+        assert yields[1][1] == "Bearer also-dead"
+        assert len(yields) >= 3
+        assert yields[2][0].url != yields[0][0].url  # SDK discovery, not a retry
+        # Exactly TWO requests went to the resource URL: original + one retry.
+        # A looping adoption would show a third.
+        to_resource = [y for y in yields if str(y[0].url) == self.URL]
+        assert len(to_resource) == 2
