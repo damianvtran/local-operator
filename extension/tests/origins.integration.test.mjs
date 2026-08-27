@@ -27,7 +27,8 @@ function installChromeStub() {
   const makeArea = (name) => ({
     get: async (keys) => {
       const out = {};
-      for (const key of Array.isArray(keys) ? keys : [keys]) {
+      const selected = keys === null ? [...areas[name].keys()] : Array.isArray(keys) ? keys : [keys];
+      for (const key of selected) {
         if (areas[name].has(key)) out[key] = areas[name].get(key);
       }
       return out;
@@ -245,6 +246,56 @@ test("loopback all-port decision persists and matches only exact scheme and host
     // Local storage, unlike worker memory, survives MV3 suspension.
     origins = await bundle.import("host-grant-restart");
     assert.equal(await origins.originAllowed(new URL("http://localhost:6000")), true);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("future host-grant schema is preserved when a decision is attempted", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const future = { version: 2, grants: { opaque: "newer-data" } };
+    chrome.areas.local.set("hostGrants", future);
+    const origins = await bundle.import();
+    const source = new URL("http://localhost:5173/page");
+    await origins.raiseAccessRequest(source, "req-A");
+    assert.equal(await origins.resolveOrigin(source.origin, "all_ports"), false);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), future);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("completed host revoke wins even when an earlier grant write lands later", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    const canonicalKey = JSON.stringify(["http:", "localhost"]);
+    chrome.areas.local.set("hostGrants", { version: 1 });
+    // Deterministic interleaving: the revoke starts later and completes first;
+    // the older approval then physically lands after it.
+    chrome.areas.local.set("hostGrantOp:v1:revoke", {
+      canonicalKey,
+      action: "revoke",
+      at: 20,
+    });
+    chrome.areas.local.set("hostGrantOp:v1:late-grant", {
+      canonicalKey,
+      action: "grant",
+      at: 10,
+    });
+    assert.equal(await origins.originAllowed(new URL("http://localhost:9999")), false);
+
+    chrome.areas.local.set("hostGrantOp:v1:new-grant", {
+      canonicalKey: JSON.stringify(["http:", "127.0.0.1"]),
+      action: "grant",
+      at: 30,
+    });
+    assert.equal(await origins.originAllowed(new URL("http://127.0.0.1:9999")), true);
   } finally {
     await bundle.close();
     chrome.restore();

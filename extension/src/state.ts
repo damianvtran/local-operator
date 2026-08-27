@@ -47,7 +47,7 @@ export interface PendingOrigin {
 // a decision made between two await_access polls must still be readable.
 export type { AccessRequest, OnceGrants } from "./access-flow";
 
-export interface LocalState {
+export interface LocalState extends Record<string, unknown> {
   token?: string;
   port?: number;
   origins?: Record<string, "allow" | "deny">;
@@ -70,7 +70,9 @@ export interface SessionState {
 }
 
 export async function getLocal(): Promise<LocalState> {
-  return chrome.storage.local.get(["token", "port", "origins", "hostGrants"]);
+  // Host grants are deliberately separate dynamic keys; reading the local area
+  // is the only way admission and Settings see the complete operation set.
+  return chrome.storage.local.get(null) as Promise<LocalState>;
 }
 
 export async function getSession(): Promise<SessionState> {

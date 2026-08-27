@@ -1,5 +1,6 @@
+import { hostGrantOperationStorageKey } from "../origin-policy";
 import { DEFAULT_PORT, getLocal } from "../state";
-import { grantRows, removeGrant } from "./grant-list";
+import { grantRows, removeExactGrant } from "./grant-list";
 
 const port = document.getElementById("port") as HTMLInputElement;
 const sites = document.getElementById("sites") as HTMLUListElement;
@@ -45,11 +46,12 @@ async function renderStatus(): Promise<void> {
 }
 
 async function render(): Promise<void> {
-  const { port: saved = DEFAULT_PORT, origins = {}, hostGrants } = await getLocal();
+  const local = await getLocal();
+  const { port: saved = DEFAULT_PORT, origins = {} } = local;
   port.value = String(saved);
   await renderStatus();
   sites.replaceChildren();
-  const entries = grantRows(origins, hostGrants);
+  const entries = grantRows(origins, local);
   sitesEmpty.classList.toggle("hidden", entries.length > 0);
   for (const entry of entries) {
     const row = document.createElement("li");
@@ -58,9 +60,24 @@ async function render(): Promise<void> {
     const remove = document.createElement("button");
     remove.className = "btn";
     remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${entry.label} access`);
     remove.addEventListener("click", async () => {
       const local = await getLocal();
-      await chrome.storage.local.set(removeGrant(entry, local.origins ?? {}, local.hostGrants));
+      if (entry.scope === "host") {
+        // Timestamp before storage starts. A revoke initiated after an approval
+        // wins even if that earlier worker write physically lands afterward.
+        await chrome.storage.local.set({
+          [hostGrantOperationStorageKey(crypto.randomUUID())]: {
+            canonicalKey: entry.key,
+            action: "revoke",
+            at: Date.now(),
+          },
+        });
+      } else {
+        await chrome.storage.local.set({
+          origins: removeExactGrant(entry, local.origins ?? {}),
+        });
+      }
       flash(`Removed ${entry.label}.`);
       await render();
     });
@@ -82,7 +99,8 @@ port.addEventListener("change", async () => {
 
 document.getElementById("unpair")?.addEventListener("click", async () => {
   const beforeUnpair = await getLocal();
-  await chrome.storage.local.remove(["token", "origins", "hostGrants"]);
+  const hostGrantKeys = Object.keys(beforeUnpair).filter((key) => key.startsWith("hostGrantOp:v1:"));
+  await chrome.storage.local.remove(["token", "origins", "hostGrants", ...hostGrantKeys]);
   // Tell the running daemon so it severs the LIVE socket, not just the next
   // reconnect (findings A5/U1). Best-effort: the daemon may be down.
   const { port: saved = DEFAULT_PORT } = beforeUnpair;

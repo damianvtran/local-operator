@@ -12,9 +12,11 @@ import {
 import { BridgeCommandError, cdp } from "./cdp";
 import {
   displayAuthority,
+  hostGrantOperationStorageKey,
   isLoopbackHost,
   loopbackHostGrantKey,
   matchingGrantScope,
+  validHostGrantSchema,
   safeHttpUrl,
 } from "./origin-policy";
 import { ORIGIN_PROMPT_TIMEOUT_MS } from "./protocol.gen";
@@ -42,13 +44,13 @@ export function setPendingObserver(
 }
 
 export async function originAllowed(url: URL): Promise<boolean> {
-  const { origins = {}, hostGrants } = await getLocal();
-  return matchingGrantScope(origins, hostGrants, url) !== null;
+  const local = await getLocal();
+  return matchingGrantScope(local.origins ?? {}, local, url) !== null;
 }
 
 export async function originGrantScope(url: URL): Promise<"origin" | "loopback_all_ports" | null> {
-  const { origins = {}, hostGrants } = await getLocal();
-  return matchingGrantScope(origins, hostGrants, url);
+  const local = await getLocal();
+  return matchingGrantScope(local.origins ?? {}, local, url);
 }
 
 async function persistDecision(origin: string, decision: OriginDecision): Promise<boolean> {
@@ -61,12 +63,17 @@ async function persistDecision(origin: string, decision: OriginDecision): Promis
     // boundary so a forged message cannot mint a broad public-site grant.
     const key = loopbackHostGrantKey(url);
     if (!key || !isLoopbackHost(url)) return false;
-    const { hostGrants } = await getLocal();
-    const grants = hostGrants?.version === 1 ? hostGrants.grants : {};
+    const local = await getLocal();
+    if (local.hostGrants !== undefined && !validHostGrantSchema(local.hostGrants)) return false;
+    // Timestamp before storage starts: a later revoke's logical order wins even
+    // if this earlier async write happens to land after it.
+    const at = Date.now();
     await chrome.storage.local.set({
-      hostGrants: {
-        version: 1,
-        grants: { ...grants, [key]: { scope: "all_ports", createdAt: Date.now() } },
+      hostGrants: { version: 1 },
+      [hostGrantOperationStorageKey(crypto.randomUUID())]: {
+        canonicalKey: key,
+        action: "grant",
+        at,
       },
     });
   }
