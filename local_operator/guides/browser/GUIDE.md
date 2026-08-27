@@ -57,17 +57,24 @@ work with the user — do not dump commands and wait.
 ### 0. Make sure the paired browser is actually open
 
 The most common "broken bridge" is simply that the paired browser is not
-running \u2014 especially when it is not the user's daily browser (they live in
+running — especially when it is not the user's daily browser (they live in
 Arc, the extension is in Chrome). Check first, silently:
 
 ```sh
-pgrep -x "Google Chrome" || open -g -a "Google Chrome"
+pgrep -x "Google Chrome"
+```
+
+If it is not running, ask the user before starting it the FIRST time (a
+standing "yes, launch Chrome when you need it" is enough forever after),
+then launch it backgrounded:
+
+```sh
+open -g -a "Google Chrome"
 ```
 
 `open -g` launches it in the background without stealing focus or raising a
-window \u2014 the extension connects to the daemon within seconds of the browser
-starting. Ask for the user's standing permission the first time you launch
-their browser for them; after that it's routine. Never launch with
+window — the extension connects to the daemon within seconds of the browser
+starting. Never launch with
 `--remote-debugging-port` or developer flags: the extension is the debugger,
 and a debug-port browser on a real logged-in profile is an open door for any
 local process.
@@ -193,15 +200,23 @@ flow is ASYNC and agent-legible — never a silent long block:
    Notification Center authorization is commonly missing), and the popup
    badge is invisible unless they happen to click the toolbar icon. Tell
    them the origin and that the buttons are in the extension popup
-   (toolbar icon → Allow next navigation / Always allow / Deny).
-3. **`await_access` (url, timeout)** waits for the decision and returns
-   `allowed`, `denied`, or `pending` (still undecided — you can message the
-   user again and call it again; the 10-minute request survives between
-   calls).
+   (toolbar icon → **Allow once** / **Always allow** / **Deny**).
+3. **`await_access` (url, timeout_s — default 120, max 240)** waits for the
+   decision and returns one of FIVE states:
+   - `allowed` — proceed; your next navigation to the origin succeeds.
+   - `denied` — final; do not re-request unless the user changes their mind.
+   - `pending` — still undecided; message the user again and call
+     `await_access` again (the ~10-minute request survives between calls).
+   - `superseded` — another session's request displaced your prompt (one
+     pending slot). Wait for that session's prompt to resolve, then
+     `request_access` again.
+   - `none` — no live request for you (expired unanswered, or never
+     raised). `request_access` again and re-notify the user.
 
-After `allowed`, the next `open`/`goto` to that origin succeeds. "Allow next
-navigation" is a single-use grant bound to YOUR session — another session
-cannot spend it, and it covers exactly one navigation. "Always allow"
+After `allowed`, the next `open`/`goto` to that origin succeeds. **Allow
+once** mints a single-use grant bound to YOUR session — another session
+cannot spend it, it covers exactly one navigation, and it expires if left
+unspent for ~10 minutes (navigate promptly after approval). **Always allow**
 persists forever (revocable in the extension's Settings → Allowed sites).
 
 Other rules:
@@ -295,10 +310,10 @@ Every failure is one actionable string; act on it rather than retrying blindly:
 - **"navigation to <origin> was denied"** — the user denied it (or a redirect
   hop's synchronous prompt expired). Do not retry the same origin unprompted;
   if it was a redirect hop, explain which origin needs approval.
-- **"the bridge did not answer within Ns — the command may be waiting on a
-  site-permission decision"** — the daemon is fine; a human decision is
-  pending. Point the user at the extension popup rather than restarting
-  anything.
+- **"the browser bridge accepted '<method>' but did not answer within Ns…"**
+  — the daemon is fine; the command is likely stuck in the browser, e.g.
+  waiting on a site-permission decision. Point the user at the extension
+  popup rather than restarting anything (the error text says exactly this).
 - **"tab is gone" / "tab crashed"** — the user closed or crashed it; `open` the
   URL again to get a fresh surface.
 - **"another debugger is attached"** — ask the user to close DevTools on that
