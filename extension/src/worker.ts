@@ -9,6 +9,13 @@ import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
 import { expireAccessRequest, resolveOrigin, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
+import {
+  RECONNECT_ALARM_NAME,
+  RECONNECT_ALARM_PERIOD_MINUTES,
+  backoffDelayMs,
+  shouldArmFastPath,
+  shouldDialOnAlarm,
+} from "./reconnect";
 import { ErrorCode, type DaemonMessage, type ExtensionEvent, type Response } from "./protocol.gen";
 
 const HANDLERS: Record<
@@ -48,7 +55,10 @@ let attempt = 0;
 let connected = false;
 let connecting = false;
 let alive = false;
-let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+// Best-effort fast-path timer (see reconnect.ts). Only meaningful while the
+// worker is alive; it dies with a suspending worker and the alarm floor takes
+// over — nothing may depend on it firing.
+let fastPathTimer: ReturnType<typeof setTimeout> | undefined;
 // The request id currently being handled, so an origin pause can tell the
 // daemon WHICH command to keep alive past the base timeout (finding A3).
 let activeRequestId = "";
@@ -233,19 +243,35 @@ async function connect(): Promise<void> {
   };
 }
 
+// FAST PATH ONLY — see reconnect.ts for the two-tier design. This recovers a
+// transient socket drop in seconds WHILE THE WORKER IS ALIVE. It is best-effort:
+// a `setTimeout` does not survive worker suspension, so if the worker suspends
+// before it fires the timer is lost and the reconnect alarm (the guaranteed
+// floor) rewakes the worker and re-dials instead. Reconnection therefore never
+// DEPENDS on this — it only makes the alive case faster than the ~1-min alarm.
 function scheduleReconnect(): void {
-  if (!alive || reconnectTimer) return;
-  const delay = Math.min(30_000, 1_000 * 2 ** attempt);
+  if (!shouldArmFastPath({ alive, fastPathPending: fastPathTimer !== undefined })) return;
+  const delay = backoffDelayMs(attempt);
   attempt += 1;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = undefined;
+  fastPathTimer = setTimeout(() => {
+    fastPathTimer = undefined;
     void connect();
   }, delay);
 }
 
-chrome.alarms.create("lop-bridge-reconnect", { periodInMinutes: 0.5 });
+// GUARANTEED WAKE — the alarm is the only timer Chrome uses to wake a suspended
+// MV3 worker, so it is the reconnection FLOOR. Period is kept at Chrome's
+// reliable minimum (see RECONNECT_ALARM_PERIOD_MINUTES); the old 0.5-min period
+// sat on the clamp edge where Chrome delayed or dropped the tick, which is why
+// the automatic rewake never fired after idle suspension. `create` re-arms an
+// existing alarm idempotently, so calling it at every worker start (top level +
+// onStartup + onInstalled) guards against a lost alarm without stacking copies.
+function ensureReconnectAlarm(): void {
+  chrome.alarms.create(RECONNECT_ALARM_NAME, { periodInMinutes: RECONNECT_ALARM_PERIOD_MINUTES });
+}
+ensureReconnectAlarm();
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "lop-bridge-reconnect" && !connected) void connect();
+  if (alarm.name === RECONNECT_ALARM_NAME && shouldDialOnAlarm({ connected, connecting })) void connect();
   // TTL sweep for an async access request nobody is polling: without it an
   // abandoned request would leave the "!" badge and popup prompt up until the
   // next access RPC happened to run the lazy sweep. The alarm is created by
@@ -254,12 +280,20 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 chrome.runtime.onStartup.addListener(() => {
   alive = true;
+  ensureReconnectAlarm();
   void connect();
 });
 chrome.runtime.onInstalled.addListener(() => {
   alive = true;
+  ensureReconnectAlarm();
   void connect();
 });
+// Cold-start convergence: on every worker start (including a rewake from
+// suspension, when the globals have reset to their false initializers) the
+// top-level dial runs immediately, the alarm is (re)armed as the floor, and
+// both funnel through connect()'s connecting/connected guard onto ONE stable
+// socket. `connecting` is never persisted, so a suspend can never leave it
+// wedged true across a restart — a fresh worker always starts able to dial.
 alive = true;
 void connect();
 
