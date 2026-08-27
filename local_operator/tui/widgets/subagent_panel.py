@@ -1301,7 +1301,7 @@ class SubagentPanel(Container):
         self._stop_spinner()
 
     # -- sync -------------------------------------------------------------
-    def sync(self, session: Any) -> None:
+    def sync(self, session: Any, *, jobs: Sequence[Any] | None = None) -> None:
         """Re-read ``session.jobs`` and schedule a repaint.
 
         Called on every Subagent* event (immediate) and on the 1 Hz poll (the
@@ -1313,13 +1313,15 @@ class SubagentPanel(Container):
         instead of one per event per row; a row appearing or leaving is the
         exception and paints at once (see the class docstring).
         """
-        try:
-            manager = getattr(session, "jobs", None)
-            jobs = manager.list() if manager is not None else []
-        except Exception:
-            jobs = []
+        if jobs is None:
+            try:
+                manager = getattr(session, "jobs", None)
+                jobs = manager.list() if manager is not None else []
+            except Exception:
+                jobs = []
+        job_rows = jobs or []
         self._model_label = str(getattr(session, "model_label", "") or "")
-        task_jobs = [job for job in jobs if getattr(job, "type", "") == "task"]
+        task_jobs = [job for job in job_rows if getattr(job, "type", "") == "task"]
         if not task_jobs:
             self._jobs_by_id = {}
             self._stats = {}

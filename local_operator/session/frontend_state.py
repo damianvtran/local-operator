@@ -18,7 +18,7 @@ from enum import StrEnum
 from types import SimpleNamespace
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
@@ -549,7 +549,11 @@ class FrontendStateStore:
 
     @property
     def state(self) -> FrontendSessionState:
-        return self._state.model_copy(deep=True)
+        # Canonical state is replaced rather than mutated after publication.
+        # A shallow model copy preserves the caller boundary without cloning up
+        # to 50,000 retained child events on every TUI read; consumers already
+        # treat snapshots as immutable, as the typed delta contract requires.
+        return self._state.model_copy()
 
     @property
     def has_subscribers(self) -> bool:
@@ -607,20 +611,35 @@ class FrontendStateStore:
         wire_changes: dict[str, Any] = {}
         trajectory_appends: dict[str, list[dict[str, Any]]] = {}
         trajectory_replacements: list[str] = []
-        current = self._state.model_dump(mode="json")
         for key, value in changes.items():
+            if key == "jobs":
+                # JobState equality walks the bounded trajectories without first
+                # cloning them into JSON. On a 100-child roster at the 500-event
+                # cap this is ~20x cheaper for the common unchanged refresh.
+                candidate_jobs = [
+                    item if isinstance(item, JobState) else JobState.model_validate(item)
+                    for item in value
+                ]
+                if self._state.jobs != candidate_jobs:
+                    normalized[key] = candidate_jobs
+                    wire_changes[key] = candidate_jobs
+                continue
             candidate = _json_value(value)
-            if current.get(key) != candidate:
-                normalized[key] = candidate
+            # Serialize only fields the caller proposes changing. Dumping the
+            # complete state here cloned every retained trajectory even for a
+            # one-bit streaming update, turning unrelated UI reads into stalls.
+            current_value = _json_value(getattr(self._state, key))
+            if current_value != candidate:
+                normalized[key] = _validate_state_field(key, candidate)
                 wire_changes[key] = candidate
         if "jobs" in wire_changes:
-            previous = {str(job.get("id", "")): job for job in current.get("jobs", [])}
+            previous = {job.id: job for job in self._state.jobs}
             summaries = []
             for job in wire_changes["jobs"]:
-                job = copy.deepcopy(job)
-                job_id = str(job.get("id", ""))
-                trajectory = list(job.pop("trajectory", []) or [])
-                old = list(previous.get(job_id, {}).get("trajectory", []) or [])
+                job_id = job.id
+                trajectory = job.trajectory
+                prior = previous.get(job_id)
+                old = prior.trajectory if prior is not None else []
                 if trajectory[: len(old)] == old:
                     appended = trajectory[len(old) :]
                 else:
@@ -631,14 +650,16 @@ class FrontendStateStore:
                     trajectory_replacements.append(job_id)
                 if appended:
                     trajectory_appends[job_id] = appended
-                summaries.append(job)
+                summaries.append(job.model_dump(mode="json", exclude={"trajectory"}))
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
-        payload = self._state.model_dump()
-        payload.update(normalized)
-        payload["sequence"] = self._state.sequence + 1
-        self._state = FrontendSessionState.model_validate(payload)
+        # Unchanged fields are immutable snapshot components and can be shared.
+        # Re-validating a full model here deep-copied all job trajectories for
+        # every small delta; each changed field was validated above instead.
+        self._state = self._state.model_copy(
+            update={**normalized, "sequence": self._state.sequence + 1}
+        )
         update = FrontendUpdate(
             epoch=self._state.epoch,
             sequence=self._state.sequence,
@@ -1193,6 +1214,22 @@ def _label(spec: Any) -> str:
     if spec is None:
         return ""
     return f"{getattr(spec, 'provider', '')}/{getattr(spec, 'model_id', '')}".strip("/")
+
+
+_STATE_FIELD_ADAPTERS: dict[str, TypeAdapter[Any]] = {}
+
+
+def _validate_state_field(key: str, value: Any) -> Any:
+    """Validate one changed field without rebuilding the unrelated state."""
+    field = FrontendSessionState.model_fields.get(key)
+    if field is None:
+        raise ValueError(f"unknown frontend state field: {key}")
+    adapter = _STATE_FIELD_ADAPTERS.get(key)
+    if adapter is None:
+        # The key space is the model's finite field set, so this cache is
+        # intrinsically bounded and avoids rebuilding pydantic schemas per delta.
+        adapter = _STATE_FIELD_ADAPTERS[key] = TypeAdapter(field.annotation)
+    return adapter.validate_python(value)
 
 
 def _json_value(value: Any) -> Any:

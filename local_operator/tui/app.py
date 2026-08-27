@@ -2310,9 +2310,21 @@ class OperatorApp(App[None]):
     def _on_frontend_update(self, update: Any) -> None:
         session = self._session
         state = getattr(session, "frontend_state", None) if session is not None else None
-        # Socket and local callbacks share this seam. The store has already
-        # applied the typed delta; widgets always render its complete state.
-        self.call_later(self._apply_frontend_state, state)
+        # Socket and local callbacks share this seam. A burst can publish several
+        # ordered fields before Textual gets its next turn; only the latest
+        # complete snapshot needs painting, while scheduling every intermediate
+        # one repeats the full status/band scan and delays keyboard handling.
+        self._pending_frontend_state = state
+        if getattr(self, "_frontend_apply_scheduled", False):
+            return
+        self._frontend_apply_scheduled = True
+        self.call_later(self._apply_pending_frontend_state)
+
+    def _apply_pending_frontend_state(self) -> None:
+        self._frontend_apply_scheduled = False
+        state = getattr(self, "_pending_frontend_state", None)
+        self._pending_frontend_state = None
+        self._apply_frontend_state(state)
 
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
@@ -8817,6 +8829,14 @@ class OperatorApp(App[None]):
         treat a missing manager as empty).
         """
         session = self._session
+        # The settle loop deliberately runs several panel passes, but the job
+        # ledger cannot change synchronously inside one refresh. Snapshot once
+        # so 100-child sessions do not copy and sort the same roster per pass.
+        try:
+            manager = getattr(session, "jobs", None)
+            jobs = manager.list() if manager is not None else []
+        except Exception:
+            jobs = []
         # Three steps, and the order is load-bearing rather than tidy.
         #
         # A panel's own `sync` is what decides whether it is displayed at all
@@ -8851,7 +8871,7 @@ class OperatorApp(App[None]):
         # first frame that does not move.
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
-                self._subagent_panel.sync(session)
+                self._subagent_panel.sync(session, jobs=jobs)
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
             if self._todo_panel is not None:

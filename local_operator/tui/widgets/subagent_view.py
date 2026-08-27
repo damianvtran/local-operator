@@ -413,13 +413,20 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     # settles the row that already printed; text is addressed by message id so
     # deltas accumulate into one block rather than one block per delta.
     ordered: list[tuple[str, str]] = []
+    # A child may retain 500 events and this fold runs for every relayed event
+    # plus the 1 Hz live-page poll. Membership in the ordered list made each
+    # refresh quadratic in distinct rows even though insertion order is already
+    # represented separately; the set keeps the same first-seen contract in O(1).
+    remembered: set[tuple[str, str]] = set()
     streams: dict[str, str] = {}
     tools: dict[str, SubagentEntry] = {}
     notices: dict[str, SubagentEntry] = {}
 
     def remember(kind: str, key: str) -> None:
-        if (kind, key) not in ordered:
-            ordered.append((kind, key))
+        identity = (kind, key)
+        if identity not in remembered:
+            remembered.add(identity)
+            ordered.append(identity)
 
     def note(index: int, text: str, kind: NoticeKind) -> None:
         notices[f"n{index}"] = _notice(f"n{index}", text, kind)

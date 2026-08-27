@@ -240,6 +240,46 @@ def test_two_subscribers_never_hold_different_state_at_one_sequence() -> None:
     assert second.sync.snapshot.active_team == "team-y"
 
 
+def test_large_job_snapshots_are_reused_without_mutating_canonical_state() -> None:
+    """High-frequency readers must not clone every retained child event."""
+    trajectory = [{"type": "message_update", "delta": "x" * 80} for _ in range(500)]
+    jobs = [
+        JobState(id=f"child-{index}", type="task", trajectory=trajectory) for index in range(100)
+    ]
+    store = FrontendStateStore(_state(jobs=jobs))
+
+    first = store.state
+    second = store.state
+
+    assert first is not second
+    assert first.jobs is second.jobs
+    first.sequence = 99
+    assert store.state.sequence != 99
+
+
+def test_one_large_roster_progress_update_sends_only_the_new_event() -> None:
+    """A one-child append must not serialize 50,000 unchanged events."""
+    jobs = [
+        JobState(
+            id=f"child-{index}",
+            type="task",
+            trajectory=[{"type": "notice", "index": event} for event in range(500)],
+        )
+        for index in range(100)
+    ]
+    store = FrontendStateStore(_state(jobs=jobs))
+    changed = jobs[-1].model_copy(
+        update={"trajectory": [*jobs[-1].trajectory, {"type": "notice", "index": 500}]}
+    )
+
+    update = store.mutate(jobs=[*jobs[:-1], changed])
+
+    assert update is not None
+    assert update.job_trajectory_appends == {jobs[-1].id: [{"type": "notice", "index": 500}]}
+    assert all("trajectory" not in summary for summary in update.changes["jobs"])
+    assert len(store.state.jobs[-1].trajectory) == 501
+
+
 def test_noop_refresh_consumes_no_sequence_for_model_list_fields() -> None:
     """N4: identical jobs/capabilities must not publish a frame each refresh."""
     jobs = [
