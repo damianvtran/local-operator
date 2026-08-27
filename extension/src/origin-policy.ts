@@ -1,19 +1,20 @@
 export type StoredVerdict = "allow" | "deny";
 
-export interface HostGrant {
-  scope: "all_ports";
-  createdAt: number;
+export interface HostGrantOperation {
+  canonicalKey: string;
+  action: "grant" | "revoke";
+  at: number;
 }
 
-/** Versioned separately from exact-origin decisions so older extensions keep
- * enforcing the origin allowlist they understand instead of misreading a
- * broader authority. Unknown versions deliberately fail closed. */
+/** The schema marker is deliberately separate from append-only operations.
+ * Each decision writes a unique chrome.storage key, so worker and Settings
+ * contexts never race by rewriting shared state. */
 export interface HostGrantsState {
   version: 1;
-  grants: Record<string, HostGrant>;
 }
 
 export type GrantScope = "origin" | "loopback_all_ports";
+export const HOST_GRANT_STORAGE_PREFIX = "hostGrantOp:v1:";
 
 export function safeHttpUrl(raw: unknown): URL {
   if (typeof raw !== "string") throw new Error("URL is required");
@@ -57,6 +58,10 @@ export function loopbackHostGrantKey(url: URL): string | null {
   return JSON.stringify([url.protocol, url.hostname]);
 }
 
+export function hostGrantOperationStorageKey(operationId: string): string {
+  return `${HOST_GRANT_STORAGE_PREFIX}${operationId}`;
+}
+
 export function loopbackHostGrantLabel(key: string): string | null {
   try {
     const parsed: unknown = JSON.parse(key);
@@ -71,27 +76,55 @@ export function loopbackHostGrantLabel(key: string): string | null {
   }
 }
 
+export function validHostGrantSchema(value: unknown): value is HostGrantsState {
+  return !!value && typeof value === "object" && !Array.isArray(value) &&
+    (value as { version?: unknown }).version === 1;
+}
+
+export function validHostGrantOperation(value: unknown): value is HostGrantOperation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const operation = value as Partial<HostGrantOperation>;
+  return typeof operation.canonicalKey === "string" &&
+    loopbackHostGrantLabel(operation.canonicalKey) !== null &&
+    (operation.action === "grant" || operation.action === "revoke") &&
+    typeof operation.at === "number" && Number.isFinite(operation.at);
+}
+
+/** Latest logical operation for one authority. Operation time is captured
+ * before async storage begins; therefore a revoke started after an approval
+ * wins even if the earlier approval's write physically lands last. Ties fail
+ * closed by preferring revoke. */
+export function latestHostGrantOperation(
+  local: Record<string, unknown>,
+  canonicalKey: string,
+): HostGrantOperation | null {
+  if (!validHostGrantSchema(local.hostGrants)) return null;
+  let latest: HostGrantOperation | null = null;
+  for (const [storageKey, value] of Object.entries(local)) {
+    if (!storageKey.startsWith(HOST_GRANT_STORAGE_PREFIX) || !validHostGrantOperation(value)) continue;
+    if (value.canonicalKey !== canonicalKey) continue;
+    if (!latest || value.at > latest.at || (value.at === latest.at && value.action === "revoke")) {
+      latest = value;
+    }
+  }
+  return latest;
+}
+
 export function matchingGrantScope(
   origins: Record<string, StoredVerdict>,
-  hostGrants: unknown,
+  local: Record<string, unknown>,
   url: URL,
 ): GrantScope | null {
   if (origins[url.origin] === "allow") return "origin";
-  if (!hostGrants || typeof hostGrants !== "object") return null;
-  const state = hostGrants as Partial<HostGrantsState>;
-  if (state.version !== 1 || !state.grants || typeof state.grants !== "object") return null;
   const key = loopbackHostGrantKey(url);
   if (!key) return null;
-  const grant = state.grants[key];
-  return grant?.scope === "all_ports" && typeof grant.createdAt === "number"
-    ? "loopback_all_ports"
-    : null;
+  return latestHostGrantOperation(local, key)?.action === "grant" ? "loopback_all_ports" : null;
 }
 
 export function storedOriginAllowed(
   origins: Record<string, StoredVerdict>,
   url: URL,
-  hostGrants?: unknown,
+  local: Record<string, unknown> = {},
 ): boolean {
-  return matchingGrantScope(origins, hostGrants, url) !== null;
+  return matchingGrantScope(origins, local, url) !== null;
 }
