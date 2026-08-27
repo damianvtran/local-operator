@@ -2173,6 +2173,7 @@ class OperatorApp(App[None]):
         precondition. Anything genuinely slow belongs in a worker, the way
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
+        self._invalidate_pending_frontend_state()
         self._session = session
         self._mobile_adopted(session)
         # Every production session supplies the same frontend contract. Install
@@ -2307,6 +2308,14 @@ class OperatorApp(App[None]):
         elif getattr(session.frontend_state, "context_tokens", None) is None:
             self._measure_preloaded_context(session)
 
+    def _invalidate_pending_frontend_state(self) -> None:
+        """Retire queued paints before another session becomes authoritative."""
+        self._frontend_session_generation = getattr(self, "_frontend_session_generation", 0) + 1
+        self._pending_frontend_state = None
+        # The old callback remains queued in Textual, but it carries the retired
+        # generation and returns without clearing a newer session's scheduled bit.
+        self._frontend_apply_scheduled = False
+
     def _on_frontend_update(self, update: Any) -> None:
         session = self._session
         state = getattr(session, "frontend_state", None) if session is not None else None
@@ -2314,13 +2323,16 @@ class OperatorApp(App[None]):
         # ordered fields before Textual gets its next turn; only the latest
         # complete snapshot needs painting, while scheduling every intermediate
         # one repeats the full status/band scan and delays keyboard handling.
+        generation = getattr(self, "_frontend_session_generation", 0)
         self._pending_frontend_state = state
         if getattr(self, "_frontend_apply_scheduled", False):
             return
         self._frontend_apply_scheduled = True
-        self.call_later(self._apply_pending_frontend_state)
+        self.call_later(self._apply_pending_frontend_state, generation)
 
-    def _apply_pending_frontend_state(self) -> None:
+    def _apply_pending_frontend_state(self, generation: int) -> None:
+        if generation != getattr(self, "_frontend_session_generation", 0):
+            return
         self._frontend_apply_scheduled = False
         state = getattr(self, "_pending_frontend_state", None)
         self._pending_frontend_state = None
@@ -2401,6 +2413,7 @@ class OperatorApp(App[None]):
         if callable(unsubscribe_frontend):
             unsubscribe_frontend()
         self._unsubscribe_frontend = None
+        self._invalidate_pending_frontend_state()
         self._session = session
         self._mobile_adopted(session)
         subscribe_frontend = getattr(session, "subscribe_frontend", None)
@@ -9077,7 +9090,10 @@ class OperatorApp(App[None]):
         self.screen.add_class(SUBAGENT_LAYOUT_CLASS)
         self._sync_subagent_compact_layout(self.size.height)
         self._set_composer_read_only(True)
-        self._refresh_subagent_view(job_id)
+        # Enter paints the new mode first; folding and mounting a retained
+        # 500-event trajectory on the same key handler made the key appear lost
+        # for about a second. The next refresh fills the already-visible page.
+        self.call_after_refresh(self._refresh_subagent_view, job_id)
 
     def _close_subagent_view(self) -> bool:
         """Leave the view and put the conversation back. True if it was open.

@@ -240,8 +240,8 @@ def test_two_subscribers_never_hold_different_state_at_one_sequence() -> None:
     assert second.sync.snapshot.active_team == "team-y"
 
 
-def test_large_job_snapshots_are_reused_without_mutating_canonical_state() -> None:
-    """High-frequency readers must not clone every retained child event."""
+def test_large_job_snapshots_share_only_immutable_retained_events() -> None:
+    """The fast snapshot boundary cannot expose a mutation path into canonical state."""
     trajectory = [{"type": "message_update", "delta": "x" * 80} for _ in range(500)]
     jobs = [
         JobState(id=f"child-{index}", type="task", trajectory=trajectory) for index in range(100)
@@ -253,8 +253,41 @@ def test_large_job_snapshots_are_reused_without_mutating_canonical_state() -> No
 
     assert first is not second
     assert first.jobs is second.jobs
+    assert first.jobs[0].trajectory is second.jobs[0].trajectory
     first.sequence = 99
+    with pytest.raises(TypeError, match="immutable"):
+        first.jobs.append(JobState(id="injected", type="task"))
+    with pytest.raises(TypeError, match="immutable"):
+        first.jobs[0].trajectory.append({"type": "notice"})
+    with pytest.raises(TypeError, match="immutable"):
+        first.jobs[0].trajectory[0]["delta"] = "corrupted"
     assert store.state.sequence != 99
+    assert len(store.state.jobs) == 100
+    assert len(store.state.jobs[0].trajectory) == 500
+    assert store.state.jobs[0].trajectory[0]["delta"] != "corrupted"
+
+
+def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:
+    """An alias attempt cannot hide a trajectory event from the next wire delta."""
+    initial = _state(jobs=[JobState(id="child", type="task", trajectory=[])])
+    owner = FrontendStateStore(initial)
+    follower = FrontendStateStore(initial)
+    snapshot = owner.state
+
+    with pytest.raises(TypeError, match="immutable"):
+        snapshot.jobs[0].trajectory.append({"type": "notice", "index": 1})
+
+    changed = JobState(
+        id="child",
+        type="task",
+        status="completed",
+        trajectory=[{"type": "notice", "index": 1}],
+    )
+    update = owner.mutate(jobs=[changed])
+    assert update is not None
+    assert update.job_trajectory_appends == {"child": [{"type": "notice", "index": 1}]}
+    follower.apply_update(update)
+    assert follower.state.jobs[0].trajectory == owner.state.jobs[0].trajectory
 
 
 def test_one_large_roster_progress_update_sends_only_the_new_event() -> None:

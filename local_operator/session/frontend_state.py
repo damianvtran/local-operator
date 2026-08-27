@@ -171,6 +171,70 @@ class PendingGateState(BaseModel):
     question_total: int = 1
 
 
+class _FrozenList(list[Any]):
+    """List-compatible retained data whose identity is safe to share in snapshots."""
+
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("canonical frontend snapshot values are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable  # type: ignore[assignment]
+    __iadd__ = _immutable  # type: ignore[assignment]
+    __imul__ = _immutable  # type: ignore[assignment]
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenList":
+        # Entries are recursively frozen, so a defensive model copy can share
+        # the 50k-event payload while still isolating every mutable boundary.
+        return self
+
+
+class _FrozenDict(dict[str, Any]):
+    """Dict-compatible retained data whose identity is safe to share in snapshots."""
+
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("canonical frontend snapshot values are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable  # type: ignore[assignment]
+    setdefault = _immutable  # type: ignore[assignment]
+    update = _immutable  # type: ignore[assignment]
+    __ior__ = _immutable  # type: ignore[assignment]
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenDict":
+        return self
+
+
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, (_FrozenList, _FrozenDict)):
+        return value
+    if isinstance(value, dict):
+        return _FrozenDict({str(key): _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return _FrozenList(_freeze_value(item) for item in value)
+    return value
+
+
+def _freeze_job(job: "JobState") -> "JobState":
+    """Freeze the large nested payload while retaining list/dict compatibility."""
+    return job.model_copy(
+        update={
+            "trajectory": _freeze_value(job.trajectory),
+            "latest_details": _freeze_value(job.latest_details),
+        }
+    )
+
+
 class JobState(BaseModel):
     """Read-only job shape used by the existing job widgets.
 
@@ -179,7 +243,7 @@ class JobState(BaseModel):
     the DTO and survive a round trip rather than being discarded.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     id: str
     type: str
@@ -372,6 +436,11 @@ class FrontendSessionState(BaseModel):
         return f"{spec.provider}/{spec.model_id}" if spec is not None else ""
 
 
+def _freeze_state_jobs(state: FrontendSessionState) -> FrontendSessionState:
+    """Freeze retained job payloads before any snapshot can alias canonical state."""
+    return state.model_copy(update={"jobs": _FrozenList(_freeze_job(job) for job in state.jobs)})
+
+
 class FrontendSync(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -544,27 +613,26 @@ class FrontendStateStore:
     """
 
     def __init__(self, state: FrontendSessionState) -> None:
-        self._state = state.model_copy(deep=True)
+        self._state = _freeze_state_jobs(state.model_copy(deep=True))
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
 
     @property
     def state(self) -> FrontendSessionState:
-        # Canonical state is replaced rather than mutated after publication.
-        # A shallow model copy preserves the caller boundary without cloning up
-        # to 50,000 retained child events on every TUI read; consumers already
-        # treat snapshots as immutable, as the typed delta contract requires.
-        return self._state.model_copy()
+        # Pydantic models outside the retained trajectory remain mutable, so the
+        # public boundary stays defensive. Retained events are recursively frozen
+        # and return themselves from deepcopy, avoiding the former 50k-dict clone.
+        return self._state.model_copy(deep=True)
 
     @property
     def has_subscribers(self) -> bool:
         return bool(self._subscribers)
 
     def replace(self, state: FrontendSessionState) -> None:
-        self._state = state.model_copy(deep=True)
+        self._state = _freeze_state_jobs(state.model_copy(deep=True))
 
     def replace_and_notify(self, state: FrontendSessionState) -> None:
         """Install a proven wire snapshot without reaching into subscribers."""
-        self._state = state.model_copy(deep=True)
+        self._state = _freeze_state_jobs(state.model_copy(deep=True))
         update = FrontendUpdate(
             epoch=state.epoch,
             sequence=state.sequence,
@@ -601,7 +669,7 @@ class FrontendStateStore:
         payload.update(changes)
         payload["epoch"] = update.epoch
         payload["sequence"] = update.sequence
-        self._state = FrontendSessionState.model_validate(payload)
+        self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
         return self.state
@@ -617,7 +685,9 @@ class FrontendStateStore:
                 # cloning them into JSON. On a 100-child roster at the 500-event
                 # cap this is ~20x cheaper for the common unchanged refresh.
                 candidate_jobs = [
-                    item if isinstance(item, JobState) else JobState.model_validate(item)
+                    _freeze_job(
+                        item if isinstance(item, JobState) else JobState.model_validate(item)
+                    )
                     for item in value
                 ]
                 if self._state.jobs != candidate_jobs:
@@ -657,8 +727,8 @@ class FrontendStateStore:
         # Unchanged fields are immutable snapshot components and can be shared.
         # Re-validating a full model here deep-copied all job trajectories for
         # every small delta; each changed field was validated above instead.
-        self._state = self._state.model_copy(
-            update={**normalized, "sequence": self._state.sequence + 1}
+        self._state = _freeze_state_jobs(
+            self._state.model_copy(update={**normalized, "sequence": self._state.sequence + 1})
         )
         update = FrontendUpdate(
             epoch=self._state.epoch,
@@ -852,7 +922,7 @@ class FrontendStateStore:
         if initial:
             payload = current.model_dump()
             payload.update(changes)
-            self._state = FrontendSessionState.model_validate(payload)
+            self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
         else:
             self.mutate(**changes)
         return self.state

@@ -430,7 +430,11 @@ async def test_subagent_expansion_traverses_every_row_and_escape_restores_compos
         await pilot.pause()
         assert isinstance(app.focused, SubagentRow)
         assert app.focused.job_id == "sub-30"
-        assert app.query_one(SubagentPanel)._list.scroll_y > 0
+        panel = app.query_one(SubagentPanel)
+        # The expanded roster virtualizes to one viewport: traversal advances
+        # the logical window instead of accumulating off-screen DOM rows.
+        assert sum(row.display for row in panel.query(SubagentRow)) < 30
+        assert panel._navigation_index == 29
 
         await pilot.press("escape")
         await pilot.pause()

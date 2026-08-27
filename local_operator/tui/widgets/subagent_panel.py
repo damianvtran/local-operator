@@ -1161,6 +1161,10 @@ class SubagentPanel(Container):
         self._affordance = SubagentAffordance()
         self._rows: dict[str, SubagentRow] = {}
         self._expanded = False
+        # Logical focus within the full roster. The expanded DOM displays only
+        # one screenful around it; every job remains keyboard-reachable without
+        # making Textual reflow 100 hidden/off-screen widgets per arrow press.
+        self._navigation_index = 0
         self._painted_rows = 0
         #: Last ledger read, keyed by job id. Refresh repopulates it; the
         #: spinner tick repaints from it between refreshes rather than
@@ -1211,27 +1215,40 @@ class SubagentPanel(Container):
             return
         self._expanded = not self._expanded
         self._apply_visibility()
-        self._dirty = True
+        # Existing row content remains valid across disclosure/navigation. A
+        # full 100-row repaint here delayed the key's visible focus feedback;
+        # the ordinary spinner tick may refresh changing facts afterwards.
         if enter_navigation:
             if self._expanded:
                 # ``ctrl+g`` is the explicit keyboard-navigation gesture: start
                 # at the oldest row so arrows can traverse every retained child.
                 # Pointer disclosure only changes visibility and must leave the
                 # draft-bearing composer's focus and next keystroke untouched.
-                self.call_after_refresh(self._focus_oldest)
+                self._navigation_index = 0
+                self._apply_visibility()
+                self.call_after_refresh(self._focus_navigation_row)
             else:
                 self.exit_navigation()
 
-    def _focus_oldest(self) -> None:
-        rows = [row for row in self._rows.values() if row.display]
+    def _focus_navigation_row(self) -> None:
+        rows = list(self._rows.values())
         if rows:
-            rows[0].focus(scroll_visible=True)
+            rows[self._navigation_index].focus(scroll_visible=True)
 
     def move_focus(self, job_id: str, direction: int) -> None:
         """Move through the complete start-ordered roster without wrapping."""
-        rows = [row for row in self._rows.values() if row.display]
-        current = next((index for index, row in enumerate(rows) if row.job_id == job_id), 0)
-        rows[max(0, min(len(rows) - 1, current + direction))].focus(scroll_visible=True)
+        job_ids = list(self._rows)
+        try:
+            current = job_ids.index(job_id)
+        except ValueError:
+            current = self._navigation_index
+        target = max(0, min(len(job_ids) - 1, current + direction))
+        self._navigation_index = target
+        # Only shift the visible window at its edge. Most arrow presses now move
+        # focus without touching layout; crossing a page boundary swaps one row.
+        if not self._rows[job_ids[target]].display:
+            self._apply_visibility()
+        self._focus_navigation_row()
 
     def exit_navigation(self) -> None:
         """Return keyboard ownership to the composer without touching its draft."""
@@ -1252,18 +1269,24 @@ class SubagentPanel(Container):
     def _apply_visibility(self) -> None:
         """Show the newest preview slice, or make every start-ordered row reachable."""
         job_ids = list(self._rows)
-        visible_ids = set(job_ids if self._expanded else job_ids[-_PREVIEW_JOB_ROWS:])
+        if self._expanded:
+            try:
+                budget = max(1, int(self.screen.size.height) - _EXPANDED_DOCK_ROWS)
+            except Exception:
+                budget = len(job_ids)
+            self._navigation_index = max(0, min(len(job_ids) - 1, self._navigation_index))
+            start = max(0, min(self._navigation_index, len(job_ids) - budget))
+            visible_ids = set(job_ids[start : start + budget])
+        else:
+            budget = _PREVIEW_JOB_ROWS
+            visible_ids = set(job_ids[-_PREVIEW_JOB_ROWS:])
         for job_id, row in self._rows.items():
             row.display = job_id in visible_ids
         visible_count = len(visible_ids)
         has_overflow = len(job_ids) > _PREVIEW_JOB_ROWS
         self._affordance.display = has_overflow
         if self._expanded:
-            try:
-                budget = max(1, int(self.screen.size.height) - _EXPANDED_DOCK_ROWS)
-            except Exception:
-                budget = visible_count
-            list_rows = min(visible_count, budget)
+            list_rows = visible_count
             self._list.styles.max_height = budget
         else:
             list_rows = visible_count

@@ -1351,11 +1351,11 @@ async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
         await pilot.pause()
-        scheduled: list[Callable[..., Any]] = []
+        scheduled: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
         applied: list[FrontendSessionState] = []
 
         def schedule(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
-            scheduled.append(callback)
+            scheduled.append((callback, args))
             return True
 
         def apply(state: Any) -> None:
@@ -1374,8 +1374,50 @@ async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
         app._on_frontend_update(object())
 
         assert len(scheduled) == 1
-        scheduled[0]()
+        callback, args = scheduled[0]
+        callback(*args)
         assert [state.conversation_title for state in applied] == ["latest"]
+
+
+@pytest.mark.asyncio
+async def test_pending_frontend_update_cannot_repaint_after_session_adoption() -> None:
+    """An old queued callback is retired before a replacement snapshot paints."""
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        scheduled: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
+        applied: list[str] = []
+
+        def schedule(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
+            scheduled.append((callback, args))
+            return True
+
+        app.call_later = schedule
+        app._apply_frontend_state = lambda state: applied.append(state.conversation_title)
+
+        class StatefulSession(FakeSession):
+            frontend_state: FrontendSessionState
+
+        old = StatefulSession()
+        old.frontend_state = FrontendSessionState(
+            session_id="old", epoch="old", conversation_title="old"
+        )
+        app._session = old
+        app._on_frontend_update(object())
+        assert len(scheduled) == 1
+
+        app._invalidate_pending_frontend_state()
+        replacement = FakeSession()
+        app._session = replacement
+        app._apply_frontend_state(
+            FrontendSessionState(session_id="new", epoch="new", conversation_title="new")
+        )
+        callback, args = scheduled[0]
+        callback(*args)
+
+        assert applied == ["new"]
 
 
 @pytest.mark.asyncio

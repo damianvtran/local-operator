@@ -1561,10 +1561,14 @@ class SubagentView(Vertical):
         for block in reversed(self._blocks[common:]):
             self._body.remove_block(block)
         del self._blocks[common:]
-        for entry in entries[common:]:
-            block = entry_block(entry)
-            self._body.append_block(block)
-            self._blocks.append(block)
+        # Opening a retained 500-event child can add hundreds of rows at once.
+        # Mount them as one Textual batch so stylesheet/layout settlement happens
+        # once; live refreshes still append their ordinary one-row suffix.
+        with self._body.batch_append():
+            for entry in entries[common:]:
+                block = entry_block(entry)
+                self._body.append_block(block)
+                self._blocks.append(block)
         self._entries = list(entries)
 
     def _empty_state(self) -> str:
