@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -3113,3 +3113,118 @@ async def test_codex_5_6_stream_skips_reasoning_items() -> None:
     texts = [e.delta for e in events if isinstance(e, StreamTextDelta)]
     assert texts == ["Answer"]  # the encrypted blob never became text
     assert events[-1].stop_reason == "stop"
+
+
+# ---------------------------------------------------------------------------
+# Aside cache-prefix regression: tools + tool_choice="none"
+#
+# `Session.complete_aside` (the /btw overlay and the /loop goal-mode judge)
+# sends the SAME live tool schema a working turn sends so the aside rides the
+# turn's cached prefix instead of re-processing the whole conversation. The
+# tools block is the FRONT of every provider's cache prefix, so a future
+# refactor that silently dropped `body["tools"]` for a `tool_choice="none"`
+# request would reintroduce the exact prompt-cache regression these tests
+# guard. Each of the three wires must emit the tools AND pin the choice to
+# "none" (the aside reads the turn and calls nothing).
+# ---------------------------------------------------------------------------
+
+
+async def _aside_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
+    """Never invoked: an aside sends tools but calls none."""
+    raise AssertionError("aside tool must not be executed")
+
+
+def _aside_tools() -> list[AgentTool]:
+    return [
+        AgentTool(
+            name="bash",
+            description="Run a shell command",
+            parameters={"type": "object", "properties": {}},
+            execute=_aside_execute,
+        ),
+        AgentTool(
+            name="read",
+            description="Read a file",
+            parameters={"type": "object", "properties": {}},
+            execute=_aside_execute,
+        ),
+    ]
+
+
+def test_openai_compat_emits_tools_with_tool_choice_none() -> None:
+    request = ChatRequest(
+        model=_spec(provider="openai"),
+        messages=[Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    body = OpenAICompatClient("https://x")._build_body(request)
+    assert [t["function"]["name"] for t in body["tools"]] == ["bash", "read"]
+    assert body["tool_choice"] == "none"
+
+
+def test_openai_responses_emits_tools_with_tool_choice_none() -> None:
+    request = ChatRequest(
+        model=_spec(provider="openai"),
+        messages=[Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    body = OpenAICompatClient("https://x")._build_responses_body(request)
+    assert [t["name"] for t in body["tools"]] == ["bash", "read"]
+    assert body["tool_choice"] == "none"
+
+
+def test_anthropic_emits_tools_with_tool_choice_none_and_keeps_cache_control() -> None:
+    request = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [t["name"] for t in body["tools"]] == ["bash", "read"]
+    assert body["tool_choice"] == {"type": "none"}
+    # The message-tail cache_control placement is unchanged by restoring tools:
+    # the tools block sits AHEAD of system+messages in the prefix, so the
+    # existing breakpoint policy (last block of the final message, and the
+    # prior user turn) must still hold.
+    assert "cache_control" in body["messages"][-1]["content"][-1]
+    assert "cache_control" in body["messages"][0]["content"][-1]
+
+
+def test_google_emits_tools_and_pins_function_calling_to_none() -> None:
+    """Gemini has no tool_choice field; it takes the mode under
+    toolConfig.functionCallingConfig. Before the aside sent tools this branch
+    was never reached with tools present, so the mode defaulted to AUTO. Now
+    that an aside sends the live tools with tool_choice="none", the mode MUST
+    be pinned to NONE or the aside could newly call a tool."""
+    request = ChatRequest(
+        model=_spec(provider="google", model_id="gemini-2.5-pro"),
+        messages=[Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    body = GoogleClient()._build_body(request)
+    decls = body["tools"][0]["function_declarations"]
+    assert [d["name"] for d in decls] == ["bash", "read"]
+    assert body["toolConfig"]["functionCallingConfig"]["mode"] == "NONE"
+
+
+def test_google_function_calling_mode_maps_auto_and_required() -> None:
+    cases: list[tuple[Literal["auto", "none", "required"], str]] = [
+        ("auto", "AUTO"),
+        ("required", "ANY"),
+        ("none", "NONE"),
+    ]
+    for choice, mode in cases:
+        body = GoogleClient()._build_body(
+            ChatRequest(
+                model=_spec(provider="google", model_id="gemini-2.5-pro"),
+                messages=[Message.user("hi")],
+                tools=_aside_tools(),
+                tool_choice=choice,
+            )
+        )
+        assert body["toolConfig"]["functionCallingConfig"]["mode"] == mode

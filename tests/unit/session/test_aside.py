@@ -13,6 +13,7 @@ import pytest
 
 from local_operator.harness.types import (
     AbortSignal,
+    AgentTool,
     ChatRequest,
     Message,
     ModelSpec,
@@ -22,6 +23,7 @@ from local_operator.harness.types import (
     StreamUsageEvent,
     TextContent,
     ToolCall,
+    ToolResult,
     Usage,
 )
 from local_operator.session.session import Session
@@ -47,11 +49,26 @@ class RecordingStream:
         return gen()
 
 
+async def _noop_execute(*_args, **_kwargs) -> ToolResult:
+    """A tool body that is never invoked — asides send tools but call none."""
+    raise AssertionError("aside tool must not be executed")
+
+
+def _tool(name: str) -> AgentTool:
+    """A minimal live tool, so an aside request carries a real schema."""
+    return AgentTool(
+        name=name,
+        description=f"{name} tool",
+        parameters={"type": "object", "properties": {}},
+        execute=_noop_execute,
+    )
+
+
 def make_session(tmp_path, stream, **kwargs) -> Session:
     return Session(
         model=MODEL,
         stream_fn=stream,
-        tools=[],
+        tools=kwargs.pop("tools", []),
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=kwargs.pop("system_blocks_provider", lambda: ["stable", "env"]),
         **kwargs,
@@ -85,9 +102,19 @@ async def test_complete_aside_leaves_no_trace(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_complete_aside_sends_the_live_context_and_no_tools(tmp_path) -> None:
-    """It answers from the conversation, and cannot act on it."""
+    """It answers from the conversation, and cannot act on it.
+
+    The aside sends the SAME live tool schema a working turn sends, not ``[]``:
+    the tools block is the front of every provider's cache prefix, so dropping
+    it would push the aside off the turn's cached prefix and force a full
+    re-process (the regression this fixes). ``tool_choice="none"`` is what keeps
+    "reads the turn, calls nothing" true even though the tools are present.
+    """
+    tools = [_tool("bash"), _tool("read")]
     stream = RecordingStream()
-    session = make_session(tmp_path, stream, system_blocks_provider=lambda: ["stable", "goal: x"])
+    session = make_session(
+        tmp_path, stream, tools=tools, system_blocks_provider=lambda: ["stable", "goal: x"]
+    )
     session._context.messages.append(Message.user("port it"))
 
     await session.complete_aside([Message.user("why?")])
@@ -95,7 +122,13 @@ async def test_complete_aside_sends_the_live_context_and_no_tools(tmp_path) -> N
     request = stream.requests[-1]
     assert request.system_blocks == ["stable", "goal: x"]
     assert [m.text for m in request.messages] == ["port it", "why?"]
-    assert request.tools == []
+    # Tools mirror the session's live set (the working turn's prefix) exactly —
+    # this is the whole point: the aside must send what the turn sends. The
+    # session augments the caller's tools with its own built-ins (task, hub,
+    # ...), so assert identity with the live set rather than the literal input.
+    assert request.tools == session._context.tools
+    assert {"bash", "read"} <= {t.name for t in request.tools}
+    # And it still cannot call any of them.
     assert request.tool_choice == "none"
     await session.dispose()
 

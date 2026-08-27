@@ -2095,6 +2095,23 @@ class GoogleClient:
                     ]
                 }
             ]
+            # Gemini has no per-request tool_choice field; it takes the mode
+            # under toolConfig.functionCallingConfig instead. It defaults to
+            # AUTO, so before an aside started sending the live tool schema this
+            # branch was never reached with tools present and the mode never
+            # mattered. Now that complete_aside sends tools with
+            # tool_choice="none" (to stay on the working turn's cache prefix),
+            # the mode MUST be pinned or the aside could newly call a tool — the
+            # opposite of the "reads the turn, calls nothing" contract. Map the
+            # cross-provider tool_choice onto Gemini's mode; unknown values fall
+            # back to AUTO, matching the other builders' safe default.
+            body["toolConfig"] = {
+                "functionCallingConfig": {
+                    "mode": {"auto": "AUTO", "none": "NONE", "required": "ANY"}.get(
+                        request.tool_choice, "AUTO"
+                    )
+                }
+            }
         return body
 
     @staticmethod
