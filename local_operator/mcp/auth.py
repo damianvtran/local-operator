@@ -1400,6 +1400,90 @@ async def _oauth_refresh_lock(server_url: str):
         os.close(fd)
 
 
+def _refresh_user_agent() -> str:
+    """A stable ``local-operator/<version>`` identifier for the refresh POST.
+
+    See the header comment in :func:`_refresh_oauth_token_locked`: Cloudflare
+    blocks a no-UA refresh to mcp.notion.com. The version is looked up from the
+    installed distribution metadata and degrades to a bare product token when
+    running from a source checkout with no metadata, so this can never raise
+    into a refresh.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return f"local-operator/{version('local-operator')}"
+        except PackageNotFoundError:
+            return "local-operator"
+    except Exception:  # noqa: BLE001 — a UA lookup must never break a refresh
+        return "local-operator"
+
+
+def _is_invalid_grant(body: bytes) -> bool:
+    """True when an OAuth error response body is an ``invalid_grant`` (RFC 6749).
+
+    A revoked or reused refresh token comes back as HTTP 400 with a JSON body
+    ``{\"error\": \"invalid_grant\", ...}``. Distinguishing it from a generic
+    400 is what lets the caller log the actionable \"run /mcp login\" meaning
+    (and never treat it as retriable). Any parse failure returns False so an
+    unexpected body is handled as an ordinary rejection, never crashes.
+    """
+    import json
+
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(payload, dict) and payload.get("error") == "invalid_grant"
+
+
+def _fallback_endpoints_for(server_url: str) -> "DiscoveredOAuthEndpoints":
+    """Synthesize the endpoint the SDK itself would refresh against.
+
+    When metadata discovery failed at startup (``endpoints is None``), the SDK's
+    ``_refresh_token`` falls back to ``urljoin(<scheme>://<netloc>, \"/token\")``
+    — the authorization base URL with its path stripped (see
+    ``OAuthContext.get_authorization_base_url``). Building a minimal
+    :class:`DiscoveredOAuthEndpoints` that targets exactly that URL lets the
+    coordinating provider perform the refresh UNDER THE LOCK with a fresh
+    re-read even without discovery, instead of falling through to the SDK's own
+    UNLOCKED refresh. That closes the residual reuse window: the SDK's unlocked
+    path spends whatever refresh token ``_initialize`` loaded at boot, which a
+    sibling may have already rotated away — presenting it a second time is the
+    reuse-detection trigger that revokes the whole family.
+
+    ``protected_resource_metadata`` is left None: with no discovery we have no
+    PRM, so the refresh omits the RFC 8707 ``resource`` parameter — matching the
+    SDK's own fallback path, whose ``should_include_resource_param`` is likewise
+    False without PRM (barring a 2025-06-18 protocol header, which the proactive
+    refresh does not carry).
+    """
+    from urllib.parse import urljoin, urlparse
+
+    from mcp.shared.auth import OAuthMetadata
+
+    parsed = urlparse(server_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    token_url = urljoin(base, "/token")
+    return DiscoveredOAuthEndpoints(
+        oauth_metadata=OAuthMetadata.model_validate(
+            {
+                "issuer": base,
+                # authorization_endpoint is a required field on OAuthMetadata
+                # but is unused by the refresh path (refresh only reads
+                # token_endpoint); the SDK's own fallback derives it the same
+                # way, so a synthesized value keeps the model valid without
+                # affecting behaviour.
+                "authorization_endpoint": urljoin(base, "/authorize"),
+                "token_endpoint": token_url,
+            }
+        ),
+        protected_resource_metadata=None,
+        auth_server_url=base,
+    )
+
+
 async def _refresh_oauth_token_locked(
     server_url: str,
     storage: McpTokenStorage,
@@ -1436,7 +1520,17 @@ async def _refresh_oauth_token_locked(
     if endpoints.protected_resource_metadata is not None:
         data["resource"] = resource_url_from_server_url(server_url)
 
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        # Explicit UA, not httpx's default. mcp.notion.com sits behind
+        # Cloudflare, whose bot heuristics return HTTP 403 "error code 1010"
+        # to a refresh POST carrying NO User-Agent (observed live this cycle:
+        # httpx's built-in UA slips through, a missing one is blocked). Pinning
+        # our own identifier means a future httpx default change or a stricter
+        # Cloudflare rule cannot silently turn every refresh into a 403 and
+        # force a browser grant on the whole fleet.
+        "User-Agent": _refresh_user_agent(),
+    }
     auth_method = client_info.token_endpoint_auth_method
     if auth_method == "client_secret_post" and client_info.client_secret:
         data["client_secret"] = client_info.client_secret
@@ -1453,6 +1547,23 @@ async def _refresh_oauth_token_locked(
         logger.debug("MCP token refresh request failed for %s", server_url, exc_info=True)
         return False
     if response.status_code != 200:
+        # A revoked-grant rejection is qualitatively different from a transient
+        # one and must be logged as such: for a rotating provider that runs
+        # refresh-token REUSE DETECTION (Notion), presenting an already-rotated
+        # refresh token returns HTTP 400 {"error":"invalid_grant"} and revokes
+        # the ENTIRE token family, logging out every session at once. When that
+        # happens the only recovery is an interactive login, so the log names
+        # that action instead of implying a retry will heal it. We never
+        # auto-retry here regardless: returning False lets the connect surface
+        # McpAuthRequiredError, which the manager turns into a suspended
+        # reconnect (see manager._reconnect's McpAuthRequiredError arm) rather
+        # than hammering a dead grant.
+        if response.status_code == 400 and _is_invalid_grant(response.content):
+            logger.info(
+                "MCP OAuth grant revoked for %s (invalid_grant); run /mcp login to restore it",
+                server_url,
+            )
+            return False
         # Informational, not debug: a rejected refresh is the thing that turns
         # into a login prompt, so its cause belongs in the readable log.
         logger.info("MCP token refresh rejected for %s: HTTP %s", server_url, response.status_code)
@@ -1677,11 +1788,18 @@ def _make_refresh_coordinating_provider(
     token endpoint is not ``<server_base>/token`` (Datadog) refreshes rather
     than 404-ing into a browser grant.
 
-    Degradation is honest: with no discovered ``endpoints`` (metadata discovery
-    failed at startup) the re-read/adopt step still runs — which alone removes
-    the common case, where a sibling already refreshed — and only the
-    self-performed exchange falls back to the SDK's own unlocked refresh, i.e.
-    exactly the pre-fix behaviour for that one provider.
+    The invariant, enforced on EVERY path: the SDK's own (unlocked)
+    ``_refresh_token`` must never run with an in-memory refresh token older than
+    what storage holds. With no discovered ``endpoints`` (metadata discovery
+    failed at startup) the coordinator no longer falls through to that unlocked
+    refresh — it synthesizes the SDK's own fallback token endpoint
+    (``<scheme>://<netloc>/token``) and performs the exchange UNDER THE LOCK
+    with a fresh re-read, so even without discovery a stale boot-time refresh
+    token is never presented a second time. Presenting one to a reuse-detecting
+    provider (Notion) is what returns ``invalid_grant`` and revokes the whole
+    token family. If the coordinated refresh itself raises, a final under-lock
+    re-read still adopts the freshest persisted token before the SDK runs, so
+    the invariant survives the exception fall-through too.
 
     The subclass additionally intercepts the FIRST 401 the resource server
     returns for the original request. The coordination step above only fires
@@ -1723,37 +1841,88 @@ def _make_refresh_coordinating_provider(
                     # Re-read under the lock: a sibling process may have rotated
                     # the token while we waited. Adopting its result is what
                     # turns a double-spend into a no-op.
-                    stored = await ctx.storage.get_tokens()
-                    if stored is not None and stored.access_token:
-                        ctx.current_tokens = stored
-                        ctx.token_expiry_time = self._refresh_coord_storage.stored_token_expiry()
+                    await self._resync_from_store(ctx)
                     if ctx.is_token_valid():
                         return  # a peer already refreshed; do not spend again
+                    # The invariant this whole block exists to guarantee: the
+                    # SDK's own ``_refresh_token`` must NEVER run with an
+                    # in-memory refresh token older than the one in storage. The
+                    # SDK loads the token once at ``_initialize`` and spends it
+                    # unlocked; a sibling that rotated it in between leaves us
+                    # holding a stale refresh token, and presenting that to a
+                    # reuse-detecting provider (Notion) returns
+                    # ``invalid_grant`` and revokes the ENTIRE token family —
+                    # logging out every session at once. So we always perform
+                    # the refresh ourselves, UNDER THE LOCK, with a fresh
+                    # re-read; the SDK's unlocked path is never reached with a
+                    # stale token.
                     endpoints = self._refresh_coord_endpoints
                     if endpoints is None:
-                        # No discovered endpoint: leave the stale token in place
-                        # and let the SDK's own (unlocked) in-flow refresh run —
-                        # the pre-fix path for this one provider. The re-read
-                        # above already handled the common racing case.
-                        return
+                        # Discovery failed at startup, but we must still refresh
+                        # under the lock rather than fall through to the SDK's
+                        # UNLOCKED refresh (which would spend the possibly-stale
+                        # boot-time token and risk the family revocation above).
+                        # Synthesize the exact endpoint the SDK itself would
+                        # fall back to (``<scheme>://<netloc>/token``) so the
+                        # locked, re-reading refresh targets the same URL the
+                        # unlocked path would have.
+                        endpoints = _fallback_endpoints_for(self._refresh_coord_server_url)
                     refreshed = await _refresh_oauth_token_locked(
                         self._refresh_coord_server_url,
                         self._refresh_coord_storage,
                         endpoints,
                     )
                     if refreshed:
-                        new_tokens = await ctx.storage.get_tokens()
-                        if new_tokens is not None:
-                            ctx.current_tokens = new_tokens
-                            ctx.token_expiry_time = (
-                                self._refresh_coord_storage.stored_token_expiry()
-                            )
+                        await self._resync_from_store(ctx)
             except Exception:  # noqa: BLE001 — coordination is best-effort
-                # A failed re-read/refresh must never break the request: fall
-                # through to the SDK's own auth flow, which will refresh (or, if
-                # that fails, surface the non-interactive McpAuthRequiredError).
+                # A failed re-read/refresh must never break the request. But we
+                # must NOT let the SDK's unlocked refresh then spend a stale
+                # boot-time token: re-read storage one final time under the lock
+                # and overwrite the in-memory token with whatever is persisted,
+                # so whatever the SDK spends next is at least the freshest
+                # stored refresh token, never an older one a sibling already
+                # rotated away. This upholds the same invariant on the exception
+                # fall-through path (a raised locked-refresh, a transient store
+                # error) as the success path does.
                 logger.debug(
                     "MCP in-flight refresh coordination failed for %s",
+                    self._refresh_coord_server_url,
+                    exc_info=True,
+                )
+                await self._adopt_freshest_stored_token(ctx)
+
+        async def _resync_from_store(self, ctx: Any) -> None:
+            """Overwrite the in-memory token with the persisted one.
+
+            Called under :func:`_oauth_refresh_lock`. Reads the store's current
+            token through the same storage the provider persists through and,
+            when present, adopts it into the context along with its recomputed
+            expiry. Both the success path and the exception fall-through share
+            this one definition of "sync from store" so the invariant (in-memory
+            refresh token never older than storage) is enforced identically on
+            every path.
+            """
+            stored = await ctx.storage.get_tokens()
+            if stored is not None and stored.access_token:
+                ctx.current_tokens = stored
+                ctx.token_expiry_time = self._refresh_coord_storage.stored_token_expiry()
+
+        async def _adopt_freshest_stored_token(self, ctx: Any) -> None:
+            """Final under-lock re-read on the exception fall-through path.
+
+            Guarantees the invariant even when the coordinated refresh raised:
+            re-read storage under the refresh lock and adopt the freshest
+            persisted token, so the SDK's subsequent unlocked refresh can never
+            spend an in-memory refresh token older than what is on disk. Best
+            effort — a failure here just leaves the pre-fix behaviour, never a
+            raise into the request.
+            """
+            try:
+                async with _oauth_refresh_lock(self._refresh_coord_server_url):
+                    await self._resync_from_store(ctx)
+            except Exception:  # noqa: BLE001 — best-effort; never break the request
+                logger.debug(
+                    "MCP in-flight refresh final re-read failed for %s",
                     self._refresh_coord_server_url,
                     exc_info=True,
                 )

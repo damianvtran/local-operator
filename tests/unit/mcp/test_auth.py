@@ -1831,12 +1831,19 @@ class TestInflightRefreshCoordination:
         assert not provider.context.lock.locked(), "SDK context.lock leaked after early close"
 
     @pytest.mark.asyncio
-    async def test_no_endpoints_falls_back_to_sdk_refresh(
+    async def test_no_endpoints_still_refreshes_under_the_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """With no discovered endpoint the re-read still runs (so a racing peer
-        is still adopted), but a self-performed refresh is left to the SDK — the
-        pre-fix path for that one provider, never a crash."""
+        """With no discovered endpoint we STILL perform the refresh under the
+        lock (against the SDK's synthesized fallback token endpoint) rather than
+        falling through to the SDK's UNLOCKED refresh.
+
+        This is the residual reuse window the fix closes: the SDK's unlocked
+        path would spend the possibly-stale boot-time refresh token, which a
+        reuse-detecting provider (Notion) punishes by revoking the whole token
+        family. The synthesized endpoint must be ``<scheme>://<netloc>/token`` —
+        exactly what the SDK itself falls back to — so the locked, re-reading
+        refresh targets the same URL."""
         import time
 
         from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
@@ -1852,20 +1859,24 @@ class TestInflightRefreshCoordination:
         await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
         store.rows[0].data["tokens_obtained_at"] = time.time() - 600
 
-        # endpoints=None: no self-performed refresh possible.
+        # endpoints=None: discovery failed, but we must still refresh under the
+        # lock against the synthesized fallback endpoint.
         provider = build_oauth_provider(self.URL, self._cfg(), store=store, endpoints=None)
 
-        refresh_calls = {"n": 0}
+        refresh_calls: dict[str, Any] = {"n": 0, "endpoint": None}
 
-        async def fake_refresh(*args: Any, **kwargs: Any) -> bool:
+        async def fake_refresh(server_url: str, storage_arg: Any, endpoints: Any) -> bool:
             refresh_calls["n"] += 1
+            refresh_calls["endpoint"] = str(endpoints.oauth_metadata.token_endpoint)
             return True
 
         monkeypatch.setattr(auth_mod, "_refresh_oauth_token_locked", fake_refresh)
 
-        # Must not raise; our own locked refresh is never called (no endpoint).
         await self._drive_auth_flow(provider)
-        assert refresh_calls["n"] == 0
+        # Exactly one locked refresh happened, against the SDK's own fallback
+        # token endpoint (server base with the path stripped, plus ``/token``).
+        assert refresh_calls["n"] == 1
+        assert refresh_calls["endpoint"] == "https://mcp.example.com/token"
 
     async def _drive_401_flow(self, provider, responder) -> list[Any]:
         """Pump ``async_auth_flow`` the way httpx does, recording every request
@@ -2084,3 +2095,234 @@ class TestInflightRefreshCoordination:
         # A looping adoption would show a third.
         to_resource = [y for y in yields if str(y[0].url) == self.URL]
         assert len(to_resource) == 2
+
+    @pytest.mark.asyncio
+    async def test_no_endpoints_spends_the_fresh_stored_refresh_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The residual reuse window, closed: with discovery failed
+        (endpoints=None) the coordinated refresh must spend the token CURRENTLY
+        in storage, never the stale one the provider loaded at boot.
+
+        Presenting an already-rotated refresh token to a reuse-detecting
+        provider (Notion) revokes the entire token family. We seed a rotated
+        token into storage AFTER the provider initialized, then drive the flow
+        and assert the refresh token the locked exchange actually reads is the
+        FRESH one — proof the SDK's unlocked, boot-time-token path was never
+        reached."""
+        import time
+
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        # Provider boots holding the STALE token (this is what _initialize
+        # loads into memory and the SDK would spend unlocked).
+        await storage.set_tokens(
+            OAuthToken(access_token="stale", refresh_token="r-old", expires_in=60)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+        store.rows[0].data["tokens_obtained_at"] = time.time() - 600  # age past expiry
+
+        provider = build_oauth_provider(self.URL, self._cfg(), store=store, endpoints=None)
+        # Force the in-memory boot-time view, THEN rotate storage underneath it.
+        async with provider.context.lock:
+            await provider._initialize()
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.refresh_token == "r-old"
+
+        # A sibling process rotated the grant in the shared store to a fresh but
+        # still-expired token (so coordination proceeds to refresh, not adopt).
+        await storage.set_tokens(
+            OAuthToken(access_token="stale2", refresh_token="r-new", expires_in=60)
+        )
+        store.rows[0].data["tokens_obtained_at"] = time.time() - 600
+
+        # The locked exchange reads its refresh token from STORAGE, not from the
+        # provider's in-memory context, so capturing what it reads proves which
+        # token would actually be spent on the wire.
+        spent: dict[str, Any] = {}
+
+        async def spy_refresh(server_url: str, storage_arg: Any, endpoints: Any) -> bool:
+            tokens = await storage_arg.get_tokens()
+            spent["refresh_token"] = tokens.refresh_token if tokens else None
+            spent["endpoint"] = str(endpoints.oauth_metadata.token_endpoint)
+            return True
+
+        monkeypatch.setattr(auth_mod, "_refresh_oauth_token_locked", spy_refresh)
+
+        await self._drive_auth_flow(provider)
+
+        # The refresh spent the FRESH stored token, against the SDK's fallback
+        # endpoint — never the stale boot-time "r-old".
+        assert spent["refresh_token"] == "r-new"
+        assert spent["endpoint"] == "https://mcp.example.com/token"
+
+    @pytest.mark.asyncio
+    async def test_locked_refresh_raise_still_adopts_freshest_before_sdk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exception fall-through upholds the invariant too: if the locked
+        refresh RAISES, a final under-lock re-read adopts the freshest persisted
+        token, so the SDK's subsequent unlocked refresh cannot spend an
+        in-memory refresh token older than storage."""
+        import time
+
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="stale", refresh_token="r-old", expires_in=60)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+        store.rows[0].data["tokens_obtained_at"] = time.time() - 600
+
+        provider = build_oauth_provider(
+            self.URL, self._cfg(), store=store, endpoints=self._endpoints()
+        )
+        async with provider.context.lock:
+            await provider._initialize()
+
+        # Sibling rotated storage to a fresh-but-expired token after boot.
+        await storage.set_tokens(
+            OAuthToken(access_token="stale2", refresh_token="r-new", expires_in=60)
+        )
+        store.rows[0].data["tokens_obtained_at"] = time.time() - 600
+
+        async def boom(*args: Any, **kwargs: Any) -> bool:
+            raise RuntimeError("token endpoint unreachable")
+
+        monkeypatch.setattr(auth_mod, "_refresh_oauth_token_locked", boom)
+
+        await provider._coordinate_inflight_refresh()
+
+        # Even though the refresh raised, the in-memory token is now the freshest
+        # persisted one — the SDK will not spend the stale "r-old".
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.refresh_token == "r-new"
+
+
+class TestRefreshOAuthTokenLocked:
+    """The locked refresh exchange: revoked-grant handling and the pinned UA.
+
+    ``_refresh_oauth_token_locked`` is the one place local-operator performs the
+    refresh POST itself (the coordinated, cross-process-serialized path). Two
+    behaviours matter beyond a happy-path 200: an ``invalid_grant`` rejection
+    must be recognised as a DEAD grant (not retried, logged with the login
+    remedy), and the request must carry an explicit User-Agent so Cloudflare
+    cannot bot-block a no-UA refresh to mcp.notion.com.
+    """
+
+    URL = "https://mcp.notion.test/mcp"
+
+    def _endpoints(self):
+        from mcp.shared.auth import OAuthMetadata
+
+        from local_operator.mcp.auth import DiscoveredOAuthEndpoints
+
+        return DiscoveredOAuthEndpoints(
+            oauth_metadata=OAuthMetadata.model_validate(
+                {
+                    "issuer": self.URL,
+                    "authorization_endpoint": "https://a/authorize",
+                    "token_endpoint": "https://a/token",
+                }
+            )
+        )
+
+    async def _seed(self) -> McpTokenStorage:
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="a-old", refresh_token="r-old", expires_in=60)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+        return storage
+
+    @pytest.mark.asyncio
+    async def test_invalid_grant_is_a_dead_grant_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A revoked/reused refresh token (HTTP 400 invalid_grant) returns False
+        with ONE actionable log line and no retry — the manager turns the
+        resulting McpAuthRequiredError into a suspended reconnect."""
+        import logging
+
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        storage = await self._seed()
+
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                400,
+                json={"error": "invalid_grant", "error_description": "OAuth grant revoked"},
+                request=request,
+            )
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched_client)
+
+        with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+            ok = await auth_mod._refresh_oauth_token_locked(self.URL, storage, self._endpoints())
+
+        assert ok is False
+        # Exactly one POST — no auto-retry of a dead grant.
+        assert calls["n"] == 1
+        revoked_logs = [r for r in caplog.records if "revoked" in r.getMessage().lower()]
+        assert len(revoked_logs) == 1
+        assert "login" in revoked_logs[0].getMessage().lower()
+
+    @pytest.mark.asyncio
+    async def test_refresh_post_carries_an_explicit_user_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refresh POST must send a non-empty User-Agent (Cloudflare 1010
+        blocks a no-UA refresh to mcp.notion.com)."""
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        storage = await self._seed()
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["ua"] = request.headers.get("User-Agent", "")
+            from mcp.shared.auth import OAuthToken
+
+            token = OAuthToken(access_token="a-new", refresh_token="r-new", expires_in=3600)
+            return httpx.Response(200, json=token.model_dump(mode="json"), request=request)
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched_client)
+
+        ok = await auth_mod._refresh_oauth_token_locked(self.URL, storage, self._endpoints())
+        assert ok is True
+        assert seen["ua"]  # non-empty
+        assert seen["ua"].startswith("local-operator")
