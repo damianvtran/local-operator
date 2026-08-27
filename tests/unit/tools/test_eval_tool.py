@@ -384,28 +384,43 @@ async def test_stdout_budget_capped_with_recovery_route(context) -> None:
 
 
 @pytest.mark.asyncio
-async def test_render_does_not_block_the_event_loop(context) -> None:
-    """A spilled result must not stall the loop Textual renders on.
+async def test_render_does_not_block_the_event_loop(context, monkeypatch) -> None:
+    """A spilled result must build off the loop Textual renders on.
 
     Regression for the operator's "TUI freezes on eval" report. Building an
     oversized result runs ``spill_truncate``, whose store-eviction sweep is
     O(entries) synchronous disk I/O; run inline on the event loop it froze the
-    render loop for ~84 ms on a 30 KB result (seconds once the store was busy).
-    The fix offloads that tail with ``asyncio.to_thread``, so the loop must stay
-    responsive here even with a heavily populated spill store making the sweep
-    genuinely expensive.
+    render loop. The fix offloads that tail with ``asyncio.to_thread``.
 
-    We measure the longest gap between 5 ms heartbeat callbacks scheduled on the
-    same loop while the eval runs: an inline sweep delays every heartbeat and
-    shows up as one large gap; an offloaded sweep leaves the heartbeats on time.
+    The proof is DETERMINISTIC, not a wall-clock threshold that depends on how
+    slow the host's disk is (an earlier version of this test used a 50 ms bound
+    that the inline path slipped under on fast hardware, so it did not actually
+    guard the fix). We replace ``spill_truncate`` with a wrapper that blocks for
+    a FIXED ``block_s`` before doing the real work, then measure the longest gap
+    between 5 ms heartbeat callbacks scheduled on the same loop while the eval
+    runs. If the blocking call executes ON the loop, every heartbeat during that
+    fixed window is delayed and ``max_gap`` is forced to at least ``block_s``; if
+    it executes in a worker thread, the loop keeps ticking and ``max_gap`` stays
+    near the heartbeat interval. Asserting ``max_gap`` well below ``block_s``
+    therefore fails on the inline path and passes on the offloaded path,
+    independent of disk speed. (Verified: reverting ``_render`` to call
+    ``_build_render_result`` inline makes this test fail; the fix makes it pass.)
     """
-    from local_operator.tools.spill import get_store
+    import time as _time
 
-    # Populate the store so the eviction sweep has real per-entry work to do —
-    # this is what turned a small inline sweep into a visible freeze.
-    store = get_store()
-    for i in range(400):
-        store.write(f"entry {i} " * 2000, tool_name="eval", session_id=f"s{i % 8}")
+    from local_operator.tools import builtin as _builtin
+
+    block_s = 0.3  # fixed, far above any scheduling jitter — the whole point
+    real_spill_truncate = _builtin.spill_truncate
+
+    def _blocking_spill_truncate(*args, **kwargs):
+        # A synchronous stand-in for the O(entries) eviction sweep: a fixed
+        # sleep the loop can only tolerate if this runs off the loop thread.
+        _time.sleep(block_s)
+        return real_spill_truncate(*args, **kwargs)
+
+    # Patch the name the render path actually calls (eval imports it by name).
+    monkeypatch.setattr(eval_tool, "spill_truncate", _blocking_spill_truncate)
 
     loop = asyncio.get_running_loop()
     interval = 0.005
@@ -423,20 +438,20 @@ async def test_render_does_not_block_the_event_loop(context) -> None:
     state["max_gap"] = 0.0
     state["last"] = loop.time()
 
-    # ~30 KB of stdout: over the 8 KiB spill threshold, so it takes the spill
-    # path and triggers the eviction sweep.
+    # ~30 KB of stdout: over the 8 KiB spill threshold, so the render path goes
+    # through spill_truncate (our blocking stand-in) rather than returning inline.
     result = await _call(context, "print('lorem ipsum ' * 2000)")
     await asyncio.sleep(0.05)
     state["on"] = False
 
     assert result.is_error is False
-    # No single synchronous gap longer than a few rendered frames. The offloaded
-    # path measures well under this; the old inline path blew past it. The bound
-    # is generous (loaded CI hosts add scheduling jitter) yet still far below the
-    # ~84 ms+ the unfixed path produced.
-    assert (
-        state["max_gap"] < 0.05
-    ), f"event loop stalled {state['max_gap'] * 1000:.0f} ms during eval render"
+    # Inline execution forces max_gap >= block_s (0.3 s); off-loop keeps it near
+    # the 5 ms interval. Half of block_s cleanly separates the two outcomes and
+    # leaves generous room for scheduler jitter.
+    assert state["max_gap"] < block_s / 2, (
+        f"event loop stalled {state['max_gap'] * 1000:.0f} ms during eval render "
+        f"(block_s={block_s * 1000:.0f} ms ran on the loop, not off it)"
+    )
 
 
 # ---------------------------------------------------------------------------

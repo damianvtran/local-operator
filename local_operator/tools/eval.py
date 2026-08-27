@@ -857,7 +857,10 @@ async def _render(
     stderr = str(response.get("stderr") or "")
     result_repr = response.get("result")
     result_repr = str(result_repr) if result_repr is not None else None
-    error = str(response.get("error") or "(no error reported)")
+    # Kept raw and stringified lazily in the error branch of
+    # _build_render_result: on the common success path the message is discarded,
+    # so building it here would be wasted work on every call (review round 1, m1).
+    error = response.get("error")
     display = [str(item) for item in response.get("display") or []]
 
     if display and on_update is not None:
@@ -887,7 +890,7 @@ def _build_render_result(
     stdout: str,
     stderr: str,
     result_repr: str | None,
-    error: str,
+    error: Any,
     display: list[str],
     context: ToolContext | None,
 ) -> ToolResult:
@@ -911,7 +914,8 @@ def _build_render_result(
             details = {**(details or {}), "display": display}
         return _text(tool_call_id, "eval", text, details=details)
 
-    body = "\n".join([error, _bash_output_summary(stdout, stderr)])
+    error_text = str(error or "(no error reported)")
+    body = "\n".join([error_text, _bash_output_summary(stdout, stderr)])
     text, spill_details = spill_truncate(body, "eval", context, TOOL_OUTPUT_LIMIT_CHARS)
     return ToolResult(
         tool_call_id=tool_call_id,
