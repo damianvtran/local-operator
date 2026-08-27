@@ -262,6 +262,35 @@ test("access state machine: pending, resolve paths, TTL expiry, grants, superses
   } finally { await module.close(); }
 });
 
+test("approval queue selection, generation, expiry, and result bounds", async () => {
+  const module = await load("src/access-queue.ts");
+  try {
+    const {
+      ACCESS_RESULT_CAP, adjacentEntryId, cleanResults, liveQueue, newEntry,
+      receiptFor, selectEntry,
+    } = module.loaded;
+    const now = 10_000;
+    const a1 = newEntry("https://a.example", "a.example", "A", "async", now, 1, undefined, "A1");
+    const b = newEntry("https://b.example", "b.example", "B", "async", now, 2, undefined, "B");
+    const a2 = newEntry("https://a.example", "a.example", "A", "async", now, 3, undefined, "A2");
+    const queue = [a1, b, a2];
+    assert.equal(selectEntry(queue, "B").entryId, "B");
+    assert.equal(adjacentEntryId(queue, "B", -1), "A1");
+    assert.equal(adjacentEntryId(queue, "B", 1), "A2");
+    assert.equal(adjacentEntryId(queue, "A1", -1), "A1");
+    assert.equal(selectEntry(queue.filter((entry) => entry.entryId !== "A1"), "A1").entryId, "B");
+    assert.notEqual(a1.entryId, a2.entryId, "A→B→A generations remain distinct");
+    assert.equal(liveQueue(queue, a1.expiresAt).length, 0);
+    const results = {};
+    for (let index = 0; index < ACCESS_RESULT_CAP + 5; index++) {
+      const entry = { ...a1, entryId: String(index) };
+      results[String(index)] = { ...receiptFor(entry, "denied", now + index), expiresAt: now + 100_000 };
+    }
+    assert.equal(Object.keys(cleanResults(results, now)).length, ACCESS_RESULT_CAP);
+    assert.equal(Object.keys(cleanResults(results, now + 100_000)).length, 0);
+  } finally { await module.close(); }
+});
+
 test("origin render holds the ack through the decision round-trip race", async () => {
   const module = await load("src/popup/origin-flow.ts");
   try {

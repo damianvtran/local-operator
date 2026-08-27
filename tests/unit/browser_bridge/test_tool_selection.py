@@ -112,7 +112,7 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
     assert "logs" in builtin.BROWSER_ACTIONS
     assert "tabs" in builtin.BROWSER_ACTIONS
     assert builtin.BRIDGE_ONLY_BROWSER_ACTIONS == frozenset(
-        {"scroll", "logs", "tabs", "request_access", "await_access"}
+        {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
     )
 
 
@@ -420,6 +420,29 @@ async def test_request_access_reports_already_allowed(monkeypatch) -> None:
         ToolContext(browser=BrowserSurface()),
     )
     assert "allowed" in result.text and "'open' or 'goto'" in result.text
+
+
+@pytest.mark.asyncio
+async def test_cancel_access_uses_the_callers_stable_identity(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        assert action == "cancel_access"
+        assert params == {"url": "https://example.com", "requester": "session:abc"}
+        return {"origin": "https://example.com", "state": "cancelled", "pending_count": 2}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(browser=BrowserSurface(), session_id="abc")
+    result = await builtin.execute_browser(
+        "t", {"action": "cancel_access", "url": "https://example.com"}, None, None, context
+    )
+    assert "cancelled" in result.text
+    assert result.details == {
+        "origin": "https://example.com",
+        "state": "cancelled",
+        "pending_count": 2,
+    }
 
 
 @pytest.mark.asyncio

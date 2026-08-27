@@ -145,8 +145,16 @@
             The agent wants to open a page on this site with your current login. It can only use
             sites you allow, and you can take this back any time in Settings.
           </p>
+          <div class="queue-head">
+            <p class="queue-count" id="origin-position">1 of 1</p>
+            <p class="queue-waiting" id="origin-waiting">1 request waiting</p>
+          </div>
           <p class="label" id="origin-host-label">Site</p>
           <p class="trough" id="origin-host"></p>
+          <div class="queue-nav" aria-label="Site approval queue">
+            <button id="origin-previous" class="btn compact" aria-label="Previous site request">Previous</button>
+            <button id="origin-next" class="btn compact" aria-label="Next site request">Next</button>
+          </div>
           <div class="actions">
             <div class="row">
               <button id="origin-allow" class="btn primary">Allow once</button>
