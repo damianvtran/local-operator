@@ -600,6 +600,9 @@ class ToolContext(BaseModel):
 
     cwd: str = "."
     session_id: str = ""
+    # Human-readable title is display metadata only. Security-sensitive tools
+    # must continue using ``session_id`` for identity and authorization.
+    session_name: str = ""
     agent_id: str = ""
     # Which BACKGROUND JOB this execution belongs to, so a host can scope an
     # approval decision to the work that provoked it instead of to every

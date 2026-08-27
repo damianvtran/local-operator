@@ -1,0 +1,94 @@
+{
+  "tabs": [
+    {
+      "id": 279508587,
+      "active": true,
+      "windowId": 279508586,
+      "groupId": -1,
+      "title": "about:blank"
+    },
+    {
+      "id": 279508588,
+      "active": false,
+      "windowId": 279508586,
+      "groupId": -1,
+      "title": "chrome-extension://pjkjoopobkiogkempoolmhcjfdommhcj/popup/popup.html"
+    },
+    {
+      "id": 279508589,
+      "active": false,
+      "windowId": 279508586,
+      "groupId": 1294515474,
+      "title": "Example Domain"
+    },
+    {
+      "id": 279508590,
+      "active": false,
+      "windowId": 279508586,
+      "groupId": 770862595,
+      "title": "Example Domain"
+    },
+    {
+      "id": 279508592,
+      "active": false,
+      "windowId": 279508586,
+      "groupId": 1943256257,
+      "title": "Example Domain"
+    },
+    {
+      "id": 279508593,
+      "active": false,
+      "windowId": 279508586,
+      "groupId": 1785666623,
+      "title": "Example Domain"
+    }
+  ],
+  "groups": [
+    {
+      "collapsed": false,
+      "color": "cyan",
+      "id": 1294515474,
+      "shared": false,
+      "title": "LO · Release planning",
+      "windowId": 279508586
+    },
+    {
+      "collapsed": false,
+      "color": "cyan",
+      "id": 770862595,
+      "shared": false,
+      "title": "LO · Renamed review",
+      "windowId": 279508586
+    },
+    {
+      "collapsed": false,
+      "color": "cyan",
+      "id": 1943256257,
+      "shared": false,
+      "title": "LO · Session",
+      "windowId": 279508586
+    },
+    {
+      "collapsed": false,
+      "color": "cyan",
+      "id": 1785666623,
+      "shared": false,
+      "title": "LO · 世界 launch notes with a…",
+      "windowId": 279508586
+    }
+  ],
+  "windows": [
+    {
+      "alwaysOnTop": false,
+      "focused": false,
+      "height": 900,
+      "id": 279508586,
+      "incognito": false,
+      "left": 0,
+      "state": "normal",
+      "top": 100,
+      "type": "normal",
+      "width": 1400
+    }
+  ]
+}

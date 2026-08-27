@@ -18,6 +18,12 @@ export interface StoredSurface {
   // chrome.tabs at list time so the listing can never show a stale page.
   createdAt: number;
   lastUsedAt: number;
+  // Optional for seamless upgrade from 0.1.3 session storage. Identity and the
+  // stable collision ordinal persist; native group ids do not survive Chrome.
+  ownerKey?: string;
+  groupBaseLabel?: string;
+  groupOrdinal?: number;
+  groupAppliedLabel?: string;
 }
 
 export interface SnapshotRef {

@@ -48,6 +48,10 @@ workflows documented below; no long-lived Google credential is stored.
       law fields, and supply any required business address/D-U-N-S details.
       This is a legal/account-owner decision, not defined by the product design.
 
+## 0.1.4 permission handoff
+
+- [ ] **Damian must add the NEW `tabGroups` permission justification in the Chrome Web Store dashboard when uploading the next package.** Use the exact paste-ready rationale in `permissions.md`; the package will request a new permission and must not be submitted against the old seven-permission declaration.
+
 ## 1. Developer account and publisher identity
 
 - [ ] Sign in to the Chrome Web Store Developer Dashboard with a company-owned,

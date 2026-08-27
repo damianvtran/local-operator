@@ -1,0 +1,39 @@
+{
+  "goto_after_worker_restart": {
+    "url": "https://example.com/",
+    "title": "Example Domain"
+  },
+  "tabs_after_worker_restart": {
+    "tabs": [
+      {
+        "tab": "bridge:279508589:6a2c8c…",
+        "url": "https://example.com/",
+        "title": "Example Domain",
+        "createdAt": 1787868058158,
+        "lastUsedAt": 1787868196920
+      },
+      {
+        "tab": "bridge:279508590:11580f…",
+        "url": "https://example.com/",
+        "title": "Example Domain",
+        "createdAt": 1787868058310,
+        "lastUsedAt": 1787868059040
+      },
+      {
+        "tab": "bridge:279508593:c56d62…",
+        "url": "https://example.com/",
+        "title": "Example Domain",
+        "createdAt": 1787868058978,
+        "lastUsedAt": 1787868058978
+      },
+      {
+        "tab": "bridge:279508592:d9a1ff…",
+        "url": "https://example.com/",
+        "title": "Example Domain",
+        "createdAt": 1787868058803,
+        "lastUsedAt": 1787868058803
+      }
+    ],
+    "limit": 8
+  }
+}
