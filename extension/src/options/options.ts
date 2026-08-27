@@ -1,4 +1,5 @@
 import { DEFAULT_PORT, getLocal } from "../state";
+import { grantRows, removeGrant } from "./grant-list";
 
 const port = document.getElementById("port") as HTMLInputElement;
 const sites = document.getElementById("sites") as HTMLUListElement;
@@ -44,29 +45,27 @@ async function renderStatus(): Promise<void> {
 }
 
 async function render(): Promise<void> {
-  const { port: saved = DEFAULT_PORT, origins = {} } = await getLocal();
+  const { port: saved = DEFAULT_PORT, origins = {}, hostGrants } = await getLocal();
   port.value = String(saved);
   await renderStatus();
   sites.replaceChildren();
-  const entries = Object.entries(origins).sort(([a], [b]) => a.localeCompare(b));
+  const entries = grantRows(origins, hostGrants);
   sitesEmpty.classList.toggle("hidden", entries.length > 0);
-  for (const [origin, verdict] of entries) {
+  for (const entry of entries) {
     const row = document.createElement("li");
     const name = document.createElement("span");
-    name.textContent = origin;
+    name.textContent = entry.label;
     const remove = document.createElement("button");
     remove.className = "btn";
     remove.textContent = "Remove";
     remove.addEventListener("click", async () => {
-      const next = { ...(await getLocal()).origins };
-      delete next[origin];
-      await chrome.storage.local.set({ origins: next });
-      flash(`Removed ${origin}.`);
+      const local = await getLocal();
+      await chrome.storage.local.set(removeGrant(entry, local.origins ?? {}, local.hostGrants));
+      flash(`Removed ${entry.label}.`);
       await render();
     });
     row.append(name, remove);
     sites.append(row);
-    void verdict;
   }
 }
 
@@ -82,10 +81,11 @@ port.addEventListener("change", async () => {
 });
 
 document.getElementById("unpair")?.addEventListener("click", async () => {
-  await chrome.storage.local.remove(["token", "origins"]);
+  const beforeUnpair = await getLocal();
+  await chrome.storage.local.remove(["token", "origins", "hostGrants"]);
   // Tell the running daemon so it severs the LIVE socket, not just the next
   // reconnect (findings A5/U1). Best-effort: the daemon may be down.
-  const { port: saved = DEFAULT_PORT, token } = { ...(await getLocal()), token: undefined };
+  const { port: saved = DEFAULT_PORT } = beforeUnpair;
   try {
     const wire = new WebSocket(`ws://127.0.0.1:${saved}/extension`);
     await new Promise((resolve, reject) => {
@@ -96,7 +96,7 @@ document.getElementById("unpair")?.addEventListener("click", async () => {
       JSON.stringify({
         event: "hello",
         proto: 1,
-        token: token ?? "",
+        token: beforeUnpair.token ?? "",
         extension_version: chrome.runtime.getManifest().version,
         browser: navigator.userAgent,
       }),

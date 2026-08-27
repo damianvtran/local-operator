@@ -5799,10 +5799,19 @@ BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 _BRIDGE_AWAIT_SLICE_MS = 20_000
 
 
-def _access_result_text(state: str, origin: str) -> str:
+def _access_result_text(state: str, origin: str, grant_scope: str = "") -> str:
     """One agent-facing line per access state, including the next step — the
     agent discovers this flow through error/result text, not documentation."""
     if state == "allowed":
+        if grant_scope == "loopback_all_ports":
+            parsed = urlsplit(origin)
+            authority = parsed.hostname or ""
+            if ":" in authority:
+                authority = f"[{authority}]"
+            return (
+                f"{parsed.scheme}://{authority} is allowed on all ports. "
+                "'open' or 'goto' the URL now."
+            )
         return f"{origin} is allowed. 'open' or 'goto' the URL now."
     if state == "denied":
         return (
@@ -5862,11 +5871,16 @@ async def _bridge_access(
         assert result is not None
         state_value = str(result.get("state", ""))
         origin = str(result.get("origin", url))
+        grant_scope = str(result.get("grant_scope", ""))
+        grant_scope = str(result.get("grant_scope", ""))
+        details = {"origin": origin, "state": state_value}
+        if grant_scope:
+            details["grant_scope"] = grant_scope
         return _text(
             tool_call_id,
             "browser",
-            _access_result_text(state_value, origin),
-            details={"origin": origin, "state": state_value},
+            _access_result_text(state_value, origin, grant_scope),
+            details=details,
         )
     # await_access: loop bounded extension-side slices until the decision, the
     # caller's deadline, or a terminal state. Each slice is its own RPC well
@@ -5898,11 +5912,16 @@ async def _bridge_access(
         state_value = str(result.get("state", ""))
         if state_value != "pending":
             origin = str(result.get("origin", url))
+            grant_scope = str(result.get("grant_scope", ""))
             return _text(
                 tool_call_id,
                 "browser",
-                _access_result_text(state_value, origin),
-                details={"origin": origin, "state": state_value},
+                _access_result_text(state_value, origin, grant_scope),
+                details={
+                    "origin": origin,
+                    "state": state_value,
+                    **({"grant_scope": grant_scope} if grant_scope else {}),
+                },
             )
 
 

@@ -69,7 +69,7 @@ all three choices: Allow once, Always allow, Deny.
 **Caption suggestion:**
 > New site? You decide before the agent opens it.
 
-**Must show:** the exact origin, default-deny nature, and reversible choice.
+**Must show:** the visible authority, default-deny nature, and reversible choice. Ordinary sites use exact-origin grants; only literal loopback hosts may show the explicit all-ports choice.
 Avoid bank, health, social, or employer sites in store creative.
 
 ### 4. The agent drives one tab

@@ -54,7 +54,7 @@ boundary. Do not shorten it to “browser automation.”
 
 ### Host permission: `<all_urls>`
 
-> Users may ask their Local Operator agent to browse any HTTP or HTTPS site, so the extension cannot declare a fixed site list. Access is denied by default: before the agent-owned tab enters a new origin, the extension displays an in-browser prompt with Allow once, Always allow, and Deny choices, and it repeats the check for redirect destinations. `<all_urls>` is required for `chrome.scripting` and debugger-backed actions on the specific origins the user approves. The extension independently rejects non-HTTP(S) schemes and does not use this permission on the user's other tabs.
+> Users may ask their Local Operator agent to browse any HTTP or HTTPS site, so the extension cannot declare a fixed site list. Access is denied by default: before the agent-owned tab enters a new origin, the extension displays an in-browser prompt with Allow once, a reversible exact-origin grant, and Deny choices, and it repeats the check for redirect destinations. Literal loopback hosts additionally offer an explicit same-scheme all-port grant; no other hostname is eligible. `<all_urls>` is required for `chrome.scripting` and debugger-backed actions on the specific origins the user approves. The extension independently rejects non-HTTP(S) schemes and does not use this permission on the user's other tabs.
 
 **Submission check (finding N2):** before uploading, diff this file against the
 **built** `extension/dist/manifest.json`, not the source list. The built name is
