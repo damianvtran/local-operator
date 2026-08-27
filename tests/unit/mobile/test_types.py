@@ -56,10 +56,13 @@ def test_peer_message_rejects_non_dict_sender() -> None:
 
 
 def test_protocol_version_not_bumped_for_peer_messaging() -> None:
-    # The peer_message op is additive; bumping the version would break the
-    # opposite compatibility direction (an old client refusing a new
-    # registrant). If this fails, someone "helpfully" bumped it — don't.
-    assert PROTOCOL_VERSION == 4
+    # The peer_message op is additive; bumping the version for IT would break
+    # the opposite compatibility direction (an old client refusing a new
+    # registrant). The pin sits at 5 because the canonical frontend-state
+    # contract (unified session state) is a genuine wire break that owns that
+    # bump — peer messaging still must not move it. If this fails, someone
+    # "helpfully" bumped it for an additive op — don't.
+    assert PROTOCOL_VERSION == 5
 
 
 def test_peer_message_is_a_known_entry_kind() -> None:

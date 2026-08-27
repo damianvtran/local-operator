@@ -43,6 +43,7 @@ from local_operator.harness.types import (
     AgentEvent,
     CompactionEndEvent,
     CompactionStartEvent,
+    HistoryDeltaEvent,
     ImageContent,
 )
 from local_operator.harness.types import Message as HarnessMessage
@@ -157,10 +158,14 @@ class UserMessageStart(Message):
     its UserBlock optimistically, so the app de-dupes on arrival. The field is
     ``prompt``, not ``text``: Textual's ``Message`` reserves ``text``."""
 
-    def __init__(self, prompt: str, image_count: int) -> None:
+    def __init__(self, prompt: str, images: list[ImageContent] | int) -> None:
         super().__init__()
         self.prompt = prompt
-        self.image_count = image_count
+        # Integer remains accepted for older synthetic tests and reduced event
+        # producers. Production carries immutable blocks; only that path can
+        # render thumbnails, while the compatibility path preserves its receipt.
+        self.images = tuple(images) if not isinstance(images, int) else ()
+        self.image_count = images if isinstance(images, int) else len(images)
 
 
 class AssistantMessageEnd(Message):
@@ -169,6 +174,22 @@ class AssistantMessageEnd(Message):
     def __init__(self, text: str) -> None:
         super().__init__()
         self.text = text
+
+
+class HistoryRowsSettled(Message):
+    """Durable rows that settled while no frontend painted them (reconnect gap).
+
+    Carries the rows verbatim so the app projects them through the SAME
+    role-aware settled-history renderer a cold resume uses — user rows as
+    user blocks with their images, assistant rows as prose plus paired tool
+    cards, custom rows through their own block paths. Routing these through
+    :class:`AssistantMessageEnd` painted every role as assistant speech
+    (review round 3, MAJOR-1/U7/D1).
+    """
+
+    def __init__(self, messages: list[Any]) -> None:
+        super().__init__()
+        self.messages = messages
 
 
 class ToolComposing(Message):
@@ -545,7 +566,7 @@ class EventController:
         # is the AgentMessage union, so pyright needs the isinstance.
         if isinstance(message, HarnessMessage) and message.role == "user":
             images = [b for b in message.content if isinstance(b, ImageContent)]
-            self._post(UserMessageStart(message.text, len(images)))
+            self._post(UserMessageStart(message.text, images))
             return
         self._assistant_buffer = ""
         self._assistant_seen = ""
@@ -585,6 +606,12 @@ class EventController:
                 # having something to say. Posting with size 0 lets the app take
                 # the money and leave the reading alone.
                 self._post(ContextUsageReported(0, message_usage))
+
+    def _handle_history_delta(self, event: HistoryDeltaEvent) -> None:
+        # Settled history, not a live stream: nothing here touches the
+        # assistant buffer or the flush timer, because these rows were never
+        # streaming in THIS frontend. The app owns the role-aware projection.
+        self._post(HistoryRowsSettled(list(event.messages)))
 
     def _handle_tool_compose(self, event: ToolCallComposeEvent) -> None:
         self._post(ToolComposing(event))
@@ -691,6 +718,7 @@ class EventController:
         "message_start": _handle_message_start,
         "message_update": _handle_message_update,
         "message_end": _handle_message_end,
+        "history_delta": _handle_history_delta,
         "tool_call_compose": _handle_tool_compose,
         "tool_execution_start": _handle_tool_start,
         "tool_execution_update": _handle_tool_update,

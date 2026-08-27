@@ -1551,12 +1551,31 @@ class Session:
         # concurrent children than a hosted one. An unset or unusable config
         # contributes NO kwarg, so the manager's own default stands and the
         # behaviour is exactly what it was before this was configurable.
+        def on_job_change() -> None:
+            store = getattr(self, "_frontend_state_store", None)
+            # No terminal or attach subscriber can observe these snapshots yet.
+            # Avoid serializing large child trajectories solely for an unused
+            # in-process state object; the first subscription snapshots live data.
+            if store is None or not store.has_subscribers:
+                return
+            if getattr(self, "_frontend_jobs_refresh_scheduled", False):
+                return
+            self._frontend_jobs_refresh_scheduled = True
+            try:
+                # Child trajectory events arrive in bursts. A 50 ms coalesce
+                # keeps progress perceptibly live without serializing six full
+                # rosters on every shared-loop event.
+                asyncio.get_running_loop().call_later(0.05, self._flush_frontend_jobs)
+            except RuntimeError:
+                self._frontend_jobs_refresh_scheduled = False
+                store.refresh_jobs(self)
+
         self.jobs = AsyncJobManager(
             on_job_complete=self._on_job_completed,
-            # The manager signals every task-roster move here; the session folds
-            # both halves (job rows + comms records) into ONE persisted snapshot
-            # so a resume can rebuild the subagent panel and the resume basis.
+            # One mutation seam persists resumability and publishes the live
+            # canonical roster, including progress/cost/status changes.
             on_roster_change=self._schedule_subagent_persist,
+            on_job_change=on_job_change,
             **_configured_max_running(),
         )
         self._wake = WakeScheduler(
@@ -1566,6 +1585,9 @@ class Session:
             # fires into one aggregated prompt (see _handle_missed_wakes).
             deliver=lambda due: self._wake_deliver_via_hook(due),
             persist=self._persist_wake_schedules,
+            on_change=lambda: (
+                self.refresh_frontend_state() if hasattr(self, "_frontend_state_store") else None
+            ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
         # Catch-up state for the wake deliveries the process was DOWN for:
@@ -1654,6 +1676,20 @@ class Session:
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
+        # The session, not an OperatorApp, owns state that must survive a second
+        # frontend joining. Constructed after every durable source above has
+        # restored so the first snapshot is already authoritative.
+        from local_operator.session.frontend_state import FrontendStateStore
+
+        # Headless hosts restore the durable checkpoint WITHOUT the live source
+        # scan (jobs/todos/MCP walk plus the TUI registry import) so schedulers
+        # stay cheap — but never start bare: their turn-end checkpoint would
+        # otherwise overwrite a TUI's persisted spend/duration/title.
+        self._frontend_state_store = (
+            FrontendStateStore.from_session(self)
+            if self._has_ui
+            else FrontendStateStore.from_checkpoint(self)
+        )
 
     def _render_history(
         self, messages: list[AgentMessage], *, keep_images: bool = False
@@ -2242,6 +2278,7 @@ class Session:
                 if callable(withdraw):
                     withdraw()
                 self._journal_effort_if_selection_in_force(previous, model)
+                self.refresh_frontend_state()
                 return
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
@@ -2268,6 +2305,7 @@ class Session:
                 if refreshed is not None:
                     self._active_fallback = refreshed
             self._journal_effort_if_selection_in_force(previous, model)
+            self.refresh_frontend_state()
             return
         # A genuine model change is a SELECTION, and selections outlive the
         # process: journal it so `--resume` comes back on this model instead
@@ -2297,6 +2335,7 @@ class Session:
         # turn (see journal_model_switch). No ``reason``: the head already reads
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
+        self.refresh_frontend_state()
         self._spawn_background(
             self.journal_model_switch(
                 f"{model.provider}/{model.model_id}",
@@ -2407,6 +2446,7 @@ class Session:
         # Same tail, same fate on resume as the team/agent briefs, so the goal
         # is journalled by the same mechanism rather than a second one.
         self._persist_attachment()
+        self.refresh_frontend_state()
         return stored
 
     @property
@@ -2441,6 +2481,7 @@ class Session:
         if team is None:
             self._goal_state.team_brief = ""
             self._persist_attachment()
+            self.refresh_frontend_state()
             return
         preamble = getattr(team, "manager_preamble", lambda: "")()
         # The manager's own profile instructions (the reusable BASE) sit in
@@ -2475,6 +2516,7 @@ class Session:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
         self._persist_attachment()
+        self.refresh_frontend_state()
 
     def _persist_attachment(self) -> None:
         """Journal the attached team/agent/goal beside the transcript.
@@ -2783,6 +2825,7 @@ class Session:
         # this the sidecar would still name the profile the user just dropped,
         # and the next resume would silently re-attach it.
         self._persist_attachment()
+        self.refresh_frontend_state()
 
     def _stamp_agent_brief(self, body: str, display_name: str) -> str:
         """Store the resolved brief on the volatile tail and report success.
@@ -2804,6 +2847,7 @@ class Session:
         # (role, seed and specialist all land here), so journalling once from
         # this point cannot miss a path the way three call-site writes could.
         self._persist_attachment()
+        self.refresh_frontend_state()
         return display_name
 
     @property
@@ -2860,6 +2904,7 @@ class Session:
                     get_recorder().note_session_name(self.session_id, stored)
                 except Exception:  # noqa: BLE001 — analytics is best-effort
                     logger.debug("analytics: note_session_name failed", exc_info=True)
+        self.refresh_frontend_state()
         return stored
 
     def _spawn_conversation_name_write(self) -> None:
@@ -3221,6 +3266,7 @@ class Session:
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
+        self.refresh_frontend_state()
 
     def queued_steering(self) -> list[AgentMessage]:
         """A FIFO snapshot of the steering queue, without draining it.
@@ -3259,6 +3305,7 @@ class Session:
         so no reference the host could match on ever leaves this method.
         """
         self._steering_queue.put_nowait(message)
+        self.refresh_frontend_state()
 
     def recall_steering(self, message: AgentMessage) -> bool:
         """Remove ONE specific message from the steering queue, if present.
@@ -3293,6 +3340,8 @@ class Session:
             remaining.append(item)
         for item in remaining:
             self._steering_queue.put_nowait(item)
+        if found:
+            self.refresh_frontend_state()
         return found
 
     def _peer_custom_message(self, text: str, sender: dict[str, Any]) -> CustomMessage:
@@ -3590,6 +3639,8 @@ class Session:
         """
         self._tools = list(tools)
         self._context.tools = self._tools
+        if hasattr(self, "_frontend_state_store"):
+            self.refresh_frontend_state()
 
     def set_fallback_tool_resolver(
         self, resolver: Callable[[str], AgentTool | None] | None
@@ -3740,6 +3791,46 @@ class Session:
 
     # -- events ---------------------------------------------------------------
 
+    def _flush_frontend_jobs(self) -> None:
+        """Coalesce a burst of child trajectory/progress mutations per loop tick."""
+        self._frontend_jobs_refresh_scheduled = False
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_jobs(self)
+
+    @property
+    def frontend_state(self):  # type: ignore[no-untyped-def]
+        """Current canonical state for any full terminal frontend."""
+        return self._frontend_state_store.state
+
+    def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
+        """Atomically refresh, snapshot and subscribe on the session loop.
+
+        The refresh must go through the PUBLISHING path: silently replacing
+        state would hand this joiner a different state at the same sequence
+        number an earlier subscriber already holds, breaking the exact-`+1`
+        gap check every client uses to detect transport loss. ``initial=True``
+        is reserved for store construction, before any subscriber exists.
+        """
+        self._frontend_state_store.refresh_from_session(self)
+        return self._frontend_state_store.subscribe(handler)
+
+    def refresh_frontend_state(self) -> None:
+        """Publish non-event source changes through the canonical contract.
+
+        Guarded because the attachment restore (#301) re-attaches the stored
+        team/agent DURING construction, before the store exists; those
+        mutations are captured by the store's own construction snapshot, so
+        skipping the publish here loses nothing.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_from_session(self)
+
+    def refresh_frontend_usage(self) -> None:
+        """Refresh restored usage without scanning transcript/jobs/tool schemas."""
+        self._frontend_state_store.refresh_restored_usage(self)
+
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable. Sync or
         async handlers are called in registration order; one raising never
@@ -3847,6 +3938,11 @@ class Session:
             return None
 
     async def _emit(self, event: AgentEvent) -> None:
+        # Fold before fan-out: a client joining from an event handler observes a
+        # snapshot that already contains this event, never an off-by-one view.
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None and (self._has_ui or store.has_subscribers):
+            store.observe_event(self, event)
         for handler in list(self._handlers):
             try:
                 outcome = handler(event)
@@ -4129,6 +4225,16 @@ class Session:
             # resume. Placed on the normal path (a turn that raised past here
             # still has last turn's snapshot; the next clean turn re-writes it).
             await self._maybe_persist_todos()
+            # Spend must survive owner death at the same durability boundary as
+            # the messages it describes. The checkpoint is replacement state,
+            # never an additive delta, so takeover cannot double it. A headless
+            # store that observed nothing (no UI, no attach subscriber) skips
+            # the write: it holds only the restored durable state, and
+            # re-appending that would at best duplicate and at worst — before
+            # ``from_checkpoint`` — clobber the richer checkpoint a TUI wrote.
+            if self._has_ui or self._frontend_state_store.has_subscribers:
+                await self._frontend_state_store.checkpoint(self._transcript)
+
             # Child events reach the shared comms watcher before either durable
             # append. Notify only after messages AND todos are stable, including
             # provider-error turns that emit no later terminal event.
@@ -4264,6 +4370,7 @@ class Session:
             request_approval=None if self._yolo else self._request_approval,
             ask_user=self._ask_user,
             wake_scheduler=self._wake,
+            on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
             subagent_launcher=self._launch_subagent,
             jobs=self.jobs,
@@ -4633,6 +4740,7 @@ class Session:
             for message in messages:
                 if isinstance(message, Message) and message.role == "user":
                     await self._emit(MessageStartEvent(message=message))
+            self.refresh_frontend_state()
         return messages
 
     def _has_urgent_steering(self) -> bool:

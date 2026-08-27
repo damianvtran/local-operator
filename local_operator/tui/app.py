@@ -27,7 +27,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
@@ -102,6 +102,7 @@ from local_operator.tui.events import (
     ContextUsageReported,
     EffectiveModelChanged,
     EventController,
+    HistoryRowsSettled,
     NoticePosted,
     PeerMessageDelivered,
     RetryEnded,
@@ -1986,6 +1987,26 @@ class OperatorApp(App[None]):
         """
         self._session = session
         self._mobile_adopted(session)
+        # Every production session supplies the same frontend contract. Install
+        # it before reading status/panel fields so owner and follower take one
+        # renderer path rather than parallel interpretations.
+        old_unsubscribe = getattr(self, "_unsubscribe_frontend", None)
+        if callable(old_unsubscribe):
+            old_unsubscribe()
+        self._unsubscribe_frontend = None
+        subscribe_frontend = getattr(session, "subscribe_frontend", None)
+        refresh_frontend_usage = getattr(session, "refresh_frontend_usage", None)
+        if callable(refresh_frontend_usage):
+            refresh_frontend_usage()
+        if callable(subscribe_frontend):
+            from local_operator.session.frontend_state import FrontendSubscription
+
+            subscription = cast(
+                FrontendSubscription,
+                subscribe_frontend(self._on_frontend_update),
+            )
+            self._unsubscribe_frontend = subscription.unsubscribe
+            self._apply_frontend_state(subscription.sync.snapshot)
         # Straight after the session is adopted: the pane's resume binding has
         # to name the conversation now in it, and a swap (`/new`, `/resume`)
         # is exactly when the old one becomes wrong.
@@ -1999,13 +2020,21 @@ class OperatorApp(App[None]):
             set_takeover = getattr(session, "set_takeover_callback", None)
             if callable(set_takeover):
                 set_takeover(self._adopt_takeover_session)
+            # The double-Esc cancel reads the synchronous count the protocol
+            # returns, but a follower's REAL count resolves on the owner. The
+            # resolver is installed per-press by the Esc handler; arming the
+            # seam here is what lets RemoteSession reach back to rewrite the
+            # optimistic notice with the authoritative number.
+            set_cancel_resolution = getattr(session, "set_cancel_resolution", None)
+            if callable(set_cancel_resolution):
+                set_cancel_resolution(None)
         # Before the band is painted below: the freshly built spec carries the
         # MODEL's default effort, and a `/reload` or `/new` that dropped the
         # user's chosen level would repaint the band with a level they did not
         # choose and are no longer running.
         spec = _model_spec(session)
         if (
-            not bool(getattr(session, "is_remote", False))
+            not callable(getattr(session, "route_shared_slash", None))
             and spec is not None
             and self._effort_choice is not None
             and hasattr(session, "set_model")
@@ -2017,24 +2046,22 @@ class OperatorApp(App[None]):
         # The refusal is latched per model, and this session may be on another
         # one; a stale latch would swallow the answer on the model that needs it.
         self._effort_refusal_shown = None
+        # The owner's offerable-model rows are canonical state, so a follower's
+        # bare ``/model`` picker lists the models the SESSION can run (D3,
+        # review round 2). Published on every adoption: the catalogue only
+        # changes on credential/registry timescales, and both adoption paths
+        # (boot and takeover) are exactly the moments a NEW owner's rows
+        # replace the previous one's.
+        self._publish_model_catalogue(session)
         # Approvals must be answered ON SCREEN from here on: the factory's
         # default gate reads stdin, which this app has taken over, so leaving it
         # installed hangs the first write/exec tool call forever.
-        if bool(getattr(session, "is_remote", False)):
-            # The socket reader task was created before this app's Textual
-            # context existed. Calling the widget-mounting handlers directly
-            # from it leaves Textual with no active app during compose. Marshal
-            # gate entry through the message pump; the returned futures still
-            # preserve the owner's first-valid-answer-wins socket semantics.
-            session.set_approval_handler(self._request_remote_tool_approval)
-            session.set_ask_handler(self._request_remote_user_choice)
-        else:
-            session.set_approval_handler(self.request_tool_approval)
-            # And this is what makes the `ask` tool EXIST for this session: its
-            # createIf builder gates on the hook, so a front end that can draw a
-            # picker gets the tool and every host that cannot (the server, exec
-            # mode, a subagent) never advertises a question nobody could answer.
-            session.set_ask_handler(self.request_user_choice)
+        # Every session enters the same widget path through Textual's pump.
+        # Remote socket callbacks require the marshal; using it locally too
+        # removes a second gate state machine without changing arbitration.
+        session.set_approval_handler(self._request_tool_approval_on_app_loop)
+        # Installing this hook is what makes the ask tool exist for a UI host.
+        session.set_ask_handler(self._request_user_choice_on_app_loop)
         self._controller = EventController(session, self)
         self._controller.subscribe()
         assert self._status is not None
@@ -2086,8 +2113,70 @@ class OperatorApp(App[None]):
         # land first and the exact restore would then be the thing overwriting
         # it — same end state on a quiet boot, but the estimate is resolved in a
         # worker, so which one won would depend on scheduling.
-        self._restore_reported_usage(session)
-        self._measure_preloaded_context(session)
+        if not callable(subscribe_frontend):
+            self._restore_reported_usage(session)
+            self._measure_preloaded_context(session)
+        elif getattr(session.frontend_state, "context_tokens", None) is None:
+            self._measure_preloaded_context(session)
+
+    def _on_frontend_update(self, update: Any) -> None:
+        session = self._session
+        state = getattr(session, "frontend_state", None) if session is not None else None
+        # Socket and local callbacks share this seam. The store has already
+        # applied the typed delta; widgets always render its complete state.
+        self.call_later(self._apply_frontend_state, state)
+
+    def _apply_frontend_state(self, state: Any) -> None:
+        if self._status is None or state is None:
+            return
+        cost = getattr(state, "cumulative_cost", None)
+        knowledge = getattr(getattr(state, "cost_knowledge", "unknown"), "value", "unknown")
+        if cost is not None:
+            self._total_cost = float(getattr(state, "cumulative_parent_cost", 0.0) or 0.0)
+            self._subagent_costs = dict(getattr(state, "child_costs", {}) or {})
+            self._spend_is_floor = knowledge in {"floor", "partial"}
+        usage = getattr(state, "last_usage", None)
+        billed_unknown = bool(
+            usage is not None
+            and (getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0))
+            and cost is None
+        )
+        mcp_servers = list(getattr(state, "mcp_servers", []) or [])
+        task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
+        bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
+        self._status.update(
+            model_label=getattr(state, "effective_model_label", "")
+            or getattr(state, "model_label", ""),
+            model_name=str(
+                getattr(getattr(state, "effective_model", None), "display_name", "") or ""
+            ),
+            effort=str(
+                getattr(getattr(state, "effective_model", None), "reasoning_effort", "") or ""
+            ),
+            agent_profile=str(getattr(state, "active_agent", "") or ""),
+            team=str(getattr(state, "active_team", "") or ""),
+            cwd=str(getattr(state, "cwd", "") or ""),
+            context_tokens=getattr(state, "context_tokens", None),
+            context_is_estimate=getattr(state, "context_is_estimate", None),
+            context_window=getattr(state, "context_window", None),
+            cost=(
+                self._spend_text(cost) if cost is not None else ("$—" if billed_unknown else None)
+            ),
+            conversation_name=str(getattr(state, "conversation_title", "") or ""),
+            streaming=bool(getattr(state, "streaming", False)),
+            subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
+            jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
+            mcp=McpStatus(
+                configured=len(mcp_servers),
+                connected=sum(1 for server in mcp_servers if server.status == "connected"),
+                failed=any(server.status == "failed" for server in mcp_servers),
+            ),
+        )
+        self._status.seed_duration(
+            active_seconds=float(getattr(state, "active_duration_s", 0.0) or 0.0),
+            activity_started_at=getattr(state, "activity_started_at", None),
+        )
+        self._refresh_band()
 
     async def _adopt_takeover_session(self, session: Any) -> None:
         """Become the owner after the remote facade wins the transcript lease.
@@ -2108,8 +2197,22 @@ class OperatorApp(App[None]):
                 await remote.dispose()
             except Exception:
                 pass
+        unsubscribe_frontend = getattr(self, "_unsubscribe_frontend", None)
+        if callable(unsubscribe_frontend):
+            unsubscribe_frontend()
+        self._unsubscribe_frontend = None
         self._session = session
         self._mobile_adopted(session)
+        subscribe_frontend = getattr(session, "subscribe_frontend", None)
+        if callable(subscribe_frontend):
+            from local_operator.session.frontend_state import FrontendSubscription
+
+            subscription = cast(
+                FrontendSubscription,
+                subscribe_frontend(self._on_frontend_update),
+            )
+            self._unsubscribe_frontend = subscription.unsubscribe
+            self._apply_frontend_state(subscription.sync.snapshot)
         session.set_approval_handler(self.request_tool_approval)
         session.set_ask_handler(self.request_user_choice)
         self._controller = EventController(session, self)
@@ -2119,13 +2222,17 @@ class OperatorApp(App[None]):
             model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
-            # The takeover replaces a RemoteSession facade with a REAL Session,
-            # which runs `_restore_attachment` at construction and so may be
-            # carrying a team/agent the band is not showing (R4). `update`
-            # treats `None` as leave-alone, so omitting these left whatever the
-            # remote facade had painted — the one adopt sink that did not paint
-            # the restored attachment. Read defensively, as `_adopt_session`
-            # does, so a reduced facade without the accessors cannot raise here.
+            # The profile/team segments must survive the swap: takeover is a
+            # transport rotation, not a conversation change, so the band may
+            # not drop (and later re-add) segments the canonical state never
+            # changed — the drop-and-restore shifts every following segment
+            # and truncates the title mid-transition (D2, review round 2).
+            # The replacement is also a REAL Session that ran
+            # `_restore_attachment` at construction, so it may carry a
+            # team/agent the remote facade never painted (R4); painting from
+            # the new session covers both. Read defensively, as
+            # `_adopt_session` does, so a reduced facade without the accessors
+            # cannot raise here.
             agent_profile=str(getattr(session, "active_agent", "") or ""),
             team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
@@ -2133,8 +2240,32 @@ class OperatorApp(App[None]):
             streaming=False,
         )
         self._wire_mcp_status(session)
+        # The durable ledger carries the conversation's true cost/context
+        # across the rotation. Seeding the band directly from the canonical
+        # snapshot (not only from restored turn usage, which is one turn's
+        # floor) keeps the cost segment on screen through the handoff —
+        # dropping it and letting the frontend update restore it later is the
+        # same visible flicker as the profile segment, one segment over.
+        frontend = getattr(session, "frontend_state", None)
+        if frontend is not None:
+            parent_cost = getattr(frontend, "cumulative_parent_cost", None)
+            if parent_cost is not None:
+                knowledge = getattr(
+                    getattr(frontend, "cost_knowledge", "unknown"), "value", "unknown"
+                )
+                self._total_cost = float(parent_cost or 0.0)
+                self._subagent_costs = dict(getattr(frontend, "child_costs", {}) or {})
+                self._spend_is_floor = knowledge in {"floor", "partial"}
+                self._status.update(cost=self._spend_text())
+            context_tokens = getattr(frontend, "context_tokens", None)
+            if context_tokens:
+                self._status.update(
+                    context_tokens=int(context_tokens),
+                    context_is_estimate=bool(getattr(frontend, "context_is_estimate", False)),
+                    context_window=_context_window(session),
+                )
 
-    async def _request_remote_tool_approval(
+    async def _request_tool_approval_on_app_loop(
         self, tool_name: str, description: str, *, job_id: str | None = None
     ) -> bool:
         """Enter the real approval surface from a pre-Textual socket task.
@@ -2145,20 +2276,20 @@ class OperatorApp(App[None]):
         letting a late card settle a cancelled owner request.
         """
         return bool(
-            await self._run_remote_gate(
+            await self._run_gate_on_app_loop(
                 lambda: self.request_tool_approval(tool_name, description, job_id=job_id)
             )
         )
 
-    async def _request_remote_user_choice(
+    async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion]
     ) -> dict[str, list[str]] | None:
         """Enter the real ask picker through Textual's message-pump context."""
-        result = await self._run_remote_gate(lambda: self.request_user_choice(questions))
+        result = await self._run_gate_on_app_loop(lambda: self.request_user_choice(questions))
         return cast(dict[str, list[str]] | None, result)
 
-    async def _run_remote_gate(self, build: Callable[[], Awaitable[Any]]) -> Any:
-        """Run one remote gate coroutine in the app context and mirror its result."""
+    async def _run_gate_on_app_loop(self, build: Callable[[], Awaitable[Any]]) -> Any:
+        """Run one gate coroutine in the app context and mirror its result."""
         loop = asyncio.get_running_loop()
         result: asyncio.Future[Any] = loop.create_future()
         task: asyncio.Task[Any] | None = None
@@ -2450,11 +2581,19 @@ class OperatorApp(App[None]):
             if self._status.context_tokens and not self._status.context_is_estimate:
                 # A turn finished while this was in flight; the exact count wins.
                 return
-            self._status.update(
-                context_tokens=tokens,
-                context_is_estimate=True,
-                context_window=_context_window(session),
-            )
+            store = getattr(session, "_frontend_state_store", None)
+            if store is not None:
+                store.mutate(
+                    context_tokens=tokens,
+                    context_is_estimate=True,
+                    context_window=_context_window(session),
+                )
+            else:
+                self._status.update(
+                    context_tokens=tokens,
+                    context_is_estimate=True,
+                    context_window=_context_window(session),
+                )
 
         # EXCLUSIVE on its own group. `on_tools_changed` fires per server
         # connect, reconnect and list-changed, so several of these can be in
@@ -2499,12 +2638,31 @@ class OperatorApp(App[None]):
             history = list(session.history())
         except Exception:
             return  # defensive: reduced hosts may lack the accessor
+        self._project_settled_rows(history)
 
+    def _project_settled_rows(self, history: list[Any]) -> bool:
+        """Mount settled transcript rows through the ONE role-aware renderer.
+
+        The shared history/render seam: cold resume feeds it the whole
+        conversation and a reconnect's durable gap replay
+        (:class:`HistoryRowsSettled`) feeds it exactly the rows no frontend
+        painted. One implementation is the point — the gap replay previously
+        synthesized role-blind assistant events and a recovered user prompt
+        painted as agent speech (review round 3, MAJOR-1/U7/D1). Whatever
+        this method does for ``--resume`` is by construction what a
+        reconnect gap does: user rows as :class:`UserBlock` with images,
+        assistant prose + tool cards paired with results, wake/peer custom
+        rows as their own blocks, refusal/error notices.
+
+        Returns whether anything mounted, so callers can skip tail-follow
+        work for an empty projection.
+        """
         # Results are keyed by the call they answer, and a tool message can sit
         # several messages after its call (one assistant turn issues a batch).
         # Indexing first is what lets each call render WITH its outcome instead
         # of as a second, orphaned row.
         results: dict[str, Any] = {}
+        settled_results: set[str] = set()
         # Harness chrome the LIVE path never paints as a user row, so replay
         # must not either (see the `role == "user"` branch). Deferred once to
         # the top of this method rather than inside the loop, matching the
@@ -2512,15 +2670,27 @@ class OperatorApp(App[None]):
         from local_operator.session.session import _CONTINUATION_PROMPT
 
         for message in history:
-            if getattr(message, "role", None) == "tool":
-                call_id = getattr(message, "tool_call_id", None)
-                if call_id:
-                    results[call_id] = message
+            if getattr(message, "role", None) != "tool":
+                continue
+            call_id = getattr(message, "tool_call_id", None)
+            if not call_id:
+                continue
+            results[call_id] = message
+            # A result whose call painted LIVE before a disconnect must
+            # settle the card already on screen — the disconnect marked it
+            # ``interrupted``, and replaying it as a new row would double the
+            # card (review round 4, MINOR-1). The disconnect retired the card
+            # out of ``_tool_cards`` but left it mounted, so scan the
+            # transcript for the painted card carrying this call id.
+            painted = self._painted_tool_card(call_id)
+            if painted is not None:
+                self._settle_painted_tool_card(painted, message)
+                settled_results.add(call_id)
         # Fresh batch, fresh pairing: a flag left by an earlier replay (or a
         # truncated one) must not open a card in this conversation.
         self._replay_bang_pending = False
 
-        appended = False
+        appended = bool(settled_results)
         transcript = self._transcript_view()
         # ONE mount for the whole conversation. Per-block mounting made Textual
         # re-walk its stylesheet, invalidate the container and schedule a settle
@@ -2663,6 +2833,60 @@ class OperatorApp(App[None]):
             # resumed session streams carries them with it rather than growing
             # off the bottom of a viewport pinned to the replay's last frame.
             transcript.follow_tail()
+        return appended
+
+    def _painted_tool_card(self, call_id: str) -> ToolCard | None:
+        """The ToolCard on screen for ``call_id``, whether live or retired.
+
+        ``_tool_cards`` holds only cards still claiming to be live; a card the
+        disconnect marked ``interrupted`` was retired out of that dictionary
+        but stays mounted in the transcript. A recovered result for the same
+        call must settle THAT row, not paint a second one (review round 4,
+        MINOR-1), so the lookup falls back to a transcript scan by the call id
+        every ToolCard carries.
+        """
+        card = self._tool_cards.get(call_id)
+        if card is not None:
+            return card
+        for block in self._transcript_view().blocks():
+            if isinstance(block, ToolCard) and block.tool_call_id == call_id:
+                return block
+        return None
+
+    def _settle_painted_tool_card(self, card: ToolCard, result: Any) -> None:
+        """Settle a live-painted tool card with the result recovered from the gap.
+
+        The card was painted by the live relay (or the sync seed) before the
+        disconnect and marked ``interrupted`` by the disconnect handler. Its
+        call's result landed durably during the gap, so the settled renderer
+        now hands the real outcome back to the SAME card instead of painting
+        a new row (review round 4, MINOR-1). Same state derivation as
+        ``_replay_tool_call`` — a call killed mid-execution persists as an
+        error result whose text starts with ``aborted (``, which the live
+        frame renders as ``interrupted``, not an error.
+        """
+        result_text = getattr(result, "text", "") or ""
+        payload = getattr(result, "provider_payload", None) or {}
+        details = payload.get("details") if isinstance(payload, dict) else None
+        if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
+            card.restore(state="interrupted")
+            return
+        if getattr(result, "is_error", False):
+            card.restore(
+                state="error",
+                result_text=result_text,
+                details=details,
+                error=_first_line(result_text),
+            )
+        else:
+            card.restore(state="success", result_text=result_text, details=details)
+        self._append_image_blocks(
+            [
+                block
+                for block in (getattr(result, "content", None) or [])
+                if isinstance(block, ImageContent)
+            ]
+        )
 
     def _replay_tool_call(
         self, call: Any, results: dict[str, Any], *, user_run: bool = False
@@ -5732,40 +5956,40 @@ class OperatorApp(App[None]):
             # started a follow-up turn, and the user's second press means that
             # too. It is idempotent when the parent is already stopped.
             self._interrupt()
-            if stopped:
-                text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
-                # Sparing backgrounded `bash` is deliberate (`background=true`
-                # exists so a build outlives the turn) and genuinely surprising
-                # to a user who just escalated a stop, which reads as "stop all
-                # of it". Naming the survivors here, and only when there ARE
-                # any, prevents the "I stopped everything, why is the build
-                # still running" question at the one moment the answer is
-                # wanted (D3, design round 1). Unconditional, it would be noise.
-                spared = self._job_count("bash")
-                if spared:
-                    text += (
-                        f"; {spared} background job{'s' if spared != 1 else ''} "
-                        "still running — jobs cancel to stop"
-                    )
-            elif offered:
-                # The children finished on their own between the two presses.
-                # `cancel_subagents` recounts at press time, so this is
-                # reachable in production and not a fake-session artifact.
-                #
-                # The wording matters more than it looks. Saying "no subagents
-                # were running" here REPLACES a row that just said "2 subagents
-                # still running", so the user reads a flat denial of what they
-                # were told one keypress ago — which re-raises the exact
-                # credibility problem this whole change exists to fix. What
-                # actually happened is better news than the offer implied, and
-                # the line should say so (D2, design round 1).
-                text = (
-                    f"{offered} subagent{'s' if offered != 1 else ''} "
-                    "finished before the stop landed"
+            set_resolution = getattr(session, "set_cancel_resolution", None)
+            if callable(set_resolution):
+                # A follower's count is OPTIMISTIC: the synchronous protocol
+                # method already returned the number it offered, but the
+                # authoritative count crosses the socket after this frame. Show
+                # the offered reading now, then rewrite it with the owner's
+                # confirmed number — the completion text only ever states what
+                # the owner actually stopped, never a guessed zero.
+                self._replace_stop_notice(
+                    f"stopping {offered} subagent{'s' if offered != 1 else ''}…", "note"
                 )
+
+                def resolve_cancel(confirmed: int) -> None:
+                    set_resolution(None)
+                    if confirmed < 0:
+                        # ``-1`` is the transport sentinel for "the owner never
+                        # answered" — NOT a count. Passing the optimistic
+                        # ``offered`` to the success reporter printed "stopped
+                        # 2 subagents" for a request that may have stopped
+                        # none (MAJOR-2, review round 2). A failed request is
+                        # recoverable (press again), so it renders as a
+                        # warning that says exactly what is unknown.
+                        self._replace_stop_notice(
+                            f"could not confirm the stop with the session owner — "
+                            f"{offered} subagent{'s' if offered != 1 else ''} may still "
+                            "be running; press Esc twice again to retry",
+                            "warning",
+                        )
+                        return
+                    self._report_subagent_stop(confirmed, offered)
+
+                set_resolution(resolve_cancel)
             else:
-                text = "no subagents were running"
-            self._replace_stop_notice(text, "note")
+                self._report_subagent_stop(stopped, offered)
             return
 
         pending = self._approval is not None and not self._approval.answered
@@ -5908,6 +6132,49 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a stop must never fail on its count
             logger.warning("counting subagents failed", exc_info=True)
             return 0
+
+    def _report_subagent_stop(self, stopped: int, offered: int) -> None:
+        """Print the stop ladder's outcome line, from one authoritative count.
+
+        Factored out of the second-Esc path so the immediate reading and the
+        owner-confirmed followup share ONE wording: a follower shows its
+        optimistic count first, then this same line once the owner's real
+        number arrives — so the two can never disagree about phrasing.
+        """
+        if stopped:
+            text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
+            # Sparing backgrounded `bash` is deliberate (`background=true`
+            # exists so a build outlives the turn) and genuinely surprising
+            # to a user who just escalated a stop, which reads as "stop all
+            # of it". Naming the survivors here, and only when there ARE
+            # any, prevents the "I stopped everything, why is the build
+            # still running" question at the one moment the answer is
+            # wanted (D3, design round 1). Unconditional, it would be noise.
+            spared = self._job_count("bash")
+            if spared:
+                text += (
+                    f"; {spared} background job{'s' if spared != 1 else ''} "
+                    "still running — jobs cancel to stop"
+                )
+        elif offered:
+            # The children finished on their own between the two presses.
+            # `cancel_subagents` recounts at press time, so this is
+            # reachable in production and not a fake-session artifact.
+            #
+            # The wording matters more than it looks. Saying "no subagents
+            # were running" here REPLACES a row that just said "2 subagents
+            # still running", so the user reads a flat denial of what they
+            # were told one keypress ago — which re-raises the exact
+            # credibility problem this whole change exists to fix. What
+            # actually happened is better news than the offer implied, and
+            # the line should say so (D2, design round 1).
+            text = (
+                f"{offered} subagent{'s' if offered != 1 else ''} "
+                "finished before the stop landed"
+            )
+        else:
+            text = "no subagents were running"
+        self._replace_stop_notice(text, "note")
 
     def _replace_stop_notice(self, text: str, kind: NoticeKind) -> None:
         """Show the stop ladder's one line, replacing any previous one.
@@ -7418,6 +7685,10 @@ class OperatorApp(App[None]):
             self._status.dispose()
         if self._controller is not None:
             self._controller.dispose()
+        unsubscribe_frontend = getattr(self, "_unsubscribe_frontend", None)
+        if callable(unsubscribe_frontend):
+            unsubscribe_frontend()
+            self._unsubscribe_frontend = None
         if self._session is not None:
             await self._session.dispose()
 
@@ -8203,9 +8474,13 @@ class OperatorApp(App[None]):
         # where the counts do not: a single child working for two minutes holds
         # `agents` at 1 the whole time while its bill climbs, so gating the
         # harvest on a count change would freeze the parent's total for exactly
-        # as long as the child was busy.
+        # as long as the child was busy. On a canonical-state session the store
+        # is the one writer (its 50 ms jobs coalesce covers the same window);
+        # harvesting here too made the band alternate between two ledgers
+        # whenever they disagreed (e.g. before descendant_usage reached DTOs).
         before = self._spend_total()
-        self._harvest_subagent_costs()
+        if not _canonical_frontend(self._session):
+            self._harvest_subagent_costs()
         total = self._spend_total()
         if (agents, jobs) != self._subagents_shown or total != before:
             self._subagents_shown = (agents, jobs)
@@ -9200,6 +9475,78 @@ class OperatorApp(App[None]):
         """The input editor. Queried rather than held: Textual owns the widget."""
         return self.query_one(Editor)
 
+    def _render_authoritative_slash(self, command: str, arg: str, outcome: Any) -> None:
+        """Render a follower's routed slash outcome in THIS terminal.
+
+        The owner ran the command and returned a :class:`SlashResult` dict
+        (``kind``/``text``/``style``/``data``); the strings are the standard
+        handler's own, so this only decides WHERE they land — the invoker's
+        transcript, not the owner's. ``block`` kinds rebuild the same widget a
+        local session would mount, so the two terminals are indistinguishable.
+        """
+        if isinstance(outcome, str):
+            # An owner that predates typed results still answers with a plain
+            # receipt string; print it as-is rather than dropping the line.
+            if outcome:
+                self._notice(outcome)
+            return
+        if not isinstance(outcome, dict):
+            return
+        kind = outcome.get("kind", "notice")
+        text = str(outcome.get("text", "") or "")
+        style = str(outcome.get("style", "info") or "info")
+        data = outcome.get("data") or {}
+        if kind == "noop":
+            # The invoker hosts the interactive surface itself (bare /model's
+            # picker is opened up-front); nothing arrives to print.
+            return
+        if kind == "block":
+            block_type = data.get("type")
+            if block_type == "context":
+                items = data.get("items") or []
+                title = str(data.get("title") or "Estimated next request")
+                self._append_block(RichBlock(_tree_listing(items, title, detail_token="muted")))
+                return
+            if block_type == "mcp":
+                block = self._mcp_block()
+                if block is not None:
+                    self._append_block(block)
+                return
+            if block_type == "team_list":
+                self._append_block(self._team_listing_block(data.get("items") or []))
+                return
+            if block_type == "agent_list":
+                self._append_block(self._agent_list_block(data.get("items") or []))
+                return
+        if text:
+            notice_kind: NoticeKind = "warning" if style == "warning" else "info"
+            if style == "error":
+                notice_kind = "error"
+            self._notice(text, notice_kind)
+
+    def _team_listing_block(self, items: list[Any]) -> RichBlock:
+        """Rebuild the bare ``/team`` roster block from wire rows.
+
+        The owner-side listing producer returns ``(name, facts, description)``
+        tuples (no live team objects cross the socket); this is the render
+        half, kept beside ``_team_list_block`` so both listings share the one
+        row layout.
+        """
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("teams", style=section)]
+        for item in items:
+            name, facts, summary = (list(item) + ["", "", ""])[:3]
+            rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
+            if facts:
+                rows.append(Padding(Text(str(facts), style=body), (0, 0, 0, 4)))
+            if summary:
+                rows.append(Padding(Text(str(summary), style=body), (0, 0, 0, 4)))
+        rows.append(Text())
+        rows.append(Text("Send: /team <name> <message>", style=body))
+        return RichBlock(Group(*rows))
+
     def _run_slash_command(
         self, text: str, attachments: Mapping[int, Attachment] | None = None
     ) -> None:
@@ -9232,26 +9579,87 @@ class OperatorApp(App[None]):
         arg = parts[1].strip() if len(parts) > 1 else ""
         notice = self._notice
 
-        # A RemoteSession keeps process/terminal commands local, but commands
-        # that mutate the SHARED conversation run on the owner. These three
-        # normally inspect local-only registries/loop state before touching the
-        # session, so they need the explicit routing seam here. /model, /effort,
-        # /goal, /rename and /compact already route through SessionProtocol's
-        # ordinary mutation methods and stay on their existing full UI paths.
+        # A RemoteSession keeps process/terminal commands local, but every
+        # command the owner advertises as ``authoritative_session`` in its
+        # capability list runs on the owner through the routing seam below —
+        # the owner's capability scope, not a hardcoded command list, decides.
+        from local_operator.session.frontend_state import (
+            _FRONTEND_LOCAL_SLASHES as _FOLLOWER_LOCAL_SLASHES,
+        )
+
         remote_route = getattr(self._session, "route_shared_slash", None)
-        if callable(remote_route) and command in {"/agent", "/team", "/loop"}:
+        remote_capabilities = {
+            f"/{cap.command}": cap
+            for cap in getattr(
+                getattr(self._session, "frontend_state", None), "slash_capabilities", []
+            )
+        }
+        remote_capability = remote_capabilities.get(command)
+        # Bare ``/mcp`` is argument-dependent: its LISTING is canonical and
+        # renders locally from the follower's own snapshot facade, while its
+        # grant subcommands mutate owner-side OAuth state and must route. The
+        # capability is advertised authoritative (the shape needing the seam),
+        # so the bare form is pulled back to local here by inspecting args.
+        if command == "/mcp" and not arg:
+            remote_capability = None
+        if (
+            callable(remote_route)
+            and remote_capability is not None
+            and getattr(remote_capability.scope, "value", remote_capability.scope)
+            == "authoritative_session"
+        ):
+            # Bare ``/model`` opens the INVOKING terminal's own picker — there
+            # is nothing for the owner to paint, and hosting the widget here is
+            # the whole point of the interaction (the old routing opened it in
+            # the owner's process, invisible to the user who asked). Choosing a
+            # row still routes the switch back to the owner.
+            if command == "/model" and not arg:
+                self._system_notice(self._persist_hint_notice())
+                self._open_model_picker()
+                return
 
             async def run_remote_slash() -> None:
                 try:
-                    typed_route = cast(Callable[[str, str], Awaitable[str]], remote_route)
-                    detail = await typed_route(command.removeprefix("/"), arg)
+                    typed_route = cast(
+                        Callable[[str, str, Sequence[ImageContent]], Awaitable[Any]], remote_route
+                    )
+                    images = resolve_markers(arg, attachments or {})
+                    outcome = await typed_route(command.removeprefix("/"), arg, images)
                 except Exception as error:
                     self._system_notice(str(error), "warning")
                 else:
-                    if detail:
-                        notice(detail)
+                    self._render_authoritative_slash(command, arg, outcome)
 
             self.run_worker(run_remote_slash(), thread=False, group="session")
+            return
+
+        if (
+            callable(remote_route)
+            and remote_capability is None
+            and remote_capabilities
+            and entry is not None
+            and entry.name not in _FOLLOWER_LOCAL_SLASHES
+            # The bare-/mcp pullback above sets remote_capability = None on
+            # purpose — the listing is canonical-local data — so the refusal
+            # below must not read that deliberate pullback as "unadvertised"
+            # (round 5, MAJOR). Only subcommand forms keep the authoritative
+            # route and therefore the refusal.
+            and not (command == "/mcp" and not arg)
+        ):
+            # A command the registry classifies as shared (not follower-local)
+            # that the owner's capability list does NOT advertise would fall
+            # through to the local handler and mutate only this follower's
+            # process — an effect that never reaches the owner (UX round 4,
+            # U10). Production owners advertise the full registry, so an
+            # unadvertised shared command means a version-skewed or reduced
+            # owner; refuse rather than silently diverge. An EMPTY capability
+            # list (a reduced test double) still falls through, matching the
+            # pre-guard behaviour the round-4 walk established.
+            self._system_notice(
+                f"/{entry.name} is not available from this session's owner; "
+                "run it in the owner's terminal",
+                "warning",
+            )
             return
 
         if command == "/exit":
@@ -9473,6 +9881,19 @@ class OperatorApp(App[None]):
         lowered = arg.lower()
         persist_default = lowered == "default" or lowered.startswith("default ")
         target = arg[len("default ") :].strip() if persist_default else arg
+        if persist_default and bool(getattr(session, "is_remote", False)):
+            # The follower's own config write would persist a default the
+            # SESSION never switched to (the switch lives on the owner), and
+            # routing it would persist on the wrong machine. Declined
+            # explicitly — the owner's typed producer answers the same way,
+            # so both terminals state one rule (MAJOR-1, review round 2).
+            self._system_notice(
+                "/model default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern; /model <p>/<id> "
+                "switches the shared session now",
+                "warning",
+            )
+            return
         if session is None or not hasattr(session, "set_model"):
             # A rejected command changed nothing, so the conversation has not
             # started: `_system_notice` keeps the boot composition intact where
@@ -10284,6 +10705,29 @@ class OperatorApp(App[None]):
             status=_status_line(note, _catalogue_status(statuses), PERSIST_HINT),
         )
 
+    def _publish_model_catalogue(self, session: Any) -> None:
+        """Push the owner's offerable models into canonical state (D3).
+
+        Owner-only by construction: a follower's session facade has no
+        ``_frontend_state_store``, and its own provider controller describes
+        the wrong credentials. The DIRECT rows are the whole answer for a
+        follower — an aggregator's row set is enumerable only through the
+        account's live listing, which a synchronous publish must not fetch;
+        the picker's ordinary live refresh covers those for the invoker, and
+        a disconnected aggregator row is never selectable anyway. Failures
+        degrade to an empty publication, never an exception on the boot path.
+        """
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is None or self._providers is None:
+            return
+        try:
+            entries = [
+                entry for entry in self._providers.static_catalogue() if not entry.aggregated
+            ]
+            store.refresh_model_catalogue(entries)
+        except Exception:
+            logger.debug("model catalogue publication failed", exc_info=True)
+
     def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
         """``(rows, note)`` — the models this user can actually run, and what was cut.
 
@@ -10315,6 +10759,48 @@ class OperatorApp(App[None]):
         """
         usable = self._usable_providers()
         current = self._current_selector()
+        # A follower merges the OWNER's published catalogue: the session runs
+        # on the owner's credentials, so the owner's rows are the offerable
+        # set and the local registry (which may have no usable provider at
+        # all) only fills in rows the owner did not name. Without this the
+        # picker's "usable" filter — computed from the follower's own empty
+        # credential store — crossed out or dropped every row the session
+        # could actually switch to (D3, review round 2).
+        session = self._session
+        owner_catalogue = getattr(session, "owner_model_catalogue", None)
+        if callable(owner_catalogue):
+            owner_rows: list[dict[str, Any]] = []
+            try:
+                fetched = owner_catalogue()
+                if isinstance(fetched, list):
+                    owner_rows = fetched
+            except Exception:
+                owner_rows = []
+            if owner_rows:
+                from local_operator.providers.controller import CatalogueEntry
+
+                known = {entry.selector for entry in entries}
+                entries = entries + [
+                    CatalogueEntry(
+                        provider=str(row.get("provider", "") or ""),
+                        model_id=str(row.get("model_id", "") or ""),
+                        label=str(row.get("label", "") or row.get("model_id", "") or ""),
+                        context_window=int(row.get("context_window", 0) or 0),
+                        input_price=float(row.get("input_price", 0.0) or 0.0),
+                        output_price=float(row.get("output_price", 0.0) or 0.0),
+                        connected=bool(row.get("connected", False)),
+                        aggregated=bool(row.get("aggregated", False)),
+                    )
+                    for row in owner_rows
+                    if f"{row.get('provider', '')}/{row.get('model_id', '')}" not in known
+                ]
+                owner_usable = {
+                    str(row.get("provider", "") or "") for row in owner_rows if row.get("connected")
+                }
+                # The owner's usable set EXTENDS, never replaces: the local
+                # store may name providers the owner's static catalogue did
+                # not (aggregators enumerate only live).
+                usable = owner_usable | (usable or set())
         rows = [
             ModelRow(
                 provider=entry.provider,
@@ -11433,6 +11919,11 @@ class OperatorApp(App[None]):
         its own tick; nothing is forced here, because a delta-rate repaint of
         the whole band is exactly the input lag the working line was fixed for.
         """
+        session = self._session
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is not None:
+            store.accrue_usage(session, usage)
+            return
         cost = self._cost_for(usage)
         if cost is not None:
             self._total_cost += cost
@@ -12262,6 +12753,10 @@ class OperatorApp(App[None]):
             set_msg = self._apply_login_defaults(provider)
             if set_msg:
                 await notice(set_msg, "info")
+            # The credential set just changed, so the owner's offerable-model
+            # publication is stale: a follower's picker must see the newly
+            # usable provider without waiting for a session restart (D3).
+            self._publish_model_catalogue(self._session)
             # In the first-run setup state there is no session yet, so a
             # successful login has to BUILD one — re-polling the splash would
             # leave the user staring at a configured-but-not-started app. Outside
@@ -12417,14 +12912,10 @@ class OperatorApp(App[None]):
         want to keep next to the task that prompted it, and the whole answer
         fits in seven rows.
         """
+        data = self._context_breakdown()
+        if data is None:
+            return None
         try:
-            session = self._session
-            if session is None:
-                return None
-            breakdown = getattr(session, "context_breakdown", None)
-            if not callable(breakdown):
-                return None
-            data = cast(dict[str, int], breakdown())
             total = data["total"]
             window = max(data["context_window"], 1)
             pct = total / window * 100
@@ -12454,6 +12945,512 @@ class OperatorApp(App[None]):
             return RichBlock(_tree_listing(items, "Estimated next request", detail_token="muted"))
         except Exception:
             return None
+
+    def _context_breakdown(self) -> dict[str, int] | None:
+        """The token-category dict behind ``/context``, or ``None`` when unknown.
+
+        Factored out of :meth:`_context_block` so the owner-side slash result
+        can return the same numbers as DATA — a follower renders its own block
+        locally, and computing the breakdown on the owner (which has the real
+        session) is the whole point of routing the command there.
+        """
+        try:
+            session = self._session
+            if session is None:
+                return None
+            breakdown = getattr(session, "context_breakdown", None)
+            if not callable(breakdown):
+                return None
+            return cast(dict[str, int], breakdown())
+        except Exception:
+            return None
+
+    # -- authoritative slash results (v5) -------------------------------------
+    async def run_slash_authoritative(
+        self, command: str, args: str, images: list[Any] | None = None
+    ) -> dict[str, Any]:
+        """Run one shared slash command and return its typed outcome as data.
+
+        The owner-side backend for a follower's ``route_shared_slash``: instead
+        of running the command's UI (which would paint in the OWNER's
+        transcript and leave the invoking terminal with a transport receipt),
+        this produces a :class:`SlashResult`-shaped dict the invoker renders
+        locally. Every product string below is built by the same handler a
+        local session would run, so the follower's receipt is byte-for-byte
+        the standard vocabulary. ``kind`` is ``notice`` for a printed line,
+        ``block`` for a renderable payload, ``noop`` when the follower opens
+        its own picker. Async because the MCP grant path awaits a browser
+        round trip; every other producer is synchronous work.
+
+        Only the commands a follower routes land here; process/terminal
+        commands stay local and never reach this dispatcher.
+        """
+        result = await self._slash_result(command, args, images)
+        return result.model_dump(mode="json")
+
+    async def _slash_result(self, command: str, args: str, images: list[Any] | None) -> Any:
+        from local_operator.session.frontend_state import SlashResult
+
+        if command == "context":
+            return self._context_slash_result(SlashResult)
+        if command == "goal":
+            return self._goal_slash_result(args, SlashResult)
+        if command == "rename":
+            return self._rename_slash_result(args, SlashResult)
+        if command == "effort":
+            return self._effort_slash_result(args, SlashResult)
+        if command == "mcp":
+            return await self._mcp_slash_result(args, SlashResult)
+        if command == "team":
+            return self._team_slash_result(args, SlashResult)
+        if command == "agent":
+            return self._agent_slash_result(args, SlashResult)
+        if command == "model":
+            if not args.strip():
+                # Bare /model opens the invoker's OWN picker — there is nothing
+                # for the owner to paint, so the result is a noop and the
+                # follower hosts the widget. A selector is a mutation: it is
+                # applied here, on the authoritative session.
+                return SlashResult(kind="noop")
+            return self._model_slash_result(args, SlashResult)
+        if command == "loop":
+            return self._loop_slash_result(args, SlashResult)
+        if command == "compact":
+            return self._compact_slash_result(SlashResult)
+        if command == "approvals":
+            return self._approvals_slash_result(args, SlashResult)
+        # Every authoritative capability must land on a producer ABOVE: a
+        # success-shaped receipt for an operation that never ran is the round-2
+        # MAJOR-1 defect, so an unhandled command answers with an honest
+        # unsupported warning — never "ran /…".
+        return SlashResult(
+            kind="notice",
+            text=f"/{command} is not available from an attached terminal — run it on the owner",
+            style="warning",
+        )
+
+    def _context_slash_result(self, SlashResult: Any) -> Any:
+        data = self._context_breakdown()
+        if data is None:
+            return SlashResult(kind="notice", text="context breakdown unavailable.", style="info")
+        total = data["total"]
+        window = max(data["context_window"], 1)
+        pct = total / window * 100
+
+        def estimated(value: int) -> str:
+            return f"~{format_context_tokens(value)}"
+
+        rows = [
+            ("Instructions", estimated(data["instructions"])),
+            ("Tool inventory", estimated(data["tool_inventory"])),
+            ("Tool schemas", estimated(data["tool_schemas"])),
+            ("Environment", estimated(data["environment"])),
+            ("Skills / MCP / goal", estimated(data["knowledge_mcp_goal"])),
+            ("Messages", estimated(data["messages"])),
+            ("Total", f"{estimated(total)} / {format_window(window)} ({pct:.1f}%)"),
+        ]
+        if data["cache_read"]:
+            rows.append(("Last cache read (exact)", format_context_tokens(data["cache_read"])))
+        return SlashResult(
+            kind="block",
+            data={"type": "context", "items": rows, "title": "Estimated next request"},
+        )
+
+    def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        session = self._session
+        if session is None or not hasattr(session, "set_goal"):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if not arg:
+            current = session.goal
+            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
+            return SlashResult(kind="notice", text=text, style="info")
+        if arg.lower() in ("clear", "none", "reset"):
+            session.set_goal("")
+            return SlashResult(kind="notice", text="goal cleared", style="info")
+        stored = session.set_goal(arg)
+        from local_operator.session.goal import MAX_GOAL_CHARS
+
+        if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"goal set — shortened to the {MAX_GOAL_CHARS}-character cap, "
+                    "applies from the next turn"
+                ),
+                style="warning",
+                data={"stored": stored},
+            )
+        return SlashResult(
+            kind="notice",
+            text="goal set — applies from the next turn",
+            style="info",
+            data={"stored": stored},
+        )
+
+    def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        session = self._session
+        if session is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if not arg:
+            current = session.conversation_name
+            text = (
+                f"conversation: {current} — /rename <title> to change it"
+                if current
+                else "unnamed — /rename <title> names this conversation"
+            )
+            return SlashResult(kind="notice", text=text, style="info")
+        stored = session.set_conversation_name(arg, user_set=True)
+        return SlashResult(
+            kind="notice",
+            text=f"renamed: {stored} — auto-naming will not override it",
+            style="info",
+            data={"stored": stored},
+        )
+
+    def _effort_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        session = self._session
+        spec = _model_spec(session)
+        if session is None or spec is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        levels = self._effort_levels()
+        label = getattr(session, "model_label", "") or "this model"
+        if not levels:
+            return SlashResult(kind="notice", text=_effort_unavailable(label), style="info")
+        current = getattr(spec, "reasoning_effort", None)
+        wanted = arg.strip().lower()
+        if not wanted:
+            return SlashResult(
+                kind="notice",
+                text=self._effort_listing(levels, current),
+                style="info",
+            )
+        if wanted == "auto":
+            restored = default_effort(getattr(spec, "model_id", "") or "")
+            if not self._apply_effort(restored, remember=False):
+                return SlashResult(
+                    kind="notice", text="session cannot change model settings", style="warning"
+                )
+            destination = restored or "the provider's default"
+            scope = "(the model's own default)" if restored else "(nothing sent)"
+            return SlashResult(
+                kind="notice",
+                text=f"reasoning effort: {current or 'auto'} → {destination} {scope}",
+                style="info",
+            )
+        if wanted not in levels:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"unknown effort level {wanted!r} — this model takes "
+                    f"{' '.join(levels)}, or auto"
+                ),
+                style="warning",
+            )
+        if wanted == current:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"reasoning effort: already {wanted} — "
+                    "/effort auto restores the model's default"
+                ),
+                style="info",
+            )
+        if not self._apply_effort(wanted):
+            return SlashResult(
+                kind="notice", text="session cannot change model settings", style="warning"
+            )
+        return SlashResult(
+            kind="notice",
+            text=f"reasoning effort: {current or 'provider default'} → {wanted} (this session)",
+            style="info",
+        )
+
+    async def _mcp_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        parts = arg.split()
+        if not parts:
+            block = self._mcp_block()
+            if block is None:
+                return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
+            # The block renders from the SAME manager state; a follower builds
+            # its own block from its mcp facade, so the owner only answers the
+            # empty case. Non-empty status is canonical — the follower's
+            # ``_mcp_block`` reads the identical rows.
+            return SlashResult(kind="block", data={"type": "mcp"})
+        sub = parts[0].lower()
+        if sub not in ("login", "logout", "reauth"):
+            return SlashResult(
+                kind="notice",
+                text=f"unknown mcp subcommand: {parts[0]} — try /mcp login|logout|reauth <name>",
+                style="warning",
+            )
+        if len(parts) < 2:
+            return SlashResult(kind="notice", text=f"usage: /mcp {sub} <name>", style="warning")
+        # The grant runs HERE, on the authoritative owner: the follower's MCP
+        # facade is read-only and the OAuth credential store is the owner's.
+        # The interactive browser round trip opens on the owner's machine (the
+        # terminal that owns the session), and the settled receipt returns to
+        # the invoker as the result — the functional outcome is identical
+        # regardless of which terminal typed the command.
+        receipt = await self._run_mcp_grant_on_owner(sub, parts[1])
+        style = "success" if receipt.startswith(("authenticated", "logged out")) else "warning"
+        return SlashResult(kind="notice", text=receipt, style=style)
+
+    def _team_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        registry = self._team_registry()
+        if registry is None or not hasattr(registry, "list_teams"):
+            return SlashResult(
+                kind="notice",
+                text="teams are unavailable in this session. Ask the agent to create one.",
+                style="warning",
+            )
+        if not arg:
+            try:
+                teams = list(registry.list_teams())
+            except Exception as exc:
+                return SlashResult(
+                    kind="notice", text=f"could not list teams: {exc}", style="warning"
+                )
+            if not teams:
+                return SlashResult(
+                    kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
+                )
+            items = [
+                (
+                    team.name,
+                    f"Led by {team.manager} · {len(team.members) + 1} "
+                    f"{'role' if len(team.members) == 0 else 'roles'}",
+                    (team.description or "").strip(),
+                )
+                for team in teams
+            ]
+            return SlashResult(kind="block", data={"type": "team_list", "items": items})
+        return SlashResult(kind="noop", data={"type": "team_mutate", "args": arg})
+
+    def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        if not arg:
+            rows = self._agent_profile_rows()
+            if not rows:
+                return SlashResult(
+                    kind="notice",
+                    text="no agents yet. Ask the agent to create one.",
+                    style="info",
+                )
+            return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+        return SlashResult(kind="noop", data={"type": "agent_mutate", "args": arg})
+
+    def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """The routed, non-bare ``/model``: a REAL switch on the owner session.
+
+        ``_cmd_model`` cannot be reused here — it prints through the local
+        transcript, which is the OWNER's terminal, and the invoker would get
+        nothing. This runs the same validation and mutation against the same
+        session and returns the receipt as data; the persist half is declined
+        rather than silently applied, because the follower's own config file
+        (not the owner's) is what its next launch reads.
+        """
+        session = self._session
+        if session is None or not hasattr(session, "set_model"):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        lowered = arg.strip().lower()
+        if lowered == "default" or lowered.startswith("default "):
+            # The default is process-local config: the follower's boot reads
+            # ITS file, so persisting from the owner's process would save a
+            # default for a machine that never asked. Declined explicitly — a
+            # silent no-op here is exactly the MAJOR-1 shape.
+            return SlashResult(
+                kind="notice",
+                text="/model default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern; /model <p>/<id> "
+                "switches the shared session now",
+                style="warning",
+            )
+        target = arg.strip()
+        provider, sep, model_id = target.partition("/")
+        if not sep or not model_id:
+            return SlashResult(
+                kind="notice",
+                text="usage: /model <provider>/<model-id> "
+                "(e.g. openrouter/deepseek/deepseek-chat)",
+                style="warning",
+            )
+        provider = provider.lower()
+        if self._providers is None:
+            return SlashResult(
+                kind="notice",
+                text="provider controller unavailable — cannot infer model spec",
+                style="warning",
+            )
+        if self._providers.provider(provider) is None:
+            return SlashResult(
+                kind="notice", text=f"unknown provider: {provider} — see /provider", style="warning"
+            )
+        try:
+            spec = self._providers.resolve_model(provider, model_id)
+        except Exception as error:
+            return SlashResult(
+                kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
+            )
+        old_label = session.model_label
+        session.set_model(self._spec_with_chosen_effort(spec), explicit=True)
+        self._probe_quota_after_switch(session)
+        self._effort_refusal_shown = None
+        self._warm_usage_background()
+        suffix, warning = self._model_access_note(provider)
+        # The switch lands on the SHARED session, so every terminal's band
+        # repaints from the canonical update — the receipt below only has to
+        # reach the invoker. Mid-turn timing is stated by the owner-side
+        # notice path (the streamed turn's own events carry it).
+        text = (
+            f"model: {old_label} → {session.model_label} "
+            f"(this session){suffix} — {PERSIST_HINT}"
+        )
+        if warning:
+            text = f"{text}\n{warning}"
+        return SlashResult(kind="notice", text=text, style="info")
+
+    def _loop_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/loop``: start/stop the owner's goal loop for real.
+
+        The loop drives provider turns through the session, which lives here;
+        a follower-local loop would either drive nothing (its own facade has
+        no loop worker worth running — each iteration's prompt must cross the
+        socket anyway) or double-drive the session. Every stop/validation
+        branch mirrors ``_cmd_loop`` so the two UIs answer identically; only
+        the transport of the receipt differs.
+        """
+        session = self._session
+        if arg.lower() in ("stop", "cancel", "abort"):
+            if self._loop_running:
+                self._loop_cancelled = True
+                return SlashResult(
+                    kind="notice", text="loop will stop after the current turn", style="info"
+                )
+            return SlashResult(kind="notice", text="no loop is running", style="info")
+        if session is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if self._loop_running:
+            return SlashResult(
+                kind="notice",
+                text="a loop is already running — /loop stop to cancel",
+                style="warning",
+            )
+        if not getattr(session, "goal", ""):
+            return SlashResult(
+                kind="notice", text="set a goal first: /goal <text>", style="warning"
+            )
+        iterations = DEFAULT_LOOP_ITERATIONS
+        if arg:
+            try:
+                iterations = int(arg)
+            except ValueError:
+                return SlashResult(
+                    kind="notice",
+                    text=f"usage: /loop [n] (1..{MAX_LOOP_ITERATIONS})",
+                    style="warning",
+                )
+        if iterations < 1 or iterations > MAX_LOOP_ITERATIONS:
+            return SlashResult(
+                kind="notice",
+                text=f"iterations must be between 1 and {MAX_LOOP_ITERATIONS}",
+                style="warning",
+            )
+        self._loop_cancelled = False
+        self.run_worker(self._loop_worker(iterations), thread=False, group="loop")
+        return SlashResult(
+            kind="notice",
+            text=f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel",
+            style="info",
+        )
+
+    def _compact_slash_result(self, SlashResult: Any) -> Any:
+        """The routed ``/compact``: kick the owner's real pass, honestly.
+
+        The pass runs minutes on a long conversation, so it cannot be awaited
+        inside the request/response op — the socket would time out and report
+        failure for work that is actually running. The return is the ACCEPT
+        receipt; the settled outcome reaches every terminal (invoker
+        included) through the canonical compaction events, one vocabulary for
+        local and remote triggers. A refusal (no session, pass already
+        running) is answered synchronously because it IS the outcome.
+        """
+        session = self._session
+        if session is None:
+            return SlashResult(
+                kind="notice",
+                text="no session yet — there is no context to compact",
+                style="warning",
+            )
+        self.run_worker(self._compact_worker(session), thread=False, group="compact")
+        return SlashResult(kind="notice", text="compacting context…", style="info")
+
+    def _approvals_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/approvals``: report or switch the OWNER's gate.
+
+        The approval gate the engine consults is the owner process's — a
+        follower's own ``_approve_all`` governs only its local widgets, so
+        switching it locally would print a receipt the session's tools never
+        honour. The mode mutation therefore lands here; the persist half is
+        declined for the same machine-locality reason as ``/model default``.
+        """
+        argument = arg.strip().lower()
+        persist = argument == "default" or argument.startswith("default ")
+        mode = argument[len("default ") :].strip() if persist else argument
+        if persist:
+            return SlashResult(
+                kind="notice",
+                text="/approvals default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern; /approvals ask|auto "
+                "switches the shared session now",
+                style="warning",
+            )
+        if mode in ("ask", "on", "prompt"):
+            wanted_auto = False
+        elif mode in ("auto", "off", "yolo"):
+            wanted_auto = True
+        elif mode:
+            return SlashResult(
+                kind="notice",
+                text=f"unknown approval mode {mode!r} — use ask or auto, "
+                "or default ask / default auto to keep it",
+                style="warning",
+            )
+        else:
+            live = mode_word(self._approve_all)
+            saved = mode_word(self._approvals_default_auto)
+            effect = (
+                "every tool runs without asking"
+                if self._approve_all
+                else "write and command tools prompt before running"
+            )
+            if live == saved:
+                return SlashResult(
+                    kind="notice",
+                    text=f"tool approvals: {live} — {effect}; new sessions open the same way",
+                    style="warning" if self._approve_all else "info",
+                )
+            return SlashResult(
+                kind="notice",
+                text=f"tool approvals: {live} (this session) — {effect}; "
+                f"new sessions open in {saved} — /approvals default {live} changes that",
+                style="warning" if self._approve_all else "info",
+            )
+        if wanted_auto:
+            self._answer_live_approval_as_allowed()
+        else:
+            self._allow_approvals_again()
+        self._set_approve_all(wanted_auto)
+        if wanted_auto:
+            return SlashResult(
+                kind="notice",
+                text="tool approvals: auto — every tool runs without asking (this session) — "
+                "/approvals default auto saves it for new sessions",
+                style="warning",
+            )
+        return SlashResult(
+            kind="notice",
+            text="tool approvals: ask — write and command tools will prompt again (this session)",
+            style="info",
+        )
 
     def _cmd_mcp(self, arg: str, notice: NoticeFn) -> None:
         """``/mcp`` lists servers; its subcommands manage OAuth grants.
@@ -12488,18 +13485,11 @@ class OperatorApp(App[None]):
             self._system_notice(f"usage: /mcp {sub} <name>", "warning")
             return
         name = parts[1]
-        manager = getattr(self._session, "mcp_manager", None)
-        if manager is None:
-            self._system_notice("MCP is not available in this session.", "warning")
+        resolved = self._resolve_mcp_server(name)
+        if isinstance(resolved, str):
+            self._system_notice(resolved, "warning")
             return
-        cfg = manager.get_server_config(name)
-        if cfg is None:
-            self._system_notice(f"MCP server {name!r} is not configured — see /mcp", "warning")
-            return
-        auth = getattr(cfg, "auth", None)
-        if auth is None or getattr(auth, "type", None) != "oauth":
-            self._system_notice(f"MCP server {name!r} does not use OAuth login.", "warning")
-            return
+        manager, cfg = resolved
         if sub == "logout":
             self._mcp_logout(manager, name, cfg)
             return
@@ -12524,6 +13514,81 @@ class OperatorApp(App[None]):
             group="mcp-login",
             exclusive=True,
         )
+
+    def _resolve_mcp_server(self, name: str) -> tuple[Any, Any] | str:
+        """The authoritative ``(manager, config)`` for ``name``, or a notice body.
+
+        Shared by the local handler and the owner-side grant worker so a
+        login/logout/reauth validates against the SAME server set from every
+        terminal: when the owner has no UI this worker is the terminal's whole
+        command, and it must see the real manager rather than a facade. Returns
+        a string (the warning to print) on every unavailable path so neither
+        caller duplicates the three refusal checks.
+        """
+        manager = getattr(self._session, "mcp_manager", None)
+        if manager is None:
+            return "MCP is not available in this session."
+        get_config = getattr(manager, "get_server_config", None)
+        if not callable(get_config):
+            # A remote follower exposes a read-only MCP facade with no config
+            # accessor; it never reaches this branch because its grant path is
+            # the worker below, but a reduced host could hand one here too.
+            return "MCP is not available in this session."
+        cfg = get_config(name)
+        if cfg is None:
+            return f"MCP server {name!r} is not configured — see /mcp"
+        auth = getattr(cfg, "auth", None)
+        if auth is None or getattr(auth, "type", None) != "oauth":
+            return f"MCP server {name!r} does not use OAuth login."
+        return manager, cfg
+
+    async def _run_mcp_grant_on_owner(self, sub: str, name: str) -> str:
+        """Run one MCP grant mutation against the REAL manager; return a receipt.
+
+        The interactive browser round trip is terminal-local (it pops a tab on
+        whatever machine runs it), so a FOLLOWER that owns its own terminal runs
+        the grant against its local MCP manager via ``_cmd_mcp`` and does not
+        need this. This path is for a follower that has no local MCP manager at
+        all — its session is a facade with a read-only MCP snapshot — and is
+        also the owner-side backend when the owner is itself headless. It does
+        the entire command and returns the line the invoker prints, so the
+        invoking terminal renders the receipt regardless of which machine
+        opened the browser.
+        """
+        resolved = self._resolve_mcp_server(name)
+        if isinstance(resolved, str):
+            return resolved
+        manager, cfg = resolved
+        if sub == "logout":
+            removed = self._mcp_logout(manager, name, cfg)
+            return (
+                f"logged out of MCP server {name!r} — its credential is removed and the "
+                "server will stay disconnected until /mcp login."
+                if removed
+                else f"MCP logout failed for {name!r} — see the owner transcript."
+            )
+        # login | reauth: the SAME interactive exchange ``_mcp_login_worker``
+        # runs, awaited here so the ack carries the settled outcome.
+        if sub == "reauth":
+            removed = self._mcp_logout(manager, name, cfg, verb="reauth", disconnect=False)
+            if not removed:
+                return f"MCP reauth failed for {name!r} — could not forget the stored grant."
+        from local_operator.mcp.auth import McpLoginCancelledError
+
+        if sub == "reauth":
+            try:
+                await manager.disconnect_server(name)
+            except Exception:  # noqa: BLE001 — a stuck teardown must not block the grant
+                logger.debug("MCP disconnect before reauth failed for %s", name, exc_info=True)
+        try:
+            conn = await manager.connect_configured_server(name, timeout_ms=600_000)
+        except asyncio.CancelledError:
+            raise
+        except McpLoginCancelledError as exc:
+            return f"MCP login for {name!r} cancelled: {exc}"
+        except Exception as exc:  # noqa: BLE001 — a failed grant is a notice, not a crash
+            return f"MCP login failed for {name!r}: {exc}"
+        return f"authenticated MCP server {name!r}; {len(conn.tools)} tools available."
 
     def _mcp_logout(
         self,
@@ -12853,8 +13918,9 @@ class OperatorApp(App[None]):
         if self._session is not None:
             context_tokens = message.context_tokens or None
         cost_text: str | None = None
+        canonical = _canonical_frontend(self._session)
         cost = self._cost_for(message.usage)
-        if cost is not None:
+        if cost is not None and not canonical:
             # Only the REMAINDER. `on_context_usage_reported` has been billing
             # this turn's calls as they landed so the segment moves while the
             # agent works; this figure prices the whole turn and supersedes the
@@ -12881,10 +13947,10 @@ class OperatorApp(App[None]):
         # back unpriceable must not leave its accrual standing to be subtracted
         # from the NEXT turn's total.
         self._turn_accrued_cost = 0.0
-        # Fold in whatever the children have spent BEFORE reading the total: a
-        # turn that delegated has almost certainly moved their figures, and the
-        # 1 Hz poll would otherwise be what first showed it.
-        self._harvest_subagent_costs()
+        # Canonical sessions already include child cost in their one ledger.
+        # Legacy/reduced hosts retain the app-owned fallback path.
+        if not canonical:
+            self._harvest_subagent_costs()
         total = self._spend_total()
         if cost is not None or (self._session is not None and self._subagent_costs):
             # A turn that priced nothing itself still has a total worth showing
@@ -13329,6 +14395,7 @@ class OperatorApp(App[None]):
         if self._consume_user_echo(message.prompt):
             return  # our own echo — the row is already painted
         self._append_block(UserBlock(message.prompt, message.image_count))
+        self._append_image_blocks(list(message.images))
 
     def _consume_user_echo(self, text: str) -> bool:
         """Take one pending echo entry for ``text``; True if there was one.
@@ -13403,6 +14470,20 @@ class OperatorApp(App[None]):
         # text is still arriving.
         self._refresh_working_activity()
 
+    def on_history_rows_settled(self, message: HistoryRowsSettled) -> None:
+        """Paint a reconnect's durable gap through the settled-history renderer.
+
+        The rows settled while this frontend had no owner socket, so no live
+        event ever painted them. They are HISTORY, not stream: projecting
+        them through :meth:`_project_settled_rows` — the same implementation
+        cold resume uses — is what guarantees a recovered transcript is
+        indistinguishable from one that never disconnected: user rows keep
+        their user styling and images, tool calls come back as settled cards
+        with their results, custom rows reach their own blocks (review round
+        3, MAJOR-1/U7/D1).
+        """
+        self._project_settled_rows(message.messages)
+
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
         """Move the context reading AND the cost DURING a turn, not only at its end.
 
@@ -13432,6 +14513,10 @@ class OperatorApp(App[None]):
                 context_is_estimate=False,
                 context_window=_context_window(self._session),
             )
+        # Canonical sessions folded this call before Textual posted the event.
+        # The app renders that ledger and does not maintain a competing total.
+        if _canonical_frontend(self._session):
+            return
         cost = self._cost_for(message.usage)
         if not cost:
             return
@@ -14062,6 +15147,16 @@ def slot_rows(slot: Any) -> int:
     # slot, so the larger is the safe one: it can only ever withhold the inset,
     # which costs a blank row, where the smaller costs a scrollable screen.
     return max(measured, predicted, 1)
+
+
+def _canonical_frontend(session: Any) -> bool:
+    """Whether this production session owns/consumes canonical frontend state.
+
+    ``Mock`` fabricates callable attributes for any probe, so concrete store
+    slots are the reliable capability marker for reduced hosts and legacy tests.
+    """
+    attributes = getattr(session, "__dict__", {})
+    return "_frontend_state_store" in attributes or "_frontend_store" in attributes
 
 
 def _model_spec(session) -> Any | None:

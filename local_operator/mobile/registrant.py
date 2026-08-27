@@ -29,7 +29,6 @@ from the registrant's loop, serialized by the implementor".
 from __future__ import annotations
 
 import asyncio
-import copy
 import hmac
 import inspect
 import json
@@ -44,17 +43,16 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
 
-from local_operator.mobile.live_turn import LiveTurnTracker
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registry import RecordPublisher
 from local_operator.mobile.types import (
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
     ClientKind,
-    PendingRequest,
     SessionProjection,
     SessionRecord,
 )
+from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +93,14 @@ _SEND_TIMEOUT_S = 1.0
 # Raw events are lossless only while a follower keeps pace. One bounded FIFO per
 # event client prevents a non-reader from retaining an unbounded stream before
 # its active drain reaches the timeout; overflow drops that client so it can
-# reconnect through history + attach_sync rather than observe a gapped stream.
+# reconnect through durable history + canonical frontend_sync instead of drift.
 _EVENT_QUEUE_MAX = 64
+
+# Ops whose answer is structured data (a typed slash result, a cancel count)
+# rather than a one-line receipt: they reply with a ``result`` frame so the
+# invoker renders the outcome locally instead of the owner's transcript
+# printing it.
+_PAYLOAD_OPS = {"slash_result", "cancel_subagents"}
 
 
 @dataclass
@@ -121,11 +125,17 @@ class _ClientConn:
     # frame. Daemon connections never set it; a v3 attach client that omitted
     # the flag keeps projection-only behaviour.
     wants_events: bool = False
-    # Flipped only AFTER the welcome projection and the attach_sync seed have
-    # been queued on this connection's ordered stream. Event fan-out snapshots
-    # recipients synchronously against the tracker fold, so this flag is what
-    # guarantees a joining client never sees an event the seed already covers
-    # (welcome → seed → live events, gapless and duplicate-free).
+    # v5 canonical state is attach-only and independently negotiated so daemon
+    # projection bytes never gain frontend frames.
+    wants_frontend: bool = False
+    frontend_ready: bool = False
+    # Updates can be scheduled back to this loop while the owner-loop
+    # subscription call is returning. Hold them until the sync frame is queued;
+    # dropping them creates an immediate sequence hole at every busy join.
+    frontend_pending: list[dict[str, Any]] = field(default_factory=list)
+    # Flipped only AFTER welcome + canonical frontend_sync are queued. Raw
+    # events begin behind that boundary on the same FIFO, so a joining client
+    # cannot see transcript animation ahead of the snapshot that seeded it.
     events_ready: bool = False
     event_queue: asyncio.Queue[dict[str, Any]] = field(
         default_factory=lambda: asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
@@ -133,6 +143,7 @@ class _ClientConn:
     # Exactly one writer drains the queue, so delivery stays ordered without a
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
+    frontend_unsubscribe: Callable[[], None] | None = None
 
 
 class SessionHandle(Protocol):
@@ -167,6 +178,7 @@ class SessionHandle(Protocol):
     async def abort(self) -> str: ...
     async def set_model(self, provider: str, model_id: str) -> str: ...
     async def set_effort(self, effort: str) -> str: ...
+
     async def slash(self, command: str, args: str) -> str: ...
     async def new_conversation(self) -> str: ...
     async def resume_session(self, session_id: str) -> str: ...
@@ -214,13 +226,10 @@ class Registrant:
             model_label=seed.model_label,
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
+            capabilities=([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else []),
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
-        # v4 event relay: the live-turn tracker folds the SAME serialized
-        # frames the relay fans out, on the registrant loop, so a joining
-        # client's seed is exactly consistent with the frames already sent.
-        self._live_turn = LiveTurnTracker()
         self._unsubscribe_events: Callable[[], None] | None = None
         # Strong references to the one event writer per subscribed client. A
         # bare create_task can be collected mid-flight, which drops frames.
@@ -501,6 +510,10 @@ class Registrant:
         # daemon's projection path must stay byte-identical, so a daemon auth
         # carrying the flag (there is none today) is deliberately ignored.
         wants_events = kind == "attach" and bool(frame.get("events"))
+        wants_frontend = kind == "attach" and bool(frame.get("frontend_state"))
+        if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
+            writer.close()
+            return
 
         if kind == "daemon":
             # At most ONE daemon connection — a new dial evicts the old, which
@@ -521,22 +534,47 @@ class Registrant:
                 logger.info("mobile control: evicting attach client %s (cap)", peer)
                 self._drop_client(victim)
 
-        conn = _ClientConn(writer=writer, kind=kind, wants_events=wants_events)
+        conn = _ClientConn(
+            writer=writer,
+            kind=kind,
+            wants_events=wants_events,
+            wants_frontend=wants_frontend,
+        )
         self._clients[id(writer)] = conn
         await self._push_to(conn)  # the welcome: a full projection, unprompted
+        if conn.wants_frontend:
+            subscribe_frontend = getattr(self._handle, "subscribe_frontend", None)
+            if not callable(subscribe_frontend):
+                self._drop_client(conn)
+                return
+
+            def on_update(update: Any) -> None:
+                payload = (
+                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
+                )
+                self._relay_frontend_to(conn, payload)
+
+            from local_operator.session.frontend_state import FrontendSubscription
+
+            outcome = subscribe_frontend(on_update)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            subscription = cast(FrontendSubscription, outcome)
+            sync = subscription.sync
+            sync_payload = sync.model_dump(mode="json")
+            conn.frontend_unsubscribe = subscription.unsubscribe
+            # Registration and snapshot capture happened synchronously on the
+            # authoritative loop. Mark ready only after queuing that snapshot;
+            # later updates therefore cannot overtake it.
+            await self._send_to(conn, {"op": "frontend_sync", "data": sync_payload})
+            conn.frontend_ready = True
+            for pending in conn.frontend_pending:
+                self._enqueue_client_frame(conn, {"op": "frontend_update", "data": pending})
+            conn.frontend_pending.clear()
         if conn.wants_events:
-            # The live-turn seed, once, right after the welcome. The snapshot
-            # and the ready flag are set in ONE synchronous block: any event
-            # folded before this instant is inside the seed and was not sent
-            # to this connection; any event folded after it is sent and is not
-            # in the seed. That single ordering fact is the mid-turn-join
-            # correctness argument — no gap, no duplicate. (The lock fast-path
-            # in ``_send_to`` acquires without yielding on an uncontended
-            # connection, so a relay callback scheduled after this block still
-            # queues its frame BEHIND the seed on the ordered stream.)
-            seed_frame = {"op": "attach_sync", "data": self._live_turn.seed().to_json()}
+            # In-flight transcript state rides the same canonical sync as every
+            # other full-TUI field. Raw events begin only after that frame.
             conn.events_ready = True
-            await self._send_to(conn, seed_frame)
         try:
             while not self._closed.is_set():
                 line = await reader.readline()
@@ -569,6 +607,13 @@ class Registrant:
             # await and leave the stream close only half-observed.
             if task is not asyncio.current_task():
                 task.cancel()
+        frontend_unsubscribe = conn.frontend_unsubscribe
+        conn.frontend_unsubscribe = None
+        if frontend_unsubscribe is not None:
+            try:
+                frontend_unsubscribe()
+            except Exception:  # noqa: BLE001 — connection cleanup must finish
+                logger.debug("frontend client unsubscribe failed", exc_info=True)
         try:
             conn.writer.close()
         except Exception:  # noqa: BLE001
@@ -604,6 +649,16 @@ class Registrant:
                 else:
                     self.phone_watchers = max(0, self.phone_watchers - 1)
                 detail = f"watchers: {self.phone_watchers}"
+            elif op in _PAYLOAD_OPS:
+                # Structured-answer ops reply with a ``result`` frame whose
+                # ``data`` the invoker renders locally (a slash command's typed
+                # outcome, a cancel's authoritative count) rather than a
+                # one-line receipt that would paint in the owner's transcript.
+                data = await self._dispatch_payload(op, frame)
+                await self._send_to(conn, {"op": "result", "req": req, "data": data})
+                await self._handle.refresh()
+                await self._push()
+                return
             else:
                 detail = await self._dispatch(op, frame)
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
@@ -643,7 +698,31 @@ class Registrant:
             return await h.set_model(str(frame.get("provider", "")), str(frame.get("model_id", "")))
         if op == "set_effort":
             return await h.set_effort(str(frame.get("effort", "")))
+        if op == "complete_aside":
+            complete_aside = getattr(h, "complete_aside", None)
+            if not callable(complete_aside):
+                raise ValueError("this owner cannot run off-record requests")
+            result = complete_aside(list(frame.get("turns") or []))
+            if not inspect.isawaitable(result):
+                raise ValueError("owner complete_aside operation must be awaitable")
+            return await result
         if op == "slash":
+            images = frame.get("images")
+            if images:
+                slash_images = getattr(h, "slash_images", None)
+                if not callable(slash_images):
+                    raise ValueError("this owner cannot route slash-command images")
+                typed_slash_images = cast(
+                    Callable[[str, str, list[dict[str, str]]], Awaitable[str]],
+                    slash_images,
+                )
+                return await typed_slash_images(
+                    str(frame.get("command", "")),
+                    str(frame.get("args", "")),
+                    images,
+                )
+            # Old daemon/reduced handles predate attachment-bearing slash ops;
+            # preserve their two-argument call shape when no pixels ride the frame.
             return await h.slash(str(frame.get("command", "")), str(frame.get("args", "")))
         if op == "new_conversation":
             return await h.new_conversation()
@@ -677,6 +756,14 @@ class Registrant:
                 frame["value"],
                 question_index=question_index,
             )
+        if op == "adopt_aside":
+            adopt = getattr(h, "adopt_aside", None)
+            if not callable(adopt):
+                raise ValueError("this owner cannot adopt an aside")
+            result = adopt(list(frame.get("messages") or []))
+            if not inspect.isawaitable(result):
+                raise ValueError("owner adopt_aside operation must be awaitable")
+            return await result
         if op == "peer_message":
             # Cross-session `lop send` delivery. Optional capability — an owner
             # host that predates peer messaging (or a non-interactive exec host
@@ -694,6 +781,84 @@ class Registrant:
                 sender=frame.get("sender") or {},
             )
         raise ValueError(f"unknown op: {op!r}")
+
+    async def _dispatch_payload(self, op: str, frame: dict[str, Any]) -> Any:
+        """Structured-answer ops: the return value becomes the ``result`` data."""
+        h = self._handle
+        if op == "slash_result":
+            run = getattr(h, "run_slash_authoritative", None)
+            if not callable(run):
+                raise ValueError("this owner cannot run typed slash results")
+            result = run(
+                str(frame.get("command", "")),
+                str(frame.get("args", "")),
+                list(frame.get("images") or []),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        if op == "cancel_subagents":
+            cancel = getattr(h, "cancel_subagents_count", None)
+            if not callable(cancel):
+                raise ValueError("this owner cannot cancel subagents")
+            result = cancel()
+            if inspect.isawaitable(result):
+                result = await result
+            return result if isinstance(result, int) else 0
+        raise ValueError(f"unknown op: {op!r}")
+
+    # -- v5 frontend state relay ----------------------------------------------
+
+    def _relay_frontend_to(self, conn: _ClientConn, data: dict[str, Any]) -> None:
+        loop = self._loop
+        if loop is None or self._closed.is_set():
+            return
+        try:
+            loop.call_soon_threadsafe(self._relay_frontend_to_on_loop, conn, data)
+        except RuntimeError:
+            pass
+
+    def _relay_frontend_to_on_loop(self, conn: _ClientConn, data: dict[str, Any]) -> None:
+        if id(conn.writer) not in self._clients:
+            return
+        if not conn.frontend_ready:
+            if len(conn.frontend_pending) >= _EVENT_QUEUE_MAX:
+                # A join that cannot install its boundary before this many
+                # canonical edges is already stale. Drop and let it reconnect
+                # to one fresh snapshot rather than retain an unbounded suffix.
+                self._drop_client(conn)
+                return
+            conn.frontend_pending.append(data)
+            return
+        self._enqueue_client_frame(conn, {"op": "frontend_update", "data": data})
+
+    def _enqueue_client_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
+        """Queue one state/event frame on the connection's sole ordered FIFO."""
+        try:
+            conn.event_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            # A full FIFO is not always a slow CLIENT: a provider can hand the
+            # session a whole turn of token deltas in one loop tick, which
+            # overflows any bound before the drain writes a byte. Those frames
+            # are losslessly coalescible (each ``message_update`` carries the
+            # full accumulated message and its append-only ``delta``), so
+            # compact first and drop only a client that stays full — the
+            # genuinely slow reader the bound exists for.
+            compacted = self._compact_event_queue(conn)
+            if compacted:
+                try:
+                    conn.event_queue.put_nowait(frame)
+                    compacted = True
+                except asyncio.QueueFull:
+                    compacted = False
+            if not compacted:
+                self._drop_client(conn)
+                return
+        if conn.event_writer_task is None:
+            task = asyncio.create_task(self._drain_event_queue(conn))
+            conn.event_writer_task = task
+            self._event_sends.add(task)
+            task.add_done_callback(self._event_sends.discard)
 
     # -- v4 event relay --------------------------------------------------------
 
@@ -725,7 +890,6 @@ class Registrant:
         """
         if self._closed.is_set():
             return
-        self._live_turn.fold(data)
         recipients = [
             conn
             for conn in self._clients.values()
@@ -735,19 +899,51 @@ class Registrant:
             return
         frame = {"op": "event", "data": data}
         for conn in recipients:
+            # Raw events and canonical deltas share this FIFO. Their producer
+            # callbacks are scheduled in session order, so a follower cannot
+            # observe transcript animation ahead of the state edge that caused it.
+            self._enqueue_client_frame(conn, frame)
+
+    def _compact_event_queue(self, conn: _ClientConn) -> bool:
+        """Merge runs of same-message ``message_update`` frames in place.
+
+        Lossless by construction: the later event's ``message`` already
+        contains the earlier one's text, and concatenating ``delta`` preserves
+        the append contract UIs rely on. Returns whether any room was freed.
+        Runs synchronously on the registrant loop, so the drain task cannot
+        observe a half-compacted queue.
+        """
+        frames: list[dict[str, Any]] = []
+        while True:
             try:
-                conn.event_queue.put_nowait(frame)
-            except asyncio.QueueFull:
-                # A raw stream cannot recover from one dropped frame. Remove the
-                # peer immediately; reconnect rebuilds from durable history and
-                # a fresh bounded live-turn seed.
-                self._drop_client(conn)
-                continue
-            if conn.event_writer_task is None:
-                task = asyncio.create_task(self._drain_event_queue(conn))
-                conn.event_writer_task = task
-                self._event_sends.add(task)
-                task.add_done_callback(self._event_sends.discard)
+                frames.append(conn.event_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+            conn.event_queue.task_done()
+        compacted: list[dict[str, Any]] = []
+        for frame in frames:
+            previous = compacted[-1] if compacted else None
+            if (
+                previous is not None
+                and frame.get("op") == "event"
+                and previous.get("op") == "event"
+            ):
+                data = frame.get("data") or {}
+                prior = previous.get("data") or {}
+                if (
+                    data.get("type") == "message_update"
+                    and prior.get("type") == "message_update"
+                    and (data.get("message") or {}).get("id")
+                    == (prior.get("message") or {}).get("id")
+                ):
+                    merged = dict(data)
+                    merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
+                    compacted[-1] = {"op": "event", "data": merged}
+                    continue
+            compacted.append(frame)
+        for frame in compacted:
+            conn.event_queue.put_nowait(frame)
+        return len(compacted) < len(frames)
 
     async def _drain_event_queue(self, conn: _ClientConn) -> None:
         """Drain one follower's raw event FIFO until it is dropped."""
@@ -814,17 +1010,9 @@ class Registrant:
         )
 
     def _projection_frame(self, conn: _ClientConn, ordinary: dict[str, Any]) -> dict[str, Any]:
-        if not conn.wants_events:
-            return ordinary
-        pending = getattr(self._handle, "event_pending", None)
-        if pending is None:
-            return ordinary
-        overlaid = copy.deepcopy(ordinary)
-        overlaid["data"]["pending"] = pending.to_json()
-        overlaid["data"]["pending_count"] = max(
-            1, int(overlaid["data"].get("pending_count", 0) or 0)
-        )
-        return overlaid
+        # Projection is exclusively the mobile renderer. Full terminal clients
+        # authenticate with this welcome but consume no semantic overlays from it.
+        return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
         """The welcome form of a push: one full projection to one connection."""
@@ -858,6 +1046,15 @@ class Registrant:
     def fold(self) -> ProjectionFold:
         return self._fold
 
-    def set_pending(self, pending: PendingRequest | None) -> None:
+    def set_pending(self, pending: Any | None) -> None:
+        """Set mobile pending state and canonical gate state for reduced hosts.
+
+        Production TUI handles publish directly when their real widget mounts;
+        this bridge keeps owned/reduced handles on the same contract.
+        """
         self._fold.set_pending(pending)
+        frontend = getattr(self._handle, "_frontend", None)
+        mutate = getattr(frontend, "mutate", None)
+        if callable(mutate):
+            mutate(pending_gate=pending.to_json() if pending is not None else None)
         self._schedule_push()

@@ -116,7 +116,9 @@ class AttachClient:
         *,
         events: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
-        on_attach_sync: Callable[[dict[str, Any]], None] | None = None,
+        frontend_state: bool = False,
+        on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
+        on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._on_projection = on_projection
         self._on_disconnected = on_disconnected
@@ -126,7 +128,11 @@ class AttachClient:
         # pydantic-free and cheap to import (module docstring contract).
         self._events = events
         self._on_event = on_event
-        self._on_attach_sync = on_attach_sync
+        self._frontend_state = frontend_state
+        self._on_frontend_sync = on_frontend_sync
+        self._on_frontend_update = on_frontend_update
+        self._frontend_epoch: str | None = None
+        self._frontend_sequence: int | None = None
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -164,6 +170,8 @@ class AttachClient:
             # simply never sends event frames — the caller gates on
             # ``record.protocol >= 4`` before relying on the relay.
             auth["events"] = True
+        if self._frontend_state:
+            auth["frontend_state"] = True
         writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         # The welcome projection doubles as the identity check: it names the
@@ -237,13 +245,37 @@ class AttachClient:
                             self._on_event(frame.get("data") or {})
                         except Exception:  # noqa: BLE001
                             continue
-                elif op == "attach_sync":
-                    if self._on_attach_sync is not None:
-                        try:
-                            self._on_attach_sync(frame.get("data") or {})
-                        except Exception:  # noqa: BLE001
-                            continue
-                elif op in ("ack", "error"):
+                elif op == "frontend_sync":
+                    data = frame.get("data") or {}
+                    epoch = data.get("epoch")
+                    sequence = data.get("sequence")
+                    if not isinstance(epoch, str) or not isinstance(sequence, int):
+                        raise ConnectionError("malformed frontend sync")
+                    self._frontend_epoch = epoch
+                    self._frontend_sequence = sequence
+                    if self._on_frontend_sync is not None:
+                        self._on_frontend_sync(data)
+                elif op == "frontend_update":
+                    data = frame.get("data") or {}
+                    epoch = data.get("epoch")
+                    sequence = data.get("sequence")
+                    expected = (
+                        (self._frontend_sequence + 1)
+                        if self._frontend_sequence is not None
+                        else None
+                    )
+                    if epoch != self._frontend_epoch or sequence != expected:
+                        # Deltas are not replacement-safe: every sequence must
+                        # arrive. Closing forces a fresh v5 snapshot rather than
+                        # continuing with silently incomplete canonical state.
+                        raise ConnectionError(
+                            f"frontend state gap: expected {self._frontend_epoch}/{expected}, "
+                            f"got {epoch}/{sequence}"
+                        )
+                    self._frontend_sequence = sequence
+                    if self._on_frontend_update is not None:
+                        self._on_frontend_update(data)
+                elif op in ("ack", "error", "result"):
                     future = self._pending.pop(frame.get("req"), None)
                     if future is not None and not future.done():
                         future.set_result(frame)
@@ -284,6 +316,33 @@ class AttachClient:
         if reply.get("op") == "error":
             raise RuntimeError(str(reply.get("message", "request failed")))
         return str(reply.get("detail", ""))
+
+    async def _request_payload(self, op: str, **fields: Any) -> Any:
+        """Send one op and await its structured ``result`` payload.
+
+        The sibling of :meth:`_request` for ops whose answer is data rather
+        than a receipt line. The registrant replies with ``{"op": "result",
+        "data": ...}``; an error frame raises the same way.
+        """
+        if not self._connected or self._writer is None:
+            raise ConnectionError("not attached")
+        self._req_seq += 1
+        req = self._req_seq
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending[req] = future
+        frame = {"op": op, "req": req, **fields}
+        try:
+            self._writer.write(json.dumps(frame).encode() + b"\n")
+            await self._writer.drain()
+            reply = await asyncio.wait_for(future, timeout=ACK_TIMEOUT_S)
+        except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+            self._pending.pop(req, None)
+            raise ConnectionError(f"owner connection lost: {exc}") from exc
+        finally:
+            self._pending.pop(req, None)
+        if reply.get("op") == "error":
+            raise RuntimeError(str(reply.get("message", "request failed")))
+        return reply.get("data")
 
     async def prompt(
         self,
@@ -342,8 +401,45 @@ class AttachClient:
     async def abort(self) -> str:
         return await self._request("abort")
 
-    async def slash(self, command: str, args: str) -> str:
-        return await self._request("slash", command=command, args=args)
+    async def slash(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None = None,
+    ) -> str:
+        return await self._request("slash", command=command, args=args, images=images or [])
+
+    async def slash_result(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None = None,
+    ) -> Any:
+        """Run one shared slash command on the owner; return its typed outcome.
+
+        The ``result`` frame carries a :class:`SlashResult` payload the invoker
+        renders locally, replacing the synthetic ``ran /…`` receipt that left
+        the follower's terminal with a transport message while the real answer
+        painted in the owner's.
+        """
+        return await self._request_payload(
+            "slash_result", command=command, args=args, images=images or []
+        )
+
+    async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
+        """Fork an aside exchange into the conversation on the authoritative owner."""
+        return await self._request("adopt_aside", messages=messages)
+
+    async def cancel_subagents(self) -> int:
+        """Cancel every running subagent on the owner; return the REAL count."""
+        value = await self._request_payload("cancel_subagents")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return -1
+
+    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+        return await self._request("complete_aside", turns=turns)
 
     async def set_model(self, provider: str, model_id: str) -> str:
         return await self._request("set_model", provider=provider, model_id=model_id)
