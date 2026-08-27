@@ -441,6 +441,41 @@ def test_file_logging_captures_native_fd2_writes_on_darwin(
     assert "native malloc noise" not in capfd.readouterr().err
 
 
+def test_file_logging_keeps_textuals_driver_on_the_terminal_on_darwin(
+    log_home: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Native fd-2 noise goes to the log without taking Textual's frames with it.
+
+    Textual's macOS/Linux driver captures ``sys.__stderr__`` when it starts and
+    writes every alternate-screen frame through that stream. Redirecting fd 2
+    underneath the unchanged object therefore redirects the entire TUI, not
+    just native diagnostics. The context must give ``sys.__stderr__`` a
+    duplicate of the original terminal while raw ``write(2)`` keeps targeting
+    the log, then restore the exact Python stream object on exit.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    original_stderr = sys.__stderr__
+    assert original_stderr is not None
+    terminal_identity = _fd_identity(original_stderr.fileno())
+
+    with file_logging() as path:
+        assert path == log_home
+        assert sys.__stderr__ is not None
+        assert sys.__stderr__ is not original_stderr
+        assert _fd_identity(sys.__stderr__.fileno()) == terminal_identity
+        assert _fd_identity(2) != terminal_identity
+        os.write(sys.__stderr__.fileno(), b"textual frame marker\n")
+        os.write(2, b"native malloc noise\n")
+
+    assert sys.__stderr__ is original_stderr
+    contents = log_home.read_text(encoding="utf-8")
+    assert "native malloc noise" in contents
+    assert "textual frame marker" not in contents
+    captured = capfd.readouterr().err
+    assert "textual frame marker" in captured
+    assert "native malloc noise" not in captured
+
+
 def test_file_logging_restores_fd2_after_an_exception_on_darwin(
     log_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

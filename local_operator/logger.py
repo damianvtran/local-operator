@@ -31,7 +31,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, TextIO
 
 from local_operator.paths import ensure_log_dir, log_dir
 
@@ -382,6 +382,65 @@ def _restore_fd_stderr(saved_fd: Optional[int]) -> None:
         pass
 
 
+def _preserve_textual_stderr(
+    saved_fd: Optional[int],
+) -> Optional[tuple[TextIO, TextIO]]:
+    """Give Textual a terminal stream after fd 2 moves to the log.
+
+    Textual's macOS/Linux driver deliberately binds ``sys.__stderr__`` rather
+    than ``sys.stderr`` when it starts. The object still writes to descriptor 2,
+    so leaving it untouched after ``dup2(logfd, 2)`` sends every alternate-
+    screen frame into the log and leaves the user's terminal blank. Duplicate
+    the saved terminal descriptor and expose that duplicate through
+    ``sys.__stderr__`` for the ownership window. ``sys.stderr`` stays untouched:
+    Textual redirects it itself, and the logging handlers were detached above.
+
+    Returns the original/replacement stream pair for exact restoration, or
+    ``None`` when a safe replacement could not be opened. The caller must then
+    abandon the native guard rather than keep a guard that hides the whole UI.
+    """
+    original = sys.__stderr__
+    if saved_fd is None or original is None:
+        return None
+    try:
+        terminal_fd = os.dup(saved_fd)
+    except OSError:
+        return None
+    try:
+        terminal_stream = os.fdopen(
+            terminal_fd,
+            "w",
+            buffering=1,
+            encoding=getattr(original, "encoding", None) or "utf-8",
+            errors=getattr(original, "errors", None) or "backslashreplace",
+        )
+    except (OSError, ValueError):
+        try:
+            os.close(terminal_fd)
+        except OSError:
+            pass
+        return None
+    sys.__stderr__ = terminal_stream
+    return original, terminal_stream
+
+
+def _restore_textual_stderr(state: Optional[tuple[TextIO, TextIO]]) -> None:
+    """Restore ``sys.__stderr__`` and close its temporary terminal duplicate."""
+    if state is None:
+        return
+    original, terminal_stream = state
+    # Never leave the process pointing at a stream while it is being closed.
+    sys.__stderr__ = original
+    try:
+        terminal_stream.flush()
+    except (OSError, ValueError):
+        pass
+    try:
+        terminal_stream.close()
+    except OSError:
+        pass
+
+
 def _write_header(handler: logging.Handler, path: Path) -> None:
     """State the file's own path and bound as its first record.
 
@@ -441,6 +500,7 @@ def file_logging(
     handler, path = _open_rotating_handler(max_bytes, backup_count)
     root_logger = logging.getLogger()
     saved_stderr_fd: Optional[int] = None
+    textual_stderr_state: Optional[tuple[TextIO, TextIO]] = None
     if handler is not None and path is not None:
         # Passes the guard installed above by design: `_is_console_handler`
         # rejects FileHandler, so the file handler is the one thing that can
@@ -465,15 +525,23 @@ def file_logging(
                 logfd = None
         if logfd is not None:
             saved_stderr_fd = _redirect_fd_stderr(logfd)
+            textual_stderr_state = _preserve_textual_stderr(saved_stderr_fd)
+            if saved_stderr_fd is not None and textual_stderr_state is None:
+                # A clean frame outranks the best-effort native diagnostic
+                # guard. Without this stream Textual would paint into the log.
+                _restore_fd_stderr(saved_stderr_fd)
+                saved_stderr_fd = None
     _file_logging_active = True
     try:
         yield path
     finally:
         _file_logging_active = False
         _current_log_file = None
-        # Restore the real fd 2 first, before the handler that owns the redirect
-        # target is closed, so the terminal is back the instant the TUI exits.
+        # Restore fd 2 before putting its original Python wrapper back: once
+        # ``sys.__stderr__`` again names descriptor 2, that descriptor must
+        # already be the terminal rather than the log.
         _restore_fd_stderr(saved_stderr_fd)
+        _restore_textual_stderr(textual_stderr_state)
         if handler is not None:
             root_logger.removeHandler(handler)
             try:
