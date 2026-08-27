@@ -291,10 +291,11 @@ Every failure is one actionable string; act on it rather than retrying blindly:
      or other debug flags — the extension IS the debugger; a debug-port
      browser on a real profile is a security hole.
   2. **Browser running but still disconnected?** The service worker may be
-     idle-suspended. It rewakes and reconnects on its own within ~1 minute
-     (a periodic reconnect alarm is the guaranteed wake — wait a minute
-     before intervening), but Chrome may delay alarms arbitrarily, so when
-     it matters now open any page in that browser:
+     idle-suspended. A periodic reconnect alarm rewakes and reconnects it on
+     its own — up to ~1 minute in a packed/released build (Chrome clamps
+     sub-30s alarm periods; a developer/unpacked load fires sooner), but
+     Chrome may delay alarms arbitrarily, so when it matters now open any
+     page in that browser:
      `open -g -a "Google Chrome" "https://example.com"` — or ask the user to
      click the extension's toolbar icon (opening the popup wakes the worker
      instantly). Reconnection then happens within seconds.

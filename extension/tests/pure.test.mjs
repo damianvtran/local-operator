@@ -335,10 +335,11 @@ test("reconnect timing: alarm is the guaranteed floor, setTimeout the alive-only
       shouldDialOnAlarm,
     } = module.loaded;
 
-    // The alarm period must stay at/above Chrome's 30s clamp. Below 0.5 min
-    // Chrome refuses to honour the period (the old 0.5-min bug sat on the edge
-    // where the tick was delayed/dropped and the automatic rewake never fired).
-    assert.ok(RECONNECT_ALARM_PERIOD_MINUTES >= 0.5, "alarm period below Chrome's 30s clamp");
+    // The alarm period must sit ABOVE Chrome's 30s clamp. Below 0.5 min Chrome
+    // refuses to honour the period, and 0.5 min itself sits exactly on the clamp
+    // edge where the tick can be dropped/delayed (the original bug) — so a
+    // `>= 0.5` assertion would re-admit the buggy edge. Require strictly above.
+    assert.ok(RECONNECT_ALARM_PERIOD_MINUTES > 0.5, "alarm period not strictly above Chrome's 30s clamp edge");
 
     // Fast-path backoff is exponential and capped so a dead daemon is not
     // hammered while a live socket still recovers in seconds.
