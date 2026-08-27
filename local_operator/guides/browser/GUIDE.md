@@ -185,7 +185,8 @@ browser's existing login state; the user signs in themselves.
 
 The extension gates navigation by origin, enforced in the browser where no
 local process can click for it. Access is denied by default, and the approval
-flow is ASYNC and agent-legible — never a silent long block:
+flow is ASYNC and agent-legible — never a silent long block. The popup shows
+the normalized authority, so a nondefault port is visible:
 
 1. **`open`/`goto` to a not-yet-allowed origin fails in milliseconds** with a
    typed `origin_not_allowed` error naming the origin. No prompt exists yet.
@@ -200,7 +201,9 @@ flow is ASYNC and agent-legible — never a silent long block:
    Notification Center authorization is commonly missing), and the popup
    badge is invisible unless they happen to click the toolbar icon. Tell
    them the origin and that the buttons are in the extension popup
-   (toolbar icon → **Allow once** / **Always allow** / **Deny**).
+   (toolbar icon → **Allow once** / **Always allow** / **Deny**). Literal
+   `localhost`, `127.0.0.1`, and `[::1]` instead show **Always this port** and
+   a separate **Always all ports** choice.
 3. **`await_access` (url, timeout_s — default 120, max 240)** waits for the
    decision and returns one of FIVE states:
    - `allowed` — proceed; your next navigation to the origin succeeds.
@@ -217,7 +220,12 @@ After `allowed`, the next `open`/`goto` to that origin succeeds. **Allow
 once** mints a single-use grant bound to YOUR session — another session
 cannot spend it, it covers exactly one navigation, and it expires if left
 unspent for ~10 minutes (navigate promptly after approval). **Always allow**
-persists forever (revocable in the extension's Settings → Allowed sites).
+persists the exact origin forever (revocable in the extension's Settings →
+Allowed sites). On literal loopback hosts, **Always all ports** is an explicit
+same-scheme, exact-host grant across ports. It does not cover HTTPS, another
+loopback address, a localhost subdomain, private-network hosts, or names that
+merely resolve to loopback. Settings lists and revokes both grant scopes
+independently.
 
 Other rules:
 

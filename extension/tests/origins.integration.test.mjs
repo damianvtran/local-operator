@@ -231,6 +231,54 @@ test("deny persists across a worker restart via session storage", async () => {
   }
 });
 
+test("loopback all-port decision persists and matches only exact scheme and host", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    let origins = await bundle.import();
+    const source = new URL("http://localhost:5173/page");
+    await origins.raiseAccessRequest(source, "req-A");
+    assert.equal(await origins.resolveOrigin(source.origin, "all_ports"), true);
+    assert.equal(await origins.originAllowed(new URL("http://localhost:9999")), true);
+    assert.equal(await origins.originAllowed(new URL("https://localhost:9999")), false);
+    assert.equal(await origins.originAllowed(new URL("http://127.0.0.1:9999")), false);
+    // Local storage, unlike worker memory, survives MV3 suspension.
+    origins = await bundle.import("host-grant-restart");
+    assert.equal(await origins.originAllowed(new URL("http://localhost:6000")), true);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("all-port decision is rejected for a forged non-loopback popup message", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "req-A");
+    assert.equal(await origins.resolveOrigin(ORIGIN, "all_ports"), false);
+    assert.equal(chrome.areas.local.get("hostGrants"), undefined);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("legacy exact-origin grants remain authoritative", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    chrome.areas.local.set("origins", { "http://localhost:5173": "allow" });
+    const origins = await bundle.import();
+    assert.equal(await origins.originAllowed(new URL("http://localhost:5173/x")), true);
+    assert.equal(await origins.originAllowed(new URL("http://localhost:5174/x")), false);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
 test("a replaced request leaves a tombstone its owner reads as superseded", async () => {
   const chrome = installChromeStub();
   const bundle = await loadOrigins();
