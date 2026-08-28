@@ -53,6 +53,9 @@ METHODS = (
     # as broken and burned an hour on it).
     "request_access",
     "await_access",
+    # Requester-bound cancellation removes only this session's exact-origin
+    # pending entry; it cannot dismiss another session's consent prompt.
+    "cancel_access",
 )
 
 
@@ -104,6 +107,7 @@ COMMAND_TIMEOUTS = {
     # loops slices client-side, so this stays an honest per-RPC bound and
     # never needs the awaiting_origin deadline-extension machinery above.
     "await_access": 25.0,
+    "cancel_access": 20.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
@@ -136,6 +140,7 @@ class ErrorCode(StrEnum):
     # MAX_SURFACES in extension/src/state.ts): parallel sessions each own a
     # tab now, and without a bound an agent fleet could spray tabs into the
     # user's real browser. Typed so the tool can tell the agent to close one.
+    ACCESS_QUEUE_FULL = "access_queue_full"
     TAB_LIMIT = "tab_limit"
     # A bare `close` while several tabs are open: the request is
     # under-specified, not a bridge fault, so it must not render as an

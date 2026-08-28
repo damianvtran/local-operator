@@ -91,11 +91,13 @@ def test_access_flow_methods_are_wired_end_to_end() -> None:
     # opaquely instead of failing typed).
     from local_operator.browser_bridge.daemon import COMMAND_TIMEOUTS
 
-    for method in ("request_access", "await_access"):
+    for method in ("request_access", "await_access", "cancel_access"):
         assert method in METHODS
         assert method in COMMAND_TIMEOUTS
     rendered = gen_ts_render()
-    assert "'request_access'" in rendered and "'await_access'" in rendered
+    assert all(
+        f"'{method}'" in rendered for method in ("request_access", "await_access", "cancel_access")
+    )
     assert "ORIGIN_NOT_ALLOWED" in rendered
 
 
