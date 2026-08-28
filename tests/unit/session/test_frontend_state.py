@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import pickle
 from collections import deque, namedtuple
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
@@ -104,6 +105,32 @@ def test_state_json_roundtrip_preserves_full_model_usage_and_future_fields() -> 
     assert wire["future_owner_field"] == {"new": True}
     assert wire["selected_model"]["future_model_field"] == "kept"
     assert wire["last_usage"]["future_usage_field"] == 7
+
+
+def test_snapshot_jobs_preserve_immutable_mapping_and_sequence_interfaces() -> None:
+    state = FrontendStateStore(
+        _state(
+            jobs=[
+                JobState(
+                    id="child",
+                    type="task",
+                    latest_details={"progress": "reading files"},
+                    trajectory=[{"type": "message_update", "delta": "hello"}],
+                )
+            ]
+        )
+    ).state
+    jobs = SnapshotJobs(state.jobs)
+
+    for job in [*jobs.list(), jobs.get("child")]:
+        assert job is not None
+        assert isinstance(job.latest_details, Mapping)
+        assert job.latest_details.get("progress") == "reading files"
+        with pytest.raises((AttributeError, TypeError)):
+            job.latest_details["progress"] = "corrupted"  # type: ignore[index]
+        assert isinstance(job.trajectory, Sequence)
+        assert isinstance(job.trajectory[0], Mapping)
+        assert job.trajectory[0].get("delta") == "hello"
 
 
 def test_missing_model_and_cost_remain_explicit_unknowns() -> None:
