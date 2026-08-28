@@ -43,6 +43,9 @@ GLOBAL.write_text(
 os.environ["HOME"] = str(_home)
 os.chdir(_cwd)
 
+from local_operator.session.mcp_status import McpStartupOutcome  # noqa: E402
+from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.widgets.toast import Toast  # noqa: E402
 from tests.unit.tui.test_app_pilot import (  # noqa: E402
     FakeMcpManager,
     McpSession,
@@ -50,10 +53,6 @@ from tests.unit.tui.test_app_pilot import (  # noqa: E402
     _transcript_text,
     _type_command,
 )
-
-from local_operator.session.mcp_status import McpStartupOutcome  # noqa: E402
-from local_operator.tui.app import OperatorApp  # noqa: E402
-from local_operator.tui.widgets.toast import Toast  # noqa: E402
 
 
 def _servers() -> list[str]:

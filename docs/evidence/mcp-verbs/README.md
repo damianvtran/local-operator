@@ -16,3 +16,17 @@ Reproduce any of them with:
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python .evidence/tui_check.py
 bash .evidence/cli_check.sh /path/to/worktree
 ```
+
+## Rendered frames
+
+`before-verbs.png` / `after-verbs.png` — the `/mcp ` argument picker. Before:
+three verbs (`login`, `logout`, `reauth`). After: six, with `list` leading as
+the safe landing row and `remove`/`logout` in the danger tint.
+
+`after-remove.png` — the `/mcp remove ` rows. All four configured servers are
+offered (the stdio and non-OAuth http ones were previously invisible), each
+carrying its **source file** in the detail column, so the Claude-imported
+`notion` row shows `~/.claude.json` and is visibly not ours to delete.
+
+Captured with `shot.py` per AGENTS.md "Visual validation", using the real
+`OperatorApp` so the stylesheet applies.
