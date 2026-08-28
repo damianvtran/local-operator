@@ -52,6 +52,7 @@ from local_operator.providers.failover import (
     is_transient_error,
     is_usage_limit_error,
     resolve_chain,
+    resolve_chain_key,
     resolve_next_key,
     spec_for_selector,
     spec_for_target,
@@ -182,6 +183,33 @@ def test_resolve_chain_wildcard_specificity() -> None:
 def test_resolve_chain_none_without_default() -> None:
     assert resolve_chain("mistral/x", {"google/*": ["a/b"]}) is None
     assert resolve_chain("mistral/x", {}) is None
+
+
+def test_resolve_chain_key_reports_which_key_won() -> None:
+    """The KEY, by the same specificity that picks the entries.
+
+    `/failovers` shows the user which of several plausible keys is in force, and
+    it must be this function's answer rather than a second matching loop that
+    can disagree with routing.
+    """
+    assert resolve_chain_key("openrouter/anthropic/claude-opus", CHAINS) == (
+        "openrouter/anthropic/claude-opus"
+    )
+    assert resolve_chain_key("google/gemini-2.5-pro", CHAINS) == "google/*"
+    # No specific key matches, so the default chain is what actually serves.
+    assert resolve_chain_key("mistral/mistral-large", CHAINS) == "default"
+
+
+def test_resolve_chain_key_longest_wildcard_wins() -> None:
+    chains = {"a/*": ["x/y"], "a/b/*": ["z/w"]}
+    assert resolve_chain_key("a/b/c", chains) == "a/b/*"
+
+
+def test_resolve_chain_key_none_without_default() -> None:
+    # Same "nothing applies" verdict resolve_chain returns, so the two cannot
+    # disagree about whether a cascade exists at all.
+    assert resolve_chain_key("mistral/x", {"google/*": ["a/b"]}) is None
+    assert resolve_chain_key("mistral/x", {}) is None
 
 
 def test_expand_candidates_provider_wildcard_keeps_model_id() -> None:

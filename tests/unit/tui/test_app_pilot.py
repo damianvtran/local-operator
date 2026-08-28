@@ -3403,6 +3403,409 @@ async def test_accounts_command_renders_credentials() -> None:
     assert "api_key (login)" in texts
 
 
+def _failover_config(tmp_path, chains) -> None:
+    """Write a real config.yml with ``chains`` under ``values.retry``.
+
+    Through ConfigManager rather than a hand-written YAML file: the loader
+    validates the document, and a hand-rolled one missing a bookkeeping key
+    fails in the app as an unrelated error.
+    """
+    from local_operator.config import ConfigManager
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "anthropic")
+    manager.set_config_value("model_name", "claude-opus-5")
+    retry = dict(manager.get_config_value("retry", {}) or {})
+    retry.update(chains)
+    manager.set_config_value("retry", retry)
+
+
+async def _failover_text(app) -> str:
+    """Run `/failovers` once the session has attached, and read the transcript.
+
+    The command reports the model's cascade, so running it before the session
+    lands captures the "still starting" degrade rather than the listing.
+    """
+    for _ in range(200):
+        if app._session is not None:
+            break
+        await asyncio.sleep(0.01)
+    app._run_slash_command("/failovers")
+    return _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_failovers_command_renders_the_cascade(monkeypatch, tmp_path) -> None:
+    """The populated case: order, matched key, accounts, and what is serving."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(
+        tmp_path,
+        {
+            "fallbackChains": {
+                "test/*": [
+                    {"provider": "openrouter", "model": "deepseek/deepseek-chat", "effort": "high"},
+                    "deepseek/deepseek-reasoner",
+                ]
+            }
+        },
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert "failover cascade" in text
+    # The matched key AND how it matched: an exact entry silently outranking a
+    # wildcard is the confusion this row exists to end.
+    assert "test/* (wildcard)" in text
+    # Configured order is the routing order, numbered so it reads as a cascade.
+    assert "1. openrouter/deepseek/deepseek-chat" in text
+    assert "2. deepseek/deepseek-reasoner" in text
+    # CONFIGURED effort, never a resolved spec (that would be a network call on
+    # the paint path). Only stated when it DIFFERS from the model default: the
+    # phrase was identical on every row of a real config, which is a column
+    # carrying no bits and the width that pushed the serving marker into a wrap.
+    assert "high effort" in text
+    assert "model default effort" not in text
+    # The fake never falls back, so the primary is what serves.
+    assert "← serving" in text
+    assert text.index("← serving") < text.index("1. openrouter")
+    assert "ask the agent to change models, effort or providers" in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_counts_accounts_without_printing_identities(monkeypatch, tmp_path) -> None:
+    """Counts collapse login flavours; `/accounts` keeps the identities.
+
+    The fake holds an openrouter key and a deepseek OAuth row carrying an email.
+    Printing `row.data` here would leak an address onto a surface that never
+    promised one.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {"default": ["deepseek/deepseek-reasoner"]}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert "1 account" in text
+    assert "a@b.c" not in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_without_a_chain_points_at_the_key_to_set(monkeypatch, tmp_path) -> None:
+    """The default install — nothing configured — is the most likely caller."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    # The primary is still shown: "you have no cascade" is only useful beside
+    # what would have had one.
+    assert "primary" in text
+    assert "values.retry.fallbackChains.default" in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_names_the_key_that_disabled_the_cascade(monkeypatch, tmp_path) -> None:
+    """Switched off reads as switched off, and names WHICH switch."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(
+        tmp_path,
+        {"modelFallback": False, "fallbackChains": {"default": ["deepseek/x"]}},
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert "retry.modelFallback is false" in text
+    # The configured chain must NOT be listed as a route: nothing would use it.
+    assert "deepseek/x" not in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_without_a_provider_facade_warns(monkeypatch, tmp_path) -> None:
+    """Same shape as `/accounts`: name the terminal command that can answer."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _failover_text(app)
+        await pilot.pause()
+        notices = [b._text for b in app.query(NoticeBlock)]
+
+    assert any("local-operator config list" in n for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_failovers_reports_an_unreadable_config_as_an_error(monkeypatch, tmp_path) -> None:
+    """A config read that raises is named, not swallowed into an empty tree."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await asyncio.sleep(0.01)
+        import local_operator.config as config_mod
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(config_mod, "ConfigManager", explode)
+        app._run_slash_command("/failovers")
+        await pilot.pause()
+        notices = [b._text for b in app.query(NoticeBlock)]
+
+    assert any("failover list failed: database is locked" in n for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_failovers_before_the_session_attaches_warns(monkeypatch, tmp_path) -> None:
+    """The pre-attach state, which the other tests deliberately wait past.
+
+    Reachable in practice: the command is typeable while the session is still
+    booting, and the cascade is a property of the session's model.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        # NO wait for attach — that is the state under test.
+        app._session = None
+        app._run_slash_command("/failovers")
+        await pilot.pause()
+        notices = [b._text for b in app.query(NoticeBlock)]
+
+    assert any("session is still starting" in n for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_failovers_on_a_follower_whose_model_raises_warns(monkeypatch, tmp_path) -> None:
+    """`RemoteSession.model` is a property that RAISES before the owner syncs.
+
+    `getattr(session, "model", None)` does NOT suppress an exception raised
+    inside a property, so this used to surface as `failover list failed: owner
+    has no selected model spec` — an error notice carrying developer vocabulary
+    for a state that has a warning phrasing.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+
+    class _RaisingSpec(FakeSession):
+        """A follower whose owner has not published a model spec yet.
+
+        Subclasses the fake so the session plumbing the app installs on adopt
+        (subscribe/dispose) still exists; only the spec accessors raise.
+        """
+
+        @property
+        def model_label(self) -> str:
+            return ""
+
+        @property
+        def model(self):
+            raise RuntimeError("owner has no selected model spec")
+
+        @property
+        def effective_model(self):
+            raise RuntimeError("owner has no effective model spec")
+
+        @property
+        def effective_model_label(self) -> str:
+            return ""
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await asyncio.sleep(0.01)
+        # Swapped in AFTER attach: `_adopt_session` reads `.model` on the boot
+        # path too, and that unrelated call site is out of this slice's scope.
+        app._session = _RaisingSpec()
+        app._run_slash_command("/failovers")
+        await pilot.pause()
+        # `_token` is where NoticeBlock keeps the resolved kind; asserting on it
+        # is what pins the REGISTER rather than just the words.
+        notices = [(b._text, b._token) for b in app.query(NoticeBlock)]
+
+    matched = [(text, token) for text, token in notices if "no model selected yet" in text]
+    assert matched, notices
+    # Nothing is broken, so this must not be the error tier.
+    assert matched[0][1] != "error"
+    assert not any("failover list failed" in text for text, _ in notices)
+
+
+@pytest.mark.asyncio
+async def test_failovers_matched_key_with_only_the_current_model_is_not_no_match(
+    monkeypatch, tmp_path
+) -> None:
+    """A key CAN match and still expand to nothing, and that is not "no match".
+
+    `expand_fallback_targets` drops a legacy entry equal to the current
+    selector, so `default: ["test/model"]` on a `test/model` primary matched
+    `default` and produced []. Saying "set fallbackChains.default" there names a
+    key that is already set and suggests a no-op.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {"default": ["test/model"]}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert "default matched but lists only the current model" in text
+    # The no-op suggestion must NOT be offered for a key that already matched.
+    assert "set values.retry.fallbackChains.default" not in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_marks_exactly_one_serving_row(monkeypatch, tmp_path) -> None:
+    """Same model at a different effort is a real route, and only ONE serves.
+
+    `FallbackTarget` is (selector, effort), so a selector-only comparison put
+    the marker on both the primary and the target — worst in exactly the case
+    the marker exists to disambiguate ("am I on high or low?").
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(
+        tmp_path,
+        {"fallbackChains": {"default": [{"provider": "test", "model": "model", "effort": "low"}]}},
+    )
+
+    class LowEffortSpec:
+        provider = "test"
+        model_id = "model"
+        reasoning_effort = "low"
+        display_name = ""
+
+    class ServingLowSession(FakeSession):
+        @property
+        def model(self):
+            spec = LowEffortSpec()
+            spec.reasoning_effort = "high"  # the SELECTION is high
+            return spec
+
+        @property
+        def effective_model(self):
+            return LowEffortSpec()  # the low-effort route is answering
+
+    app = OperatorApp(
+        lambda: _factory(ServingLowSession()), provider_controller=FakeProviderController()
+    )
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert text.count("← serving") == 1, text
+    # It belongs to the low-effort TARGET, not the high-effort primary.
+    low_row = [line for line in text.splitlines() if "low effort" in line]
+    assert low_row and "← serving" in low_row[0], text
+
+
+@pytest.mark.asyncio
+async def test_failovers_does_not_call_a_usable_provider_accountless(monkeypatch, tmp_path) -> None:
+    """A routing listing must not report a working hop as `no accounts`.
+
+    The fake's `deepseek` has an OAuth row; `openrouter` has a key. A provider
+    that needs no credential at all (`allows_missing_api_key`) is a healthy
+    route, and calling it `no accounts` reads as "this hop will fail" and sends
+    the user to a pointless login.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {"default": ["ollama/llama3"]}})
+
+    class OllamaDef:
+        id = "ollama"
+        name = "Ollama"
+        store_credentials_as = None
+        allows_missing_api_key = True
+        login = None
+        search_aliases = ()
+
+    class OllamaController(FakeProviderController):
+        def provider(self, pid):
+            return OllamaDef() if pid == "ollama" else super().provider(pid)
+
+        def is_usable(self, provider):
+            return provider == "ollama" or super().is_usable(provider)
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=OllamaController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    ollama_row = [line for line in text.splitlines() if "ollama/llama3" in line]
+    assert ollama_row, text
+    assert "no credential needed" in ollama_row[0]
+    assert "no accounts" not in ollama_row[0]
+
+
+@pytest.mark.asyncio
+async def test_failovers_flags_config_edited_after_the_session_started(
+    monkeypatch, tmp_path
+) -> None:
+    """The listing must describe what the SESSION routes on, and flag drift.
+
+    The router captures its settings once at session build; nothing watches
+    config.yml. Without this the command confirmed cascade edits the running
+    session would not honour — a green light, and most wrong for the user who
+    followed this command's own "ask the agent to change…" hint.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # On DISK: two targets. The session captured only the first.
+    _failover_config(tmp_path, {"fallbackChains": {"default": ["zai/glm-5.3", "kimi/k3"]}})
+
+    class SnapshotSession(FakeSession):
+        @property
+        def routing_settings(self):
+            return {"retry": {"fallbackChains": {"default": ["zai/glm-5.3"]}}}
+
+    app = OperatorApp(
+        lambda: _factory(SnapshotSession()), provider_controller=FakeProviderController()
+    )
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    # What the SESSION will do, not what the file says.
+    assert "1. zai/glm-5.3" in text
+    assert "kimi/k3" not in text
+    # And it says so, naming the step that makes the edit real.
+    assert "config.yml changed since this session started" in text
+    assert "/reload" in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_offers_the_agent_affordance_in_every_state(monkeypatch, tmp_path) -> None:
+    """The user with NO cascade needs the "ask the agent" hint most."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"modelFallback": False, "fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        disabled = await _failover_text(app)
+        await pilot.pause()
+
+    assert "ask the agent to turn the cascade back on" in disabled
+
+
 def _usage_reports(*, used: float = 5.0):
     from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
