@@ -7,7 +7,7 @@ import pickle
 from collections import deque, namedtuple
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -256,7 +256,8 @@ def test_large_job_snapshots_share_only_immutable_retained_events() -> None:
     second = store.state
 
     assert first is not second
-    assert first.jobs is second.jobs
+    assert first.jobs is not second.jobs
+    assert first.jobs[0] is not second.jobs[0]
     assert first.jobs[0].trajectory is second.jobs[0].trajectory
     first.sequence = 99
     with pytest.raises((AttributeError, TypeError)):
@@ -422,6 +423,66 @@ def test_immutable_wrappers_have_no_builtin_base_class_bypass() -> None:
     assert update is None
     assert owner.state.jobs == follower.state.jobs
     assert owner.state.model_dump(mode="json") == follower.state.model_dump(mode="json")
+
+
+def test_public_and_input_pydantic_owners_never_alias_canonical_state() -> None:
+    input_job = JobState.model_validate(
+        {
+            "id": "child",
+            "type": "task",
+            "status": "running",
+            "usage": Usage(input_tokens=4).model_dump(mode="json"),
+            "descendant_usage": [FrontendUsage(output_tokens=3).model_dump(mode="json")],
+            "trajectory": [{"type": "notice", "index": 1}],
+            "future_model": FrontendUsage(input_tokens=7),
+        }
+    )
+    initial = _state(jobs=[input_job])
+    owner = FrontendStateStore(initial)
+    follower = FrontendStateStore(initial)
+    baseline = owner.state.model_dump(mode="json")
+    snapshot = owner.state
+    public_job = snapshot.jobs[0]
+
+    cast(Any, public_job.__dict__)["status"] = "corrupted"
+    cast(Any, public_job.__dict__)["trajectory"] = ()
+    assert public_job.usage is not None
+    cast(Any, public_job.usage.__dict__)["input_tokens"] = 99
+    cast(Any, public_job.descendant_usage[0].__dict__)["output_tokens"] = 99
+    assert public_job.__pydantic_extra__ is not None
+    cast(Any, public_job.__pydantic_extra__)["future_model"].__dict__["input_tokens"] = 99
+    cast(Any, public_job.__pydantic_extra__)["injected"] = "bad"
+
+    cast(Any, input_job.__dict__)["status"] = "input-corrupted"
+    cast(Any, input_job.__dict__)["trajectory"].append({"type": "input-corrupted"})
+    assert input_job.usage is not None
+    cast(Any, input_job.usage.__dict__)["input_tokens"] = 88
+    assert input_job.__pydantic_extra__ is not None
+    cast(Any, input_job.__pydantic_extra__)["future_model"].__dict__["input_tokens"] = 88
+
+    assert owner.state.sequence == 0
+    assert owner.state.model_dump(mode="json") == baseline
+    assert follower.state.model_dump(mode="json") == baseline
+
+    repaired = JobState.model_validate(baseline["jobs"][0])
+    update = owner.mutate(jobs=[repaired])
+    if update is not None:
+        follower.apply_update(update)
+    assert owner.state.jobs == follower.state.jobs
+    assert owner.state.model_dump(mode="json") == follower.state.model_dump(mode="json")
+
+
+def test_input_job_is_detached_again_on_mutation() -> None:
+    store = FrontendStateStore(_state(jobs=[]))
+    incoming = JobState(id="child", type="task", trajectory=[{"type": "notice"}])
+    update = store.mutate(jobs=[incoming])
+    assert update is not None
+    cast(Any, incoming.__dict__)["status"] = "corrupted"
+    cast(Any, incoming.__dict__)["trajectory"].append({"type": "corrupted"})
+
+    canonical = store.state.jobs[0]
+    assert canonical.status == "running"
+    assert canonical.trajectory == [{"type": "notice"}]
 
 
 def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:

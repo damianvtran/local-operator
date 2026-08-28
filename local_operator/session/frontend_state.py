@@ -363,11 +363,7 @@ def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) 
 
 
 def _freeze_job(job: "JobState") -> "JobState":
-    """Freeze every declared and future nested value on a shared job snapshot."""
-    if all(_is_frozen_value(value) for value in job.__dict__.values()) and all(
-        _is_frozen_value(value) for value in (job.model_extra or {}).values()
-    ):
-        return job
+    """Detach the owning model and freeze every nested canonical value."""
     values = {
         name: _freeze_value(value)
         for name, value in job.__dict__.items()
@@ -513,17 +509,11 @@ class _FrozenUsage(Usage):
 
     model_config = ConfigDict(extra="allow", frozen=True)
 
-    def __deepcopy__(self, _memo: dict[int, Any] | None = None) -> "_FrozenUsage":
-        return self
-
 
 class _FrozenFrontendUsage(FrontendUsage):
     """FrontendUsage-compatible immutable descendant accounting value."""
 
     model_config = ConfigDict(extra="allow", frozen=True)
-
-    def __deepcopy__(self, _memo: dict[int, Any] | None = None) -> "_FrozenFrontendUsage":
-        return self
 
 
 def _freeze_usage(value: Usage) -> _FrozenUsage:
@@ -635,11 +625,31 @@ class FrontendSessionState(BaseModel):
         return f"{spec.provider}/{spec.model_id}" if spec is not None else ""
 
 
-def _freeze_state_jobs(state: FrontendSessionState) -> FrontendSessionState:
-    """Freeze retained job payloads before any snapshot can alias canonical state."""
-    return state.model_copy(
-        update={"jobs": _FrozenSequence(_freeze_job(job) for job in state.jobs)}
+def _freeze_state_jobs(
+    state: FrontendSessionState, *, jobs_are_canonical: bool = False
+) -> FrontendSessionState:
+    """Detach incoming owners, or preserve already-owned jobs on scalar updates."""
+    jobs = state.jobs if jobs_are_canonical else (_freeze_job(job) for job in state.jobs)
+    return state.model_copy(update={"jobs": _FrozenSequence(jobs)})
+
+
+def _public_job(job: JobState) -> JobState:
+    """Detach every Pydantic owner while sharing immutable retained payloads."""
+    values = {
+        name: copy.deepcopy(value) if isinstance(value, BaseModel) else value
+        for name, value in job.__dict__.items()
+        if name != "descendant_usage"
+    }
+    values["descendant_usage"] = _FrozenSequence(
+        copy.deepcopy(component) for component in job.descendant_usage
     )
+    detached = job.model_copy(update=values)
+    if job.model_extra:
+        detached.__pydantic_extra__ = {
+            name: copy.deepcopy(value) if isinstance(value, BaseModel) else value
+            for name, value in job.model_extra.items()
+        }
+    return detached
 
 
 class FrontendSync(BaseModel):
@@ -819,10 +829,12 @@ class FrontendStateStore:
 
     @property
     def state(self) -> FrontendSessionState:
-        # Pydantic models outside the retained trajectory remain mutable, so the
-        # public boundary stays defensive. Retained events are recursively frozen
-        # and return themselves from deepcopy, avoiding the former 50k-dict clone.
-        return self._state.model_copy(deep=True)
+        # Never share an owning Pydantic instance. Clone the small state/job/usage
+        # shells while immutable retained payload wrappers remain shared.
+        snapshot = self._state.model_copy(deep=True)
+        return snapshot.model_copy(
+            update={"jobs": _FrozenSequence(_public_job(job) for job in self._state.jobs)}
+        )
 
     @property
     def has_subscribers(self) -> bool:
@@ -928,8 +940,10 @@ class FrontendStateStore:
         # Unchanged fields are immutable snapshot components and can be shared.
         # Re-validating a full model here deep-copied all job trajectories for
         # every small delta; each changed field was validated above instead.
+        jobs_changed = "jobs" in normalized
         self._state = _freeze_state_jobs(
-            self._state.model_copy(update={**normalized, "sequence": self._state.sequence + 1})
+            self._state.model_copy(update={**normalized, "sequence": self._state.sequence + 1}),
+            jobs_are_canonical=not jobs_changed,
         )
         update = FrontendUpdate(
             epoch=self._state.epoch,
