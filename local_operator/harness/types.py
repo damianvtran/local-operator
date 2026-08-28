@@ -895,6 +895,10 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     aborted: bool = False
     error: str | None = None
     generation: int = 0
+    # A post-turn compaction happens after the loop creates this event but before
+    # the session releases it. Keep the billed messages intact while letting the
+    # session replace their now-invalid pre-compaction occupancy reading.
+    context_tokens: int | None = None
 
 
 class TurnStartEvent(AgentEvent[Literal["turn_start"]]):

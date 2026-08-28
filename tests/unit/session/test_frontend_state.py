@@ -193,6 +193,36 @@ def test_compaction_semantics_replace_context_and_preserve_lifetime_cost() -> No
     assert store.state.cumulative_parent_cost == 8.5
 
 
+def test_post_compaction_agent_end_keeps_settled_occupancy_and_provider_bill() -> None:
+    """A held boundary is emitted after automatic compaction, so its message
+    usage is older than the context it closes. Occupancy follows the stamped
+    post-pass level while billing still consumes the provider's real receipt.
+    """
+    store = FrontendStateStore(
+        _state(
+            cumulative_parent_cost=8.5,
+            context_tokens=590_400,
+            last_usage=Usage(context_tokens=590_400),
+        )
+    )
+    usage = Usage(context_tokens=590_400, input_tokens=590_400, output_tokens=1_000, usd_cost=2.5)
+    session = SimpleNamespace(effective_model=_spec(), restored_usage=lambda: usage)
+
+    store.observe_event(
+        session,
+        AgentEndEvent(
+            messages=[Message.assistant("done", usage=usage)],
+            context_tokens=131_100,
+        ),
+    )
+
+    assert store.state.context_tokens == 131_100
+    assert store.state.context_is_estimate is True
+    assert store.state.last_usage is not None
+    assert store.state.last_usage.context_tokens == 590_400
+    assert store.state.cumulative_parent_cost == pytest.approx(11.0)
+
+
 def test_real_async_job_roundtrips_progress_trajectory_and_accounting() -> None:
     job = AsyncJob(
         id="child-1",

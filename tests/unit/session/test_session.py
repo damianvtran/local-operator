@@ -1477,6 +1477,62 @@ async def test_compaction_continuation_emits_one_run_boundary(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_continuation_provider_usage_supersedes_compaction_estimate(tmp_path, monkeypatch):
+    """Exercise the production boundary order: the first provider run ends,
+    post-turn compaction stamps its estimate, and default auto-continuation runs
+    the provider again before the one logical agent end is released. The later
+    receipt must own occupancy; the estimate only bridges the gap between runs.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="first"),
+                StreamEndEvent(
+                    stop_reason="stop",
+                    usage=Usage(input_tokens=590_400, context_tokens=590_400),
+                ),
+            ],
+            [
+                StreamTextDelta(delta="resumed"),
+                StreamEndEvent(
+                    stop_reason="stop",
+                    usage=Usage(input_tokens=171_000, context_tokens=171_000),
+                ),
+            ],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    compactions = 0
+
+    async def fake_compact() -> None:
+        nonlocal compactions
+        compactions += 1
+        if compactions == 1:
+            session._held_context_tokens = 131_100
+            session._continuation_queue.append(Message.user("continue"))
+
+    monkeypatch.setattr(session, "_maybe_compact", fake_compact)
+    ends: list[AgentEndEvent] = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+
+    await session.prompt("do the thing")
+
+    assert len(stream.requests) == 2
+    assert len(ends) == 1
+    assert ends[0].context_tokens is None
+    continuation = next(
+        message
+        for message in reversed(ends[0].messages)
+        if isinstance(message, Message) and message.usage is not None
+    )
+    assert continuation.usage is not None
+    assert continuation.usage.context_tokens == 171_000
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_auto_continuation_prompt_is_never_announced_as_user(tmp_path, monkeypatch):
     """The post-compaction continuation is harness chrome, not the user's words.
 

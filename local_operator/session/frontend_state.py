@@ -1096,6 +1096,21 @@ class FrontendStateStore:
         # breakdown on every unrelated mutation would serialize the unbounded
         # tool inventory on the session loop.
         context_breakdown = current.context_breakdown
+        # A compaction creates a newer occupancy estimate than the last provider
+        # receipt while that receipt remains authoritative for billing. Generic
+        # source refreshes run after `agent_end`; replaying the unchanged receipt
+        # there caused every frontend to paint `tokens_after` and then rebound to
+        # the pre-pass level. Only a genuinely newer receipt may supersede it.
+        receipt_context = getattr(last_usage, "context_tokens", None) if last_usage else None
+        current_receipt_context = (
+            current.last_usage.context_tokens if current.last_usage is not None else None
+        )
+        preserve_settled_context = bool(
+            current.context_is_estimate
+            and current.context_tokens
+            and receipt_context
+            and receipt_context == current_receipt_context
+        )
         changes = dict(
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
             conversation_title=title,
@@ -1112,15 +1127,12 @@ class FrontendStateStore:
             last_usage=(
                 last_usage.model_dump(mode="json") if isinstance(last_usage, Usage) else last_usage
             ),
-            context_tokens=(
-                getattr(last_usage, "context_tokens", None)
-                if last_usage
-                else current.context_tokens
-            ),
+            context_tokens=(current.context_tokens if preserve_settled_context else receipt_context)
+            or current.context_tokens,
             context_is_estimate=(
-                False
-                if isinstance(last_usage, Usage) and last_usage.context_tokens
-                else current.context_is_estimate
+                current.context_is_estimate
+                if preserve_settled_context
+                else False if receipt_context else current.context_is_estimate
             ),
             context_window=(
                 getattr(effective, "context_window", None) if effective is not None else None
@@ -1295,11 +1307,18 @@ class FrontendStateStore:
                 elif any(u.input_tokens or u.output_tokens for u in usages):
                     changes["cost_knowledge"] = CostKnowledge.PARTIAL
                     changes["current_turn_accrued_cost"] = 0.0
+                # `messages` remain the billing authority even when a post-turn
+                # compaction invalidates their occupancy. The session stamps the
+                # settled level separately so this late boundary cannot rebound a
+                # frontend to the provider reading from before the rewrite.
+                settled_context = event.context_tokens or aggregate.context_tokens
                 changes.update(
                     last_usage=aggregate.model_dump(mode="json"),
-                    context_tokens=aggregate.context_tokens,
+                    context_tokens=settled_context,
                     context_is_estimate=(
-                        False if aggregate.context_tokens else state.context_is_estimate
+                        True
+                        if event.context_tokens is not None
+                        else False if aggregate.context_tokens else state.context_is_estimate
                     ),
                 )
         elif (

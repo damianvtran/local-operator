@@ -14467,10 +14467,11 @@ class OperatorApp(App[None]):
         self._status.update(
             streaming=False,
             context_tokens=context_tokens,
-            # The provider's own prompt_tokens: exact, and it supersedes the
-            # boot estimate permanently. `None` leaves the flag alone, so a turn
-            # that reported no usage does not demote a standing estimate.
-            context_is_estimate=None if context_tokens is None else False,
+            # Ordinarily this is the provider's exact prompt_tokens. A post-turn
+            # compaction replaces that now-invalid occupancy with its local
+            # settled estimate while preserving the turn's provider bill.
+            # `None` leaves the flag alone when the turn reported no usage.
+            context_is_estimate=(None if context_tokens is None else message.context_is_estimate),
             context_window=_context_window(self._session),
             cost=cost_text,
         )

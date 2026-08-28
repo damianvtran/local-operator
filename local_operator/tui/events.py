@@ -97,12 +97,14 @@ class TurnEnded(Message):
         *,
         context_tokens: int = 0,
         usage: Any = None,
+        context_is_estimate: bool = False,
     ) -> None:
         super().__init__()
         self.aborted = aborted
         self.error = error
         self.context_tokens = context_tokens
         self.usage = usage
+        self.context_is_estimate = context_is_estimate
 
 
 class ContextUsageReported(Message):
@@ -540,12 +542,16 @@ class EventController:
                 context_tokens=context_tokens or None,
                 cost_components=cost_components,
             )
+        # The aggregate still prices the calls. A post-turn compaction can stamp
+        # a newer occupancy level on the boundary without corrupting that bill.
+        settled_context = getattr(event, "context_tokens", None)
         self._post(
             TurnEnded(
                 getattr(event, "aborted", False),
                 getattr(event, "error", None),
-                context_tokens=context_tokens,
+                context_tokens=(settled_context if settled_context is not None else context_tokens),
                 usage=usage,
+                context_is_estimate=settled_context is not None,
             )
         )
 
