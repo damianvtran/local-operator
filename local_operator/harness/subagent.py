@@ -1032,6 +1032,16 @@ async def _build_child_session(
         job_id=job_id,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        # The parent's variable store, for the SAME reason the session factory
+        # documents as a trap (session_factory.py: "a store installed only
+        # here reached the createIf check and nothing else"): this
+        # construction-time context feeds ``create_tools`` AND the child's
+        # later turns read ``context.variables`` for bash credential
+        # injection, so omitting it here left the child's construction-time
+        # tools reading a bare process-env store. The child Session below
+        # also gets ``variables=`` directly; this line covers the window
+        # before that Session exists and any createIf gate that reads it.
+        variables=getattr(parent_session, "_variables", None),
         resolve_internal_url=resolve_internal_url,
         subagent_comms=getattr(parent_session, "subagent_comms", None),
         # The child can work with roles too (look one up, or record what it

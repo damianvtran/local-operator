@@ -9,8 +9,12 @@ contains the secret.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
+from local_operator.harness.types import CustomMessage, StreamEndEvent
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.key_prompt import MASK_CHAR, KeyPromptBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -73,6 +77,38 @@ async def test_storing_a_credential_masks_the_value_and_names_the_key() -> None:
     assert secret not in "\n".join(notices)
     assert session.variables.credential_names() == ["GITHUB_TOKEN"]
     assert session.variables.credential_env()["GITHUB_TOKEN"] == secret
+
+
+@pytest.mark.asyncio
+async def test_storing_a_credential_announces_it_to_the_session_journal() -> None:
+    """The model-visible half of /credential: the store write alone changes
+    only the system-prompt tail, which the model has no reason to re-read.
+    A real session journals a ``session_credential`` record naming the KEY
+    (never the value) so the next turn — and a resume — see it."""
+    from local_operator.incidents import SESSION_CREDENTIAL_MESSAGE_TYPE
+    from tests.unit.session.test_session import ScriptedStream
+    from tests.unit.session.test_session import make_session as make_real_session
+
+    # A REAL session, not the FakeSession the pilot tests boot with: the
+    # journal lives on Session (``journal_credential_change``), and the fake
+    # has no journal to call.
+    real = make_real_session(
+        Path(tempfile.mkdtemp()), ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    )
+    secret = "ghp_never_in_the_journal"
+
+    real.journal_credential_change("GITHUB_TOKEN")
+
+    records = [
+        m
+        for m in real._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+    ]
+    assert len(records) == 1
+    assert "GITHUB_TOKEN" in records[0].details["text"]
+    assert secret not in records[0].details["text"]
+    assert records[0].details["action"] == "stored"
+    await real.dispose()
 
 
 @pytest.mark.asyncio

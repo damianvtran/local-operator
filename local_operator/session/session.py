@@ -117,6 +117,7 @@ from local_operator.harness.wake import (
 )
 from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
+    SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
 )
@@ -410,6 +411,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
         elif message.custom_type in (
             SESSION_INCIDENT_MESSAGE_TYPE,
             SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+            SESSION_CREDENTIAL_MESSAGE_TYPE,
         ):
             # An incident rides the sender's preformatted text (the classifier
             # already wrote category + suggested action), exactly like a wake
@@ -418,6 +420,10 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # the same path so the model becomes aware it is now answering as a
             # different model (a deliberate switch or a failover fallback),
             # rather than only seeing a changed static "Model:" system line.
+            # A credential record rides the same path so a mid-session
+            # ``/credential`` is ANNOUNCED to the model rather than only
+            # changing the prompt tail, which the model has no reason to
+            # re-read (the failure behind session 835fbcafdc27).
             out.append(
                 Message(
                     role="user",
@@ -511,7 +517,11 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
 #: live one. A deny-list enumerating the ephemeral types cannot see a type that
 #: does not exist yet; this one excludes it by default.
 _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
-    {SESSION_INCIDENT_MESSAGE_TYPE, SESSION_MODEL_SWITCH_MESSAGE_TYPE}
+    {
+        SESSION_INCIDENT_MESSAGE_TYPE,
+        SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        SESSION_CREDENTIAL_MESSAGE_TYPE,
+    }
 )
 
 
@@ -4392,6 +4402,12 @@ class Session:
             jobs=self.jobs,
             subagent_comms=self.subagent_comms,
             variables=self._variables,
+            # The ``ask`` tool stores secret answers straight into the store;
+            # this hook is what lets the session ANNOUNCE the new key to the
+            # model instead of leaving it to notice the prompt tail (the
+            # failure behind session 835fbcafdc27). Re-bound every turn for
+            # the same reason the rest of this context is rebuilt.
+            journal_credential=self.journal_credential_change,
             job_id=self._job_id,
             agent_registry=self.agent_registry,
             team_registry=self.team_registry,
@@ -4625,6 +4641,62 @@ class Session:
             self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal model switch", exc_info=True)
+
+    def journal_credential_change(
+        self,
+        key: str,
+        *,
+        action: str = "stored",
+        replaced: bool = False,
+    ) -> None:
+        """Make a mid-session credential change visible to the MODEL.
+
+        Storing or forgetting a credential already updates the store (bash
+        injection follows) and the ``<session-credentials>`` block in the
+        volatile prompt tail — but nothing in the live conversation said so.
+        The model has no reason to re-read a tail it already read, so the
+        operator's ``I just added the API key`` left it guessing names until
+        it noticed the tail by accident (session 835fbcafdc27: ten minutes
+        between the store and the model finding the real key name). This
+        appends a ``session_credential`` message that renders as a user turn,
+        naming the KEY only — the value never rides a message the provider
+        sees.
+
+        SYNC, unlike :meth:`journal_model_switch`: the TUI's
+        ``/credential`` flow and the ``ask`` tool both call this from the
+        loop, and the store write has ALREADY happened by the time they do —
+        a fire-and-forget task could be reordered after a turn that starts
+        before the next loop tick, which is exactly the window where the
+        model asks "what key?" one turn later. The transcript write is the
+        only await-shaped step, so this parks it on the same background
+        machinery as the rest of the journal (``_spawn_background``) while
+        the live-context append is immediate.
+
+        Called AFTER a successful store/forget, never before: the
+        announcement must not claim a credential the store refused (empty
+        value, empty key).
+        """
+        from local_operator.incidents import format_credential_message
+
+        if self._disposed or not key:
+            return
+        text = format_credential_message(key, action=action, replaced=replaced)
+        message = CustomMessage(
+            custom_type=SESSION_CREDENTIAL_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "key": key,
+                "action": action,
+                "replaced": replaced,
+            },
+        )
+        # Live context first (synchronous, so the very next turn sees it),
+        # then the durable write in the background: resume replays the
+        # announcement, which is what tells a restored session which names
+        # exist without re-reading the whole tail.
+        self._append_or_park_journal(message)
+        self._spawn_background(self._transcript.append_message(message))
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
         """MCP manager hook (breaker trips): journal without blocking the

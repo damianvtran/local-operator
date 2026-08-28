@@ -41,6 +41,7 @@ from local_operator.providers.failover import ProviderError
 from local_operator.session.session import (
     IMAGE_DROPPED_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
+    SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     Session,
@@ -1292,6 +1293,78 @@ async def test_a_knob_only_change_does_not_journal_a_switch(tmp_path):
         if isinstance(m, CustomMessage) and m.custom_type == SESSION_MODEL_SWITCH_MESSAGE_TYPE
     ]
     assert switches == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_credential_change_is_journaled_and_model_visible(tmp_path):
+    """Storing a credential mid-session must ANNOUNCE itself into the live
+    context (rendered as a user turn) and persist for resume — the fix for a
+    model that never learned a key its operator had just stored."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    secret = "ghp_value_that_must_never_ride_a_message"
+
+    session.journal_credential_change("OSWORLD_OPENAI_API_KEY")
+    await wait_for(
+        lambda: any(
+            isinstance(m, CustomMessage) and m.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+            for m in session._context.messages
+        )
+    )
+    records = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+    ]
+    assert len(records) == 1
+    text = records[-1].details["text"]
+    # Names the key, states the bash contract, and NEVER carries the value
+    # (this text is sent to the provider and written to the transcript).
+    assert "OSWORLD_OPENAI_API_KEY" in text
+    assert "bash" in text
+    assert secret not in text
+
+    # It renders into the request the provider sees on the next turn.
+    await session.prompt("use the key I just gave you")
+    rendered = "\n".join(getattr(m, "text", "") for m in stream.requests[0].messages)
+    assert "[session credential] OSWORLD_OPENAI_API_KEY" in rendered
+    assert secret not in rendered
+    # Persisted, so a resumed session replays the announcement.
+    await wait_for(
+        lambda: any(
+            e.get("custom_type") == SESSION_CREDENTIAL_MESSAGE_TYPE
+            for e in session._transcript.build_llm_history()
+            if isinstance(e, dict)
+        )
+        or any(
+            getattr(e, "custom_type", None) == SESSION_CREDENTIAL_MESSAGE_TYPE
+            for e in session._transcript.build_llm_history()
+        )
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_credential_forget_is_journaled_as_removal(tmp_path):
+    """The forget edge is announced too, so the model stops referencing an
+    env var that no longer exists instead of failing every bash call."""
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream)
+    session.journal_credential_change("DEPLOY_KEY", action="forgot")
+    await wait_for(
+        lambda: any(
+            isinstance(m, CustomMessage) and m.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+            for m in session._context.messages
+        )
+    )
+    record = next(
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+    )
+    assert "removed" in record.details["text"]
+    assert "no longer available" in record.details["text"]
     await session.dispose()
 
 
