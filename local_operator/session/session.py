@@ -2160,6 +2160,19 @@ class Session:
         return self._active_fallback
 
     @property
+    def routing_settings(self) -> Any:
+        """The settings this session's stream will ROUTE on, or ``None``.
+
+        The stream captured its settings mapping at session build and holds it
+        for the session's life, so a surface that re-reads ``config.yml`` is
+        answering a different question than "what will this session do". Kept
+        as a pass-through to the stream (rather than a second copy stored here)
+        so the two can never disagree; ``None`` when the stream predates the
+        accessor, which callers must treat as "cannot say", never as "empty".
+        """
+        return getattr(self._stream_fn, "routing_settings", None)
+
+    @property
     def effective_model(self) -> ModelSpec:
         """The spec ACTUALLY serving requests.
 

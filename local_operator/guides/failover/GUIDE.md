@@ -54,6 +54,14 @@ to learn what was already known.
 
 ## Quota reserve
 
+**Everything in this section requires `usageAwareFallback: true`, which is NOT
+the shipped default.** With it false (the default), `preflight_usage` returns
+before any of it runs, so no quota is probed at message boundaries and neither
+rule below applies — the cascade still works, it just moves on provider errors
+rather than on quota forecasts. Turn it on to spend one lightweight quota
+request per user-message boundary in exchange for routing that leaves a
+provider before it fails.
+
 `usageReservePercent` (default 10) holds back a slice of quota. Two rules that
 are easy to get backwards:
 
@@ -116,11 +124,11 @@ Everything lives under `values.retry` in `config.yml`:
 values:
   retry:
     enabled: true
-    maxRetries: 3
-    baseDelayMs: 500
-    modelFallback: true
-    usageAwareFallback: true
-    usageReservePercent: 10
+    maxRetries: 10          # shipped default
+    baseDelayMs: 500        # shipped default
+    modelFallback: true     # shipped default
+    usageAwareFallback: true   # NOT the default (ships false); see below
+    usageReservePercent: 10 # shipped default
     fallbackChains:
       anthropic/claude-opus-5:
         - provider: zai
@@ -141,6 +149,13 @@ chain re-list the *current* model at a different effort as a real route.
 
 `enabled: false` or `modelFallback: false` switches the cascade off entirely —
 `/failovers` names whichever of the two did it.
+
+**An edit does not reach a running session.** The stream captures its settings
+once at session build and nothing watches `config.yml`, so after changing the
+cascade the user must run `/reload` (or start a new session) for the new routing
+to take effect. `/failovers` compares the two and prints a `stale` row naming
+`/reload` when they diverge, so the listing never shows a cascade the running
+session will not honour.
 
 **Never put tokens or API keys in this mapping.** Credentials live in the
 credential store (`local-operator login <provider>`); a chain entry names a

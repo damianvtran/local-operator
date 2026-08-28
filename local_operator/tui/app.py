@@ -443,6 +443,15 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("accounts", "List stored credentials"),
     # The listing is the receipt — the cascade tree IS the whole answer, and
     # the command takes no argument to restate.
+    #
+    # NO `failover` singular alias, despite it being an equally natural spelling:
+    # the picker sizes its name column on the widest `/name  /alias` pair, and
+    # `/failovers  /failover` (21 cells) is 3 wider than the current widest, so
+    # the alias permanently narrows the DESCRIPTION column for every command at
+    # every width (it truncated `List all commands` on the 41-cell frame that
+    # `test_descriptions_come_back_above_the_collapse_width` pins). The singular
+    # still reaches this command through the picker's prefix match, which is the
+    # cheap half of what an alias would buy.
     SlashCommand("failovers", "Show the model failover cascade and what is serving"),
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand("usage", "Show provider usage quota"),
@@ -11799,15 +11808,45 @@ class OperatorApp(App[None]):
             counts[storage] = counts.get(storage, 0) + 1
         return counts
 
-    @staticmethod
-    def _account_detail(provider: str, counts: Mapping[str, int]) -> str:
-        """``2 accounts`` / ``1 account`` / ``no accounts`` for a provider."""
+    def _account_detail(self, provider: str, counts: Mapping[str, int]) -> str:
+        """What a ROUTING listing should say about ``provider``'s credentials.
+
+        Not the same question `/accounts` answers. That surface lists the
+        credential store, so "no accounts" is the literal truth there. Here the
+        row describes a hop the cascade may take, and a provider with a key in
+        the ENVIRONMENT — or one that needs no key at all, a local Ollama —
+        will serve perfectly well with zero stored rows. Printing "no accounts"
+        beside such a hop reads as "this hop will fail", which is the opposite
+        of the truth and sends the user to a pointless `login`.
+
+        So a zero count defers to ``is_usable`` (env key or
+        ``allows_missing_api_key``) before it reports an absence. A NON-zero
+        count still prints the number, because rotation depth is the thing this
+        column exists to show.
+        """
         from local_operator.providers.registry import credential_provider_id
 
         total = counts.get(credential_provider_id(provider), 0)
-        if total == 0:
+        if total:
+            return "1 account" if total == 1 else f"{total} accounts"
+        # Never let a credential-store read decide the row alone: `is_usable`
+        # is the wider question, and it is the one routing actually asks. The
+        # two usable-with-zero-rows cases are named apart because the user's
+        # next action differs — one is "your env var is doing the work", the
+        # other is "there is nothing to configure here".
+        if self._providers is None:
             return "no accounts"
-        return "1 account" if total == 1 else f"{total} accounts"
+        try:
+            definition = self._providers.provider(provider)
+            if definition is not None and definition.allows_missing_api_key:
+                return "no credential needed"
+            if self._providers.is_usable(provider):
+                return "env key"
+        except Exception:
+            # A locked store is not evidence the provider is broken; fall
+            # through to the honest count rather than inventing a verdict.
+            pass
+        return "no accounts"
 
     def _failover_rows(self, notice: NoticeFn) -> list[tuple[str, str]] | None:
         """The ``/failovers`` tree rows, or ``None`` when a notice was issued.
@@ -11825,6 +11864,15 @@ class OperatorApp(App[None]):
         Degrades rather than hides: the most likely caller is a default install
         with nothing configured at all, and "you have no cascade, here is the key
         that would create one" is the useful answer for them.
+
+        Reads the SESSION's captured routing settings, not ``config.yml``, for
+        the reason recorded on ``Session.routing_settings``: the stream snapshots
+        its settings at build time and nothing watches the file, so a listing
+        built from disk confirms cascade edits the running session will not
+        honour. That is worst for the user who followed this command's own
+        "ask the agent to change…" hint. The on-disk copy is still read, but
+        only to DETECT that divergence and say so; it never silently replaces
+        what the session will do.
         """
         from local_operator.config import ConfigManager
         from local_operator.paths import config_dir
@@ -11832,6 +11880,7 @@ class OperatorApp(App[None]):
             DEFAULT_CHAIN_KEY,
             RetrySettings,
             expand_fallback_targets,
+            parse_selector,
             resolve_chain,
             resolve_chain_key,
         )
@@ -11850,7 +11899,16 @@ class OperatorApp(App[None]):
             # model to have a cascade for until it attaches.
             notice("session is still starting…", "warning")
             return None
-        selected = _model_spec(session)
+        try:
+            selected = _model_spec(session)
+        except Exception:
+            # `RemoteSession.model` is a PROPERTY THAT RAISES when the owner has
+            # no selected spec yet, and `getattr(..., None)` does not suppress an
+            # exception raised inside a property. Unguarded, a follower attached
+            # before the owner's model syncs got `failover list failed: owner has
+            # no selected model spec` — an error notice, in developer vocabulary,
+            # for a state this function already has a warning phrasing for.
+            selected = None
         primary = str(getattr(session, "model_label", "") or "")
         if selected is not None:
             primary = f"{selected.provider}/{selected.model_id}"
@@ -11860,70 +11918,165 @@ class OperatorApp(App[None]):
 
         counts = self._account_counts()
         configured_effort = str(getattr(selected, "reasoning_effort", "") or "")
-        primary_accounts = self._account_detail(primary.split("/")[0], counts)
+        primary_provider, _ = parse_selector(primary)
         primary_detail = " · ".join(
-            part for part in (primary, configured_effort, primary_accounts) if part
+            part
+            for part in (
+                primary,
+                configured_effort,
+                self._account_detail(primary_provider, counts),
+            )
+            if part
         )
 
         # The model ACTUALLY serving, via `effective_model` rather than the
         # route's `active_fallback`: RemoteSession implements `effective_model`
         # but not the route state, so this is the one comparison that is correct
         # on both the owning terminal and an attached follower.
-        effective = _effective_spec(session)
+        try:
+            effective = _effective_spec(session)
+        except Exception:
+            effective = None  # same raising-property guard as `selected` above
         serving = ""
+        serving_effort = ""
         if effective is not None:
             serving = f"{effective.provider}/{effective.model_id}"
+            serving_effort = str(getattr(effective, "reasoning_effort", "") or "")
         else:
             serving = str(getattr(session, "effective_model_label", "") or "")
 
         rows: list[tuple[str, str]] = [("primary", primary_detail)]
 
-        retry = RetrySettings.from_settings(
-            ConfigManager(config_dir()).get_config().values,
-        )
+        # THE SESSION'S snapshot, with the file read only to detect drift.
+        session_settings = getattr(session, "routing_settings", None)
+        disk_settings = ConfigManager(config_dir()).get_config().values
+        if session_settings is None:
+            # A host that cannot say what it routes on (an older stream, a test
+            # double). Falling back to disk is the only answer available, and it
+            # is the answer this command shipped with.
+            session_settings = disk_settings
+            drifted = False
+        else:
+            # Compare only what routing reads. A `tui.theme` edit is not a
+            # routing change and must not raise a "/reload to apply" flag.
+            drifted = RetrySettings.from_settings(session_settings) != RetrySettings.from_settings(
+                disk_settings
+            )
+        retry = RetrySettings.from_settings(session_settings)
+
+        def close(extra: list[tuple[str, str]], hint: str) -> list[tuple[str, str]]:
+            """Finish the tree: drift flag, then the agent affordance.
+
+            Both belong in EVERY state, not just the populated one. The user
+            staring at "no chain" is the one who most needs to know the agent
+            will write the config for them, and a stale listing is most
+            misleading exactly when it shows a cascade that looks new.
+            """
+            out = rows + extra
+            if drifted:
+                # Named on its own row rather than folded into the hint: it is a
+                # fact about this listing's accuracy, and `/reload` is the step
+                # that makes the on-disk cascade the one that actually routes.
+                out.append(("stale", "config.yml changed since this session started · /reload"))
+            # The hint is an escape hatch, not a route. With an EMPTY name its
+            # text landed at the exact x of every row name while wearing the
+            # terminal `└─` glyph, so it read as one more cascade entry. Giving
+            # it a short label puts it in the same class as `primary` and
+            # `matched chain` — a named fact about the cascade rather than a
+            # numbered hop in it — for 5 cells instead of the 30+ that padding
+            # to the name column would cost (which re-wrapped the row it fixed).
+            out.append(("tip", hint))
+            return out
+
         if not retry.enabled or not retry.model_fallback:
             # Name the KEY, not just the state: "off" without the key leaves the
             # user hunting through config.yml for which of two switches did it.
             disabled_by = "retry.enabled" if not retry.enabled else "retry.modelFallback"
-            rows.append(("cascade off", f"{disabled_by} is false — no fallback route is used"))
-            return rows
+            return close(
+                [("cascade off", f"{disabled_by} is false — no fallback route is used")],
+                "ask the agent to turn the cascade back on",
+            )
 
         chain_key = resolve_chain_key(primary, retry.fallback_chains)
         chain = resolve_chain(primary, retry.fallback_chains) if chain_key else None
         targets = expand_fallback_targets(primary, chain) if chain else []
         if not targets:
-            rows.append(
-                (
-                    "no chain",
-                    f"nothing matches {primary} — set "
-                    f"values.retry.fallbackChains.{DEFAULT_CHAIN_KEY}",
-                )
-            )
-            return rows
+            # TWO different states, and collapsing them made the command assert
+            # the opposite of the engine's answer. A key can match and still
+            # yield nothing: `expand_fallback_targets` drops a legacy entry equal
+            # to the current selector, so `default: ["zai/glm-5.3"]` after
+            # `/model zai/glm-5.3` matched `default` and expanded to []. Telling
+            # that user to "set fallbackChains.default" names a key that is
+            # already set and suggests a no-op.
+            if chain_key is None:
+                detail = f"no chain matches — set values.retry.fallbackChains.{DEFAULT_CHAIN_KEY}"
+            else:
+                detail = f"{chain_key} matched but lists only the current model"
+            return close([("no chain", detail)], "ask the agent to set up a fallback cascade")
 
         # The key IS the answer to "which chain am I on"; the parenthetical only
         # earns its width when the key alone does not say how it was picked —
         # `default` is self-describing, `anthropic/claude-opus-5` could be either
-        # an exact entry or a wildcard that happened to expand.
+        # an exact entry or a wildcard that happened to expand. Tested on the
+        # key's own SHAPE rather than "not equal to the primary", which called
+        # every future match rule a wildcard.
         if chain_key == DEFAULT_CHAIN_KEY:
             matched = DEFAULT_CHAIN_KEY
+        elif chain_key.endswith("/*"):
+            matched = f"{chain_key} (wildcard)"
         else:
-            matched = f"{chain_key} ({'exact' if chain_key == primary else 'wildcard'})"
+            matched = f"{chain_key} (exact)"
         rows.append(("matched chain", matched))
 
-        if serving and serving == primary:
-            rows[0] = (rows[0][0], f"{rows[0][1]}   ← serving")
+        # ONE row is serving. The marker is a claim about a single route, and
+        # `FallbackTarget` is (selector, effort), so a chain that re-lists the
+        # current model at a different effort — which the guide documents as a
+        # real route — made both the primary and that target match on selector
+        # alone and printed the marker twice. Effort is part of the identity of
+        # the thing serving, so it is part of the comparison; the primary only
+        # keeps the marker when no target claims it, so the count can never
+        # exceed one.
+        target_rows: list[tuple[str, str, bool]] = []
+        served_by_target = False
         for index, target in enumerate(targets, start=1):
-            effort = f"{target.effort} effort" if target.effort else "model default effort"
-            detail = f"{effort} · {self._account_detail(target.selector.split('/')[0], counts)}"
-            if serving and serving == target.selector:
-                detail = f"{detail}   ← serving"
-            rows.append((f"{index}. {target.selector}", detail))
+            target_provider, _ = parse_selector(target.selector)
+            # Only what DIFFERS between rows. "model default effort" was
+            # identical on 5 of 5 rows on a real config — a column carrying no
+            # bits, and the width that pushed the serving marker into the wrap
+            # (`_removal_detail` rejects exactly this shape for the same reason).
+            parts = [f"{target.effort} effort"] if target.effort else []
+            parts.append(self._account_detail(target_provider, counts))
+            is_serving = (
+                not served_by_target
+                and bool(serving)
+                and serving == target.selector
+                and (target.effort or "") == (serving_effort if target.effort else "")
+            )
+            served_by_target = served_by_target or is_serving
+            target_rows.append((f"{index}. {target.selector}", " · ".join(parts), is_serving))
+
+        if serving and serving == primary and not served_by_target:
+            rows[0] = (rows[0][0], f"{rows[0][1]}   ← serving")
+
+        # Pad the name column so the details form a grid, the way the sibling
+        # `/mcp` listing does. This is the listing where down-column comparison
+        # matters most — "which of these hops has accounts" is read vertically —
+        # and D2's shortening is what makes the padding affordable.
+        name_column = max(len(name) for name, _, _ in target_rows)
+        for name, detail, is_serving in target_rows:
+            # The marker goes BEFORE the detail: it is the one element with no
+            # readable degraded form (a wrapped detail is still words; a wrapped
+            # `← serving` is an arrow at column 0 pointing at nothing), so it
+            # sits where the wrap reaches last rather than first.
+            marker = "← serving  " if is_serving else ""
+            rows.append((name.ljust(name_column), f"{marker}{detail}"))
 
         # House phrasing for "this is not a read-only wall": the agent owns the
         # config, so the user does not have to learn the YAML to change it.
-        rows.append(("", "ask the agent to change models, effort or providers in this cascade"))
-        return rows
+        # Trimmed to fit an 80-column terminal (a split pane) without wrapping:
+        # "in this cascade" restated the caption two rows up and cost the row
+        # its last line.
+        return close([], "ask the agent to change models, effort or providers here")
 
     def _cmd_failovers(self, notice: NoticeFn) -> None:
         """``/failovers`` — the model failover cascade and what is serving."""
