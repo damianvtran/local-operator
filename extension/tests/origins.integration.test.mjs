@@ -420,22 +420,22 @@ test("decision between enqueue publication and return cannot miss the waiter", a
   } finally { await bundle.close(); chrome.restore(); }
 });
 
-test("identical in-command admissions are independently visible and decidable", async () => {
+test("same-command in-command admissions dedupe onto one generation", async () => {
   const chrome = installChromeStub();
   const bundle = await loadModule("src/origins.ts");
   try {
     const origins = await bundle.import();
     const first = origins.askOrigin(url("https://same-hop.example"), "same-command");
     const second = origins.askOrigin(url("https://same-hop.example"), "same-command");
-    while (chrome.session("accessQueue")?.length !== 2) await new Promise((resolve) => setTimeout(resolve, 0));
-    const [a, b] = chrome.session("accessQueue");
-    assert.notEqual(a.entryId, b.entryId);
-    await origins.resolveOrigin(a.origin, "deny", a.entryId);
-    assert.equal(await first, false);
-    assert.equal(chrome.session("accessQueue").length, 1, "deny removes only the selected navigation");
-    await origins.resolveOrigin(b.origin, "once", b.entryId);
-    assert.equal(await second, true);
-    assert.equal(chrome.session("onceGrants")?.["https://same-hop.example\nsame-command"], undefined);
+    // A retried same-command navigation re-asks the identical question, so it
+    // dedupes onto the ONE generation the user is looking at instead of
+    // stacking a twin. One decision therefore settles every paused document
+    // attached to that command.
+    while ((chrome.session("accessQueue")?.length ?? 0) !== 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    const [entry] = chrome.session("accessQueue");
+    await origins.resolveOrigin(entry.origin, "deny", entry.entryId);
+    assert.deepEqual(await Promise.all([first, second]), [false, false]);
+    assert.equal(chrome.session("accessQueue").length, 0, "the deduped generation is decided");
   } finally { await bundle.close(); chrome.restore(); }
 });
 
@@ -446,7 +446,7 @@ test("always allow reconciles every identical in-command waiter", async () => {
     const origins = await bundle.import();
     const first = origins.askOrigin(url("https://fleet-hop.example"), "same-command");
     const second = origins.askOrigin(url("https://fleet-hop.example"), "same-command");
-    while (chrome.session("accessQueue")?.length !== 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    while ((chrome.session("accessQueue")?.length ?? 0) !== 1) await new Promise((resolve) => setTimeout(resolve, 0));
     const selected = chrome.session("accessQueue")[0];
     await origins.resolveOrigin(selected.origin, "always", selected.entryId);
     assert.deepEqual(await Promise.all([first, second]), [true, true]);
@@ -461,7 +461,7 @@ test("TTL sweep settles every identical in-command waiter", async () => {
     const origins = await bundle.import();
     const first = origins.askOrigin(url("https://expire-both.example"), "same-command");
     const second = origins.askOrigin(url("https://expire-both.example"), "same-command");
-    while (chrome.session("accessQueue")?.length !== 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    while ((chrome.session("accessQueue")?.length ?? 0) !== 1) await new Promise((resolve) => setTimeout(resolve, 0));
     const expiresAt = Math.max(...chrome.session("accessQueue").map((entry) => entry.expiresAt));
     await origins.sweepQueue(expiresAt);
     assert.deepEqual(await Promise.all([first, second]), [false, false]);
@@ -573,4 +573,112 @@ test("queue cap rejects without loss and migration imports legacy generation onc
     assert.equal(overflow.pending_count, 16);
     assert.equal(chrome.session("accessQueue").length, 16);
   } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("origin-fallback decision applies to a single live entry and rejects ambiguity", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    const now = Date.now();
+    chrome.setSession("accessQueueVersion", 1);
+    // ONE live entry for the origin: an empty-generation (health-fallback)
+    // decision has no id to aim at, but the user is looking at exactly this
+    // origin, so the click must land on it.
+    chrome.setSession("accessQueue", [
+      { entryId: "solo", origin: "https://solo.example", displayAuthority: "solo.example", requester: "cmd-solo", kind: "in_command", requestedAt: now, expiresAt: now + 60_000, sequence: 1, commandId: "cmd-solo" },
+    ]);
+    assert.equal(await origins.resolveOrigin("https://solo.example", "once", ""), true, "single match applies");
+    assert.equal(chrome.session("accessQueue").length, 0, "single entry was decided");
+
+    // TWO live entries share the origin: the fallback must not guess which
+    // paused navigation the user meant (B1 stays closed).
+    chrome.setSession("accessQueue", [
+      { entryId: "twin-a", origin: "https://twin.example", displayAuthority: "twin.example", requester: "cmd-a", kind: "in_command", requestedAt: now, expiresAt: now + 60_000, sequence: 1, commandId: "cmd-a" },
+      { entryId: "twin-b", origin: "https://twin.example", displayAuthority: "twin.example", requester: "cmd-b", kind: "in_command", requestedAt: now, expiresAt: now + 60_000, sequence: 2, commandId: "cmd-b" },
+    ]);
+    assert.equal(await origins.resolveOrigin("https://twin.example", "once", ""), false, "multi-match rejects");
+    assert.equal(chrome.session("accessQueue").length, 2, "both twin entries survive the rejection");
+
+    // No live entry for the origin: nothing to apply the decision to.
+    assert.equal(await origins.resolveOrigin("https://absent.example", "once", ""), false, "zero-match rejects");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("in-command enqueue dedupes a retried same-command navigation but keeps distinct commands", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadStore();
+  try {
+    const store = await bundle.import();
+    const first = await store.enqueueAccess(url("https://dup.example"), "cmd-1", "in_command", "cmd-1");
+    const retry = await store.enqueueAccess(url("https://dup.example"), "cmd-1", "in_command", "cmd-1");
+    assert.equal(retry.entryId, first.entryId, "same command dedupes onto one generation");
+    assert.equal(chrome.session("accessQueue").length, 1, "no twin stacks for one command");
+    const other = await store.enqueueAccess(url("https://dup.example"), "cmd-1", "in_command", "cmd-2");
+    assert.notEqual(other.entryId, first.entryId, "a different command keeps its own generation");
+    assert.equal(chrome.session("accessQueue").length, 2);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("a deduped same-command generation resolves every attached waiter", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    // Two paused documents under the SAME command share one generation after
+    // dedupe; both registered resolvers must be released by one decision, or
+    // one navigation would wait on a promise nothing can resolve.
+    const p1 = origins.askOrigin(url("https://wait.example"), "cmd-w");
+    const p2 = origins.askOrigin(url("https://wait.example"), "cmd-w");
+    for (let i = 0; i < 40 && (chrome.session("accessQueue")?.length ?? 0) !== 1; i++) await tick();
+    await tick();
+    assert.equal(chrome.session("accessQueue").length, 1, "twins dedupe onto one generation");
+    const entryId = chrome.session("accessQueue")[0].entryId;
+    assert.equal(await origins.resolveOrigin("https://wait.example", "once", entryId), true);
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assert.equal(r1, true, "first paused document resumes");
+    assert.equal(r2, true, "deduped twin also resumes");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("worker observer announces an origin block and clears it when the entry leaves the queue", async () => {
+  const chrome = installChromeStub();
+  const frames = [];
+  globalThis.navigator = { userAgent: "node-test" };
+  globalThis.WebSocket = class {
+    static OPEN = 1;
+    readyState = 1;
+    constructor() { queueMicrotask(() => this.onopen?.()); }
+    send(data) { frames.push(JSON.parse(String(data))); }
+    close() {}
+  };
+  const bundle = await loadModule("src/worker.ts");
+  const originalNow = Date.now;
+  let now = Date.now();
+  try {
+    chrome.setSession("accessQueueVersion", 1);
+    chrome.setSession("accessQueue", [
+      { entryId: "e1", origin: "https://x.example", displayAuthority: "x.example", requester: "cmd-1", kind: "in_command", requestedAt: now, expiresAt: now + 60_000, sequence: 1, commandId: "cmd-1" },
+    ]);
+    await bundle.import();
+    // Wait for the socket to open (hello frame) so observer sends are captured.
+    for (let i = 0; i < 40 && !frames.some((f) => f.event === "hello"); i++) await tick();
+    assert.ok(frames.some((f) => f.event === "hello"), "worker connected");
+    // Re-sweep with the entry still live: the announcement repeats, and no
+    // clearance is emitted for an entry that is still in the queue.
+    await chrome.fireAlarm("lop-access-expiry");
+    for (let i = 0; i < 40 && !frames.some((f) => f.event === "awaiting_origin"); i++) await tick();
+    assert.ok(frames.some((f) => f.event === "awaiting_origin" && f.id === "cmd-1"), "block announced");
+    assert.ok(!frames.some((f) => f.event === "awaiting_origin_cleared"), "no clearance while the entry is live");
+    // Expire the entry and sweep: the observer must announce the clearance so
+    // the daemon stops echoing a prompt the popup can no longer resolve.
+    now += 120_000;
+    Date.now = () => now;
+    await chrome.fireAlarm("lop-access-expiry");
+    for (let i = 0; i < 40 && !frames.some((f) => f.event === "awaiting_origin_cleared"); i++) await tick();
+    assert.ok(frames.some((f) => f.event === "awaiting_origin_cleared" && f.id === "cmd-1"), "clearance announced");
+  } finally {
+    Date.now = originalNow;
+    await bundle.close(); chrome.restore();
+  }
 });

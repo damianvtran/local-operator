@@ -415,6 +415,17 @@ class BridgeService:
                         self.link.awaiting_origin[request_id] = str(frame.get("origin", ""))
                         self.publish()
                     continue
+                if frame.get("event") == "awaiting_origin_cleared":
+                    # The extension's queue entry for this command is gone
+                    # (decided, cancelled, or expired) without a response the
+                    # daemon will see. Drop the record so /health stops echoing
+                    # a prompt the popup can no longer resolve — the stale echo
+                    # is what looped the approval popup on "Request changed."
+                    request_id = str(frame.get("id", ""))
+                    if request_id and request_id in self.link.awaiting_origin:
+                        self.link.awaiting_origin.pop(request_id, None)
+                        self.publish()
+                    continue
                 if frame.get("event") == "unpair":
                     # The options page "Unpair this browser" reaches the daemon
                     # here so revocation severs THIS live socket, mirroring the

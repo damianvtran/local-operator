@@ -9,6 +9,7 @@ import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
+  noticeForRejectedDecision,
   originPromptView,
   type DecidedOrigin,
   type OriginDecision,
@@ -403,6 +404,11 @@ async function decide(decision: OriginDecision): Promise<void> {
   // click approve an origin the user never looked at. The worker validates
   // the generation and rejects a stale one.
   const origin = shownPromptOrigin;
+  // Capture the generation at click time, like the origin: a concurrent
+  // render() (storage.onChanged) may rewrite the module variables while this
+  // async handler is in flight, and the notice selection must judge the
+  // prompt the user SAW, not whatever landed mid-flight.
+  const promptId = shownPromptId;
   if (origin) {
     // Acknowledge from the CLICK alone, before the worker round-trip: session
     // storage and /health keep echoing this prompt until `origin_decision`
@@ -416,23 +422,30 @@ async function decide(decision: OriginDecision): Promise<void> {
       event: "origin_decision",
       origin,
       decision,
-      entryId: shownPromptId,
+      entryId: promptId,
     })) as { applied?: boolean } | undefined;
     if (!response?.applied) {
-      // The worker refused the decision: the prompt was replaced (or expired)
-      // after this popup rendered it. Say so instead of pretending the click
-      // took effect, clear the latch, and re-render — which shows the CURRENT
-      // prompt, whose buttons are live again.
       decidedOrigin = null;
-      showOriginNotice(
-        "Request changed.",
-        "The site request was replaced while this window was open. Review the new request.",
+      // A rejection with an EMPTY prompt id came from a /health-fallback
+      // render (no generation to aim at) — the request was not replaced, and
+      // resolveOrigin's origin fallback already applied this click to the
+      // single matching live entry. Re-render the resulting state without the
+      // "Request changed." interstitial: looping it on every click was the
+      // reported bug. A rejection WITH an id is a real miss — replaced or
+      // expired — and gets the matching notice.
+      const { accessQueue } = await getSession();
+      const originStillPending = liveQueue(accessQueue, Date.now()).some(
+        (entry) => entry.origin === origin,
       );
+      const notice = noticeForRejectedDecision(promptId, originStillPending);
       setOriginBusy(false);
-      // Hold the notice long enough to read (same shape as the pairing
-      // success hold), then fall through to render(), which draws the
-      // CURRENT prompt with live buttons.
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      if (notice) {
+        showOriginNotice(notice.title, notice.sub);
+        // Hold the notice long enough to read (same shape as the pairing
+        // success hold), then fall through to render(), which draws the
+        // CURRENT prompt with live buttons.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
     }
   }
   // A successful decision removes this generation; FIFO becomes current. A

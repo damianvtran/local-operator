@@ -80,6 +80,13 @@ function send(frame: object): void {
 const PENDING_NOTIFICATION_ID = "lop-origin-pending";
 let notificationQueueKey = "unreconciled";
 
+// Command ids the worker has announced to the daemon as awaiting a human
+// origin decision. Module-level so it survives across observer invocations
+// but resets with the worker — a restarted worker re-announces its live
+// entries on the first snapshot, and the daemon's own record resets on
+// disconnect, so neither side carries stale ids across a restart.
+const announcedAwaitingIds = new Set<string>();
+
 /** Chrome's notification typings retain callback overloads across versions,
  * while MV3 implementations return promises. Normalize the runtime result so
  * the action-surface allSettled boundary always owns rejection handling. */
@@ -88,10 +95,25 @@ async function notificationResult(result: Promise<unknown> | unknown): Promise<v
 }
 
 setPendingObserver(async (snapshot) => {
+  // Command ids announced as awaiting a human decision. The daemon pops its
+  // record when the RPC's response arrives or the RPC times out, but a queue
+  // entry that is decided, cancelled, or expired on the extension side
+  // produces neither when the worker loses the command (suspension, restart),
+  // so /health kept echoing a prompt the popup could never resolve — the
+  // stale echo that looped the approval popup. Announce clearances for ids
+  // that leave the queue so the echo is bounded by the queue's lifetime.
+  const liveCommandIds = new Set<string>();
   for (const entry of snapshot.queue) {
     if (entry.kind === "in_command" && entry.commandId) {
+      liveCommandIds.add(entry.commandId);
       send({ event: "awaiting_origin", id: entry.commandId, origin: entry.origin });
+      announcedAwaitingIds.add(entry.commandId);
     }
+  }
+  for (const id of announcedAwaitingIds) {
+    if (liveCommandIds.has(id)) continue;
+    announcedAwaitingIds.delete(id);
+    send({ event: "awaiting_origin_cleared", id });
   }
   const count = snapshot.queue.length;
   // Badge/title reconciliation may legitimately repeat during a sweep, but an

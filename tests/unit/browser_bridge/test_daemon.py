@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,60 @@ def test_web_page_origin_is_rejected(tmp_path: Path) -> None:
             assert "4004" in str(exc) or getattr(exc, "code", None) == 4004
         else:  # pragma: no cover - rejection is mandatory
             raise AssertionError("web origin was accepted")
+
+
+def _until(condition, timeout: float = 5.0) -> None:
+    """The websocket receive loop runs on TestClient's portal thread, so a
+    main-thread assertion right after send_json races the frame's processing.
+    Poll the condition instead of reading state once."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(0.02)
+    assert condition(), "condition did not settle in time"
+
+
+def test_awaiting_origin_cleared_stops_the_health_echo(tmp_path: Path) -> None:
+    """The extension's queue entry can expire, be cancelled, or be decided
+    without a response the daemon will see. The extension then announces
+    ``awaiting_origin_cleared``; the daemon must drop its record and republish
+    so /health stops echoing a prompt the popup can no longer resolve — the
+    stale echo that looped the approval popup on "Request changed." """
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        service = app.state.bridge
+        with client.websocket_connect("/extension", headers={"origin": ORIGIN}) as socket:
+            socket.send_json(
+                {
+                    "event": "hello",
+                    "proto": PROTO_VERSION,
+                    "token": "",
+                    "extension_version": "0.1.0",
+                    "browser": "Chrome/151",
+                }
+            )
+            socket.receive_json()
+            socket.send_json(
+                {"event": "awaiting_origin", "id": "r-1", "origin": "https://docs.example"}
+            )
+            _until(lambda: service.link.awaiting_origin == {"r-1": "https://docs.example"})
+            assert client.get("/health").json()["pending_origin"] == "https://docs.example"
+            # The extension-side entry is gone; the daemon must forget it.
+            socket.send_json({"event": "awaiting_origin_cleared", "id": "r-1"})
+            _until(lambda: service.link.awaiting_origin == {})
+            assert client.get("/health").json()["pending_origin"] == ""
+            # A clearance for an id the daemon never recorded is a no-op.
+            socket.send_json({"event": "awaiting_origin_cleared", "id": "r-unknown"})
+            assert service.link.awaiting_origin == {}
+
+
+def test_awaiting_origin_cleared_round_trips_through_the_wire_model() -> None:
+    from local_operator.browser_bridge.protocol import AwaitingOriginCleared
+
+    frame = AwaitingOriginCleared(id="r-1")
+    assert AwaitingOriginCleared.model_validate_json(frame.model_dump_json()) == frame
+    assert frame.event == "awaiting_origin_cleared"
 
 
 def test_await_access_lock_topology() -> None:

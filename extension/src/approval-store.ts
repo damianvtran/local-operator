@@ -196,12 +196,33 @@ export function enqueueAccess(
   return withSessionMutation(async () => {
     const now = Date.now();
     const snapshot = await normalizedLocked(now);
-    // Only narrated async requests deduplicate. Two paused documents under one
-    // command carry the same requester/origin/kind/commandId but represent two
-    // independently blocked navigations. Sharing one generation would either
-    // overwrite a waiter or make one Allow once authorize both.
-    const existing = kind === "async" ? findPending(snapshot.queue, url.origin, requester, kind, now) : undefined;
+    // Async requests deduplicate on origin+requester: one narrated question is
+    // asked once. In-command requests deduplicate ONLY on
+    // origin+requester+commandId — a retried navigation re-asks the identical
+    // question and must not stack a twin the user has to answer twice
+    // (approving one used to leave the other looping the popup on
+    // "Request changed."). Two paused documents under DIFFERENT commands keep
+    // separate generations so each command resumes on its own consent; a
+    // same-command twin shares the one generation the user is looking at, and
+    // one Allow resumes every waiter attached to it — exactly the consent
+    // given, never a broader grant.
+    const existing =
+      kind === "async"
+        ? findPending(snapshot.queue, url.origin, requester, kind, now)
+        : snapshot.queue.find(
+            (entry) =>
+              entry.kind === "in_command" &&
+              entry.origin === url.origin &&
+              entry.requester === requester &&
+              !!commandId &&
+              entry.commandId === commandId,
+          );
     if (existing) {
+      // A deduplicated generation must carry the new caller's waiter too:
+      // onAdmitted otherwise fires only on first admission, and an in-command
+      // caller whose waiter never registers would await a promise nothing can
+      // resolve (the paused document frozen forever).
+      onAdmitted?.(existing);
       await armNextExpiry(snapshot);
       return {
         origin: url.origin,
