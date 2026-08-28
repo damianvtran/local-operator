@@ -92,8 +92,10 @@ bridge. The bridge accepts extension connections only from the paired
 extension ID.
 
 Site access is denied by default. The extension asks in browser UI before the
-agent navigates to a site you have not approved. You can review and remove
-saved sites in the extension settings and unpair the browser at any time.
+agent navigates to a site you have not approved. Saved access is exact-origin
+by default; literal loopback hosts may receive an explicit same-scheme all-port
+grant. You can review and remove each site-access grant independently in the
+extension settings and unpair the browser at any time.
 
 ## Analytics, advertising, and sale of data
 
