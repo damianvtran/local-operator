@@ -4162,6 +4162,12 @@ class Session:
                         # end. Continuation runs re-enter here and are silent.
                         self._logical_generation = event.generation
                         await self._emit(event)
+                    else:
+                        # A continuation's provider receipt is newer than the
+                        # estimate produced between runs. Demote that estimate
+                        # as soon as the later request begins so the eventual
+                        # held end can expose its own authoritative occupancy.
+                        self._held_context_tokens = None
                     continue
                 if isinstance(event, AgentEndEvent):
                     new_messages = list(event.messages)
