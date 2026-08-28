@@ -161,6 +161,37 @@ body {
   text-transform: uppercase;
   color: var(--ink-dim);
 }
+.queue-head,
+.queue-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.queue-head {
+  margin-top: 14px;
+}
+.queue-count,
+.queue-waiting {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--ink-dim);
+}
+.queue-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.queue-nav {
+  margin-top: 8px;
+}
+.queue-nav .btn {
+  flex: 1;
+}
+.btn.compact {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
 .trough {
   display: block;
   margin: 6px 0 0;
