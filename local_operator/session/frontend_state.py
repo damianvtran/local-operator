@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
@@ -223,6 +224,8 @@ class _FrozenDict(dict[str, Any]):
 
 
 def _freeze_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
     if isinstance(value, (_FrozenList, _FrozenDict)):
         return value
     if isinstance(value, FrontendUsage):
@@ -253,7 +256,20 @@ def _freeze_value(value: Any) -> Any:
         return tuple(_freeze_value(item) for item in value)
     if isinstance(value, frozenset):
         return frozenset(_freeze_value(item) for item in value)
-    return value
+    # Closed boundary: Pydantic is the wire serializer, so anything beyond the
+    # known fast paths is admitted only if that serializer can reduce it to JSON
+    # values. Dataclasses/namedtuples become mappings/lists; datetime/path/enums
+    # become scalars. Arbitrary __dict__/slots objects are rejected rather than
+    # shared into canonical state with an unknowable mutation surface.
+    try:
+        serialized = to_jsonable_python(value)
+    except PydanticSerializationError as exc:
+        raise TypeError(
+            f"unsupported canonical frontend value: {type(value).__qualname__}"
+        ) from exc
+    if serialized is value:
+        raise TypeError(f"unsupported canonical frontend value: {type(value).__qualname__}")
+    return _freeze_value(serialized)
 
 
 def _is_frozen_value(value: Any) -> bool:

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import deque, namedtuple
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -318,6 +319,58 @@ def test_shared_job_usage_descendants_and_future_extras_are_immutable() -> None:
     restored_tags = getattr(restored, "future_tags")
     assert restored_tags == ["alpha", "beta"] or restored_tags == ["beta", "alpha"]
     assert store.state.sequence == 0
+
+
+def test_structured_future_extras_normalize_to_closed_immutable_values() -> None:
+    @dataclass
+    class DataclassPayload:
+        nested: list[int]
+
+    NamedPayload = namedtuple("NamedPayload", "nested")
+
+    class PydanticPayload(FrontendUsage):
+        nested: list[int]
+
+    cases = [
+        (DataclassPayload([1]), lambda payload: payload["nested"]),
+        (NamedPayload([1]), lambda payload: payload[0]),
+        (PydanticPayload(nested=[1]), lambda payload: payload.nested),
+    ]
+    for value, nested in cases:
+        store = FrontendStateStore(
+            _state(
+                jobs=[
+                    JobState.model_validate(
+                        {"id": "child", "type": "task", "future_payload": value}
+                    )
+                ]
+            )
+        )
+        payload = getattr(store.state.jobs[0], "future_payload")
+        assert nested(payload) == [1]
+        with pytest.raises(TypeError, match="immutable"):
+            nested(payload).append(2)
+        assert store.state.sequence == 0
+        assert nested(getattr(store.state.jobs[0], "future_payload")) == [1]
+
+
+def test_arbitrary_future_objects_are_rejected_before_canonical_storage() -> None:
+    class DictObject:
+        def __init__(self) -> None:
+            self.nested = [1]
+
+    class SlotsObject:
+        __slots__ = ("nested",)
+
+        def __init__(self) -> None:
+            self.nested = [1]
+
+    for value in (DictObject(), SlotsObject(), object()):
+        state = _state(
+            jobs=[JobState.model_validate({"id": "child", "type": "task", "future_payload": value})]
+        )
+        with pytest.raises(TypeError, match="unsupported canonical frontend value"):
+            FrontendStateStore(state)
 
 
 def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:
