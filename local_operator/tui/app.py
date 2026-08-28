@@ -17020,14 +17020,21 @@ def compaction_receipt(message: CompactionEnded) -> str:
     when they fail to show a reduction, because a receipt claiming a saving
     that did not happen is worse than the bare line.
     """
+    # An advisor-triggered pass fires BELOW the configured threshold, so the
+    # numbers alone read as the trigger misfiring. The event's own clause is
+    # appended (already length-capped at validation) rather than composed
+    # here, so the explanation stays owned by whatever produced it.
+    note = getattr(message, "detail", None) or ""
     before, after = message.tokens_before, message.tokens_after
     if before <= 0 or after <= 0 or after >= before:
-        return "context compacted"
+        return f"context compacted · {note}" if note else "context compacted"
     saved = f"{(1 - after / before) * 100:.0f}% smaller"
     detail = f"{format_context_tokens(before)} → {format_context_tokens(after)} tokens ({saved})"
     label = _STRATEGY_LABELS.get(message.strategy, message.strategy)
     if label:
         detail += f", via {label}"
+    if note:
+        detail += f" · {note}"
     return f"context compacted · {detail}"
 
 

@@ -274,6 +274,13 @@ class _CompactionPlan:
     context_tokens: int
     #: Local estimate over the pre-pass history — the receipt's "before".
     tokens_before: int
+    #: The advisory that lowered this pass's trigger, or ``None`` for an
+    #: ordinary size-triggered pass. Carried for the RECEIPT (the user is owed
+    #: an explanation when a pass fires below the configured threshold) and
+    #: for the anti-thrash bookkeeping in ``_maybe_compact``. It is not an
+    #: input to the commit: ``_run_compaction`` never reads it, so a hint can
+    #: never reach the summarizer or permanent history.
+    advisor_hint: Any | None = None
 
 
 def _configured_max_running() -> dict[str, int]:
@@ -911,6 +918,58 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
     }
 
 
+def _should_compact(
+    compaction_api: Any,
+    context_tokens: int,
+    window_tokens: int,
+    settings: Any,
+    advisory_ok: bool,
+) -> bool:
+    """``should_compact``, calling the pre-advisor signature when it can.
+
+    The kwarg is passed ONLY when an accepted advisory is actually in play,
+    which is both a correctness property and a compatibility one:
+
+    - Correctness: with the beta off, ``advisory_ok`` is always ``False`` and
+      the call is byte-identical to the one this code made before the advisor
+      existed. There is no "new argument that happens to be inert" for a
+      reader to reason about.
+    - Compatibility: hosts and tests substitute their own ``should_compact``
+      (the suite has several three-parameter doubles), and an unconditional
+      kwarg turns every one of them into a ``TypeError`` at the gate. A double
+      that predates the advisor cannot be asked about advice anyway.
+
+    The ``TypeError`` fallback covers a double that IS given advice but does
+    not know the parameter: degrading to the ordinary trigger is the safe
+    direction, since the advisor may only ever make a pass fire earlier.
+    """
+    if not advisory_ok:
+        return bool(compaction_api.should_compact(context_tokens, window_tokens, settings))
+    try:
+        return bool(
+            compaction_api.should_compact(context_tokens, window_tokens, settings, advisory_ok=True)
+        )
+    except TypeError:
+        return bool(compaction_api.should_compact(context_tokens, window_tokens, settings))
+
+
+def _advisor_detail(hint: Any | None) -> str | None:
+    """Receipt sentence for an advisor-triggered pass, or ``None``.
+
+    An advisory pass fires below the threshold the user configured, so the
+    plain "context compacted" receipt would read as the trigger misbehaving.
+    Naming the advisor and its own stated reason is what makes an early pass
+    legible; ``reason`` is already length-capped at validation
+    (``ADVISOR_MAX_REASON_CHARS``), so nothing unbounded reaches the notice.
+    """
+    if hint is None:
+        return None
+    reason = getattr(hint, "reason", "")
+    if reason:
+        return f"advisor: {reason}"
+    return "advisor: task boundary"
+
+
 #: The ONLY ``AsyncJob`` fields the roster snapshot carries. An allowlist, not
 #: an exclude set, because the roster projection must stay small: it is written
 #: to the replaced sidecar on every roster move, and a superseded copy in a
@@ -1478,6 +1537,28 @@ class Session:
         # usage objects that lifetime cost and analytics still need.
         self._held_context_tokens: int | None = None
         self._abort_requested = False  # sticky across the continuation gap
+        # --- Speculative compaction advisor (BETA; inert unless the config
+        # opts in via values.compaction.advisor_enabled). All of it is session
+        # state rather than plan state because the advisor runs OFF the turn:
+        # the call is spawned at a tool-loop boundary and nothing awaits it, so
+        # the result has to be parked somewhere the next plan gate can read it.
+        #
+        # ``_advisor_hint`` holds at most one validated hint. It is
+        # single-slot on purpose: a queue of hints is a queue of stale
+        # opinions about a conversation that has since moved, and the plan gate
+        # only ever wants the newest.
+        self._advisor_hint: Any | None = None
+        self._advisor_in_flight = False  # at most ONE call outstanding; skip, never queue
+        self._advisor_calls = 0  # against settings.advisor_max_calls
+        self._advisor_last_turn = -(10**9)  # turn index of the last call, for every_n_turns
+        self._advisor_cooldown_until = -1  # turn index the cooldown expires at
+        # Kill switch. An advisor-triggered pass that fails to clear the
+        # recovery band proved the advice was not merely early but wrong about
+        # there being headroom to reclaim, and repeating it is a compaction
+        # treadmill on the user's bill. Non-negotiable: once set, the advisor
+        # is done for the life of the session.
+        self._advisor_disabled = False
+        self._advisor_triggered_pending = False  # last pass fired on advice
         # Last completed provider request (epoch ms). Distinct from
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
         # age, and stamping turn bookkeeping right before the check made the
@@ -5149,12 +5230,20 @@ class Session:
         # crash mid-run leaves a transcript that replays to what actually
         # happened rather than losing the run outright.
         await self._persist_new_messages(messages)
+        # Off-loop advisory (BETA, inert by default). Spawned HERE, after the
+        # cheap pre-gate has already proved the context is worth thinking
+        # about and before the plan gate reads any hint: this is the one place
+        # in a session that is both at a safe boundary and holding a fresh
+        # provider context figure. Nothing awaits it — see
+        # :meth:`_maybe_spawn_advisor`.
+        self._maybe_spawn_advisor()
         planned = await self._plan_compaction(respect_threshold=True)
         if isinstance(planned, CompactionOutcome):
             return None
         outcome = await self._run_compaction(planned, reason="mid-turn")
         if not outcome.ran:
             return None
+        self._settle_advisor(planned, outcome)
         return list(self._context.messages)
 
     async def _maybe_compact(self) -> None:
@@ -5189,6 +5278,7 @@ class Session:
         outcome = await self._run_compaction(planned, reason="context-window")
         if not outcome.ran:
             return
+        self._settle_advisor(planned, outcome)
         # The provider usage in `_held_end.messages` remains authoritative for
         # BILLING, but its occupancy predates this pass. If it is allowed to win
         # the later agent-end reduction, every frontend briefly paints `after`
@@ -5373,6 +5463,15 @@ class Session:
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
 
+        # (2a) The advisory, consumed at THIS single point and nowhere else.
+        # It becomes exactly two things: the ``advisory_ok`` flag handed to
+        # ``should_compact`` and the effective keep-recent handed to
+        # ``find_cut_point``. ``_run_compaction`` is untouched and manual
+        # ``/compact`` never gets here with a hint, so there is no path by
+        # which a hallucinated hint reaches the summarizer or the transcript.
+        advisor_hint = self._take_advisor_hint(settings) if respect_threshold else None
+        advisory_ok = advisor_hint is not None and advisor_hint.compact_now
+
         if respect_threshold:
             # Cheap proof first. ``should_compact`` is strictly monotonic in
             # context_tokens and ``compaction_context_tokens`` is monotonic in
@@ -5387,10 +5486,12 @@ class Session:
             # "no". A MANUAL pass is going to load it anyway, so it skips
             # straight to the exact figure it has to report.
             bound = compaction_api.messages_tokens_upper_bound(llm_history)
-            if not compaction_api.should_compact(
+            if not _should_compact(
+                compaction_api,
                 compaction_api.compaction_context_tokens(provider_reported, bound),
                 self.effective_model.context_window,
                 settings,
+                advisory_ok,
             ):
                 return CompactionOutcome(ran=False, reason="below_threshold")
 
@@ -5407,14 +5508,47 @@ class Session:
             compaction_api, "estimate_messages_tokens", llm_history
         )
         context_tokens = compaction_api.compaction_context_tokens(provider_reported, local_estimate)
-        if respect_threshold and not compaction_api.should_compact(
-            context_tokens, self.effective_model.context_window, settings
+        if respect_threshold and not _should_compact(
+            compaction_api,
+            context_tokens,
+            self.effective_model.context_window,
+            settings,
+            advisory_ok,
         ):
             return CompactionOutcome(ran=False, reason="below_threshold")
 
-        cut = await self._offloaded(
-            compaction_api, "find_cut_point", llm_history, settings.keep_recent_tokens
-        )
+        # (2b) Task-aware preserve window. The cut is recency-shaped
+        # (``keep_recent_tokens``) while the session is task-shaped, and on the
+        # measured session that mismatch cut inside a live task on five of
+        # seven passes. ``task_boundary_floor`` is a FLOOR, never a
+        # replacement, so this can only keep MORE history than the recency
+        # rule asked for — which is what makes an earlier trigger safe. An
+        # accepted advisory may widen it further, never narrow it (the
+        # validator rejects a narrowing hint outright).
+        #
+        # This changes the CUT, not the TRIGGER: it runs for every pass,
+        # advisory or not, and introduces no second gate.
+        keep_recent = settings.keep_recent_tokens
+        boundary_floor: Any = getattr(compaction_api, "task_boundary_floor", None)
+        if callable(boundary_floor):
+            # Resolved by name off the module for the tolerance ``_offloaded``
+            # grants its rulers: a partial test double that predates this
+            # degrades to plain recency rather than crashing the pass.
+            genuine_user_ids = {
+                message.id
+                for message in self._context.messages
+                if isinstance(message, Message) and message.role == "user"
+            }
+            floor_value: Any = boundary_floor(
+                llm_history,
+                genuine_user_ids,
+                cap=self._advisor_floor_cap(settings),
+            )
+            keep_recent = max(keep_recent, int(floor_value))
+        if advisor_hint is not None:
+            keep_recent = max(keep_recent, int(advisor_hint.preserve_tokens))
+
+        cut = await self._offloaded(compaction_api, "find_cut_point", llm_history, keep_recent)
         if cut is None or cut <= 0:
             # ``find_cut_point`` is the ONE definition of "worth summarizing":
             # the kept window has to reach ``keep_recent_tokens`` and at least
@@ -5423,7 +5557,6 @@ class Session:
             # history, and a context whose older history a previous pass has
             # already summarized — so the refusal names which one it is rather
             # than guessing.
-            keep_recent = settings.keep_recent_tokens
             if local_estimate <= keep_recent:
                 detail = (
                     f"nothing to compact: the whole conversation is ~{local_estimate:,} tokens "
@@ -5471,7 +5604,81 @@ class Session:
             cut=cut,
             context_tokens=context_tokens,
             tokens_before=local_estimate,
+            advisor_hint=advisor_hint if advisory_ok else None,
         )
+
+    def _settle_advisor(self, plan: _CompactionPlan, outcome: CompactionOutcome) -> None:
+        """Anti-thrash bookkeeping after an ADVISOR-triggered pass.
+
+        Two guards, both about the same failure: an advisor that keeps saying
+        "now" to a context it cannot actually relieve.
+
+        1. **Cooldown.** After any advisory pass the advisor is suppressed for
+           ``advisor_cooldown_turns``. The pass just moved the very boundary
+           the advisor would be asked to judge, so an immediate re-ask is a
+           question about a conversation that no longer exists.
+
+        2. **Kill switch, non-negotiable.** An advisory pass that fails to
+           clear ``RECOVERY_BAND * advisor_floor`` did not merely fire early,
+           it fired where there was nothing to reclaim — the same signature as
+           the live dead-loop bug ``RECOVERY_BAND`` was added for, except the
+           advisor would keep re-authorising it below the configured
+           threshold. So the advisor is DISABLED for the rest of the session
+           and the fact is logged once, loudly enough to be found. Nothing
+           re-enables it short of a new session: a feature that can spend money
+           in a loop must fail closed.
+
+        An ordinary size-triggered pass (``advisor_hint is None``) is not the
+        advisor's business and returns immediately.
+        """
+        hint = plan.advisor_hint
+        if hint is None:
+            return
+        settings = plan.settings
+        cooldown = int(getattr(settings, "advisor_cooldown_turns", 0) or 0)
+        if cooldown > 0:
+            self._advisor_cooldown_until = self._generation + cooldown
+        try:
+            compaction_api = plan.compaction_api
+            floor = compaction_api.resolve_advisor_floor_tokens(
+                self.effective_model.context_window, settings
+            )
+            band = compaction_api.RECOVERY_BAND * floor
+        except Exception:  # noqa: BLE001 — a partial double must not break the pass
+            return
+        if outcome.tokens_after > band:
+            self._advisor_disabled = True
+            logger.warning(
+                "compaction advisor disabled for this session: an advisor-triggered pass "
+                "left %s tokens, above the %.0f-token recovery band for the %s-token "
+                "advisor floor — the advice was not reclaiming headroom",
+                f"{outcome.tokens_after:,}",
+                band,
+                f"{floor:,}",
+            )
+
+    def _take_advisor_hint(self, settings: Any) -> Any | None:
+        """The pending advisory, consumed (single-use) and freshness-checked.
+
+        Single-use because a hint is an opinion about one moment: leaving it
+        in place would let one call's judgement lower the trigger on every
+        subsequent gate until the next call replaced it, which is a stuck
+        threshold wearing an advisory's clothes.
+
+        Stale hints are dropped rather than applied. ``advisor_every_n_turns``
+        bounds how far behind a hint may be: a hint produced more than one
+        advisory interval ago describes a conversation that has since moved,
+        and a late hint is nearly no hint.
+        """
+        hint = self._advisor_hint
+        self._advisor_hint = None
+        if hint is None or self._advisor_disabled:
+            return None
+        every = int(getattr(settings, "advisor_every_n_turns", 0) or 0)
+        if every > 0 and self._generation - int(getattr(hint, "turn_index", 0)) > every:
+            logger.debug("compaction advisor: discarded stale hint")
+            return None
+        return hint
 
     async def _run_compaction(self, plan: _CompactionPlan, *, reason: str) -> CompactionOutcome:
         """Commit one compaction pass — THE pass, for both triggers.
@@ -5621,6 +5828,11 @@ class Session:
                     strategy=plan.strategy,
                     tokens_before=plan.context_tokens,
                     tokens_after=tokens_after,
+                    # A pass that fired BELOW the configured threshold owes the
+                    # user an explanation, or the receipt looks like the
+                    # trigger misfired. The hint is read here only to render
+                    # that sentence; nothing about the pass depends on it.
+                    detail=_advisor_detail(plan.advisor_hint),
                 )
             )
             return CompactionOutcome(
@@ -5931,6 +6143,237 @@ class Session:
             elif isinstance(event, StreamUsageEvent) and on_usage is not None:
                 on_usage(event.usage)
         return "".join(parts)
+
+    async def advise_compaction(self, turns: Sequence[AgentMessage]) -> str:
+        """One off-loop request asking the model WHEN to compact (BETA).
+
+        Modelled directly on :meth:`complete_aside` — live system blocks, the
+        wire-legal snapshot of the live history, the live tool schema with
+        ``tool_choice="none"`` — and for the same reason: it is a question
+        about the CONVERSATION that must not join it. Read that method's
+        docstring for why the tools are sent rather than dropped; the whole
+        economic case below rests on it.
+
+        Two deliberate deltas from an aside:
+
+        ``replayable=True`` (an aside is not). Nothing here reaches a screen
+        until the whole string is assembled, so a stalled read can be
+        discarded and retried rather than losing the call — the same reasoning
+        as :meth:`_one_shot_complete`. Nobody is waiting, so a retry costs
+        latency nobody is measuring.
+
+        ``isolated=False``, and this one is load-bearing enough to be the
+        reason the feature is worth shipping at all. ``isolated=True`` strips
+        the session's ``prompt_cache_key`` on the OpenAI wire (see
+        ``ChatRequest.isolated``), which puts this request on its own cache
+        namespace with a 100% uncached prefix. Measured on the session that
+        motivated this feature, 92.9% of prompt-side tokens were cache READS;
+        an advisor call that hits the turn's warm prefix costs about 2.6% of
+        the bill, and the same call on a cold namespace costs about 25.6% and
+        turns the whole feature into a net loss. So the advisor deliberately
+        forgoes isolation's protections (single attempt, no route/credential
+        state) to stay on the session's cache key.
+
+        For exactly the same reason there is NO ``advisor_model`` /
+        ``advisor_effort`` config key, and adding one would be a regression
+        rather than a feature. A cheap model looks like the obvious economy
+        and is strictly worse: it has its own cache namespace, so its prefix
+        is 100% uncached, and a full uncached read of a 500k context on a
+        cheap model costs more than a cached read of the same context on the
+        expensive one. The knob would invite users to silently destroy the
+        economics that justify the call.
+
+        MEASURED, not assumed (``scripts/measure_advisor_cache.py``, live
+        Anthropic): this request shape reads 96.1% of its prompt from cache
+        (``cache_read=14024``, ``cache_write=568`` for the appended turn).
+        Two findings that shape the code:
+
+        - The system blocks are passed through UNCHANGED. The advisor's
+          instructions ride inside the appended user turn instead, because
+          system sits in the cache prefix ahead of the messages: adding one
+          block there measured 0% cache hit and a full ``cache_write=14590``.
+          The request must stay APPEND-ONLY relative to the turn's prefix.
+        - On Anthropic, ``isolated=True`` measured 100% cache hit as well,
+          because that provider keys caching on prefix CONTENT rather than on
+          ``prompt_cache_key``. Isolation is still declined, since the key
+          does govern the OpenAI-compatible wire and this method has to be
+          correct on every provider a session may be running.
+        """
+        blocks = self._system_blocks()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        request = ChatRequest(
+            model=self._model,
+            system_blocks=list(blocks),
+            messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
+            # Live tools, same as an aside: the tools block is the FRONT of the
+            # provider cache prefix, so sending [] would change position 0 and
+            # force a full re-process at write price instead of a cache read.
+            tools=list(self._context.tools),
+            tool_choice="none",
+            replayable=True,
+            isolated=False,
+        )
+        parts: list[str] = []
+        async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+            elif isinstance(event, StreamUsageEvent):
+                # The cache-hit rate IS the feature's cost model, so it is
+                # logged rather than assumed. A run of advisor calls showing
+                # low cache_read_tokens means the prefix is not being reused
+                # and the advisor should be switched off.
+                usage = event.usage
+                logger.debug(
+                    "compaction advisor usage: context=%s cache_read=%s cache_write=%s",
+                    getattr(usage, "context_tokens", None),
+                    getattr(usage, "cache_read_tokens", None),
+                    getattr(usage, "cache_write_tokens", None),
+                )
+        return "".join(parts)
+
+    def _advisor_settings(self) -> Any | None:
+        """Compaction settings when the advisor may run this turn, else ``None``.
+
+        Every gate that does not need the history lives here, so the spawn
+        site stays a single readable condition and the expensive checks
+        (rendering, token estimates) never run for a session that has the beta
+        switched off — which is every session by default.
+        """
+        if self._disposed or self._advisor_disabled or self._advisor_in_flight:
+            return None
+        settings = self._compaction_settings
+        if settings is None or not getattr(settings, "advisor_enabled", False):
+            return None
+        if not settings.enabled or getattr(settings, "strategy", "") == "off":
+            return None
+        if self._advisor_calls >= int(getattr(settings, "advisor_max_calls", 0) or 0):
+            return None
+        if self._generation < self._advisor_cooldown_until:
+            return None
+        every = int(getattr(settings, "advisor_every_n_turns", 0) or 0)
+        if every > 0 and self._generation - self._advisor_last_turn < every:
+            return None
+        return settings
+
+    def _maybe_spawn_advisor(self) -> None:
+        """Fire an advisor call at a tool-loop boundary, awaiting nothing.
+
+        Called from the mid-turn hook, which is the one place in a session
+        that is guaranteed to be at a SAFE boundary (a tool batch has landed;
+        ``_wire_legal_snapshot`` handles the dangling-call case anyway) and is
+        also where the context is growing fastest.
+
+        Nothing awaits the result. A hint that lands after the plan gate has
+        already run is simply the next gate's input, and a hint that lands
+        after the conversation has moved on is discarded as stale — the same
+        posture ``session.naming`` takes for a late title, and the reason this
+        can never add latency to a turn.
+        """
+        settings = self._advisor_settings()
+        if settings is None:
+            return
+        provider_reported = (
+            self._last_usage.context_tokens if self._last_usage is not None else None
+        )
+        trigger = int(getattr(settings, "advisor_trigger_tokens", 0) or 0)
+        # Below the advisor's own trigger there is no decision to inform, and
+        # the call would be pure cost. The provider figure is used rather than
+        # a local estimate because this runs on the loop and a full tokenize
+        # here would be exactly the stall the plan gate's upper-bound pre-gate
+        # exists to avoid.
+        if provider_reported is None or provider_reported < trigger:
+            return
+        self._advisor_in_flight = True
+        self._advisor_calls += 1
+        self._advisor_last_turn = self._generation
+        self._spawn_background(self._run_advisor(settings, self._generation))
+
+    async def _run_advisor(self, settings: Any, turn_index: int) -> None:
+        """The advisor call, bounded and total: every failure is a no-op.
+
+        ``_spawn_background`` already logs rather than raises, so this only has
+        to guarantee the in-flight latch is released and that no provider
+        failure, timeout, or malformed answer becomes anything more than a
+        missing hint. The turn running alongside must never learn this
+        happened.
+        """
+        try:
+            from local_operator.compaction import api as compaction_api
+
+            timeout = float(getattr(settings, "advisor_timeout_s", 30.0) or 30.0)
+            history = list(self._context.messages)
+            provider_reported = (
+                self._last_usage.context_tokens if self._last_usage is not None else 0
+            )
+            threshold = compaction_api.resolve_threshold_tokens(
+                self.effective_model.context_window, settings
+            )
+            prompt = compaction_api.build_advisor_prompt(
+                history,
+                context_tokens=provider_reported or 0,
+                threshold_tokens=threshold,
+            )
+            turns = [Message.user(prompt)]
+            # One budget for the whole call, the way _ask_for_title bounds
+            # naming: there is no retry above this and the request's own
+            # replay is inside it.
+            raw = await asyncio.wait_for(
+                self.advise_compaction(turns),
+                timeout,
+            )
+            genuine_user_ids = {
+                message.id
+                for message in self._context.messages
+                if isinstance(message, Message) and message.role == "user"
+            }
+            hint = compaction_api.validate_hint(
+                compaction_api.parse_hint(raw),
+                history,
+                genuine_user_ids=genuine_user_ids,
+                min_confidence=float(getattr(settings, "advisor_min_confidence", 0.6) or 0.0),
+                keep_recent_tokens=int(settings.keep_recent_tokens),
+                floor_cap=self._advisor_floor_cap(settings),
+                turn_index=turn_index,
+            )
+            if hint is not None:
+                self._advisor_hint = hint
+                logger.debug(
+                    "compaction advisor hint: preserve=%s tokens=%d now=%s conf=%.2f",
+                    hint.preserve_from_id,
+                    hint.preserve_tokens,
+                    hint.compact_now,
+                    hint.confidence,
+                )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # Cancelled is caught for the reason naming catches it: this task
+            # is detached and routinely cancelled at dispose, and a teardown
+            # traceback for a feature nobody waited on is noise.
+            pass
+        except Exception:  # noqa: BLE001 — an advisory must never break a turn
+            logger.debug("compaction advisor call failed", exc_info=True)
+        finally:
+            self._advisor_in_flight = False
+
+    def _advisor_floor_cap(self, settings: Any) -> int:
+        """Cap for ``task_boundary_floor`` — the preserve window may not eat
+        the whole context.
+
+        Half the resolved trigger: above that a "preserved" window leaves the
+        pass nothing to summarize, so ``find_cut_point`` answers ``None`` and
+        the protection turns into "never compact" — the failure the trigger
+        exists to prevent.
+        """
+        threshold = 0
+        try:
+            from local_operator.compaction import api as compaction_api
+
+            threshold = compaction_api.resolve_threshold_tokens(
+                self.effective_model.context_window, settings
+            )
+        except Exception:  # noqa: BLE001 — degrade to the recency rule
+            return int(settings.keep_recent_tokens)
+        return max(int(settings.keep_recent_tokens), threshold // 2)
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
         """A copy of the live message list that a provider will actually accept.
