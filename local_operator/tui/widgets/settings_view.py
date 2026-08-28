@@ -421,6 +421,10 @@ class SettingsView(Vertical):
         if row.kind == "chain" and row.chain is not None:
             self._chain = None if self._chain == row.chain else row.chain
             self._repaint()
+            # Reveal the hops, for the reason the enum expansion does: a chain
+            # whose `▾` says open with nothing visible under it reads as the
+            # press having failed.
+            self._scroll_to_expansion()
             return
         if row.kind in ("hop", "hop_add", "chain_add"):
             self._begin_edit(row)
@@ -438,12 +442,47 @@ class SettingsView(Vertical):
         if setting.kind is Kind.ENUM:
             self._expanded = None if self._expanded == setting.key else setting.key
             self._repaint()
+            # Reveal the CHOICES, not just the row that owns them. Scrolling
+            # the selected row into view is not enough: expanding a row sitting
+            # on the viewport's bottom edge put every choice below the fold, so
+            # the frame showed a `▾` marker and nothing under it and the
+            # expansion read as having failed to open.
+            self._scroll_to_expansion()
             return
         if setting.kind is Kind.READONLY:
             self._error = "this setting is retired and cannot be changed"
             self._repaint()
             return
         self._begin_edit(row)
+
+    def _scroll_to_expansion(self) -> None:
+        """Bring the highlighted row AND the group it just opened into view.
+
+        Scrolls only as far as it must: if the whole group already fits, the
+        offset is left alone, because a list that jumped on every expansion
+        would lose the reader's place for no gain.
+        """
+        try:
+            height = self._body.size.height
+        except Exception:
+            return
+        if height <= 0:
+            return
+        last = self._selected
+        for index in range(self._selected + 1, len(self._rows)):
+            # Choices belong to an enum row; hops (and the trailing "+ add a
+            # hop") belong to a chain row. Both are the group the press just
+            # opened, and both were off-screen for a row near the bottom edge.
+            if self._rows[index].kind not in ("choice", "hop", "hop_add"):
+                break
+            last = index
+        offset = self._body.scroll_offset.y
+        if last >= offset + height:
+            # Prefer keeping the OWNING row on screen when the group is taller
+            # than the viewport: the choices are meaningless without the label
+            # that says what is being chosen.
+            target = min(self._selected, last - height + 1)
+            self._body.scroll_to(y=max(target, 0), animate=False)
 
     def action_reset(self) -> None:
         """``r`` — put the highlighted row back to its shipped default.
@@ -977,13 +1016,13 @@ class SettingsView(Vertical):
         editor = Text(no_wrap=True)
         accent = Style(color=theme_mod.semantic_color("accent"))
         faint = Style(color=theme_mod.semantic_color("faint"))
-        error = Style(color=theme_mod.semantic_color("danger"))
         editor.append(self._buffer, style=Style(color=theme_mod.semantic_color("fg")))
         editor.append("▏", style=accent)
-        if self._error:
-            editor.append(f"  {self._error}", style=error)
-        else:
-            editor.append("  enter saves · esc cancels · clear to unset", style=faint)
+        # The CONTRACT rides the row; the ERROR does not. The detail line below
+        # already carries the rejection in full width, and printing it twice
+        # read as two separate problems — the row's copy also had to compete
+        # with the value column for space it does not have.
+        editor.append("  enter saves · esc cancels · clear to unset", style=faint)
         return editor
 
     def _paint_detail(self) -> None:

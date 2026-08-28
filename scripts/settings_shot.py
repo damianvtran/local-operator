@@ -183,6 +183,9 @@ def _select(view: SettingsView, key: str) -> None:
         if row.setting is not None and row.setting.key == key and row.kind == "setting":
             view._selected = index
             view._repaint()
+            # Scroll it into view, or the capture frames a cursor that is not
+            # on screen and the expansion under it is invisible.
+            view._scroll_to_selection()
             return
     raise SystemExit(f"no row for {key}")
 
@@ -192,6 +195,7 @@ def _select_chain(view: SettingsView, chain: str) -> None:
         if row.kind == "chain" and row.chain == chain:
             view._selected = index
             view._repaint()
+            view._scroll_to_selection()
             return
     raise SystemExit(f"no chain row for {chain}")
 
