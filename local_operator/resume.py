@@ -1066,7 +1066,11 @@ def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]
     Because a marker that EXISTS must still be read and parsed (see
     :data:`ORIGIN_CACHE_NAME`), that is one file read per subagent directory:
     1127 ms over 31,700 dirs, of which the reads are 639 ms. The verdict cache
-    is what removes it, taking the same scan to ~250 ms warm.
+    is what removes it, taking the same scan to ~310 ms warm
+    (``bench/resume-picker-after.json``; independently re-measured at 307 ms in
+    agent review round 1). Quote the committed bench figure here rather than a
+    remembered one — an optimistic number in a docstring is how the next
+    person's regression looks like an improvement.
 
     ``limit`` truncates the RESULT, never the work: every directory is visited
     regardless, so a caller asking for all sessions costs the same as one
