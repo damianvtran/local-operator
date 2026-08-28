@@ -1455,6 +1455,10 @@ class Session:
         # whether the run continues, `_logical_generation` remembers which
         # agent_start the eventual end belongs to. Both are None outside a run.
         self._held_end: AgentEndEvent | None = None
+        # The loop's held end owns billing, but a later post-turn compaction owns
+        # occupancy. Carry that newer level to the boundary without rewriting the
+        # usage objects that lifetime cost and analytics still need.
+        self._held_context_tokens: int | None = None
         self._abort_requested = False  # sticky across the continuation gap
         # Last completed provider request (epoch ms). Distinct from
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
@@ -4038,15 +4042,18 @@ class Session:
         """Emit the boundary event the pipeline was holding, if any."""
         held = self._held_end
         self._held_end = None
+        context_tokens = self._held_context_tokens
+        self._held_context_tokens = None
         if held is None:
             return
         generation = self._logical_generation or held.generation
         self._logical_generation = None
-        await self._emit(
-            held
-            if held.generation == generation
-            else held.model_copy(update={"generation": generation})
-        )
+        changes: dict[str, Any] = {}
+        if held.generation != generation:
+            changes["generation"] = generation
+        if context_tokens is not None:
+            changes["context_tokens"] = context_tokens
+        await self._emit(held if not changes else held.model_copy(update=changes))
 
     async def _run_turn(
         self,
@@ -5043,6 +5050,11 @@ class Session:
         outcome = await self._run_compaction(planned, reason="context-window")
         if not outcome.ran:
             return
+        # The provider usage in `_held_end.messages` remains authoritative for
+        # BILLING, but its occupancy predates this pass. If it is allowed to win
+        # the later agent-end reduction, every frontend briefly paints `after`
+        # from compaction_end and then rebounds to `before` at turn settlement.
+        self._held_context_tokens = outcome.tokens_after
 
         # (5) Recovery band: only schedule a continuation when the pass
         # actually created headroom (an anti-thrash guard).
