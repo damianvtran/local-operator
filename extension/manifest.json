@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local Operator",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Connect Local Operator to the browser you already use, entirely on your machine.",
   "permissions": ["debugger", "tabs", "tabGroups", "scripting", "storage", "alarms", "webNavigation", "notifications"],
   "host_permissions": ["<all_urls>"],
