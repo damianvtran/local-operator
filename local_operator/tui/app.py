@@ -244,8 +244,20 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: and this clause sits after the access note, so it has to be complete and short.
 #: "Saves provider and model" named the payload but not why it mattered; "saves
 #: this for new sessions" names the consequence, fits the same slot, and includes
-#: the article the clipped phrase lacked.
-PERSIST_HINT = "/model default saves this for new sessions"
+#: the article the clipped phrase lacked. At 38 cells it clears the footer's
+#: 47-cell budget at 50 columns, which is the width that decides whether it
+#: survives at all — the picker's status clauses concatenate with no shedding.
+#:
+#: REPOINTED at the `d` affordance (#369). It used to read "/model default saves
+#: this for new sessions", which is no longer true: a bare `/model default` now
+#: CONFIRMS rather than writing, precisely because that spelling was the
+#: ambiguity the issue reported. The breadcrumb names the key instead, because
+#: the key is the one route to a saved default with no ambiguity in it at all.
+#:
+#: It names `/model` as well as `d` because two of its four sites are receipts
+#: printed when NO picker is open (the switch receipt, and the bare-`/model`
+#: notice), where "press d" alone would name a key that does nothing yet.
+PERSIST_HINT = "d in /model saves this for new sessions"
 
 #: Marks a cost figure RESTORED from a resumed conversation rather than accrued
 #: this session. The restored number is a floor — only the last reported turn's
@@ -10445,6 +10457,18 @@ class OperatorApp(App[None]):
         lowered = arg.lower()
         persist_default = lowered == "default" or lowered.startswith("default ")
         target = arg[len("default ") :].strip() if persist_default else arg
+        # ``/model saved`` — the reading `default` never had (#369). The issue's
+        # core finding is that `/model <thing>` is a grammar whose first token is
+        # a VALUE, so `default` reads as a model you can be switched to, and the
+        # one intention it looks like ("put me back on my configured default")
+        # was the one intention the command could not express. This is that
+        # spelling. A separate WORD rather than overloading `default`, because
+        # `default` already means "persist" on `/approvals` and changing its
+        # meaning here would break the cross-command habit in the other
+        # direction.
+        if lowered == "saved":
+            self._cmd_model_saved(notice)
+            return
         if persist_default and bool(getattr(session, "is_remote", False)):
             # The follower's own config write would persist a default the
             # SESSION never switched to (the switch lives on the owner), and
@@ -10465,16 +10489,32 @@ class OperatorApp(App[None]):
             self._system_notice("session is still starting…", "warning")
             return
         if persist_default and not target:
-            # Bare ``/model default`` means "keep the one I am on". Demanding the
-            # selector back was the gap behind "how do I even set a default": the
-            # sentence a user has right after switching is "make THIS the
-            # default", and answering it by retyping
-            # `openrouter/deepseek/deepseek-chat` is a transcription exercise the
-            # app can do for itself off the session's own label.
-            target = session.model_label
-            if not target:
+            # Bare ``/model default`` CONFIRMS rather than writing (#369).
+            #
+            # It used to resolve the elided selector to `session.model_label`
+            # and write immediately. That is the defect the issue reports: the
+            # user who typed it was asking to be SWITCHED to their configured
+            # default, and instead their current model silently replaced that
+            # default in config.yml, with no undo and a receipt that arrived
+            # after the write. Two intentions shared one spelling and the
+            # destructive one won.
+            #
+            # Nothing is written here. The confirmation names the model that
+            # WOULD be saved, and both other readings are offered by name, so
+            # the ambiguity is resolved by the user rather than guessed at:
+            # `/model saved` switches to the configured default, `/model
+            # default <p>/<id>` persists explicitly, and the `d` key on a
+            # picker row does it without the command at all.
+            label = session.model_label
+            if not label:
                 self._system_notice("usage: /model default <provider>/<model-id>", "warning")
                 return
+            self._system_notice(
+                f"save {label} as the boot default? — "
+                f"/model default {label} confirms · d on a /model row does it too · "
+                "/model saved switches to the configured default instead"
+            )
+            return
         provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
             self._system_notice(
@@ -10612,6 +10652,96 @@ class OperatorApp(App[None]):
             notice(MODEL_SWITCH_MID_TURN_NOTICE, "info")
         if warning:
             notice(warning, "warning")
+
+    def _cmd_model_saved(self, notice: NoticeFn) -> None:
+        """``/model saved`` — switch this session to the CONFIGURED default.
+
+        The reading `/model default` looks like and never had (#369). The issue
+        notes that `/team` and `/agent` already have a "put me back to the
+        configured baseline" verb (`/agent clear`) and `/model` did not, so this
+        matches that vocabulary rather than inventing a third.
+
+        Reads config directly rather than caching the boot values: a default
+        written by `/model default` or by the settings page during THIS session
+        must be what this switches to, and a value captured at launch would send
+        the user back to the model they were already trying to leave.
+        """
+        session = self._session
+        if session is None or not hasattr(session, "set_model"):
+            self._system_notice("session is still starting…", "warning")
+            return
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            manager = ConfigManager(config_dir())
+            provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
+            model_id = str(manager.get_config_value("model_name", "") or "").strip()
+        except Exception as error:  # noqa: BLE001 — reported, never fatal
+            self._system_notice(f"could not read the saved default: {error}", "error")
+            return
+        if not provider or not model_id:
+            # An honest "there is nothing to go back to", naming the command
+            # that creates one. Silently doing nothing would read as the switch
+            # having happened.
+            self._system_notice(
+                "no boot default saved yet — /model default <provider>/<model-id> sets one",
+                "warning",
+            )
+            return
+        # Routed through `_cmd_model`'s selector path rather than reimplemented:
+        # that path validates the provider, resolves the spec, carries the
+        # chosen effort across, re-measures the context and repaints the band.
+        # A second switch implementation here is how the two would drift on the
+        # next change to any of those steps.
+        self._cmd_model(f"{provider}/{model_id}", notice)
+
+    def _persist_default_from_picker(self) -> None:
+        """``d`` on the highlighted model-picker row — save it as the default.
+
+        The PRIMARY fix for #369: it removes the ambiguity by removing the need
+        to type the command at all. The comment on `_cmd_model` already
+        anticipated this affordance — "the user phrase 'make this the default'
+        has no other home, and the picker's current-row marker already covers
+        'which am I on'" — and the row under the cursor supplies the `this` that
+        a bare `/model default` had to guess at.
+
+        Does NOT switch the session. The picker's Enter already means "switch to
+        this", so `d` is the other half; a key that did both would make the two
+        indistinguishable and leave a user who only wanted to set a default
+        talking to a model they did not pick.
+        """
+        picker = self._editor().model_picker
+        row = picker.highlighted()
+        if row is None:
+            return
+        if bool(getattr(self._session, "is_remote", False)):
+            # Same refusal `/model default` gives a follower, and for the same
+            # reason: this writes the LOCAL machine's config, and a follower
+            # would persist a default governing a terminal nobody is sitting at.
+            self._system_notice(
+                "the boot default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern",
+                "warning",
+            )
+            return
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            manager = ConfigManager(config_dir())
+            manager.set_config_value("hosting", row.provider)
+            manager.set_config_value("model_name", row.model_id)
+            saved_to = _home_relative(str(manager.config_file))
+        except Exception as error:  # noqa: BLE001 — a read-only config dir
+            self._system_notice(f"could not save default: {error}", "warning")
+            return
+        # Names both halves, the file and the keys, exactly as the command's
+        # own receipt does — one vocabulary for one outcome reached two ways.
+        self._system_notice(
+            f"boot default saved to {saved_to}: hosting {row.provider}, "
+            f"model_name {row.model_id} (used from the next launch)"
+        )
 
     def _persist_hint_notice(self) -> str:
         """The line a bare ``/model`` prints above the list.
