@@ -6,17 +6,11 @@ import {
   type HostGrantsState,
   validHostGrantSchema,
 } from "./origin-policy";
+import { withSessionMutation } from "./state";
 
-/** Every persistent access mutation executes in the one MV3 worker context.
- * Popup approval and Settings messages both enter this queue, so exact and
- * broad grants cannot race revoke/unpair through separate storage snapshots. */
-let mutationQueue: Promise<unknown> = Promise.resolve();
-
-function enqueue<T>(operation: () => Promise<T>): Promise<T> {
-  const run = mutationQueue.catch(() => {}).then(operation);
-  mutationQueue = run;
-  return run;
-}
+/** Persistent grants and the session approval queue share one worker-owned
+ * mutation chain. The `Locked` helpers exist for approval-store, which already
+ * owns that chain while committing the durable grant before queue receipts. */
 
 function validGrant(value: unknown): value is HostGrant {
   return !!value && typeof value === "object" && !Array.isArray(value) &&
@@ -36,23 +30,25 @@ export function normalizedHostGrants(value: unknown): HostGrantsState | null {
   return { version: 1, grants: Object.fromEntries(entries) };
 }
 
+export async function grantExactOriginLocked(origin: string): Promise<boolean> {
+  const url = new URL(origin);
+  const { origins = {}, hostGrants } = await chrome.storage.local.get([
+    "origins",
+    "hostGrants",
+  ]);
+  // A broad grant already covers this exact origin. Do not recreate a hidden
+  // redundant row after the broad approval compacted it away.
+  if (matchingGrantScope({}, hostGrants, url) === "loopback_all_ports") return true;
+  await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
+  return true;
+}
+
 export function grantExactOrigin(origin: string): Promise<boolean> {
-  return enqueue(async () => {
-    const url = new URL(origin);
-    const { origins = {}, hostGrants } = await chrome.storage.local.get([
-      "origins",
-      "hostGrants",
-    ]);
-    // A broad grant already covers this exact origin. Do not recreate a hidden
-    // redundant row after the broad approval compacted it away.
-    if (matchingGrantScope({}, hostGrants, url) === "loopback_all_ports") return true;
-    await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
-    return true;
-  });
+  return withSessionMutation(() => grantExactOriginLocked(origin));
 }
 
 export function revokeExactOrigin(origin: string): Promise<boolean> {
-  return enqueue(async () => {
+  return withSessionMutation(async () => {
     const { origins = {} } = await chrome.storage.local.get(["origins"]);
     const next = { ...origins };
     delete next[origin];
@@ -61,46 +57,48 @@ export function revokeExactOrigin(origin: string): Promise<boolean> {
   });
 }
 
-export function grantLoopbackHost(url: URL): Promise<boolean> {
+export async function grantLoopbackHostLocked(url: URL): Promise<boolean> {
   const canonicalKey = loopbackHostGrantKey(url);
-  if (!canonicalKey) return Promise.resolve(false);
-  return enqueue(async () => {
-    const { hostGrants, origins = {} } = await chrome.storage.local.get([
-      "hostGrants",
-      "origins",
-    ]);
-    if (hostGrants !== undefined && !normalizedHostGrants(hostGrants)) return false;
-    const current = normalizedHostGrants(hostGrants) ?? { version: 1 as const, grants: {} };
-    const remainingOrigins = Object.fromEntries(
-      Object.entries(origins).filter(([origin, verdict]) => {
-        if (verdict !== "allow") return true;
-        try {
-          const exact = new URL(origin);
-          return exact.protocol !== url.protocol || exact.hostname !== url.hostname;
-        } catch {
-          // Unknown legacy entries are not ours to discard.
-          return true;
-        }
-      }),
-    );
-    // One multi-key storage write is the durable transaction: failure cannot
-    // report success after cleaning exact grants without storing the broad one.
-    await chrome.storage.local.set({
-      origins: remainingOrigins,
-      hostGrants: {
-        version: 1,
-        grants: {
-          ...current.grants,
-          [canonicalKey]: { scope: "all_ports", createdAt: Date.now() },
-        },
+  if (!canonicalKey) return false;
+  const { hostGrants, origins = {} } = await chrome.storage.local.get([
+    "hostGrants",
+    "origins",
+  ]);
+  if (hostGrants !== undefined && !normalizedHostGrants(hostGrants)) return false;
+  const current = normalizedHostGrants(hostGrants) ?? { version: 1 as const, grants: {} };
+  const remainingOrigins = Object.fromEntries(
+    Object.entries(origins).filter(([origin, verdict]) => {
+      if (verdict !== "allow") return true;
+      try {
+        const exact = new URL(origin);
+        return exact.protocol !== url.protocol || exact.hostname !== url.hostname;
+      } catch {
+        // Unknown legacy entries are not ours to discard.
+        return true;
+      }
+    }),
+  );
+  // One multi-key storage write is the durable transaction: failure cannot
+  // report success after cleaning exact grants without storing the broad one.
+  await chrome.storage.local.set({
+    origins: remainingOrigins,
+    hostGrants: {
+      version: 1,
+      grants: {
+        ...current.grants,
+        [canonicalKey]: { scope: "all_ports", createdAt: Date.now() },
       },
-    });
-    return true;
+    },
   });
+  return true;
+}
+
+export function grantLoopbackHost(url: URL): Promise<boolean> {
+  return withSessionMutation(() => grantLoopbackHostLocked(url));
 }
 
 export function revokeLoopbackHost(canonicalKey: string): Promise<boolean> {
-  return enqueue(async () => {
+  return withSessionMutation(async () => {
     const { hostGrants } = await chrome.storage.local.get(["hostGrants"]);
     const current = normalizedHostGrants(hostGrants);
     if (!current) return false;
@@ -112,7 +110,7 @@ export function revokeLoopbackHost(canonicalKey: string): Promise<boolean> {
 }
 
 export function clearAllAccessGrants(): Promise<boolean> {
-  return enqueue(async () => {
+  return withSessionMutation(async () => {
     await chrome.storage.local.remove(["token", "origins", "hostGrants"]);
     return true;
   });
