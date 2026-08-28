@@ -190,57 +190,79 @@ class PendingGateState(BaseModel):
     question_total: int = 1
 
 
-class _FrozenSequence(Sequence[Any]):
-    """Immutable sequence with list-compatible equality and wire shape."""
+class _FrozenSequence(tuple[Any, ...]):
+    """Tuple-backed sequence with list-compatible equality and wire shape."""
 
-    __slots__ = ("_values",)
+    __slots__ = ()
 
-    def __init__(self, values: Iterable[Any]) -> None:
-        self._values = tuple(values)
-
-    def __getitem__(self, index: Any) -> Any:
-        return self._values[index]
-
-    def __len__(self) -> int:
-        return len(self._values)
-
-    def __iter__(self) -> Iterator[Any]:
-        return iter(self._values)
+    def __new__(cls, values: Iterable[Any]) -> "_FrozenSequence":
+        return tuple.__new__(cls, tuple(values))
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Sequence):
-            return list(self._values) == list(other)
+            return tuple(self) == tuple(other)
         return False
+
+    def __hash__(self) -> int:
+        return tuple.__hash__(self)
+
+    def __copy__(self) -> "_FrozenSequence":
+        return self
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenSequence":
         return self
 
+    def __reduce__(self) -> tuple[type["_FrozenSequence"], tuple[tuple[Any, ...]]]:
+        return type(self), (tuple(self),)
 
-class _FrozenMapping(Mapping[str, Any]):
-    """Immutable mapping with dict-compatible equality and wire shape."""
 
-    __slots__ = ("_items", "_values")
+class _FrozenMapping(tuple[tuple[str, Any], ...]):
+    """Tuple-of-pairs mapping with no writable or rebindable backing storage."""
 
-    def __init__(self, values: Mapping[str, Any]) -> None:
-        self._items = tuple(values.items())
-        self._values = dict(self._items)
+    __slots__ = ()
 
-    def __getitem__(self, key: str) -> Any:
-        return self._values[key]
+    def __new__(cls, values: Mapping[str, Any] | Iterable[tuple[str, Any]]) -> "_FrozenMapping":
+        items = values.items() if isinstance(values, Mapping) else values
+        return tuple.__new__(cls, tuple(items))
 
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._values)
+    def __getitem__(self, key: str) -> Any:  # type: ignore[override]
+        for candidate, value in tuple.__iter__(self):
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:  # type: ignore[override]
+        return (key for key, _value in tuple.__iter__(self))
 
     def __len__(self) -> int:
-        return len(self._values)
+        return tuple.__len__(self)
+
+    def items(self) -> Iterator[tuple[str, Any]]:
+        return tuple.__iter__(self)
 
     def __eq__(self, other: object) -> bool:
+        if isinstance(other, _FrozenMapping):
+            return tuple(tuple.__iter__(self)) == tuple(tuple.__iter__(other))
         if isinstance(other, Mapping):
-            return dict(self._items) == dict(other)
+            return dict(self.items()) == {key: other[key] for key in other}
         return False
+
+    def __hash__(self) -> int:
+        return tuple.__hash__(self)
+
+    def __copy__(self) -> "_FrozenMapping":
+        return self
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenMapping":
         return self
+
+    def __reduce__(self) -> tuple[type["_FrozenMapping"], tuple[tuple[tuple[str, Any], ...]]]:
+        return type(self), (tuple(tuple.__iter__(self)),)
+
+
+# Virtual registration keeps the runtime mapping contract without inheriting a
+# second, incompatible Collection generic beside tuple's pair iteration.
+Mapping.register(_FrozenMapping)  # type: ignore[attr-defined]
 
 
 def _freeze_value(value: Any) -> Any:

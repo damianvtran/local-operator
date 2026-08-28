@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import pickle
 from collections import deque, namedtuple
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -401,6 +403,17 @@ def test_immutable_wrappers_have_no_builtin_base_class_bypass() -> None:
         dict.__setitem__(event, "type", "corrupted")
     with pytest.raises(TypeError):
         event["details"]["nested"] = [2]
+    for wrapper in (jobs, trajectory, event):
+        assert not hasattr(wrapper, "__dict__")
+        with pytest.raises(TypeError):
+            vars(wrapper)
+        with pytest.raises(AttributeError):
+            object.__setattr__(wrapper, "_values", [])
+        assert copy.copy(wrapper) is wrapper
+        assert copy.deepcopy(wrapper) is wrapper
+        restored = pickle.loads(pickle.dumps(wrapper))
+        assert restored == wrapper
+        assert type(restored) is type(wrapper)
 
     dumped = owner.state.model_dump(mode="json")
     assert dumped["jobs"][0]["trajectory"] == [{"type": "notice", "details": {"nested": [1]}}]
@@ -408,6 +421,7 @@ def test_immutable_wrappers_have_no_builtin_base_class_bypass() -> None:
     update = owner.mutate(jobs=list(owner.state.jobs))
     assert update is None
     assert owner.state.jobs == follower.state.jobs
+    assert owner.state.model_dump(mode="json") == follower.state.model_dump(mode="json")
 
 
 def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:
