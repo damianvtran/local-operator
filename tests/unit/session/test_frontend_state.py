@@ -257,11 +257,11 @@ def test_large_job_snapshots_share_only_immutable_retained_events() -> None:
     assert first.jobs is second.jobs
     assert first.jobs[0].trajectory is second.jobs[0].trajectory
     first.sequence = 99
-    with pytest.raises(TypeError, match="immutable"):
+    with pytest.raises((AttributeError, TypeError)):
         first.jobs.append(JobState(id="injected", type="task"))
-    with pytest.raises(TypeError, match="immutable"):
+    with pytest.raises((AttributeError, TypeError)):
         first.jobs[0].trajectory.append({"type": "notice"})
-    with pytest.raises(TypeError, match="immutable"):
+    with pytest.raises((AttributeError, TypeError)):
         first.jobs[0].trajectory[0]["delta"] = "corrupted"
     assert store.state.sequence != 99
     assert len(store.state.jobs) == 100
@@ -294,13 +294,13 @@ def test_shared_job_usage_descendants_and_future_extras_are_immutable() -> None:
     with pytest.raises(Exception, match="frozen"):
         snapshot.jobs[0].descendant_usage[0].output_tokens = 99
     future_payload = getattr(snapshot.jobs[0], "future_payload")
-    with pytest.raises(TypeError, match="immutable"):
+    with pytest.raises((AttributeError, TypeError)):
         future_payload["nested"].append(2)
     future_tags = getattr(snapshot.jobs[0], "future_tags")
     with pytest.raises(AttributeError):
         future_tags.add("corrupted")
     future_queue = getattr(snapshot.jobs[0], "future_queue")
-    with pytest.raises(TypeError, match="immutable"):
+    with pytest.raises((AttributeError, TypeError)):
         future_queue.append({"nested": [2]})
     assert getattr(snapshot.jobs[0], "future_bytes") == b"abc"
 
@@ -348,7 +348,7 @@ def test_structured_future_extras_normalize_to_closed_immutable_values() -> None
         )
         payload = getattr(store.state.jobs[0], "future_payload")
         assert nested(payload) == [1]
-        with pytest.raises(TypeError, match="immutable"):
+        with pytest.raises((AttributeError, TypeError)):
             nested(payload).append(2)
         assert store.state.sequence == 0
         assert nested(getattr(store.state.jobs[0], "future_payload")) == [1]
@@ -373,6 +373,43 @@ def test_arbitrary_future_objects_are_rejected_before_canonical_storage() -> Non
             FrontendStateStore(state)
 
 
+def test_immutable_wrappers_have_no_builtin_base_class_bypass() -> None:
+    initial = _state(
+        jobs=[
+            JobState(
+                id="child",
+                type="task",
+                trajectory=[{"type": "notice", "details": {"nested": [1]}}],
+            )
+        ]
+    )
+    owner = FrontendStateStore(initial)
+    follower = FrontendStateStore(initial)
+    snapshot = owner.state
+    jobs = snapshot.jobs
+    trajectory = snapshot.jobs[0].trajectory
+    event = trajectory[0]
+
+    assert not isinstance(jobs, list)
+    assert not isinstance(trajectory, list)
+    assert not isinstance(event, dict)
+    with pytest.raises(TypeError):
+        list.append(jobs, JobState(id="injected", type="task"))
+    with pytest.raises(TypeError):
+        list.append(trajectory, {"type": "injected"})
+    with pytest.raises(TypeError):
+        dict.__setitem__(event, "type", "corrupted")
+    with pytest.raises(TypeError):
+        event["details"]["nested"] = [2]
+
+    dumped = owner.state.model_dump(mode="json")
+    assert dumped["jobs"][0]["trajectory"] == [{"type": "notice", "details": {"nested": [1]}}]
+    assert owner.state.sequence == 0
+    update = owner.mutate(jobs=list(owner.state.jobs))
+    assert update is None
+    assert owner.state.jobs == follower.state.jobs
+
+
 def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:
     """An alias attempt cannot hide a trajectory event from the next wire delta."""
     initial = _state(jobs=[JobState(id="child", type="task", trajectory=[])])
@@ -380,7 +417,7 @@ def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:
     follower = FrontendStateStore(initial)
     snapshot = owner.state
 
-    with pytest.raises(TypeError, match="immutable"):
+    with pytest.raises((AttributeError, TypeError)):
         snapshot.jobs[0].trajectory.append({"type": "notice", "index": 1})
 
     changed = JobState(

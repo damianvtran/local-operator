@@ -16,16 +16,27 @@ from collections import deque
 from collections.abc import (
     Callable,
     Iterable,
+    Iterator,
+    Mapping,
     MutableMapping,
     MutableSequence,
     MutableSet,
+    Sequence,
 )
 from dataclasses import dataclass
 from enum import StrEnum
 from types import SimpleNamespace
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+)
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
@@ -179,54 +190,63 @@ class PendingGateState(BaseModel):
     question_total: int = 1
 
 
-class _FrozenList(list[Any]):
-    """List-compatible retained data whose identity is safe to share in snapshots."""
+class _FrozenSequence(Sequence[Any]):
+    """Immutable sequence with list-compatible equality and wire shape."""
 
-    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("canonical frontend snapshot values are immutable")
+    __slots__ = ("_values",)
 
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    append = _immutable
-    clear = _immutable
-    extend = _immutable
-    insert = _immutable
-    pop = _immutable
-    remove = _immutable
-    reverse = _immutable
-    sort = _immutable  # type: ignore[assignment]
-    __iadd__ = _immutable  # type: ignore[assignment]
-    __imul__ = _immutable  # type: ignore[assignment]
+    def __init__(self, values: Iterable[Any]) -> None:
+        self._values = tuple(values)
 
-    def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenList":
-        # Entries are recursively frozen, so a defensive model copy can share
-        # the 50k-event payload while still isolating every mutable boundary.
+    def __getitem__(self, index: Any) -> Any:
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._values)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Sequence):
+            return list(self._values) == list(other)
+        return False
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenSequence":
         return self
 
 
-class _FrozenDict(dict[str, Any]):
-    """Dict-compatible retained data whose identity is safe to share in snapshots."""
+class _FrozenMapping(Mapping[str, Any]):
+    """Immutable mapping with dict-compatible equality and wire shape."""
 
-    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("canonical frontend snapshot values are immutable")
+    __slots__ = ("_items", "_values")
 
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable  # type: ignore[assignment]
-    setdefault = _immutable  # type: ignore[assignment]
-    update = _immutable  # type: ignore[assignment]
-    __ior__ = _immutable  # type: ignore[assignment]
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        self._items = tuple(values.items())
+        self._values = dict(self._items)
 
-    def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenDict":
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return dict(self._items) == dict(other)
+        return False
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenMapping":
         return self
 
 
 def _freeze_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool, bytes)):
         return value
-    if isinstance(value, (_FrozenList, _FrozenDict)):
+    if isinstance(value, (_FrozenSequence, _FrozenMapping)):
         return value
     if isinstance(value, FrontendUsage):
         return _freeze_frontend_usage(value)
@@ -238,7 +258,7 @@ def _freeze_value(value: Any) -> Any:
         # a mutable model the older follower cannot know how to freeze safely.
         return _freeze_value(value.model_dump(mode="python"))
     if isinstance(value, MutableMapping):
-        return _FrozenDict({str(key): _freeze_value(item) for key, item in value.items()})
+        return _FrozenMapping({str(key): _freeze_value(item) for key, item in value.items()})
     if isinstance(value, bytearray):
         # bytearray is the remaining built-in mutable container accepted by an
         # unconstrained extra; bytes preserves its Pydantic JSON string shape.
@@ -246,7 +266,7 @@ def _freeze_value(value: Any) -> Any:
     if isinstance(value, memoryview):
         return bytes(value)
     if isinstance(value, (MutableSequence, deque)):
-        return _FrozenList(_freeze_value(item) for item in value)
+        return _FrozenSequence(_freeze_value(item) for item in value)
     if isinstance(value, MutableSet):
         # ``frozenset`` preserves set equality/membership and Pydantic's JSON
         # serializer emits the same array shape as a mutable set. Nested values
@@ -273,13 +293,51 @@ def _freeze_value(value: Any) -> Any:
 
 
 def _is_frozen_value(value: Any) -> bool:
-    if isinstance(value, (_FrozenList, _FrozenDict, _FrozenUsage, _FrozenFrontendUsage)):
+    if isinstance(value, (_FrozenSequence, _FrozenMapping, _FrozenUsage, _FrozenFrontendUsage)):
         return True
     if isinstance(value, (str, int, float, bool, bytes, type(None), frozenset)):
         return True
     if isinstance(value, tuple):
         return all(_is_frozen_value(item) for item in value)
     return False
+
+
+def _wire_value(value: Any) -> Any:
+    """Return ordinary JSON containers at the serialization boundary only."""
+    if isinstance(value, _FrozenSequence):
+        return [_wire_value(item) for item in value]
+    if isinstance(value, _FrozenMapping):
+        return {key: _wire_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_wire_value(item) for item in value]
+    if isinstance(value, frozenset):
+        return [_wire_value(item) for item in value]
+    if isinstance(value, BaseModel):
+        mutable = value.model_copy(
+            update={name: _wire_value(item) for name, item in value.__dict__.items()}
+        )
+        if value.model_extra:
+            mutable.__pydantic_extra__ = {
+                name: _wire_value(item) for name, item in value.model_extra.items()
+            }
+        return mutable
+    return value
+
+
+def _job_summary(job: "JobState") -> dict[str, Any]:
+    """Serialize one roster row without visiting its retained trajectory."""
+    values = {
+        name: _wire_value(value) for name, value in job.__dict__.items() if name != "trajectory"
+    }
+    values.update({name: _wire_value(value) for name, value in (job.model_extra or {}).items()})
+    return to_jsonable_python(values)
+
+
+def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
+    """Compare changed rows only; stable refreshes reuse frozen job identities."""
+    return len(current) == len(candidate) and all(
+        old is new or old == new for old, new in zip(current, candidate)
+    )
 
 
 def _freeze_job(job: "JobState") -> "JobState":
@@ -294,7 +352,7 @@ def _freeze_job(job: "JobState") -> "JobState":
         if name not in {"usage", "descendant_usage"}
     }
     values["usage"] = _freeze_usage(job.usage) if job.usage is not None else None
-    values["descendant_usage"] = _FrozenList(
+    values["descendant_usage"] = _FrozenSequence(
         _freeze_frontend_usage(component) for component in job.descendant_usage
     )
     for name, value in (job.model_extra or {}).items():
@@ -347,6 +405,19 @@ class JobState(BaseModel):
     # than silently doing nothing.
     parent_job_id: str | None = None
     session_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Pydantic's field serializers expect concrete lists/dicts. Thaw only
+        # the ephemeral wire copy; canonical state keeps the immutable wrappers.
+        mutable = self.model_copy(
+            update={name: _wire_value(value) for name, value in self.__dict__.items()}
+        )
+        if self.model_extra:
+            mutable.__pydantic_extra__ = {
+                name: _wire_value(value) for name, value in self.model_extra.items()
+            }
+        return handler(mutable)
 
     @classmethod
     def from_job(cls, job: Any) -> "JobState":
@@ -502,6 +573,11 @@ class FrontendSessionState(BaseModel):
     history_cursor: str | None = None
     attachment_root: str | None = None
 
+    @model_serializer(mode="wrap")
+    def _serialize_frozen_jobs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        mutable = self.model_copy(update={"jobs": list(self.jobs)})
+        return handler(mutable)
+
     @field_validator("selected_model", "effective_model", mode="before")
     @classmethod
     def _model_wire(cls, value: Any) -> Any:
@@ -539,7 +615,9 @@ class FrontendSessionState(BaseModel):
 
 def _freeze_state_jobs(state: FrontendSessionState) -> FrontendSessionState:
     """Freeze retained job payloads before any snapshot can alias canonical state."""
-    return state.model_copy(update={"jobs": _FrozenList(_freeze_job(job) for job in state.jobs)})
+    return state.model_copy(
+        update={"jobs": _FrozenSequence(_freeze_job(job) for job in state.jobs)}
+    )
 
 
 class FrontendSync(BaseModel):
@@ -791,7 +869,7 @@ class FrontendStateStore:
                     )
                     for item in value
                 ]
-                if self._state.jobs != candidate_jobs:
+                if not _jobs_equal(self._state.jobs, candidate_jobs):
                     normalized[key] = candidate_jobs
                     wire_changes[key] = candidate_jobs
                 continue
@@ -821,7 +899,7 @@ class FrontendStateStore:
                     trajectory_replacements.append(job_id)
                 if appended:
                     trajectory_appends[job_id] = appended
-                summaries.append(job.model_dump(mode="json", exclude={"trajectory"}))
+                summaries.append(_job_summary(job))
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
