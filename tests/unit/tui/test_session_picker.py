@@ -28,7 +28,6 @@ from local_operator.resume import (
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     _MARKER_LEGEND,
-    _SOFT_TIER_MIN_HITS,
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
@@ -1247,10 +1246,10 @@ async def test_the_soft_tier_is_skipped_once_the_exact_tiers_fill_a_page() -> No
 
     Since the picker went uncapped that build sat on the first character typed.
     It is deferred behind the cheap tiers: a query that already returns a
-    screenful has nothing for soft matching to rescue, and the extra recall
-    would land below the fold.
+    query the exact tiers can answer at all has nothing for soft matching to
+    rescue.
     """
-    rows = [_row(f"s{i:03d}", f"classifier run {i}") for i in range(_SOFT_TIER_MIN_HITS + 5)]
+    rows = [_row(f"s{i:03d}", f"classifier run {i}") for i in range(15)]
     digests = {row.id: "body text" for row in rows}
     app = _PickerHost(rows, digests)
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1342,3 +1341,75 @@ async def test_a_large_row_set_does_not_move_a_row_under_the_cursor() -> None:
         await pilot.pause()
         assert [r.id for r in screen.visible_rows] == first
         assert screen.selected_id() == selected
+
+
+@pytest.mark.asyncio
+async def test_the_result_list_never_grows_as_the_user_types() -> None:
+    """The filter must narrow monotonically within a typing run.
+
+    The first soft-tier gate fired when the exact tiers returned fewer than a
+    page, which is a threshold typing CROSSES: on the operator's real store,
+    `watc` and `watch` showed 41 rows and `watchl` showed 1519 — the list grew
+    twentyfold on a longer query, every row acquired a body-match marker, and
+    the card changed height under the cursor.
+
+    Gating on ZERO exact hits removes the boundary: once a query has an exact
+    hit, every extension either keeps some (still exact-only) or drops to none
+    (soft rescues from an empty list, which can only add to nothing).
+    """
+    rows = [_row(f"s{i:03d}", f"session {i}") for i in range(16)]
+    # Ten digests carry `watch` and stop there; six are an edit-distance
+    # neighbour the soft tier can reach but the exact tier never sees. This is
+    # the shape that made the shipped gate flip mid-word.
+    digests = {
+        row.id: ("watch sweep evicted" if i < 10 else "watch5 sweep evicted")
+        for i, row in enumerate(rows)
+    }
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+
+        counts = []
+        for query in ("wat", "watc", "watch", "watchi"):
+            screen.set_query(query)
+            await pilot.pause()
+            counts.append(len(screen.visible_rows))
+
+        assert counts == sorted(counts, reverse=True), f"the list grew on a longer query: {counts}"
+
+
+@pytest.mark.asyncio
+async def test_the_soft_tier_runs_only_when_the_exact_tiers_find_nothing() -> None:
+    """The gate itself, stated directly: any exact hit suppresses the soft tier,
+    and no exact hit runs it. Pins the condition the D1 monotonicity argument
+    rests on, so a future change to the threshold fails here rather than in a
+    user's typing run."""
+    rows = [_row("aaa1", "classifier work"), _row("bbb2", "unrelated")]
+    digests = {"aaa1": "improve adm classifier throughput"}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        calls: list[str] = []
+        real = screen._soft_index.search
+
+        def counting(digests_arg, query):
+            calls.append(query)
+            return real(digests_arg, query)
+
+        screen._soft_index.search = counting  # type: ignore[method-assign]
+
+        # One exact hit is enough to suppress the tier, even though the result
+        # is far short of a page — the old gate would have run it here.
+        screen.set_query("classifier")
+        await pilot.pause()
+        assert len(screen.visible_rows) == 1
+        assert calls == [], "the soft tier ran despite an exact hit"
+
+        # No exact hit anywhere: the tier runs and rescues the typo.
+        screen.set_query("classifer")
+        await pilot.pause()
+        assert [r.id for r in screen.visible_rows] == ["aaa1"]
+        assert calls == ["classifer"], "the soft tier did not run for a typo"
+

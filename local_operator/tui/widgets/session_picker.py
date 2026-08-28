@@ -114,16 +114,6 @@ RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are
 #: :meth:`SessionPickerScreen._page_rows`.
 PAGE_ROWS_MAX = 10
 
-#: Exact-tier hits below which the picker also consults the bounded SOFT tier
-#: (see ``SessionPickerScreen.visible_rows``). Deliberately one full page: the
-#: soft tier's job is to rescue a query the exact tiers answered poorly, and a
-#: query that already fills the visible page has nothing to rescue — the extra
-#: recall would land below the fold at the cost of a 324 ms / 95 MB first-call
-#: tokenise over the whole store. Tied to the page ceiling rather than being a
-#: second free-standing number, because "a screenful" is exactly the threshold
-#: being described.
-_SOFT_TIER_MIN_HITS = PAGE_ROWS_MAX
-
 #: Non-row lines the card always draws: header, rule, blank spacer, the
 #: position counter, and the key hints. Reserved UNCONDITIONALLY (the counter
 #: included, even when the list fits) so the height never depends on content
@@ -568,24 +558,40 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # uncapped, that build sat on the first character typed, which is
             # the worst possible moment to spend a third of a second.
             #
-            # Gating on the RESULT COUNT rather than on query length is what
-            # keeps the tier honest: soft matching exists to rescue a typo, a
-            # prefix, or remembered-out-of-order words, and all three are cases
-            # where the exact tiers return nothing useful. When they already
-            # return a screenful, the extra recall is invisible below the fold
-            # and not worth the stall.
+            # Gated on the exact tiers finding NOTHING, not on how much they
+            # found. A count threshold is observable: typing narrows the exact
+            # set, and the keystroke that takes it below the threshold switches
+            # the soft tier on and adds rows BACK. Measured on the count gate,
+            # one keystroke apart: 16 rows, then 10, then 16 again on a longer
+            # query — rows reappearing, every row acquiring a body-match marker,
+            # the footer gaining its legend, and the card changing height under
+            # the cursor mid-word. "Keep typing to narrow" is the model this
+            # surface teaches, and a filter that grows on a longer query reads
+            # as broken even when the extra rows are relevant.
+            #
+            # Zero is the only threshold a user cannot cross downward by typing
+            # more: once a query has an exact hit, every extension either keeps
+            # some hits (still exact-only) or drops to none (soft rescues it,
+            # from an empty list, which can only add). So the list narrows
+            # monotonically within a typing run. It is also the case the tier's
+            # own docstring describes — rescuing a query the exact tiers could
+            # not answer — and it strictly reduces how often the 324 ms / 95 MB
+            # tokenise runs.
             #
             # Deterministic in ``(digests, query)``, which the picker's
             # ordering invariant requires: the gate reads only the exact-tier
             # result for this same query, so a fixed query admits a fixed set
             # and rows still never move under the cursor between repaints.
-            near = filter_rows(self._all, self._query, self._body_matches)
-            if len(near) < _SOFT_TIER_MIN_HITS:
+            admitted = filter_rows(self._all, self._query, self._body_matches)
+            if not admitted:
                 soft = self._soft_index.search(self._digests, self._query)
+                self._admitted = self._body_matches | soft
+                # Recomputed only on the empty branch: on the common path the
+                # first pass is already the answer, so the uncapped row list is
+                # scanned once per query change rather than twice.
+                admitted = filter_rows(self._all, self._query, self._admitted)
             else:
-                soft = frozenset()
-            self._admitted = self._body_matches | soft
-            admitted = filter_rows(self._all, self._query, self._admitted)
+                self._admitted = set(self._body_matches)
             self._filtered = rank_rows(admitted, self._query, self._body_matches)
             self._filtered_for = self._query
         return self._filtered
