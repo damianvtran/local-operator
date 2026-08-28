@@ -78,6 +78,7 @@ function send(frame: object): void {
 // it to message the user through the harness, which notifies reliably. This
 // banner stays because it costs nothing and helps the machines where it works.
 const PENDING_NOTIFICATION_ID = "lop-origin-pending";
+let notificationQueueKey = "unreconciled";
 setPendingObserver((snapshot) => {
   for (const entry of snapshot.queue) {
     if (entry.kind === "in_command" && entry.commandId) {
@@ -85,6 +86,12 @@ setPendingObserver((snapshot) => {
     }
   }
   const count = snapshot.queue.length;
+  // Badge/title reconciliation may legitimately repeat during a sweep, but an
+  // identical aggregate OS notification is noise. Entry generations form a
+  // stable key that changes on enqueue, decision, cancellation, and expiry.
+  const nextNotificationKey = snapshot.queue.map((entry) => entry.entryId).join("\n");
+  if (nextNotificationKey === notificationQueueKey) return;
+  notificationQueueKey = nextNotificationKey;
   if (count) {
     const first = snapshot.queue[0]!;
     chrome.notifications?.create(PENDING_NOTIFICATION_ID, {
@@ -304,8 +311,12 @@ chrome.runtime.onInstalled.addListener(() => {
 // socket. `connecting` is never persisted, so a suspend can never leave it
 // wedged true across a restart — a fresh worker always starts able to dial.
 alive = true;
-void restoreAccessQueue();
-void connect();
+// Observer registration above precedes restoration. Chain startup so persisted
+// queue state reconciles its global badge/title before connection work, and
+// contain failure so MV3 never reports an unhandled top-level rejection.
+void restoreAccessQueue()
+  .catch((error) => console.warn("approval queue restore failed", error))
+  .finally(() => void connect());
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes.accessQueue) {

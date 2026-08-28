@@ -201,9 +201,9 @@ the normalized authority, so a nondefault port is visible:
    **Then NOTIFY THE USER YOURSELF — this step is mandatory.** Use the `ask`
    tool or a message: the harness notification is the RELIABLE channel.
    Chrome's own notification frequently never reaches the user (macOS
-   Notification Center authorization is commonly missing), and the popup
-   badge is invisible unless they happen to click the toolbar icon. Tell
-   them the origin and that the buttons are in the extension popup
+   Notification Center authorization is commonly missing), and the numbered
+   toolbar badge only reports the pending count. Tell them the origin and that
+   the buttons are in the extension popup
    (toolbar icon → **Allow once** / **Always allow** / **Deny**). Literal
    `localhost`, `127.0.0.1`, and `[::1]` instead show **Always this port** and
    a separate **Always all ports** choice.

@@ -1,3 +1,4 @@
+import { reconcileActionSurface } from "./action-surface";
 import { requesterOriginKey, type AccessQueueEntry, type OriginDecision } from "./access-queue";
 import {
   cancelAccess,
@@ -35,7 +36,12 @@ function reconcileWaiters(snapshot: QueueSnapshot): void {
 // completion guarantee.
 setQueueObserver((snapshot) => {
   reconcileWaiters(snapshot);
-  onPendingChange?.(snapshot);
+  // The queue store deliberately does not await observers while holding its
+  // mutation lock. Catch here so a Chrome API rejection cannot become an
+  // unhandled worker promise; reconcileActionSurface logs per-operation detail.
+  void updatePromptSurfaces(snapshot).catch((error) =>
+    console.warn("approval action surface reconciliation failed", error),
+  );
 });
 
 export function setPendingObserver(observer: (snapshot: QueueSnapshot) => void): void {
@@ -102,14 +108,8 @@ export async function ensureTopLevelAccess(
   });
 }
 
-async function updatePromptSurfaces(snapshot: QueueSnapshot): Promise<void> {
-  const count = snapshot.queue.length;
-  await chrome.action.setBadgeBackgroundColor({ color: "#e96042" });
-  await chrome.action.setBadgeText({ text: count ? (count > 9 ? "9+" : String(count)) : "" });
-  await chrome.action.setTitle({
-    title: count === 0 ? "Local Operator" : count === 1 ? "1 site request waiting" : `${count} site requests waiting`,
-  });
-  onPendingChange?.(snapshot);
+export async function updatePromptSurfaces(snapshot: QueueSnapshot): Promise<void> {
+  await reconcileActionSurface(snapshot, onPendingChange ?? undefined);
 }
 
 export async function restoreAccessQueue(): Promise<void> {

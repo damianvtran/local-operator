@@ -9,10 +9,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-function installChromeStub() {
+function installChromeStub(actionFailures = new Set()) {
   const areas = { session: new Map(), local: new Map() };
   const listeners = [];
   const alarms = new Map();
+  const actionCalls = [];
   const makeArea = (name) => ({
     get: async (keys) => {
       const out = {};
@@ -42,13 +43,29 @@ function installChromeStub() {
     alarms: {
       create: (name, info) => alarms.set(name, info),
       clear: async (name) => alarms.delete(name),
+      onAlarm: { addListener: () => {} },
     },
-    action: {
-      setBadgeBackgroundColor: async () => {}, setBadgeText: async () => {}, setTitle: async () => {},
-    },
+    action: Object.fromEntries(
+      ["setBadgeBackgroundColor", "setBadgeTextColor", "setBadgeText", "setTitle"].map((method) => [
+        method,
+        async (params) => {
+          actionCalls.push([method, params]);
+          if (actionFailures.has(method)) throw new Error(`${method} rejected`);
+        },
+      ]),
+    ),
     debugger: {
       onEvent: { addListener: () => {}, removeListener: () => {} },
       onDetach: { addListener: () => {} }, sendCommand: async () => ({}),
+    },
+    notifications: {
+      create: async () => {}, clear: async () => {}, onClicked: { addListener: () => {} },
+    },
+    runtime: {
+      getURL: (path) => `chrome-extension://test/${path}`,
+      getManifest: () => ({ version: "0.1.4" }),
+      onStartup: { addListener: () => {} }, onInstalled: { addListener: () => {} },
+      onMessage: { addListener: () => {} }, sendMessage: async () => {},
     },
   };
   return {
@@ -56,7 +73,12 @@ function installChromeStub() {
     local: (key) => areas.local.get(key),
     setSession: (key, value) => areas.session.set(key, value),
     alarm: (name) => alarms.get(name),
-    restore: () => { delete globalThis.chrome; },
+    actionCalls,
+    restore: () => {
+      delete globalThis.chrome;
+      delete globalThis.WebSocket;
+      delete globalThis.navigator;
+    },
   };
 }
 
@@ -72,6 +94,103 @@ async function loadModule(entry = "src/approval-store.ts") {
 
 const loadStore = () => loadModule();
 const url = (origin) => new URL(origin + "/page");
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const lastAction = (chrome, method) => chrome.actionCalls.filter(([name]) => name === method).at(-1)?.[1];
+
+test("queue mutations reconcile global numbered badge and exact tooltip", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const origins = await bundle.import();
+    const first = await origins.raiseAccessRequest(url("https://one.example"), "session:one");
+    await tick();
+    assert.deepEqual(lastAction(chrome, "setBadgeText"), { text: "1" });
+    assert.deepEqual(lastAction(chrome, "setTitle"), { title: "1 site request waiting" });
+    const second = await origins.raiseAccessRequest(url("https://two.example"), "session:two");
+    await tick();
+    assert.deepEqual(lastAction(chrome, "setBadgeText"), { text: "2" });
+    assert.deepEqual(lastAction(chrome, "setTitle"), { title: "2 site requests waiting" });
+    await origins.resolveOrigin(first.origin, "deny", first.entryId);
+    assert.deepEqual(lastAction(chrome, "setBadgeText"), { text: "1" });
+    assert.deepEqual(lastAction(chrome, "setTitle"), { title: "1 site request waiting" });
+    await origins.resolveOrigin(second.origin, "deny", second.entryId);
+    assert.deepEqual(lastAction(chrome, "setBadgeText"), { text: "" });
+    assert.deepEqual(lastAction(chrome, "setTitle"), { title: "Local Operator" });
+    assert.ok(chrome.actionCalls.every(([, params]) => !("tabId" in params) && !("windowId" in params)));
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("worker cold start restores persisted badge without unhandled rejection", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/worker.ts");
+  try {
+    const now = Date.now();
+    chrome.setSession("accessQueueVersion", 1);
+    chrome.setSession("accessQueue", [
+      { entryId: "a", origin: "https://a.example", displayAuthority: "a.example", requester: "A", kind: "async", requestedAt: now, expiresAt: now + 60_000, sequence: 1 },
+      { entryId: "b", origin: "https://b.example", displayAuthority: "b.example", requester: "B", kind: "async", requestedAt: now, expiresAt: now + 60_000, sequence: 2 },
+    ]);
+    globalThis.navigator = { userAgent: "node-test" };
+    globalThis.WebSocket = class {
+      static OPEN = 1;
+      readyState = 1;
+      constructor() { queueMicrotask(() => this.onopen?.()); }
+      send() {}
+      close() {}
+    };
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await bundle.import();
+      for (let attempts = 0; attempts < 20 && lastAction(chrome, "setBadgeText")?.text !== "2"; attempts++) await tick();
+      assert.deepEqual(lastAction(chrome, "setBadgeText"), { text: "2" });
+      assert.deepEqual(lastAction(chrome, "setTitle"), { title: "2 site requests waiting" });
+      assert.deepEqual(unhandled, []);
+    } finally { process.off("unhandledRejection", onUnhandled); }
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("cold-start restore reconciles a persisted two-entry queue", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/origins.ts");
+  try {
+    const now = Date.now();
+    chrome.setSession("accessQueueVersion", 1);
+    chrome.setSession("accessQueue", [
+      { entryId: "a", origin: "https://a.example", displayAuthority: "a.example", requester: "A", kind: "async", requestedAt: now, expiresAt: now + 60_000, sequence: 1 },
+      { entryId: "b", origin: "https://b.example", displayAuthority: "b.example", requester: "B", kind: "async", requestedAt: now, expiresAt: now + 60_000, sequence: 2 },
+    ]);
+    const origins = await bundle.import();
+    await origins.restoreAccessQueue();
+    assert.deepEqual(lastAction(chrome, "setBadgeText"), { text: "2" });
+    assert.deepEqual(lastAction(chrome, "setTitle"), { title: "2 site requests waiting" });
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+for (const failedMethod of ["setBadgeBackgroundColor", "setBadgeText"]) {
+  test(`${failedMethod} rejection does not abort later action surfaces`, async () => {
+    const chrome = installChromeStub(new Set([failedMethod]));
+    const bundle = await loadModule("src/origins.ts");
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args);
+    try {
+      const origins = await bundle.import(failedMethod);
+      let observed = 0;
+      origins.setPendingObserver(() => { observed += 1; });
+      await origins.raiseAccessRequest(url("https://failure.example"), "session:failure");
+      assert.ok(chrome.actionCalls.some(([method]) => method === "setBadgeText"));
+      assert.deepEqual(lastAction(chrome, "setTitle"), { title: "1 site request waiting" });
+      assert.ok(observed > 0, "notification observer must still run");
+      assert.ok(warnings.some((args) => args.some((value) => String(value).includes(failedMethod))));
+    } finally {
+      console.warn = originalWarn;
+      await bundle.close(); chrome.restore();
+    }
+  });
+}
 
 test("concurrent enqueue preserves FIFO and separates same-origin requesters", async () => {
   const chrome = installChromeStub();
