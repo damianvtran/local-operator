@@ -1,6 +1,7 @@
 import {
   loopbackHostGrantKey,
   loopbackHostGrantLabel,
+  matchingGrantScope,
   type HostGrant,
   type HostGrantsState,
   validHostGrantSchema,
@@ -30,7 +31,14 @@ export function normalizedHostGrants(value: unknown): HostGrantsState | null {
 }
 
 export async function grantExactOriginLocked(origin: string): Promise<boolean> {
-  const { origins = {} } = await chrome.storage.local.get(["origins"]);
+  const url = new URL(origin);
+  const { origins = {}, hostGrants } = await chrome.storage.local.get([
+    "origins",
+    "hostGrants",
+  ]);
+  // A broad grant already covers this exact origin. Do not recreate a hidden
+  // redundant row after the broad approval compacted it away.
+  if (matchingGrantScope({}, hostGrants, url) === "loopback_all_ports") return true;
   await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
   return true;
 }
@@ -52,10 +60,28 @@ export function revokeExactOrigin(origin: string): Promise<boolean> {
 export async function grantLoopbackHostLocked(url: URL): Promise<boolean> {
   const canonicalKey = loopbackHostGrantKey(url);
   if (!canonicalKey) return false;
-  const { hostGrants } = await chrome.storage.local.get(["hostGrants"]);
+  const { hostGrants, origins = {} } = await chrome.storage.local.get([
+    "hostGrants",
+    "origins",
+  ]);
   if (hostGrants !== undefined && !normalizedHostGrants(hostGrants)) return false;
   const current = normalizedHostGrants(hostGrants) ?? { version: 1 as const, grants: {} };
+  const remainingOrigins = Object.fromEntries(
+    Object.entries(origins).filter(([origin, verdict]) => {
+      if (verdict !== "allow") return true;
+      try {
+        const exact = new URL(origin);
+        return exact.protocol !== url.protocol || exact.hostname !== url.hostname;
+      } catch {
+        // Unknown legacy entries are not ours to discard.
+        return true;
+      }
+    }),
+  );
+  // One multi-key storage write is the durable transaction: failure cannot
+  // report success after cleaning exact grants without storing the broad one.
   await chrome.storage.local.set({
+    origins: remainingOrigins,
     hostGrants: {
       version: 1,
       grants: {

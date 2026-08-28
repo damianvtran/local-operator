@@ -76,6 +76,8 @@ test("settings list and revoke exact and all-port grants independently", async (
       "Remove this-port grant for http://localhost:5173",
     ]);
     assert.equal(new Set(accessibleNames).size, rows.length, "each Remove control is distinguishable");
+    const compactRows = module.loaded.grantRows({}, hostGrants);
+    assert.deepEqual(compactRows.map((row) => row.label), ["http://localhost · all ports"]);
     assert.equal(origins["http://localhost:5173"], "allow", "exact grant remains");
 
     assert.deepEqual(
