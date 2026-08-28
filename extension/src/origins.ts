@@ -43,8 +43,8 @@ export function setPendingObserver(observer: (snapshot: QueueSnapshot) => void):
 }
 
 export async function originAllowed(url: URL): Promise<boolean> {
-  const { origins = {} } = await getLocal();
-  return storedOriginAllowed(origins, url);
+  const { origins = {}, hostGrants } = await getLocal();
+  return storedOriginAllowed(origins, url, hostGrants);
 }
 
 export interface OriginAdmission {
@@ -137,7 +137,7 @@ export async function resolveOrigin(
   decision: OriginDecision,
   entryId: string = "",
 ): Promise<boolean> {
-  if (!entryId) return false;
+  if (!entryId || !["once", "always", "all_ports", "deny"].includes(decision)) return false;
   const result = await decideAccess(entryId, decision);
   if (!result.applied) return false;
   // decideAccess persisted receipts before releasing the mutation lock; the

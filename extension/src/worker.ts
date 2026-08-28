@@ -7,9 +7,11 @@ import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
+import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
+import { reconcileCommandTab } from "./tab-groups";
 import {
   RECONNECT_ALARM_NAME,
   RECONNECT_ALARM_PERIOD_MINUTES,
@@ -130,6 +132,9 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     return;
   }
   try {
+    // Rename propagation is presentation-only and deliberately precedes every
+    // owned-tab command; failures never mask the command's real result.
+    if (request.method !== "open") await reconcileCommandTab(request.params);
     const result = await handler(request.params, request.id);
     // Push the driven page so the daemon (and the Connected popup) can show
     // the human what the agent is on (finding U3).
@@ -311,6 +316,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Decisions are keyed by ORIGIN (finding A6) and carry the prompt
   // GENERATION the popup rendered (round-2 B1): resolveOrigin rejects a
   // decision for a prompt that was replaced after the popup drew it.
+  if (message?.event === "origin_grant_revoke") {
+    revokeExactOrigin(String(message.origin))
+      .then((applied) => sendResponse({ applied }))
+      .catch(() => sendResponse({ applied: false }));
+    return true;
+  }
+  if (message?.event === "host_grant_revoke") {
+    revokeLoopbackHost(String(message.canonicalKey))
+      .then((applied) => sendResponse({ applied }))
+      .catch(() => sendResponse({ applied: false }));
+    return true;
+  }
+  if (message?.event === "clear_access_grants") {
+    clearAllAccessGrants()
+      .then((applied) => sendResponse({ applied }))
+      .catch(() => sendResponse({ applied: false }));
+    return true;
+  }
   if (message?.event === "origin_decision") {
     // sendResponse + `return true` keeps the MV3 event alive until the
     // decision is DURABLY recorded (record, grant, allowlist, prompt

@@ -6,7 +6,7 @@
  * currently reviewing. Keeping ordering boring is intentional: it makes two
  * popup contexts and a restarted worker converge on the same next entry. */
 
-export type OriginDecision = "once" | "always" | "deny";
+export type OriginDecision = "once" | "always" | "all_ports" | "deny";
 export type AccessKind = "async" | "in_command";
 export type AccessState = "allowed" | "denied" | "pending" | "cancelled" | "superseded" | "none";
 
@@ -155,9 +155,24 @@ export function receiptForRequester(
     .sort((a, b) => b.decidedAt - a.decidedAt)[0];
 }
 
-/** Current policy hook. Keeping matching centralized lets a later grant_scope
- * implementation broaden loopback policy without teaching reconciliation a
- * second, subtly different definition of "covered". */
-export function policyCovers(grantedOrigin: string, candidateOrigin: string): boolean {
-  return grantedOrigin === candidateOrigin;
+/** The one reconciliation matcher for durable grants. Exact grants retain
+ * origin semantics; loopback all-port grants cover only the same scheme and
+ * exact literal hostname, never aliases, IP families, or HTTP/HTTPS peers. */
+export function policyCovers(
+  grantedOrigin: string,
+  candidateOrigin: string,
+  scope: "origin" | "loopback_all_ports" = "origin",
+): boolean {
+  if (scope === "origin") return grantedOrigin === candidateOrigin;
+  try {
+    const granted = new URL(grantedOrigin);
+    const candidate = new URL(candidateOrigin);
+    return (
+      granted.protocol === candidate.protocol &&
+      granted.hostname === candidate.hostname &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(granted.hostname)
+    );
+  } catch {
+    return false;
+  }
 }
