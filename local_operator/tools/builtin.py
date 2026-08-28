@@ -8035,7 +8035,7 @@ def _report_secret_answers(
         if getattr(result, "ok", False) and isinstance(key, str):
             reported[question.id] = [key]
             # Announce only on a successful store, and only the KEY: the
-            # announcement is journaled to the transcript and sent to the
+            # announcement is journaled into the live context and sent to the
             # provider, so the value must never ride it.
             if callable(announce):
                 try:

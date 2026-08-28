@@ -33,9 +33,14 @@ SESSION_INCIDENT_MESSAGE_TYPE = "session_incident"
 #: system-prompt tail, which the model has no reason to re-read when it
 #: changes — so an operator who runs ``/credential FOO_KEY`` and says "I just
 #: added the key" left the model to guess names until it happened to notice
-#: the tail. This message lands in the live context (and is persisted, so a
-#: resumed session replays it) naming the KEY ONLY: the value must never ride
-#: a message the provider sees.
+#: the tail. This message lands in the LIVE context only, naming the KEY
+#: ONLY: the value must never ride a message the provider sees. It is
+#: deliberately NOT persisted — credentials are process-memory-only, so a
+#: replayed "$FOO_KEY is injected into every bash command" would assert an
+#: env var a restarted session does not have (review round 1, R2). Resume-time
+#: discovery is already served honestly by the ``<session-credentials>``
+#: block, which the prompt tail rebuilds from the (empty) live store each
+#: turn.
 SESSION_CREDENTIAL_MESSAGE_TYPE = "session_credential"
 
 #: Custom-message type journaled by the session when the running model changes

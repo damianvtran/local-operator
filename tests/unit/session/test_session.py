@@ -1299,8 +1299,11 @@ async def test_a_knob_only_change_does_not_journal_a_switch(tmp_path):
 @pytest.mark.asyncio
 async def test_credential_change_is_journaled_and_model_visible(tmp_path):
     """Storing a credential mid-session must ANNOUNCE itself into the live
-    context (rendered as a user turn) and persist for resume — the fix for a
-    model that never learned a key its operator had just stored."""
+    context (rendered as a user turn) — the fix for a model that never
+    learned a key its operator had just stored. The record is deliberately
+    NOT persisted: credentials are process-memory-only, so a replayed
+    announcement would assert an env var a restarted session does not have
+    (review round 1, R2)."""
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream)
     secret = "ghp_value_that_must_never_ride_a_message"
@@ -1330,17 +1333,88 @@ async def test_credential_change_is_journaled_and_model_visible(tmp_path):
     rendered = "\n".join(getattr(m, "text", "") for m in stream.requests[0].messages)
     assert "[session credential] OSWORLD_OPENAI_API_KEY" in rendered
     assert secret not in rendered
-    # Persisted, so a resumed session replays the announcement.
+    # Live-context ONLY: the record must not reach the transcript, or a
+    # resume would replay a live-capability claim for an env var the
+    # restarted session does not have (R2).
+    await wait_for(
+        lambda: len(list(session._transcript.entries())) > 0,
+        timeout=1.0,
+    )
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert SESSION_CREDENTIAL_MESSAGE_TYPE not in dumped
+    assert not _is_persistable_message(records[-1])
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_credential_announcement_does_not_replay_on_resume(tmp_path):
+    """R2: the announcement is live-context-only, so a session reopened from
+    the same transcript must NOT replay "[session credential] X was just
+    stored" — the store is process-memory-only and the restarted session has
+    no such env var. The honest resume advertisement is the
+    ``<session-credentials>`` prompt-tail block, rebuilt from the live (empty)
+    store each turn."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    session.journal_credential_change("OSWORLD_OPENAI_API_KEY")
+    await session.prompt("use the key I just gave you")
+    # Give the post-turn persistence pass a beat, then prove the LIVE session
+    # saw the announcement (the request carried it)…
+    await wait_for(lambda: len(stream.requests) == 1)
+    rendered = "\n".join(getattr(m, "text", "") for m in stream.requests[0].messages)
+    assert "[session credential] OSWORLD_OPENAI_API_KEY" in rendered
+    await session.dispose()
+
+    # …and the REOPENED session does not: replaying the transcript must
+    # contain no credential record (the turn's real messages do persist).
+    replayed = Transcript(session._transcript.directory).build_llm_history()
+    texts = [getattr(m, "text", "") for m in replayed if isinstance(m, Message)]
+    assert any("use the key I just gave you" in t for t in texts), texts
+    assert not any("[session credential]" in t for t in texts), texts
+    # A session constructed over that transcript (what --resume does) starts
+    # with no credential announcement in context either.
+    resumed = make_session(
+        session._transcript.directory,
+        ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+    )
+    assert not any(
+        isinstance(m, CustomMessage) and m.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+        for m in resumed._context.messages
+    )
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_credential_announcement_survives_into_compaction_kept_window_only_as_live(tmp_path):
+    """R2 corollary: a compaction pass must not bake the live credential
+    record into the kept window. The kept window is rebuilt from
+    ``_render_for_compaction``, and a rendered record is a plain user Message
+    carrying the same id — which the turn-end persist pass would then write,
+    resurrecting the stale-on-resume replay the allow-list removal closed."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    session.journal_credential_change("OSWORLD_OPENAI_API_KEY")
     await wait_for(
         lambda: any(
-            e.get("custom_type") == SESSION_CREDENTIAL_MESSAGE_TYPE
-            for e in session._transcript.build_llm_history()
-            if isinstance(e, dict)
+            isinstance(m, CustomMessage) and m.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+            for m in session._context.messages
         )
-        or any(
-            getattr(e, "custom_type", None) == SESSION_CREDENTIAL_MESSAGE_TYPE
-            for e in session._transcript.build_llm_history()
-        )
+    )
+    # The REQUEST render still carries it (the live announcement is the fix
+    # for the model that never re-reads the tail)…
+    rendered_request = session._render_history(session._context.messages)
+    assert any(
+        "[session credential] OSWORLD_OPENAI_API_KEY" in getattr(m, "text", "")
+        for m in rendered_request
+    )
+    # …but the compaction render excludes it, so a pass that cuts anywhere
+    # cannot bake it into the kept window.
+    rendered_compaction = session._render_for_compaction()
+    assert not any(
+        "[session credential] OSWORLD_OPENAI_API_KEY" in getattr(m, "text", "")
+        for m in rendered_compaction
     )
     await session.dispose()
 

@@ -12991,8 +12991,13 @@ class OperatorApp(App[None]):
             notice(format_credential_forget(removed, parsed.key))
             return
         if parsed.action == "forget-all":
+            # Snapshot the names BEFORE the clear: clear_credentials() empties
+            # the store, so iterating credential_names() after it reads an
+            # empty list and the model is never told anything was removed
+            # (review round 1, R1 — the loop below was dead code as written).
+            names = store.credential_names()
             count = store.clear_credentials()
-            for key in store.credential_names():
+            for key in names:
                 self._journal_credential_change(key, action="forgot")
             notice(format_credential_forget_all(count))
             return
@@ -13015,9 +13020,8 @@ class OperatorApp(App[None]):
             return
         # Announce AFTER a successful store and through the session's journal
         # (never a bare transcript write): the announcement must land in the
-        # live context AND the persisted transcript, so the next turn — and a
-        # resumed session — both see it. This is the fix for the model that
-        # never learned a key its operator had just stored
+        # live context so the next turn sees it. This is the fix for the
+        # model that never learned a key its operator had just stored
         # (session 835fbcafdc27).
         self._journal_credential_change(result.credential.key, replaced=bool(result.replaced))
         verb = "Replaced" if result.replaced else "Stored"

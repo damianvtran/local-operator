@@ -520,7 +520,15 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
-        SESSION_CREDENTIAL_MESSAGE_TYPE,
+        # SESSION_CREDENTIAL_MESSAGE_TYPE is deliberately absent: a credential
+        # announcement asserts a LIVE capability ("$KEY is injected into every
+        # bash command") against a store that is process-memory-only. A
+        # replayed record would tell a restarted session an env var is present
+        # when bash will not have it — stale by definition, the same class as a
+        # transient model-switch fallback (review round 1, R2). Resume-time
+        # discovery is served by the ``<session-credentials>`` prompt-tail
+        # block, which is rebuilt from the live store every turn and so
+        # correctly shows nothing after a restart.
     }
 )
 
@@ -1899,9 +1907,39 @@ class Session:
         tool calls; the post-turn gate and ``/compact`` run later still), a
         resume drops it anyway, and the guardrail re-arms on the next list
         movement or user turn.
+
+        A ``session_credential`` record is filtered for the SAME reason (review
+        round 1, R2): it is not persisted (see
+        :data:`_PERSISTABLE_CUSTOM_TYPES`), but unlike a reminder it sits at
+        the RECENT end of the context — exactly where the kept window is — so
+        the default render would bake it into ``kept`` as a plain
+        ``Message(role="user")`` carrying the same id, and the turn-end
+        persist pass (which persists every plain Message) would then write it
+        to the transcript after all, resurrecting the stale-on-resume replay
+        the allow-list removal closed. Excluding it here keeps the live
+        announcement in the REQUEST render (``_render_history``, untouched)
+        while the rebuild the compaction commit owns stays persisted-only.
         """
+
+        def _is_ephemeral_for_compaction(message: AgentMessage) -> bool:
+            """Whether ``message`` must stay out of the compaction render.
+
+            Named rather than inlined because BOTH filters are
+            live-context-only injections whose rendered (id-carrying) copy
+            would otherwise be baked into the kept window and persisted by the
+            turn-end pass despite never being transcript material.
+            """
+            return _is_todo_reminder(message) or (
+                isinstance(message, CustomMessage)
+                and message.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
+            )
+
         return self._render_history(
-            [message for message in self._context.messages if not _is_todo_reminder(message)],
+            [
+                message
+                for message in self._context.messages
+                if not _is_ephemeral_for_compaction(message)
+            ],
             keep_images=keep_images,
         )
 
@@ -4658,9 +4696,12 @@ class Session:
         operator's ``I just added the API key`` left it guessing names until
         it noticed the tail by accident (session 835fbcafdc27: ten minutes
         between the store and the model finding the real key name). This
-        appends a ``session_credential`` message that renders as a user turn,
-        naming the KEY only — the value never rides a message the provider
-        sees.
+        appends a ``session_credential`` message to the LIVE context that
+        renders as a user turn, naming the KEY only — the value never rides a
+        message the provider sees. The record is deliberately NOT persisted:
+        credentials are process-memory-only, so a replayed announcement would
+        assert an env var a restarted session does not have (review round 1,
+        R2).
 
         SYNC, unlike :meth:`journal_model_switch`: the TUI's
         ``/credential`` flow and the ``ask`` tool both call this from the
@@ -4691,12 +4732,18 @@ class Session:
                 "replaced": replaced,
             },
         )
-        # Live context first (synchronous, so the very next turn sees it),
-        # then the durable write in the background: resume replays the
-        # announcement, which is what tells a restored session which names
-        # exist without re-reading the whole tail.
+        # Live context ONLY (review round 1, R2). The announcement asserts a
+        # live capability — "$KEY is injected into every bash command" —
+        # against a store that is process-memory-only and rebuilt empty on
+        # every start. Persisting it meant a resumed session replayed the
+        # claim as a user turn for an env var bash no longer has. The
+        # mid-session discovery problem this fixes (the model never re-reads
+        # the prompt tail) is fully served by the live append; resume-time
+        # discovery is served by the ``<session-credentials>`` tail block,
+        # which is rebuilt from the live store each turn and so correctly
+        # shows nothing after a restart. Mirrors the transient model-switch
+        # split (``_is_persistable_message``).
         self._append_or_park_journal(message)
-        self._spawn_background(self._transcript.append_message(message))
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
         """MCP manager hook (breaker trips): journal without blocking the
