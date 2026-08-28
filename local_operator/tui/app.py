@@ -172,6 +172,11 @@ from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
 )
+from local_operator.tui.widgets.settings_view import (
+    SettingsChanged,
+    SettingsView,
+    SettingsViewDismissed,
+)
 from local_operator.tui.widgets.status_line import (
     ICON_MCP,
     McpStatus,
@@ -440,6 +445,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     # The listing is the receipt.
     SlashCommand("provider", "List providers and their login/usage state"),
+    # The PAGE is the receipt, the same rule `/usage` and `/analytics` follow:
+    # it replaces the transcript region, so a notice printed behind it would
+    # only be readable after leaving. Beside `/theme` and `/search` because it
+    # is the surface that contains both of them.
+    SlashCommand("settings", "Change every setting on one page", aliases=("config",)),
     SlashCommand("search", "Configure web search providers and load balancing"),
     # The listing is the receipt.
     SlashCommand("accounts", "List stored credentials"),
@@ -961,6 +971,11 @@ SUBAGENT_COMPACT_MAX_ROWS = 24
 #: ``_open_org_chart_view``/``_close_org_chart_view``. Named to match its
 #: ``Screen.org-chart`` tcss block, the sibling of ``Screen.subagent``.
 ORG_CHART_LAYOUT_CLASS = "org-chart"
+
+#: The screen class the settings mode adds, flipped only in
+#: ``_open_settings_view``/``_close_settings_view``. Named to match its
+#: ``Screen.settings`` tcss block, the sibling of ``Screen.org-chart``.
+SETTINGS_LAYOUT_CLASS = "settings"
 
 #: Class the SCREEN carries while the `/btw` aside card owns the composer. The
 #: transcript is inert then — Enter goes to the card — so it recedes behind it,
@@ -1918,6 +1933,11 @@ class OperatorApp(App[None]):
         # same way they close the subagent view.
         self._org_chart_view: Any | None = None
         self._org_chart_focus_restore: Any | None = None
+        # The settings mode (``/settings``), a third sibling of the same MODE
+        # contract. Held here for the same reason the two above are: the Esc
+        # chain and every approval/ask/clear yield close it the same way.
+        self._settings_view: Any | None = None
+        self._settings_focus_restore: Any | None = None
         # What the aside borrowed and owes back. The card has no input of its
         # own — the ONE composer is pointed at it — so opening the aside has to
         # stash whatever the user had half typed for the main chat, and Esc has
@@ -3287,6 +3307,10 @@ class OperatorApp(App[None]):
         # The org-chart mode is reclaimed for the same reason: it hides the
         # transcript being replaced, so it cannot outlive the conversation.
         self._close_org_chart_view()
+        # The settings page too. It is not about the conversation at all, but
+        # it hides the same region, so leaving it mounted would put a config
+        # editor over a transcript that has just been replaced underneath it.
+        self._close_settings_view()
         # The aside goes too, and this is the general form of the interrupt
         # case. It is a question ABOUT a conversation that is being replaced,
         # answered from a context that is about to be torn down, and it is
@@ -6078,6 +6102,7 @@ class OperatorApp(App[None]):
         # Replaced rather than repeated, so three interrupts leave one hint.
         self._close_subagent_view()
         self._close_org_chart_view()
+        self._close_settings_view()
         # The aside goes with it, for the reason the hint below exists at all.
         # The card floats over the transcript at one elevation step, so a
         # notice appended behind it is drawn where it cannot be read — and this
@@ -6223,6 +6248,12 @@ class OperatorApp(App[None]):
         # and sits at the same precedence: a chart open over the conversation is
         # dismissed before Esc means anything else.
         if self._close_org_chart_view():
+            return
+        # The settings page sits at the same precedence, with one difference it
+        # owns itself: its OWN Esc handler runs the ladder first (editor, then
+        # expansion), so by the time Esc reaches here the page has nothing left
+        # to close and leaving is the right answer.
+        if self._close_settings_view():
             return
         # A live `ask` picker takes Escape as "leave this question unanswered",
         # which is what its own footer advertises (`esc skip`) and what its
@@ -6658,6 +6689,9 @@ class OperatorApp(App[None]):
         # transcript the prompt is a block in, so a question raised while it is
         # open would be invisible and the turn would park unanswerably.
         self._close_org_chart_view()
+        # And the settings page, which hides that same region. An approval is
+        # the one thing a user must not be able to miss.
+        self._close_settings_view()
         # The aside yields for the identical reason, one layer up: the card
         # floats OVER the transcript, so the question would be drawn behind it
         # while still taking focus off the composer the card is pointed at —
@@ -6776,6 +6810,7 @@ class OperatorApp(App[None]):
         # The same yield the approval prompt makes, for the same reason.
         self._close_subagent_view()
         self._close_org_chart_view()
+        self._close_settings_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
         self._ask_screen = card
@@ -7277,6 +7312,7 @@ class OperatorApp(App[None]):
         # that would read as the key having done nothing.
         self._close_subagent_view()
         self._close_org_chart_view()
+        self._close_settings_view()
         # Same rule for the aside card, and the same sentence: Ctrl+L acts on
         # the CONVERSATION, and the aside is a floating question about it that
         # is also holding the composer. Wiping the ledger under an open card
@@ -9352,6 +9388,158 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_org_chart_view()
 
+    def _cmd_settings(self, notice: NoticeFn) -> None:
+        """``/settings`` — open the full-page settings surface.
+
+        Frontend-LOCAL (see ``_FRONTEND_LOCAL_SLASHES``): the page reads and
+        writes THIS machine's config.yml, so a follower must not route it to
+        the session owner and persist onto the wrong machine.
+
+        ``_system_notice`` is deliberately NOT used to announce the open: the
+        page replaces the transcript region entirely, so a notice printed
+        behind it would only be seen after leaving — the surface is its own
+        receipt, the same rule ``/usage`` and ``/analytics`` follow.
+        """
+        self._open_settings_view()
+
+    def _open_settings_view(self) -> None:
+        """Enter the full-page settings mode.
+
+        A MODE of this screen, cloned from :meth:`_open_org_chart_view`: the
+        transcript region is replaced while the dock stays put and greyed
+        (``Screen.settings``). Opening it a second time is a no-op rather than
+        a remount — there is only one settings page, so a repeat ``/settings``
+        should leave the user where they were rather than resetting their
+        cursor to the top of the list.
+
+        The read-only content (teams, agents, provider state) is resolved HERE
+        and handed to the widget, so a repaint costs no registry or credential
+        I/O — the same split the org chart makes with its resolved tree.
+        """
+        if self._settings_view is not None:
+            return
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        # Captured before anything is blurred: this is where Esc puts the user
+        # back, almost always the composer.
+        self._settings_focus_restore = self.focused
+        view = SettingsView(ConfigManager(config_dir()))
+        self._settings_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._set_composer_read_only(True)
+        # Seeded BEFORE the deferred mount-time repaint lands, the same
+        # deliberate ordering ``_open_org_chart_view`` documents: ``mount``
+        # posts ``on_mount`` rather than running it, so this ``load`` is what
+        # makes the FIRST painted frame the populated one instead of an empty
+        # pane that fills in a tick later (a visible reflow).
+        view.load(
+            teams=self._settings_team_rows(),
+            agents=self._agent_profile_rows(),
+            providers=self._settings_provider_rows(),
+        )
+
+    def _settings_team_rows(self) -> list[tuple[str, str, str]]:
+        """Teams as ``(name, facts, summary)`` for the settings pane.
+
+        The SAME shape ``_agent_profile_rows`` already returns, so the pane
+        renders both listings through one row renderer rather than carrying a
+        second layout for a second registry. Never raises: an unreadable
+        registry renders as an empty pane, and a settings page that crashed on
+        a broken team file would be unreachable exactly when it is needed.
+        """
+        rows: list[tuple[str, str, str]] = []
+        try:
+            for team in self._team_choices():
+                rows.append((team.name, team.detail or "team", team.description or ""))
+        except Exception:  # noqa: BLE001 — a bad registry must not break the page
+            logger.debug("settings: team rows unavailable", exc_info=True)
+        return rows
+
+    def _settings_provider_rows(self) -> list[tuple[str, str]]:
+        """Logged-in providers as ``(id, state)`` for the settings pane.
+
+        Uses ``_credential_state`` rather than a locally-invented vocabulary,
+        so this pane, ``/provider`` and the ``/login`` picker keep describing
+        one situation with one set of words — the drift that surface already
+        records having had.
+        """
+        rows: list[tuple[str, str]] = []
+        providers = self._providers
+        if providers is None:
+            return rows
+        try:
+            for definition in providers.login_providers():
+                if not providers.has_any_credential(definition.id):
+                    # Only the providers the user actually has a credential for.
+                    # The full catalogue is `/provider`'s job; this pane answers
+                    # the narrower "who am I logged in as", which is the half
+                    # that bears on which default model will work.
+                    continue
+                rows.append(
+                    (
+                        definition.id,
+                        self._credential_state(definition.id, True),
+                    )
+                )
+        except Exception:  # noqa: BLE001 — never crash the page on a store read
+            logger.debug("settings: provider rows unavailable", exc_info=True)
+        return rows
+
+    def _close_settings_view(self) -> bool:
+        """Leave the settings mode and put the conversation back. True if open.
+
+        Mirror of :meth:`_close_org_chart_view`: everything the mode changed is
+        restored here and nowhere else. The transcript was only hidden, so it
+        comes back with its blocks, scroll position, and any half-typed prompt
+        exactly as they were left.
+        """
+        view = self._settings_view
+        if view is None:
+            return False
+        self._settings_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._set_composer_read_only(False)
+        restore = self._settings_focus_restore
+        self._settings_focus_restore = None
+        try:
+            (restore or self._editor()).focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_settings_view_dismissed(self, message: SettingsViewDismissed) -> None:
+        """The page's ``esc`` hint was clicked — same exit as the key itself."""
+        message.stop()
+        self._close_settings_view()
+
+    def on_settings_changed(self, message: SettingsChanged) -> None:
+        """Apply a written setting to the surfaces already on screen.
+
+        The page STORES; the app is what knows a stored value means something
+        to a widget that is already painted. Only the settings with a live
+        effect need anything here — the rest are read when a session or a
+        launch is built, which is what the section's scope tag tells the user.
+
+        Guarded end to end: a live-apply failure must not make the write look
+        like it failed, because it did not — the value is on disk either way.
+        """
+        message.stop()
+        try:
+            if message.key == "tui.theme" and message.value:
+                self._apply_theme(str(message.value))
+            elif message.key.startswith("display."):
+                # The display flags are read through the cached fast path, which
+                # `settings_io` already invalidated; the widgets that resolved a
+                # flag at build time still need telling.
+                self._repaint_themed_widgets()
+        except Exception:  # noqa: BLE001 — the write landed; the repaint is a bonus
+            logger.debug("settings: live apply failed for %s", message.key, exc_info=True)
+
     def _refresh_subagent_view(self, job_id: str | None = None) -> None:
         """Repaint the open view from the ledger's CURRENT state.
 
@@ -10058,6 +10246,8 @@ class OperatorApp(App[None]):
             self._cmd_theme(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
+        elif command == "/settings":
+            self._cmd_settings(notice)
         elif command == "/search":
             self._cmd_search(arg, notice)
         elif command == "/accounts":
@@ -13624,6 +13814,7 @@ class OperatorApp(App[None]):
         # the same reason.
         self._close_subagent_view()
         self._close_org_chart_view()
+        self._close_settings_view()
         self._close_aside()
         block = KeyPromptBlock(provider_label, secret=secret, sole_path=sole_path)
         self._key_prompt = block
