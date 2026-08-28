@@ -37,7 +37,9 @@ export interface SnapshotRef {
 
 export interface PendingOrigin {
   origin: string;
-  hostname: string;
+  /** Browser-normalized authority shown to the user, including any
+   * nondefault port and IPv6 brackets. */
+  authority: string;
   requestId: string;
   // Immutable per-PROMPT generation token, minted every time the prompt slot
   // is (re)written. The popup binds its rendered view and its decision message
@@ -59,6 +61,7 @@ export interface LocalState {
   token?: string;
   port?: number;
   origins?: Record<string, "allow" | "deny">;
+  hostGrants?: import("./origin-policy").HostGrantsState;
 }
 
 export interface SessionState {
@@ -77,7 +80,7 @@ export interface SessionState {
 }
 
 export async function getLocal(): Promise<LocalState> {
-  return chrome.storage.local.get(["token", "port", "origins"]);
+  return chrome.storage.local.get(["token", "port", "origins", "hostGrants"]);
 }
 
 export async function getSession(): Promise<SessionState> {

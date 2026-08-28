@@ -1,3 +1,4 @@
+import { displayAuthority, isLoopbackHost } from "../origin-policy";
 import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
@@ -120,15 +121,19 @@ async function render(): Promise<void> {
     showOriginAck(decidedOrigin!.decision);
     return;
   }
-  const pendingHost = pendingOrigin?.hostname || hostnameOf(health?.pending_origin);
-  if (pendingHost) {
+  const pendingAuthority = pendingOrigin?.authority || authorityOf(health?.pending_origin);
+  if (pendingAuthority) {
     // The heading is fixed prose; the host — the string the user must verify
     // before granting a standing browsing grant — goes in the monospace trough
     // where it renders intact and reads unambiguously as data (D11). The
     // heading id stays constant, so no per-host text in the serif face.
     const host = document.getElementById("origin-host");
-    if (host) host.textContent = pendingHost;
+    if (host) host.textContent = pendingAuthority;
     shownPromptOrigin = pendingOriginValue;
+    const loopback = isLoopbackOrigin(pendingOriginValue);
+    document.getElementById("origin-all-ports")?.classList.toggle("hidden", !loopback);
+    const always = document.getElementById("origin-always");
+    if (always) always.textContent = loopback ? "Always this port" : "Always allow";
     shownPromptId = pendingOrigin?.promptId ?? "";
     // A fresh prompt must arrive with live buttons even if a previous
     // decision's lock is still set.
@@ -188,12 +193,21 @@ async function render(): Promise<void> {
   show(viewForHealth(false, locallyPaired));
 }
 
-function hostnameOf(origin: string | undefined): string {
+function authorityOf(origin: string | undefined): string {
   if (!origin) return "";
   try {
-    return new URL(origin).hostname;
+    return displayAuthority(new URL(origin));
   } catch {
     return origin;
+  }
+}
+
+function isLoopbackOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  try {
+    return isLoopbackHost(new URL(origin));
+  } catch {
+    return false;
   }
 }
 
@@ -311,13 +325,14 @@ document.getElementById("retry")?.addEventListener("click", () => void render())
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
 document.getElementById("origin-allow")?.addEventListener("click", () => void decide("once"));
 document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
+document.getElementById("origin-all-ports")?.addEventListener("click", () => void decide("all_ports"));
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
 
-// Lock the three consent buttons the moment one is clicked: the session-storage
+// Lock every consent button the moment one is clicked: the session-storage
 // read below is async, and a second click in that window would double-send the
 // decision. render()'s prompt path unlocks for the next genuine prompt.
 function setOriginBusy(busy: boolean): void {
-  for (const id of ["origin-allow", "origin-always", "origin-deny"]) {
+  for (const id of ["origin-allow", "origin-always", "origin-all-ports", "origin-deny"]) {
     const button = document.getElementById(id) as HTMLButtonElement | null;
     if (button) button.disabled = busy;
   }

@@ -428,6 +428,31 @@ async def test_request_access_reports_already_allowed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_access_reports_loopback_all_ports_scope(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        return {
+            "origin": "http://[::1]:8000",
+            "state": "allowed",
+            "grant_scope": "loopback_all_ports",
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "request_access", "url": "http://[::1]:8000"},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert "http://[::1] is allowed on all ports" in result.text
+    assert result.details is not None
+    assert result.details["grant_scope"] == "loopback_all_ports"
+
+
+@pytest.mark.asyncio
 async def test_await_access_returns_decision_and_denied_warns_off_retry(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)

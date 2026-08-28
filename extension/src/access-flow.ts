@@ -22,7 +22,7 @@
  * and letting a different agent ride it turns one approval into a fleet-wide
  * permission — indistinguishable from "always" for the other sessions. */
 
-export type OriginDecision = "once" | "always" | "deny";
+export type OriginDecision = "once" | "always" | "all_ports" | "deny";
 
 /** What request_access/await_access report back to the agent. "none" means no
  * live request exists FOR THE CALLER (never raised, expired, or superseded);
