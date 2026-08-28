@@ -827,19 +827,25 @@ def config_edit_command(args: argparse.Namespace) -> int:
 
     config_manager = ConfigManager(config_dir())
 
-    # Validate the key against the shipped defaults BEFORE writing. The old
+    # Validate the key against the SCHEMA before writing. The old
     # ``except KeyError`` was dead code \u2014 ``update_config`` calls
     # ``Config.set_value`` which is a plain ``dict.__setitem__`` and never
     # raises for an unknown key \u2014 so a typo like ``config edit hostng radient``
     # printed "Successfully updated hostng" and wrote a junk key the app never
     # reads. difflib names the closest real key so the fix is one glance away.
-    from local_operator.config import DEFAULT_CONFIG
+    #
+    # The key set is ``settings_io``'s and no longer ``DEFAULT_CONFIG.values``,
+    # which held only TOP-LEVEL keys. Every dotted key was rejected outright,
+    # including ``display.terminal_title`` — which the TUI itself instructs the
+    # user to run this exact command for. The app told them to type a command
+    # that could only exit 1.
+    from local_operator import settings_io
 
-    valid_keys = set(DEFAULT_CONFIG.values.keys())
-    if args.key not in valid_keys:
+    setting = settings_io.resolve_key(args.key)
+    if setting is None:
         import difflib
 
-        close = difflib.get_close_matches(args.key, sorted(valid_keys), n=1)
+        close = difflib.get_close_matches(args.key, settings_io.valid_keys(), n=1)
         hint = f" Did you mean '{close[0]}'?" if close else ""
         print(
             paint(
@@ -875,13 +881,22 @@ def config_edit_command(args: argparse.Namespace) -> int:
             # Keep as string if conversion fails
             pass
 
-        config_manager.update_config(
-            {args.key: value},
-            write=True,
-        )
+        # Through the facade rather than ``update_config``: a dotted key needs
+        # the merge-into-existing-sub-mapping rule (a whole-mapping write drops
+        # the siblings ``_load_config`` never back-fills), and the flat
+        # ``display.*`` keys need their dot treated as literal rather than as a
+        # level of nesting. ``write_setting`` validates as well, so an
+        # out-of-range number is now refused here instead of being stored and
+        # silently clamped by whichever consumer reads it.
+        settings_io.write_setting(config_manager, setting, value)
 
         print(f"Successfully updated {args.key} to {value}")
         return 0
+    except ValueError as e:
+        # A schema rejection is a typo, not a crash: state the rule that was
+        # broken rather than wrapping it in "error updating configuration".
+        print(paint(f"Error: {args.key}: {e}", ERROR, stream=sys.stderr), file=sys.stderr)
+        return 1
     except Exception as e:
         # 1, not -1: a shell sees -1 as 255, which collides with the
         # xargs/ssh "command not found" sentinel and contradicts the
@@ -893,14 +908,24 @@ def config_edit_command(args: argparse.Namespace) -> int:
 
 
 def config_list_command() -> int:
-    """List available configuration options and their descriptions."""
+    """List available configuration options and their descriptions.
+
+    Lists the SCHEMA rather than whatever happens to be stored. The old loop
+    walked ``config.values``, so a nested key was shown as a raw dict blob
+    (``retry: {'enabled': True, ...}``) and any key the user had never set was
+    absent entirely — which made this the wrong answer to "what can I set?",
+    the question `config edit`'s own error message sends people here to ask.
+    Each row now names a key `config edit` accepts, one per line.
+    """
+    from local_operator import settings_io
+
     config_manager = ConfigManager(config_dir())
     config = config_manager.get_config()
 
-    # Configuration descriptions. conversation_length / detail_length /
-    # max_learnings_history are DEPRECATED (CL-16): the compaction engine
-    # supersedes them — retention is governed by `values.compaction.*` now;
-    # the keys stay readable but are inert.
+    # Legacy descriptions kept for the two keys the schema does not carry
+    # (`compaction` and `tui` as whole mappings, listed for users following an
+    # older doc). Everything else is described by the schema, so the page and
+    # this table cannot describe one key two ways.
     descriptions = {
         "hosting": "AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)",
         "model_name": "The specific model to use for interactions",
@@ -923,10 +948,22 @@ def config_list_command() -> int:
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
-    for key, value in config.values.items():
-        description = descriptions.get(key, "No description available")
-        print(f"\033[1;32m│ {key}: {value}\033[0m")
+    for setting in settings_io.SETTINGS:
+        # The EFFECTIVE value (stored, else the shipped default), which is what
+        # the user is asking about — an unset key showing blank would read as
+        # "off" for every boolean here.
+        value = settings_io.read_setting(config_manager, setting)
+        description = descriptions.get(setting.key) or setting.help
+        print(f"\033[1;32m│ {setting.key}: {value}\033[0m")
         print(f"\033[1;32m│   Description: {description}\033[0m")
+    # Anything a hand-edited config carries that the schema does not know about
+    # is still listed, marked, rather than hidden: a key the app does not read
+    # is exactly what a user needs to be told about, and silently omitting it
+    # is how the old `hostng` typo survived unnoticed.
+    unknown = sorted(set(config.values) - {setting.path[0] for setting in settings_io.SETTINGS})
+    for key in unknown:
+        print(f"\033[1;32m│ {key}: {config.values[key]}\033[0m")
+        print("\033[1;32m│   Description: not a recognised key; nothing reads it\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
     return 0
 

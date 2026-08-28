@@ -5,7 +5,9 @@ It provides default configurations and methods to update them.
 """
 
 import argparse
+import os
 import sys
+import tempfile
 from copy import deepcopy
 from datetime import datetime
 from importlib.metadata import version
@@ -384,8 +386,51 @@ class ConfigManager:
 
         config["metadata"]["last_modified"] = datetime.now().isoformat()
 
-        with open(self.config_file, "w", encoding="utf-8") as f:
-            yaml.dump(config, f, default_flow_style=False)
+        # ATOMIC. This was a plain `open(..., "w")`, which truncates the file
+        # before it writes a byte: a crash, a full disk, or a kill between the
+        # truncate and the flush left config.yml empty or half-written, and the
+        # next launch met it as an unreadable config (moved aside to
+        # config.yml.bad) with every setting gone. The window was tolerable
+        # while writes were rare CLI operations; `/settings` writes on every
+        # Enter, so it is now on an interactive path a user drives dozens of
+        # times a session.
+        #
+        # Temp file in the SAME directory — os.replace is only atomic within a
+        # filesystem, and /tmp is routinely a different one. fsync before the
+        # replace so the rename cannot be ordered ahead of the data on a crash,
+        # leaving a correctly-named empty file.
+        #
+        # The EXISTING file's mode is carried onto the replacement. os.replace
+        # swaps in the temp file's inode, so without this every write would
+        # silently reset the mode to mkstemp's 0600 — and a user who widened
+        # config.yml on purpose (a shared host, a group-readable checkout) would
+        # find it narrowed again on the next toggle. Same rule `_load_config`
+        # states for the directory: 0600 at CREATION only, never on upgrade.
+        directory = self.config_file.parent
+        try:
+            preserve_mode = self.config_file.stat().st_mode & 0o777
+        except OSError:
+            preserve_mode = None
+        handle, temp_path = tempfile.mkstemp(
+            dir=str(directory), prefix=".config.", suffix=".yml.tmp"
+        )
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as f:
+                yaml.dump(config, f, default_flow_style=False)
+                f.flush()
+                os.fsync(f.fileno())
+            if preserve_mode is not None:
+                os.chmod(temp_path, preserve_mode)
+            os.replace(temp_path, self.config_file)
+        except BaseException:
+            # Leaving a stray .config.*.yml.tmp beside a config the user is
+            # about to hand-edit is its own small confusion, and the failure
+            # is re-raised either way — the caller reports it.
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
 
     def get_config(self) -> Config:
         """Get the current configuration settings.

@@ -804,7 +804,7 @@ def flat_dotted_keys() -> tuple[str, ...]:
 def display_defaults() -> dict[str, Any]:
     """``{"display.shimmer": True, ...}`` — the TUI display-flag defaults.
 
-    ``tui/settings.py`` derives its ``_DEFAULTS`` from this so the page and the
+    ``tui/settings.py`` derives its flag defaults from this so the page and the
     fast-path reader cannot disagree about what "unset" means. Returned as a
     fresh dict because the caller caches and mutates its copy.
     """
