@@ -97,7 +97,10 @@ from local_operator.media import ImageInfo, sniff_image, sniff_image_file
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
+    CompletionMode,
     PickerMode,
+    completion_for,
+    ghost_for,
     slash_argument,
     slash_argument_context,
     slash_context,
@@ -2806,6 +2809,18 @@ class Editor(TextArea):
         ):
             self._copy_gesture = False
             self._copied_selection = None
+        # A caret move invalidates the ghost: it is rendered AT the caret, so a
+        # ghost set while the caret sat at the end of `/mcp login` and then left
+        # standing renders mid-word once the caret moves back into it
+        # (`/mcp loGHOSTgin notion`, reproduced). Clearing here rather than
+        # re-deriving keeps this watcher cheap and cannot itself paint: the next
+        # `_sync_picker` re-derives on the following keystroke.
+        #
+        # `getattr` for the same reason as above — a reactive watcher can fire
+        # during base-class construction, before this subclass's attributes
+        # exist.
+        if getattr(self, "suggestion", ""):
+            self.suggestion = ""
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
@@ -3534,6 +3549,11 @@ class Editor(TextArea):
             # always sets the notice to "", so the hint owns the channel cleanly.
             if self._is_name_argument_command(self._argument_command):
                 self._picker.set_notice(self._name_switch_hint(list_argument) or "")
+        # The ghost is re-derived from the freshly synced picker, on the one
+        # path every keystroke already takes. Placed after both list branches so
+        # it reads the picker state this sync just settled, never the previous
+        # keystroke's.
+        self._sync_ghost()
         argument = slash_argument(self.text, self.MODEL_COMMANDS, cursor, self._command_names)
         if argument is None:
             if self._model_picker.is_open():
@@ -3556,6 +3576,12 @@ class Editor(TextArea):
         list) is reported as a close — the preview must not outlive its list.
         """
         command = self._argument_command
+        # Arrowing the list moves the preview with it: the ghost describes the
+        # HIGHLIGHTED row, so a highlight change is one of the two ways its
+        # answer can change (the other is a keystroke, handled by
+        # :meth:`_sync_picker`). The name is passed in because the picker
+        # reports it before ``highlighted_name()`` would.
+        self._sync_ghost(name)
         self.post_message(ArgumentHighlightChanged(command or "", name if command else None))
 
     def _command_word(self) -> str | None:
@@ -3684,14 +3710,44 @@ class Editor(TextArea):
     def _argument_is_destructive(self) -> bool:
         """Whether the OPEN argument list removes something when a row is chosen.
 
-        Read off the buffer's command word rather than the rows: what a keystroke
-        destroys is a property of the command, and a per-row flag would make the
-        gate depend on data the app happened to fill in.
+        TWO conditions, OR-ed — the command WORD, or the highlighted ROW's own
+        ``alert`` flag. Both, because they protect different things and neither
+        subsumes the other:
+
+        * ``DESTRUCTIVE_COMMANDS`` is the FLOOR. It is a property of the command
+          and holds however the app filled the rows in, so a list that arrives
+          empty, late, or without flags is still gated. It must not be replaced
+          by the row check: that would make credential safety depend on data the
+          app happened to set, and any `/logout` row that ever shipped without
+          ``alert=True`` would silently lose the protection it has today.
+
+        * The ROW flag is the PRECISION. A command word is the wrong
+          granularity for a two-level command: under `/mcp`, `remove` and
+          `logout` destroy while `login` and `reauth` do not, so adding `mcp`
+          to the tuple would tax the harmless sibling — `/mcp login lin` +
+          Enter would fill instead of running. ``ArgumentChoice.alert`` is
+          already set on exactly the destructive rows, so this is per-slot
+          precision from machinery that already exists rather than a second
+          confirmation mechanism.
+
+        Without the row condition, `/mcp remove fsy` — three characters that
+        spell nothing, narrowed by the fuzzy matcher to one survivor — deleted a
+        server config from disk on a single Enter, because the command word is
+        `mcp` and not `logout`. That is the `/logout oer` → openrouter hazard
+        this gate was written for, reached through a word the tuple could not
+        see. The same hole existed for `/mcp logout`.
+
+        Note ``alert`` is also set on rows that are merely CONSEQUENTIAL rather
+        than deleting (`/approvals default auto`, whose effect outlives the
+        window). Gating those the same way is the safe direction: the only cost
+        is that Enter fills and a second Enter runs.
         """
-        return (
-            self._picker.mode is PickerMode.ARGUMENT
-            and self._argument_command in self.DESTRUCTIVE_COMMANDS
-        )
+        if self._picker.mode is not PickerMode.ARGUMENT:
+            return False
+        if self._argument_command in self.DESTRUCTIVE_COMMANDS:
+            return True
+        choice = self._picker.highlighted_choice()
+        return choice is not None and choice.alert
 
     def _picker_query(self) -> str | None:
         """The text the open list is matching against, or ``None`` when closed.
@@ -3706,6 +3762,135 @@ class Editor(TextArea):
             return slash_argument(self.text, self._argument_commands, cursor, self._command_names)
         context = slash_context(self.text, cursor, self._command_names)
         return None if context is None else context.query
+
+    def _completion_for(self, mode: CompletionMode, name: str) -> tuple[str, int] | None:
+        """``(new_text, new_caret)`` for accepting ``name``, or ``None``.
+
+        The widget-side adapter over the pure :func:`completion_for`: it supplies
+        this editor's vocabulary and live caret so both the completion sites and
+        the ghost ask the question the same way. Everything else about a
+        completion (running the command, the inline reassembly, the
+        trailing-space policy) stays where it was.
+        """
+        return completion_for(
+            self.text,
+            self._caret_offset(),
+            mode,
+            name,
+            self._argument_commands,
+            self._command_names,
+        )
+
+    def _completion_mode(self) -> CompletionMode | None:
+        """Which slot the OPEN picker would complete into, or ``None``.
+
+        Reads the picker's own mode rather than re-parsing, so the ghost can
+        never describe a different slot from the one Tab would act on.
+        """
+        if not self._picker.is_open():
+            return None
+        if self._picker.mode is not PickerMode.ARGUMENT:
+            return CompletionMode.COMMAND
+        if self._is_name_argument_command(self._argument_command):
+            return CompletionMode.NAME_ARGUMENT
+        return CompletionMode.ARGUMENT
+
+    def _ghost_completion(self, name: str | None = None) -> str:
+        """The dimmed inline preview of what Tab would insert, or ``""``.
+
+        Ghost text is rendered by Textual's own ``suggestion`` reactive (the
+        ``text-area--suggestion`` component, inserted at the caret in
+        ``TextArea._render_line``). Nothing here paints: a bespoke render pass
+        would duplicate the framework AND could not be ordered correctly against
+        :meth:`_paint_markers`/:meth:`_paint_slash`, which post-process a
+        finished ``Strip``.
+
+        Using the native path means living with two of its properties, and the
+        THREE GATES below are what put both out of reach. They are not caution;
+        removing any one of them reintroduces a specific, reproduced defect:
+
+        1. **Caret at the END of the command's line, with no selection.** The
+           ghost adds cells the DOCUMENT does not have, while
+           :meth:`_slash_cells` and :meth:`_marker_cells` compute their x-ranges
+           from document columns. Any highlighted run at or after the caret
+           therefore slides against the rendered strip — observed as the ghost
+           painted in the command colour with the real text's highlight stripped
+           off. With the caret at the line end there is no such run left to
+           misalign. **Relaxing this gate silently reintroduces that mispaint**:
+           driving the widget with the gate bypassed renders ``/mc`` + ghost
+           ``p `` as ``/p mc``, and no test of the ghost's TEXT would catch it.
+        2. **The ghost fits the remaining width.** Textual injects the
+           suggestion AFTER the wrap sections are divided, so a long ghost
+           neither wraps nor crops and simply overruns the composer.
+        3. **Single-line buffer.** Same wrap machinery, and a multi-line draft is
+           not a state the command lists are live in anyway.
+
+        Beyond the gates, the ghost is shown only when accepting the row is a
+        pure APPEND to the buffer (see :func:`ghost_for`) — a fuzzy match
+        rewrites typed characters, so no ghost can honestly describe it.
+        """
+        mode = self._completion_mode()
+        if mode is None:
+            return ""
+        row = name if name is not None else self._picker.highlighted_name()
+        if row is None:
+            return ""
+        text = self.text
+        # Gate 3, and gate 1's selection half. A selection means Tab's edit is
+        # not an insertion at a caret at all.
+        if "\n" in text or self.selection.start != self.selection.end:
+            return ""
+        caret = self._caret_offset()
+        if caret != len(text):
+            return ""
+        ghost = ghost_for(self._completion_for(mode, row), text)
+        if not ghost:
+            return ""
+        # Gate 2. The row's text cells are ``content_size.width`` less the
+        # gutter, and the caret sits at ``column`` within them (single-line by
+        # gate 3, so the document column IS the screen column). A ghost that
+        # would not fit is dropped ENTIRELY rather than rendered overrunning:
+        # cropping it would show fewer characters than Tab inserts, which breaks
+        # the same invariant from the other direction.
+        width = self.content_size.width - self.gutter_width
+        column = self.selection.end[1]
+        if width <= 0 or column + len(ghost) > width:
+            return ""
+        return ghost
+
+    def _sync_ghost(self, name: str | None = None) -> None:
+        """Push the current ghost into Textual's ``suggestion`` reactive.
+
+        The whole write. Called from :meth:`_sync_picker` (which already
+        re-derives every list from the buffer on each keystroke) and from
+        :meth:`_on_picker_highlight` (so arrowing the list moves the preview
+        with it), which between them cover every way the answer can change.
+        """
+        self.suggestion = self._ghost_completion(name)
+
+    def action_cursor_right(self, select: bool = False) -> None:
+        """Move the caret one cell right. NEVER accept the ghost.
+
+        ``TextArea.action_cursor_right`` inserts ``suggestion`` when one is set,
+        which is the fish/zsh-autosuggest convention. This widget deliberately
+        does not take it: Tab is the single accept key the ghost's invariant
+        (``buffer + ghost == buffer after Tab``) is stated over, and issue #370
+        wants ``alt+←/→`` and ``cmd+←/→`` as caret motion in this same composer.
+        A ``→`` that sometimes types five characters and sometimes moves one cell
+        would make that family of chords mean two different things depending on
+        whether a list happens to be open.
+
+        Clearing the suggestion around the super() call is what skips the insert
+        without reimplementing the caret arithmetic, which is non-trivial
+        (selection collapse, soft-wrap, end-of-document). The ghost is then
+        re-derived rather than restored: the caret has moved, so whether it is
+        still honest is exactly the question :meth:`_ghost_completion` answers.
+        """
+        self.suggestion = ""
+        try:
+            super().action_cursor_right(select)
+        finally:
+            self._sync_ghost()
 
     def _apply_command(self, name: str) -> None:
         """What CHOOSING a row does — the picker's ``on_choose`` callback.
@@ -3742,19 +3927,16 @@ class Editor(TextArea):
                 return
             self._run_argument(name)
             return
-        context = slash_context(self.text, self._caret_offset(), self._command_names)
-        if context is None:
+        # The string arithmetic lives in ``completion_for`` so the inline ghost
+        # is derived from the SAME function this commits: the dimmed cells the
+        # user sees are exactly the characters Tab writes, by construction
+        # rather than by two builders agreeing (see :meth:`_ghost_completion`).
+        # It replaces ONLY the command token ``[start, end)``, because inline
+        # detection means a message may follow it and that prose must survive.
+        completed = self._completion_for(CompletionMode.COMMAND, name)
+        if completed is None:
             return
-        # Replace ONLY the command token ``[start, end)`` with ``/name ``. The
-        # word used to run to the end of the buffer, so a completion could splice
-        # to the end; inline detection means a message may follow the token
-        # (``fix this /te|`` or ``/te| ship it``), and that suffix is the user's
-        # prose — it must survive verbatim. The trailing space is load-bearing:
-        # it terminates the word (closing the command list) and, for a
-        # list-taking command, opens the argument list.
-        text = self.text
-        completed = f"{text[: context.start]}/{name} {text[context.end :]}"
-        self._set_text_and_caret(completed, context.start + len(name) + 2)
+        self._set_text_and_caret(*completed)
 
     def _resolve_argument(self, name: str, key: str, unambiguous: bool) -> None:
         """Tab/Enter on an argument row: complete it, or run it.
@@ -3785,20 +3967,15 @@ class Editor(TextArea):
         space terminates the argument, so the matcher would stop matching and Tab
         would appear to fill the field and abandon it in one keystroke.
         """
-        context = slash_argument_context(
-            self.text, self._argument_commands, self._caret_offset(), self._command_names
-        )
-        if context is None:
+        # Shared with the ghost through ``completion_for`` (see
+        # :meth:`_apply_command`). It replaces the argument SPAN ``[start,
+        # end)`` rather than the buffer tail: inline detection means the command
+        # may not be the last thing in the draft, so trimming the argument's
+        # length off the end would corrupt a trailing message.
+        completed = self._completion_for(CompletionMode.ARGUMENT, name)
+        if completed is None:
             return
-        # Replace the argument SPAN ``[start, end)`` rather than the buffer tail:
-        # inline detection means the command may not be the last thing in the
-        # draft, so trimming the argument's length off the end would corrupt a
-        # trailing message. ``end`` is the end of the command's line, which is
-        # the whole argument by construction.
-        text = self.text
-        self._set_text_and_caret(
-            f"{text[: context.start]}{name}{text[context.end :]}", context.start + len(name)
-        )
+        self._set_text_and_caret(*completed)
 
     def _run_argument(self, name: str) -> None:
         """Complete ``name`` and run, so the command's own handler runs it.
@@ -3950,12 +4127,15 @@ class Editor(TextArea):
         )
         if context is None:
             return
-        # Fill the name+space into the argument SPAN (not the buffer tail), so a
-        # trailing inline message would survive. ``context.end`` is the end of the
-        # command's line, the whole argument by construction.
+        # Fill the name+space through the shared helper (see
+        # :meth:`_apply_command`), which replaces the argument SPAN rather than
+        # the buffer tail so a trailing inline message survives. The context is
+        # still read here because the INLINE branch below needs its token span.
         text = self.text
-        filled = f"{text[: context.start]}{name} {text[context.end :]}"
-        caret = context.start + len(name) + 1
+        completed = self._completion_for(CompletionMode.NAME_ARGUMENT, name)
+        if completed is None:
+            return
+        filled, caret = completed
         # If a draft survives outside the command token, this is an INLINE engage:
         # reassemble to the front rather than leaving the command mid-draft. The
         # name is already filled, so the token now reads ``/team <name>``; the
