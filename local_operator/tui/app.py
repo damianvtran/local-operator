@@ -150,6 +150,7 @@ from local_operator.tui.widgets.editor import (
     Editor,
     EditorCopied,
     EditorCopyStale,
+    EditorPasteEmpty,
     EditorQuit,
     EditorSubmitted,
     InlineCommandRequested,
@@ -5034,6 +5035,34 @@ class OperatorApp(App[None]):
         state its receipt reached.
         """
         self.query_one(Toast).withdraw(COMPOSER_COPY)
+
+    def on_editor_paste_empty(self, message: EditorPasteEmpty) -> None:
+        """A paste that could only have been an image attached nothing — say so.
+
+        The other half of issue #372. The reported symptom was not only that a
+        screenshot did not attach, it was that ``Cmd+V`` produced NO response
+        at all: nothing inserted, no marker, no message. That is
+        indistinguishable from a broken key, which is why the bug was filed as
+        a paste failure rather than as a missing capability — the user had no
+        way to tell which one they were looking at.
+
+        One line, and deliberately vague about the cause. The composer cannot
+        tell an empty clipboard from a text-only one from a missing ``xclip``
+        from a refused format: every backend answers "no image" identically, on
+        purpose (see :mod:`local_operator.clipboard`), so a message naming a
+        cause would be guessing. "No image on the clipboard to attach" is true
+        of all of them and is the fact the user needs.
+
+        ``yield_to_actionable`` for the same reason the copy receipt uses it:
+        the user just pressed a key and this is feedback about that keypress,
+        so it must not evict an MCP failure they have not read yet. It takes no
+        owner — nothing later can falsify "the clipboard had no image at the
+        moment you pressed paste", so there is no withdrawal to arrange.
+        """
+        self.query_one(Toast).show(
+            "no image on the clipboard to attach",
+            yield_to_actionable=True,
+        )
 
     def _put_on_clipboard(self, text: str | None, owner: object | None = None) -> None:
         """The one clipboard write, with the receipt that makes it visible.
