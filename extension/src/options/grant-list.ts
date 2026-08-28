@@ -28,6 +28,12 @@ export function grantRows(
   return [...exact, ...broad].sort((a, b) => a.label.localeCompare(b.label));
 }
 
+export function removeGrantAccessibleName(row: GrantRow): string {
+  const authority = row.label.replace(/ · (?:this port|all ports)$/, "");
+  const scope = row.scope === "host" ? "all-ports" : "this-port";
+  return `Remove ${scope} grant for ${authority}`;
+}
+
 export function removeExactGrant(
   row: GrantRow,
   origins: Record<string, StoredVerdict>,
