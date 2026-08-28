@@ -5309,6 +5309,15 @@ async def _await_navigation(
         await asyncio.sleep(BROWSER_NAV_POLL_S)
 
 
+_BROWSER_OPEN_CLEANUP_REMINDER = (
+    "Close this surface with action='close' before your final response unless the user needs "
+    "it left open."
+)
+_BROWSER_TABS_CLEANUP_FOOTER = (
+    "Close YOUR `(yours)` tab when finished; listings cannot be used to close others."
+)
+
+
 def _page_line(title: str, href: str) -> str:
     """One-line description of what is actually on screen.
 
@@ -5381,7 +5390,8 @@ async def _browser_open(
     return _text(
         tool_call_id,
         "browser",
-        f"Opened browser surface {surface_id}: {_page_line(title, href)}",
+        f"Opened browser surface {surface_id}: {_page_line(title, href)}\n"
+        f"{_BROWSER_OPEN_CLEANUP_REMINDER}",
         details={"surface_id": surface_id, "url": href, "title": title},
     )
 
@@ -5750,6 +5760,7 @@ async def _bridge_open(
         **_browser_identity_params(context, tool_call_id),
     }
     resuming = state.surface_id.startswith("bridge:")
+    created_new = not resuming
     if resuming:
         params["tab"] = state.surface_id
     result, problem = await _bridge_call(tool_call_id, "open", params, surface=state.surface_id)
@@ -5762,6 +5773,7 @@ async def _bridge_open(
         # the recovery verb — same contract as the cmux path — so drop the
         # dead handle and create a fresh tab instead of surfacing the error.
         state.surface_id = ""
+        created_new = True
         result, problem = await _bridge_call(
             tool_call_id,
             "open",
@@ -5778,10 +5790,13 @@ async def _bridge_open(
     state.surface_id = surface
     href = str(result.get("url", ""))
     title = str(result.get("title", ""))
+    message = f"Opened browser surface {surface}: {_page_line(title, href)}"
+    if created_new:
+        message += f"\n{_BROWSER_OPEN_CLEANUP_REMINDER}"
     return _text(
         tool_call_id,
         "browser",
-        f"Opened browser surface {surface}: {_page_line(title, href)}",
+        message,
         details={"surface_id": surface, "url": href, "title": title},
     )
 
@@ -6064,7 +6079,8 @@ async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> Tool
         return _text(
             tool_call_id,
             "browser",
-            "No extension-driven browser tabs are open. Use 'open' with a URL to start one.",
+            "No extension-driven browser tabs are open. Use 'open' with a URL to start one.\n\n"
+            f"{_BROWSER_TABS_CLEANUP_FOOTER}",
             details={"tab_count": 0},
         )
     lines = [_format_bridge_tab(entry, state.surface_id) for entry in entries]
@@ -6075,7 +6091,7 @@ async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> Tool
         "(most recently used first; handles are redacted — the listing is "
         "awareness-only and cannot drive or close a tab. Your own tab is "
         "marked '(yours)'; drive it with the handle your session already "
-        "holds):\n\n" + "\n".join(lines),
+        "holds):\n\n" + "\n".join(lines) + f"\n\n{_BROWSER_TABS_CLEANUP_FOOTER}",
         details={"tab_count": len(entries), "surface_id": state.surface_id},
     )
 
@@ -6613,12 +6629,14 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "x/y pixels, a direction keyword, or a selector to reveal) and reports "
             "whether more content remains; 'logs' returns the page's console "
             "output and uncaught exceptions for debugging web apps. Parallel "
-            "sessions each drive their own tab: a fresh 'open' creates a NEW "
-            "extension tab pinned to this session (later opens navigate it), "
+            "sessions each drive their own tab: a fresh 'open' creates one NEW "
+            "tab owned by this session; reuse it because later opens navigate it. "
+            "Before your final response, call 'close' unless the user explicitly "
+            "needs it left open for a pending or immediately continuing interaction. "
             "'tabs' lists every extension-driven tab including other sessions' "
             "(handles are redacted: the listing is awareness-only and cannot "
-            "drive or close anything), and 'close' "
-            "ends your own tab when you are done with it. 'scroll', 'logs' and "
+            "drive or close anything), and 'close' ends only your own tab. "
+            "'scroll', 'logs' and "
             "'tabs' need the extension backend (cmux says so). On the extension, "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "

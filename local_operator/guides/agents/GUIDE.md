@@ -59,6 +59,13 @@ Roles resolve from the operator's registry first, then from packaged starters (`
 
 A role's tool allowlist is a capability boundary, not advice. A `reviewer` has no `edit`/`write` — it reads and runs tests but cannot alter what it reviews, which is what stops a reviewer from silently reviewing its own patch. Roles that do not coordinate also lose `task`/`wait`/`jobs`.
 
+Before a subagent's terminal handoff, it must close any browser surface it owns
+with `browser action=close`, following the inherited system lifecycle rule and
+its narrow exceptions. Runner disposal already calls the child's `dispose` in
+a `finally` path and closes a leftover surface, but that is crash/cancellation
+fallback: when writing a custom task runner, put child disposal in `finally`,
+and do not use teardown as routine per-turn cleanup.
+
 Use the `agent` tool to work with roles and specialists:
 
 - `search` — which role fits a task, by meaning. Use it when you are about to delegate something specialized and are not sure a role exists.

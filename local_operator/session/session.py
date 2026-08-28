@@ -6707,11 +6707,15 @@ class Session:
         self._dispose_hooks.append(hook)
 
     async def _close_browser_surface(self) -> None:
-        """Close a cmux browser surface the agent left open.
+        """Close a browser surface the agent left open as a teardown fallback.
 
         The surface is session-scoped (see ``BrowserSurface``), so nothing else
-        will ever close it: the model is not guaranteed to call ``browser
-        close``, and the handle dies with the process.
+        can close it after the handle dies with the process. Agents are told to
+        close before their final response because interactive TUI/cmux processes
+        commonly stay alive between turns; closing on every assistant final
+        would instead break legitimate multi-turn browsing and pending login or
+        approval flows. Disposal covers process exit, child-runner completion,
+        crashes, and missed instruction cleanup for both cmux and bridge tabs.
 
         The tool layer is imported HERE rather than at module scope: this is a
         teardown-only call, and ``tools.builtin`` is otherwise absent from the
@@ -6770,7 +6774,7 @@ class Session:
                 except BaseException:  # noqa: BLE001 — dispose must always proceed
                     pass
             # The browser surface is session-scoped and lives in the user's own
-            # cmux pane, so an unclosed one is a tab THEY have to close by hand.
+            # browser, so an unclosed one is a tab THEY have to close by hand.
             # After the turn has stopped (so nothing is mid-navigation on it)
             # and before the task group closes, since this awaits a subprocess.
             await self._close_browser_surface()
