@@ -139,7 +139,11 @@ def _job_with(trajectory: list[dict[str, Any]], status: str = "completed") -> An
 
 def test_fold_accepts_immutable_mapping_and_sequence_contracts() -> None:
     """Canonical follower trajectories stay tuple-backed and fully renderable."""
-    from local_operator.session.frontend_state import FrontendSessionState, FrontendStateStore, JobState
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        JobState,
+    )
     from local_operator.tui.widgets.subagent_panel import row_facts
 
     state = FrontendStateStore(
