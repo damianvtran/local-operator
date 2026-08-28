@@ -14,6 +14,7 @@ import {
 } from "./access-grants";
 import { expireAccessRequest, resolveOrigin, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
+import { reconcileCommandTab } from "./tab-groups";
 import {
   RECONNECT_ALARM_NAME,
   RECONNECT_ALARM_PERIOD_MINUTES,
@@ -130,6 +131,9 @@ async function dispatch(request: { id: string; method: string; params: Record<st
   }
   activeRequestId = request.id;
   try {
+    // Rename propagation is presentation-only and deliberately precedes every
+    // owned-tab command; failures never mask the command's real result.
+    if (request.method !== "open") await reconcileCommandTab(request.params);
     const result = await handler(request.params, request.id);
     // Push the driven page so the daemon (and the Connected popup) can show
     // the human what the agent is on (finding U3).

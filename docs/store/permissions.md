@@ -28,6 +28,10 @@ boundary. Do not shorten it to “browser automation.”
 
 > Local Operator uses `chrome.tabs` to create, navigate, inspect, and close one tab dedicated to the user's agent. Reading that tab's URL and title lets the extension confirm the page actually reached after navigation or a redirect. The extension does not read, modify, or close the user's other tabs.
 
+### `tabGroups`
+
+> Used only to title and visually group tabs created and owned by Local Operator. The extension does not enumerate or alter unrelated tab groups, move groups between windows, or use group membership for browsing-history collection.
+
 ### `scripting`
 
 > Local Operator uses `chrome.scripting.executeScript` in the agent-owned tab to return that page's rendered text content to the agent when the user asks it to read a page. The injected function is bundled with the extension, performs text extraction only, and neither loads remote code nor persists on the page.
@@ -55,7 +59,7 @@ boundary. Do not shorten it to “browser automation.”
 **Submission check (finding N2):** before uploading, diff this file against the
 **built** `extension/dist/manifest.json`, not the source list. The built name is
 `Local Operator`, and the permission set that must match here is
-`debugger, tabs, scripting, storage, alarms, webNavigation, notifications` plus
+`debugger, tabs, tabGroups, scripting, storage, alarms, webNavigation, notifications` plus
 host `<all_urls>`. Any implementation change to the manifest updates this file,
 not the reverse.
 

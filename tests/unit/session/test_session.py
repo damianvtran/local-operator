@@ -469,6 +469,16 @@ async def test_abort_emits_aborted_agent_end(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tool_context_carries_live_conversation_name(tmp_path) -> None:
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    assert session._build_tool_context().session_name == ""
+    session.set_conversation_name("Release planning")
+    assert session._build_tool_context().session_name == "Release planning"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_yolo_disables_approval(tmp_path):
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
     approvals: list[str] = []
