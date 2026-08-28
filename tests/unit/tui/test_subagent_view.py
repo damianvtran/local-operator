@@ -2263,6 +2263,10 @@ async def test_a_streaming_message_keeps_one_block_across_refreshes() -> None:
         counter = _MountCounter(view)
         identities: set[int] = set()
         text = ""
+        # Bound before the loop so the assertions below are reachable even if
+        # the body never runs: an empty loop would otherwise leave `block`
+        # unbound and turn a real failure into a NameError at the assert.
+        block: AssistantBlock | None = None
         for index in range(12):
             text += f"token{index} "
             job.trajectory = _stream("m1", text)
@@ -2273,6 +2277,7 @@ async def test_a_streaming_message_keeps_one_block_across_refreshes() -> None:
         assert len(identities) == 1, "the streaming block was rebuilt"
         assert counter.removes == 0, f"{counter.removes} rows torn down while streaming"
         # The message on screen is the whole accumulated text, not a fragment.
+        assert block is not None
         assert "token0 " in block.text() and block.text().endswith("token11")
 
 
