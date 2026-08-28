@@ -1699,6 +1699,23 @@ class SessionStreamFn:
             openai_api=_openai_api_mode(self._settings),
         )
 
+    @property
+    def routing_settings(self) -> Mapping[str, Any]:
+        """The settings mapping THIS stream will actually route on.
+
+        Captured once at session build (``session_factory``) and held for the
+        session's life, so it is not necessarily what is on disk: nothing
+        watches ``config.yml``, and the only ``ConfigManager.reload`` caller is
+        the first-run ``/login`` path. A read-only surface that wants to report
+        what the SESSION will do — rather than what a later edit intends — has
+        to read this rather than re-reading the file, or it shows a green light
+        for a cascade the running session will not honour.
+
+        Exposed read-only for exactly that reason; mutating routing mid-session
+        is not what this is for.
+        """
+        return self._settings if isinstance(self._settings, Mapping) else {}
+
     def set_notice_handler(
         self, handler: Callable[[str, str], Awaitable[None] | None] | None
     ) -> None:

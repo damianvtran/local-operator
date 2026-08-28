@@ -96,54 +96,12 @@ local-operator login-status
 
 ## Configure quota-aware account and model fallback
 
-Fallback order lives under `values.retry.fallbackChains`. Use an exact
-`provider/model` key when only one primary should take the route, and list
-targets in priority order. A target can be a legacy `provider/model` string or
-a mapping with `provider`, `model`, and optional `effort`:
+Fallback order lives under `values.retry.fallbackChains`, and the routing engine
+around it — multi-account rotation, the quota reserve, cooldowns back to the
+primary — is documented in one place: read `guide://failover`. Two guides
+asserting cooldown semantics is how they drift apart.
 
-```yaml
-values:
-  retry:
-    enabled: true
-    maxRetries: 3
-    baseDelayMs: 500
-    modelFallback: true
-    usageAwareFallback: true
-    usageReservePercent: 10
-    fallbackChains:
-      anthropic/claude-opus-5:
-        - provider: anthropic
-          model: claude-opus-5
-          effort: low
-        - provider: openai
-          model: gpt-5.3-codex
-          effort: high
-```
-
-This route keeps the configured primary first. At a new user-message boundary,
-Local Operator checks a provider's live OAuth quota when that provider exposes
-one. It rotates through usable accounts on the same provider — including
-accounts whose remaining quota is under the reserve threshold — and only
-moves to the next listed provider once every account on the current one is
-at 0%. A model-tier cap (Anthropic's `7 day (Fable)` against `claude-fable-5`)
-is still per account: siblings on that provider are tried before the chain
-leaves it. Reserve quota can select a lower-effort route on the *same*
-provider without blocking the account; it is not a licence to hop providers
-while spendable quota remains. Fully exhausted account-wide quota skips
-same-provider effort changes because they cannot restore capacity. A
-fallback whose own provider is already at 0% is skipped so the cascade does
-not pin a maxed hop. Usage endpoints that are missing or unreachable fail
-open.
-
-Provider errors use the same ordered chain. A successful fallback stays pinned
-through tool calls and other model calls in that user message, and a cooldown
-prevents retrying a broken primary on every new message. Startup remains
-non-blocking: when quota preflight changes the route, the TUI prints a warning
-instead of failing launch.
-
-`fallbackChains.default` applies to any model without a more specific chain.
-Keys ending in `/*` match every model under that provider. Login credentials
-remain in the credential store; never put tokens or keys in this mapping.
+In the TUI, `/failovers` prints the live cascade and which provider is serving.
 
 
 ## Configuration sections

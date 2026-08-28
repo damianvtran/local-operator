@@ -71,6 +71,10 @@ _FRONTEND_LOCAL_SLASHES = {
     "provider",
     "search",
     "accounts",
+    # Reads config.yml and the local credential COUNTS, and compares the
+    # frontend's own effective model — all of it available on a follower, so
+    # routing it to the owner would only add a hop.
+    "failovers",
     "usage",
     "analytics",
     "skills",
