@@ -412,7 +412,7 @@ test("rejected decision notice skips the interstitial for fallback renders", asy
     // A real miss with the origin gone from the live queue entirely.
     assert.deepEqual(noticeForRejectedDecision("gen-1", false), {
       title: "Request expired.",
-      sub: "This request expired or was cancelled.",
+      sub: "It timed out or was cancelled, so nothing was granted or denied.",
     });
   } finally { await module.close(); }
 });

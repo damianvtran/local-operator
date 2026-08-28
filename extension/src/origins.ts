@@ -162,7 +162,9 @@ export async function resolveOrigin(
     // stays closed.
     const match = queue.filter((entry) => entry.origin === origin);
     if (match.length !== 1) return false;
-    targetId = match[0]?.entryId ?? "";
+    // length===1 guarantees the element; no optional-chain dead guard.
+    const single = match[0]!;
+    targetId = single.entryId;
     if (!targetId) return false;
   }
   const result = await decideAccess(targetId, decision);

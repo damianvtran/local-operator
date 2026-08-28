@@ -111,8 +111,11 @@ export function noticeForRejectedDecision(
       sub: "The site request was replaced while this window was open. Review the new request.",
     };
   }
+  // D1/D2 (design round 1): state the CONSEQUENCE (nothing was granted or
+  // denied) instead of restating the title's cause, so a user who just
+  // clicked Allow knows the click had no effect.
   return {
     title: "Request expired.",
-    sub: "This request expired or was cancelled.",
+    sub: "It timed out or was cancelled, so nothing was granted or denied.",
   };
 }
