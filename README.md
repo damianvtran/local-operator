@@ -204,6 +204,11 @@ current session's cost live).
   `ctrl+f` promotes the aside into the conversation.
 - `shift+tab` — cycle reasoning effort.
 - `ctrl+l` — clear the transcript (history is untouched).
+- `option+←` / `option+→` (`ctrl+←` / `ctrl+→` on Linux and Windows) — move the
+  caret a word at a time in the composer; add `shift` to select by word. On
+  macOS this works whichever option-key mode your terminal is set to — the
+  default, "Use Option as Meta", and "Esc+" all behave the same, so there is
+  nothing to configure.
 
 ## 🔌 Providers
 
