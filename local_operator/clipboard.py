@@ -66,19 +66,51 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 from local_operator.media import sniff_image
 
-#: Every clipboard read is capped here. A clipboard daemon that never answers
-#: is the failure this bounds: the read runs on the keystroke that pasted, so
-#: an unbounded subprocess is a permanently frozen composer rather than a slow
-#: one. Two seconds is generous for a local IPC read (the macOS backend
-#: measures ~200 ms for a 20 KB PNG, including AppleScript startup) and short
-#: enough that a wedged daemon costs one visible pause and nothing more.
+#: The budget for ONE clipboard read operation, across every subprocess it
+#: takes. A clipboard daemon that never answers is what this bounds: the read
+#: runs on the keystroke that pasted, so an unbounded subprocess is a
+#: permanently frozen composer rather than a slow one.
+#:
+#: A WHOLE-OPERATION deadline and not a per-process one, which is the
+#: correction from review round 1 (F2). A per-`_run` cap looks equivalent and
+#: is not: `_read_x11_image` tries four MIME types in sequence and the composer
+#: adds a second file-URL read, so four hung `xclip` calls at 2 s each measured
+#: **8.0 s** of dead composer against a docstring promising "one visible
+#: pause". `_Deadline` below hands each `_run` only the time left, so the total
+#: is what the constant says regardless of how many calls a backend makes.
+#:
+#: Two seconds is generous for a local IPC read (the macOS backend measures
+#: ~200 ms for a 20 KB PNG including AppleScript startup, and ~0.6 s for an
+#: 8 MB Retina screenshot) and short enough that a wedged daemon costs one
+#: visible pause.
 CLIPBOARD_TIMEOUT_S = 2.0
+
+#: The INGEST ceiling: how many bytes may be pulled off the clipboard at all.
+#:
+#: Deliberately far above the composer's ``MAX_ATTACHMENT_BYTES`` (4 MB),
+#: because the two bounds protect against different things and conflating them
+#: broke the exact gesture this module exists for (review round 1, U1). The
+#: ATTACHMENT budget governs what may reach a provider, and it is applied after
+#: ``bound_image_for_model`` has resized the image. The INGEST budget only has
+#: to stop a runaway read from a hostile or broken clipboard owner — the bytes
+#: are transient and are about to be shrunk.
+#:
+#: Measured, with the real ``screencapture -c`` that ``Cmd+Shift+Ctrl+4``
+#: invokes, on a 3456x2234 Retina display: the pasteboard PNG is 8.4-8.5 MB and
+#: bounds down to 0.28 MB at 1568x1014, fourteen times under the attachment
+#: cap. Handing the 4 MB attachment cap to the READ therefore discarded every
+#: full-screen screenshot before the resize that makes it attachable could run,
+#: and reported "no image on the clipboard" for a clipboard that plainly had
+#: one. 64 MB reads that screenshot in ~0.6 s and still refuses a payload no
+#: screen capture could produce.
+MAX_CLIPBOARD_READ_BYTES = 64 * 1024 * 1024
 
 #: Environment variables that mean "this process is on the far end of an SSH
 #: connection". Any ONE of them is enough; they are set by different sshd
@@ -126,6 +158,7 @@ def _as_image(data: bytes | None, max_bytes: int) -> ClipboardImage | None:
     special-casing the one that was caught doing it, and it also settles the
     size bound in the same place — the clipboard is an untrusted-size source,
     so the ceiling belongs where the bytes are accepted.
+
     """
     if not data or len(data) > max_bytes:
         return None
@@ -153,19 +186,54 @@ def clipboard_reads_are_local(env: Mapping[str, str] | None = None) -> bool:
     return not any(source.get(name) for name in SSH_ENV_VARS)
 
 
+class _Deadline:
+    """The remaining budget for one clipboard operation, shared by its calls.
+
+    Threaded through the backends so a multi-call read costs what
+    :data:`CLIPBOARD_TIMEOUT_S` says in total, rather than that much per
+    subprocess (review round 1, F2). Constructed once per public entry point
+    and passed down; a backend never gets to decide its own budget.
+
+    ``expired`` is checked BEFORE each spawn so an exhausted deadline costs no
+    further processes at all, rather than three more that are each handed a
+    zero timeout and killed.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self._end = time.monotonic() + seconds
+
+    @property
+    def remaining(self) -> float:
+        return self._end - time.monotonic()
+
+    @property
+    def expired(self) -> bool:
+        # A read cannot usefully be given a zero or negative timeout, so the
+        # floor is what "no time left" means rather than a bare `<= 0`.
+        return self.remaining <= _MIN_SPAWN_BUDGET_S
+
+
+#: Below this much time left, a further subprocess is not worth spawning: the
+#: interpreters here (``osascript``, ``pwsh``) cost more than this just to
+#: start, so a spawn under it can only end in a kill.
+_MIN_SPAWN_BUDGET_S = 0.05
+
+
 def _run(
     argv: list[str],
+    deadline: _Deadline,
     *,
-    timeout: float = CLIPBOARD_TIMEOUT_S,
     stdin_text: str | None = None,
+    max_bytes: int | None = None,
 ) -> bytes | None:
-    """Run ``argv`` and return its stdout bytes, or ``None`` for any failure.
+    """Run ``argv`` within ``deadline`` and return stdout, or ``None``.
 
     The single subprocess seam every backend goes through, so the timeout, the
-    binary stdout, and the never-raise contract are decided once instead of
-    four times. ``stderr`` is swallowed rather than merged: ``xclip`` writes
-    "Error: target image/png not available" to it for the ordinary case of a
-    text-only clipboard, and that is not news the user needs on a keystroke.
+    byte ceiling, the binary stdout and the never-raise contract are decided
+    once instead of four times. ``stderr`` is swallowed rather than merged:
+    ``xclip`` writes "Error: target image/png not available" to it for the
+    ordinary case of a text-only clipboard, and that is not news the user needs
+    on a keystroke.
 
     A non-zero exit is ``None`` and not an error for the same reason — every
     one of these tools reports "nothing of that type on the clipboard" as a
@@ -174,24 +242,65 @@ def _run(
     ``stdin_text`` feeds a script to an interpreter reading from stdin, which
     is how the AppleScript backends are invoked. It keeps the script out of the
     argument vector, where it would be visible in every ``ps`` listing.
+
+    ``max_bytes`` STOPS THE READ rather than judging it afterwards, which is
+    why this cannot use ``subprocess.run``: that reads the pipe to EOF before
+    returning, so a ceiling applied to its result is a verdict on memory
+    already spent. The pipe backends let the SELECTION OWNER choose the payload
+    size, and round 1 (F3) measured 300 MB buffered and 750 MB of peak RSS
+    against a 4 MB cap. Reading ``max_bytes + 1`` and refusing a longer stream
+    is the same stat-first discipline the composer's path branch documents.
+
+    The deadline is REQUIRED rather than defaulted, so a future backend cannot
+    quietly opt out of the total bound by omitting it.
     """
+    if deadline.expired:
+        return None
+    limit = None if max_bytes is None else max_bytes + 1
     try:
-        completed = subprocess.run(
+        with subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            input=None if stdin_text is None else stdin_text.encode("utf-8"),
-            stdin=None if stdin_text is not None else subprocess.DEVNULL,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        # OSError covers the binary vanishing between `which` and `run`;
-        # SubprocessError covers the timeout. Both mean "no clipboard image".
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        ) as process:
+            try:
+                if stdin_text is not None and process.stdin is not None:
+                    # Written before the bounded read so an interpreter waiting
+                    # on its script is not deadlocked against a reader waiting
+                    # on its output. These scripts are a few hundred bytes,
+                    # comfortably inside the pipe buffer.
+                    process.stdin.write(stdin_text.encode("utf-8"))
+                    process.stdin.close()
+                if process.stdout is None:
+                    stdout = b""
+                elif limit is None:
+                    stdout = process.stdout.read()
+                else:
+                    stdout = process.stdout.read(limit)
+                # The wait is what turns a bounded read into a bounded RUN: a
+                # tool that answers instantly and then hangs would otherwise
+                # escape the deadline entirely.
+                returncode = process.wait(timeout=max(deadline.remaining, 0.0))
+            finally:
+                # `Popen.__exit__` closes the pipes but only reaps a process
+                # that has already exited, so a timed-out child is killed here
+                # rather than left orphaned holding the selection.
+                if process.poll() is None:
+                    process.kill()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # OSError covers the binary vanishing between `which` and `exec`;
+        # SubprocessError covers the timeout; ValueError covers a pipe closed
+        # under us. All of them mean "no clipboard image".
         return None
-    if completed.returncode != 0:
+    if returncode != 0:
         return None
-    return completed.stdout
+    if limit is not None and len(stdout) >= limit:
+        # Longer than the ceiling allows. Dropped rather than truncated: a
+        # truncated PNG still sniffs as one and would be attached as a corrupt
+        # image block.
+        return None
+    return stdout
 
 
 #: AppleScript is the macOS backend because it needs no third-party binary and
@@ -249,16 +358,17 @@ on run argv
 \tset urls to pb's readObjectsForClasses:{current application's NSURL} options:(missing value)
 \tif urls is missing value then return ""
 \tset out to ""
+\tset sep to (ASCII character 0)
 \trepeat with i from 0 to ((urls's |count|() as integer) - 1)
 \t\tset u to (urls's objectAtIndex:i)
-\t\tif (u's isFileURL()) as boolean then set out to out & ((u's |path|()) as text) & linefeed
+\t\tif (u's isFileURL()) as boolean then set out to out & ((u's |path|()) as text) & sep
 \tend repeat
 \treturn out
 end run
 """
 
 
-def _read_macos_image(max_bytes: int) -> ClipboardImage | None:
+def _read_macos_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
     """macOS: the ``public.png`` flavor, or ``public.tiff`` re-encoded to PNG.
 
     Writes to a temp FILE rather than returning bytes on stdout. ``osascript``
@@ -278,6 +388,7 @@ def _read_macos_image(max_bytes: int) -> ClipboardImage | None:
         # into the source text.
         stdout = _run(
             ["osascript", "-", str(dest)],
+            deadline,
             stdin_text=_MACOS_IMAGE_SCRIPT,
         )
         if stdout is None:
@@ -305,54 +416,85 @@ def _read_bounded(path: Path, max_bytes: int) -> bytes | None:
         return None
 
 
-def _read_macos_file_urls() -> list[str]:
-    """macOS: file paths from the pasteboard's ``public.file-url`` flavor."""
+def _read_macos_file_urls(deadline: _Deadline) -> list[str]:
+    """macOS: file paths from the pasteboard's ``public.file-url`` flavor.
+
+    Split on ``\\x00`` rather than on newlines. A newline is legal in a macOS
+    filename, and splitting on it turned one real path into two nonexistent
+    ones — which the composer's all-or-nothing rule then correctly refused, so
+    a Finder copy of such a file silently attached nothing (review round 1,
+    F5). NUL cannot occur in a path, so it is the one unambiguous separator.
+    """
     if not shutil.which("osascript"):
         return []
-    stdout = _run(["osascript", "-"], stdin_text=_MACOS_FILE_URL_SCRIPT)
+    stdout = _run(["osascript", "-"], deadline, stdin_text=_MACOS_FILE_URL_SCRIPT)
     if stdout is None:
         return []
     text = stdout.decode("utf-8", errors="replace")
-    return [line.strip() for line in text.splitlines() if line.strip()]
+    return [path for path in text.split("\x00") if path.strip()]
 
 
-def _read_wayland_image(max_bytes: int) -> ClipboardImage | None:
+def _read_wayland_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
     """Wayland: ``wl-paste --list-types`` then ``wl-paste --type <mime>``.
 
     The type list is queried first because ``wl-paste --type image/png`` on a
     clipboard that has no PNG both fails AND, on some compositors, blocks while
     the offer is negotiated. Asking what is on offer costs one cheap call and
     turns four speculative reads into at most one real one.
+
+    Then it tries every offered type in preference order, the same as X11.
+    Round 1 (F4) caught these two loops disagreeing: this one used to stop
+    after the first offered type on the theory that a second candidate is "the
+    same image again", which is a guess about the clipboard owner rather than a
+    fact — a compositor may well offer a huge PNG and a small JPEG of
+    different pictures. Both loops now do the same thing, and the total cost is
+    bounded by the shared deadline instead of by loop length.
     """
     if not shutil.which("wl-paste"):
         return None
-    listing = _run(["wl-paste", "--list-types"])
+    listing = _run(["wl-paste", "--list-types"], deadline)
     if listing is None:
         return None
     offered = {line.strip() for line in listing.decode("utf-8", "replace").splitlines()}
     for mime in IMAGE_MIME_PREFERENCE:
         if mime not in offered:
             continue
-        # A type that was offered but could not be read (or was oversized, or
-        # did not sniff as what it claimed) is not a reason to try a worse
-        # encoding of the same picture: the next candidate is the same image
-        # again, past the same ceiling.
-        return _as_image(_run(["wl-paste", "--no-newline", "--type", mime]), max_bytes)
+        image = _as_image(
+            _run(
+                ["wl-paste", "--no-newline", "--type", mime],
+                deadline,
+                max_bytes=max_bytes,
+            ),
+            max_bytes,
+        )
+        if image is not None:
+            return image
     return None
 
 
-def _read_x11_image(max_bytes: int) -> ClipboardImage | None:
+def _read_x11_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
     """X11: ``xclip -selection clipboard -t <mime> -o``.
 
     Each type is attempted directly. X11 has ``TARGETS``, but querying it costs
     a round trip per read and ``xclip`` already exits non-zero within
     milliseconds for a type the selection owner does not offer, so the
     speculative reads are cheaper than the negotiation Wayland needs.
+
+    The loop is what made F2's worst case the worst: four hung selection owners
+    used to cost four full timeouts. The shared deadline now caps all four
+    together, and `_run` refuses to spawn once it is exhausted.
     """
     if not shutil.which("xclip"):
         return None
     for mime in IMAGE_MIME_PREFERENCE:
-        image = _as_image(_run(["xclip", "-selection", "clipboard", "-t", mime, "-o"]), max_bytes)
+        image = _as_image(
+            _run(
+                ["xclip", "-selection", "clipboard", "-t", mime, "-o"],
+                deadline,
+                max_bytes=max_bytes,
+            ),
+            max_bytes,
+        )
         if image is not None:
             return image
     return None
@@ -378,8 +520,15 @@ def _read_x11_image(max_bytes: int) -> ClipboardImage | None:
 #: NOTE: unit-tested against mocked invocations only. There is no Windows host
 #: in this project's development or CI environment, so this command has been
 #: reviewed rather than executed.
+#: Both objects are disposed in a ``finally`` rather than on the success path.
+#: Round 1 (F6) caught the leak: ``WriteAllBytes`` throwing (a full disk, a
+#: permission fault) skipped straight to the ``catch``, so the bitmap and the
+#: stream were never released — and this is a native GDI+ handle, not managed
+#: memory the collector will shortly reclaim.
 _WINDOWS_SCRIPT = """\
 $ErrorActionPreference = 'Stop'
+$img = $null
+$stream = $null
 try {
   Add-Type -AssemblyName System.Windows.Forms, System.Drawing | Out-Null
   $img = [Windows.Forms.Clipboard]::GetImage()
@@ -387,9 +536,12 @@ try {
   $stream = New-Object System.IO.MemoryStream
   $img.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
   [IO.File]::WriteAllBytes($args[0], $stream.ToArray())
-  $stream.Dispose()
-  $img.Dispose()
-} catch { exit 1 }
+} catch {
+  exit 1
+} finally {
+  if ($null -ne $stream) { $stream.Dispose() }
+  if ($null -ne $img) { $img.Dispose() }
+}
 """
 
 
@@ -403,7 +555,7 @@ def _windows_shell() -> str | None:
     return shutil.which("pwsh") or shutil.which("powershell")
 
 
-def _read_windows_image(max_bytes: int) -> ClipboardImage | None:
+def _read_windows_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
     """Windows: PowerShell reads the clipboard bitmap and PNG-encodes it.
 
     Via a temp file for the encoding reason documented on
@@ -438,7 +590,8 @@ def _read_windows_image(max_bytes: int) -> ClipboardImage | None:
                 "-File",
                 str(script),
                 str(dest),
-            ]
+            ],
+            deadline,
         )
         if stdout is None:
             return None
@@ -455,10 +608,18 @@ def read_clipboard_image(
     """The image on the system clipboard, or ``None``.
 
     ``None`` covers every "there is nothing to attach" case without
-    distinguishing them, because the caller cannot act differently on any of
-    them: an empty clipboard, a text-only clipboard, a missing ``xclip``, a
-    remote session, a wedged daemon and an oversized payload all mean the same
-    thing to a composer deciding whether a paste produced an attachment.
+    distinguishing them, because no backend can reliably tell them apart: an
+    empty clipboard, a text-only clipboard, a missing ``xclip``, a wedged
+    daemon and an unreadable payload are one answer here. The two cases the
+    CALLER can distinguish are deliberately not collapsed into this function —
+    a remote session is knowable up front via
+    :func:`clipboard_reads_are_local`, and an oversized image is knowable from
+    the bytes it returns — because those are the two the user can act on
+    (review round 1, D2/U2).
+
+    ``max_bytes`` is the INGEST ceiling, not the attachment budget; see
+    :data:`MAX_CLIPBOARD_READ_BYTES` for why passing the smaller of the two
+    here defeats the resize that makes a screenshot attachable.
 
     ``platform`` and ``env`` are injectable so each backend is testable on any
     host — this module's whole failure mode is a platform assumption that only
@@ -471,19 +632,22 @@ def read_clipboard_image(
     """
     if not clipboard_reads_are_local(env):
         return None
+    # ONE deadline for the whole operation, created here rather than inside a
+    # backend so a multi-call read cannot outlive the documented cap (F2).
+    deadline = _Deadline(CLIPBOARD_TIMEOUT_S)
     system = sys.platform if platform is None else platform
     source = os.environ if env is None else env
     if system == "darwin":
-        return _read_macos_image(max_bytes)
+        return _read_macos_image(max_bytes, deadline)
     if system == "win32":
-        return _read_windows_image(max_bytes)
+        return _read_windows_image(max_bytes, deadline)
     if system.startswith("linux") or "bsd" in system:
         # BSDs run the same X11/Wayland stacks, so they take the same backends
         # rather than falling through to "no clipboard".
         if source.get("WAYLAND_DISPLAY"):
-            return _read_wayland_image(max_bytes)
+            return _read_wayland_image(max_bytes, deadline)
         if source.get("DISPLAY"):
-            return _read_x11_image(max_bytes)
+            return _read_x11_image(max_bytes, deadline)
         # A headless Linux box (a container, a bare tty) has no clipboard at
         # all, and shelling out to discover that costs a subprocess per paste.
         return None
@@ -510,4 +674,86 @@ def read_clipboard_file_paths(
     system = sys.platform if platform is None else platform
     if system != "darwin":
         return []
-    return _read_macos_file_urls()
+    return _read_macos_file_urls(_Deadline(CLIPBOARD_TIMEOUT_S))
+
+
+@dataclass(frozen=True)
+class ClipboardContents:
+    """What one look at the clipboard found, and whether it was even allowed.
+
+    A single result for a single gesture. The composer used to ask two separate
+    questions (image, then file URLs), which gave the pair two independent
+    deadlines and a 4 s worst case against a constant that says 2 (review round
+    1, F2). Both are answered here under one budget.
+
+    ``refused_remote`` is carried because it is the one state this module knows
+    with certainty and the user can act on: over SSH the read never happens, so
+    reporting "no image on the clipboard" would be describing a clipboard
+    nobody looked at (review round 1, D2/U2). "An image was found but could not
+    be attached" is the OTHER distinguishable case, and it deliberately lives
+    with the caller, which is where the attachment budget and the resize are;
+    this type only reports what was on the clipboard.
+
+    Everything else stays collapsed: an empty clipboard, a text-only one, a
+    missing ``xclip`` and a wedged daemon are one answer, because a message
+    that guessed between them would be inventing a diagnosis.
+    """
+
+    image: ClipboardImage | None = None
+    paths: tuple[str, ...] = ()
+    #: The read never happened: this session is remote, so the clipboard would
+    #: be the server's. Not a failure to find an image, and must not be
+    #: reported as one.
+    refused_remote: bool = False
+
+    @property
+    def found_nothing(self) -> bool:
+        """Nothing to attach, and not because the read was refused."""
+        return self.image is None and not self.paths and not self.refused_remote
+
+
+def read_clipboard(
+    max_bytes: int = MAX_CLIPBOARD_READ_BYTES,
+    *,
+    platform: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> ClipboardContents:
+    """One look at the clipboard for one paste, under one deadline.
+
+    The entry point the composer uses. It exists so that the image read and the
+    file-URL read share a single :data:`CLIPBOARD_TIMEOUT_S` budget rather than
+    getting one each, and so the caller learns the two things it can act on
+    without this module having to explain itself per backend.
+
+    ``max_bytes`` defaults to the INGEST ceiling
+    (:data:`MAX_CLIPBOARD_READ_BYTES`) rather than to any attachment budget:
+    resizing happens downstream, and a ceiling applied before it discards
+    images that would have been perfectly attachable (U1).
+    """
+    if not clipboard_reads_are_local(env):
+        return ClipboardContents(refused_remote=True)
+
+    deadline = _Deadline(CLIPBOARD_TIMEOUT_S)
+    system = sys.platform if platform is None else platform
+    source = os.environ if env is None else env
+
+    image: ClipboardImage | None = None
+    if system == "darwin":
+        image = _read_macos_image(max_bytes, deadline)
+    elif system == "win32":
+        image = _read_windows_image(max_bytes, deadline)
+    elif system.startswith("linux") or "bsd" in system:
+        if source.get("WAYLAND_DISPLAY"):
+            image = _read_wayland_image(max_bytes, deadline)
+        elif source.get("DISPLAY"):
+            image = _read_x11_image(max_bytes, deadline)
+    if image is not None:
+        return ClipboardContents(image=image)
+
+    # Only macOS has a second shape to try; every other platform's file manager
+    # puts the paths on the clipboard as text, which the terminal already
+    # bracket-pastes into the composer's existing path branch.
+    paths: tuple[str, ...] = ()
+    if system == "darwin":
+        paths = tuple(_read_macos_file_urls(deadline))
+    return ClipboardContents(paths=paths)

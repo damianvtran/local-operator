@@ -150,6 +150,7 @@ from local_operator.tui.widgets.editor import (
     Editor,
     EditorCopied,
     EditorCopyStale,
+    EditorPasteAttached,
     EditorPasteEmpty,
     EditorQuit,
     EditorSubmitted,
@@ -1122,6 +1123,19 @@ class _ProviderRows(NamedTuple):
 #: identity is all that is compared, and holding a widget in app state is a
 #: lifetime problem for no benefit.
 COMPOSER_COPY = object()
+
+#: Tag for the toast an image paste that attached nothing raises, so a LATER
+#: successful paste can retire it. Same mechanism and same reason as
+#: `COMPOSER_COPY`: the single slot may hold this card behind an actionable
+#: notice, and while it is held the claim can stop being true.
+#:
+#: It does go stale, which the first version of this handler denied. Captured
+#: in design round 1 (D3): an MCP failure holds the slot, an empty paste defers
+#: the notice, the user then pastes a screenshot successfully, the failure
+#: expires — and "couldn't attach an image" paints over a composer visibly
+#: holding `[Image #1, 1568x200]`, several seconds later, with no keypress to
+#: explain it.
+COMPOSER_PASTE_NOTICE = object()
 
 
 class Chrome(Static):
@@ -5046,23 +5060,70 @@ class OperatorApp(App[None]):
         a paste failure rather than as a missing capability — the user had no
         way to tell which one they were looking at.
 
-        One line, and deliberately vague about the cause. The composer cannot
-        tell an empty clipboard from a text-only one from a missing ``xclip``
-        from a refused format: every backend answers "no image" identically, on
-        purpose (see :mod:`local_operator.clipboard`), so a message naming a
-        cause would be guessing. "No image on the clipboard to attach" is true
-        of all of them and is the fact the user needs.
+        **The sentence states the OUTCOME, not a diagnosis of the clipboard.**
+        The first version said "no image on the clipboard to attach" for every
+        case, and design/UX round 1 (D2/U2) showed that is false in two of
+        them: over SSH the clipboard is never read, and an oversized screenshot
+        is very much on the clipboard. Both sent the user to re-copy, the one
+        move that cannot work. "Couldn't attach an image from the clipboard" is
+        true in every case because it describes what the app did.
+
+        Three variants, matching exactly what
+        :class:`~local_operator.tui.widgets.editor.EditorPasteEmpty` can
+        establish, and no more — a per-backend message would fight the
+        deliberate collapse in :mod:`local_operator.clipboard` and would mean
+        guessing between an empty clipboard and a missing ``xclip``. The two
+        that are knowable name the user's next move, since a failure the user
+        can act on is worth more words than one they cannot.
+
+        Capitalised, noun-first: this is a state notice, the family
+        ``No provider configured`` belongs to, not a gesture receipt like
+        ``copied 12 characters`` (design round 1, D4).
+
+        ``TOAST_FAILURE_MS`` and not the 5 s default, because
+        ``toast.py`` splits duration by ACTIONABILITY rather than severity:
+        a receipt the user can verify at a glance gets 5 s, something they must
+        read and act on gets 10 s. Two of these three now carry a remedy, so
+        they belong in the second family (design round 1, D6).
 
         ``yield_to_actionable`` for the same reason the copy receipt uses it:
-        the user just pressed a key and this is feedback about that keypress,
-        so it must not evict an MCP failure they have not read yet. It takes no
-        owner — nothing later can falsify "the clipboard had no image at the
-        moment you pressed paste", so there is no withdrawal to arrange.
+        the user just pressed a key, so this must not evict an MCP failure they
+        have not read yet. Unlike the first version it takes an OWNER, so a
+        later successful paste can retire a card that is still held — see
+        :data:`COMPOSER_PASTE_NOTICE`.
         """
+        from local_operator.tui.widgets.toast import TOAST_FAILURE_MS
+
+        if message.reason == "remote":
+            text = "Clipboard images aren't read over SSH. Paste a file path instead."
+        elif message.reason == "unattachable":
+            text = "Couldn't attach that image. Try a smaller one, or paste its file path."
+        else:
+            text = "Couldn't attach an image from the clipboard."
         self.query_one(Toast).show(
-            "no image on the clipboard to attach",
+            text,
+            duration_ms=TOAST_FAILURE_MS,
             yield_to_actionable=True,
+            owner=COMPOSER_PASTE_NOTICE,
         )
+
+    def on_editor_paste_attached(self, message: EditorPasteAttached) -> None:
+        """An image attached — retire any paste notice still waiting for a slot.
+
+        The withdrawal half of D3. A deferred notice is news waiting for the
+        slot to free, and this is the event that makes it false: the user now
+        has an image in the composer, so a card saying the app could not attach
+        one must not surface behind it seconds later.
+
+        ``drop_deferred`` and not ``withdraw``: a SHOWING notice describes the
+        earlier keypress and was true when it was raised, and pulling it out
+        from under the user mid-read is its own small confusion. Only the held
+        card — the one that has not been seen yet and would be read as
+        describing THIS paste — is dropped. Ownership means it can only ever
+        touch this app's own paste notice, never an MCP failure or a copy
+        receipt sharing the slot.
+        """
+        self.query_one(Toast).drop_deferred(COMPOSER_PASTE_NOTICE)
 
     def _put_on_clipboard(self, text: str | None, owner: object | None = None) -> None:
         """The one clipboard write, with the receipt that makes it visible.

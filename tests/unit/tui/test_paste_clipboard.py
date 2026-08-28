@@ -30,16 +30,22 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import random
 import threading
+import time
 
 import pytest
 from PIL import Image
 from textual import events
 from textual.app import App, ComposeResult
 
-from local_operator.clipboard import ClipboardImage
+from local_operator.clipboard import ClipboardContents, ClipboardImage
 from local_operator.tui.widgets import editor as editor_module
-from local_operator.tui.widgets.editor import Editor, EditorPasteEmpty
+from local_operator.tui.widgets.editor import (
+    Editor,
+    EditorPasteAttached,
+    EditorPasteEmpty,
+)
 
 
 def _png_bytes(width: int = 1568, height: int = 200) -> bytes:
@@ -55,12 +61,16 @@ class Host(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.empty_notices: list[EditorPasteEmpty] = []
+        self.attached_notices: list[EditorPasteAttached] = []
 
     def compose(self) -> ComposeResult:
         yield Editor()
 
     def on_editor_paste_empty(self, message: EditorPasteEmpty) -> None:
         self.empty_notices.append(message)
+
+    def on_editor_paste_attached(self, message: EditorPasteAttached) -> None:
+        self.attached_notices.append(message)
 
 
 async def _paste(app: App[None], pilot, text: str) -> None:
@@ -69,20 +79,19 @@ async def _paste(app: App[None], pilot, text: str) -> None:
         await pilot.pause()
 
 
-def _stub_clipboard(monkeypatch, *, image=None, paths=None) -> dict[str, int]:
-    """Replace both clipboard reads; count the calls so routing is assertable."""
-    counts = {"image": 0, "paths": 0}
+def _stub_clipboard(monkeypatch, *, image=None, paths=None, refused_remote=False) -> dict[str, int]:
+    """Replace the clipboard read; record the calls so routing is assertable."""
+    counts = {"reads": 0}
 
-    def read_image(max_bytes: int):
-        counts["image"] += 1
-        return image
+    def read_clipboard(*args, **kwargs):
+        counts["reads"] += 1
+        return ClipboardContents(
+            image=image,
+            paths=tuple(paths or ()),
+            refused_remote=refused_remote,
+        )
 
-    def read_paths():
-        counts["paths"] += 1
-        return list(paths or [])
-
-    monkeypatch.setattr(editor_module, "read_clipboard_image", read_image)
-    monkeypatch.setattr(editor_module, "read_clipboard_file_paths", read_paths)
+    monkeypatch.setattr(editor_module, "read_clipboard", read_clipboard)
     return counts
 
 
@@ -133,7 +142,7 @@ async def test_the_clipboard_marker_is_identical_to_the_path_branch_s(
         from_clipboard = editor.text
         clipboard_image = editor.referenced_images()[0]
 
-    monkeypatch.setattr(editor_module, "read_clipboard_image", lambda max_bytes: None)
+    monkeypatch.setattr(editor_module, "read_clipboard", lambda *a, **k: ClipboardContents())
     app = Host()
     async with app.run_test() as pilot:
         editor = app.query_one(Editor)
@@ -161,7 +170,7 @@ async def test_a_whitespace_only_paste_also_consults_the_clipboard(monkeypatch) 
         await pilot.pause()
         await _paste(app, pilot, "\n")
 
-        assert counts["image"] == 1
+        assert counts["reads"] == 1
         assert editor.text == "[Image #1, 1568x200] "
 
 
@@ -209,11 +218,10 @@ async def test_a_copied_file_whose_name_has_spaces_still_attaches(monkeypatch, t
 @pytest.mark.asyncio
 async def test_image_bytes_win_over_file_urls(monkeypatch, tmp_path) -> None:
     """A pasteboard can carry both. The bytes are what the user copied most
-    recently in the reported gesture, and reading them costs no filesystem
-    access, so they are tried first and the URL read never happens."""
+    recently in the reported gesture, so they win and the paths are ignored."""
     path = tmp_path / "other.png"
     path.write_bytes(_png_bytes(100, 100))
-    counts = _stub_clipboard(
+    _stub_clipboard(
         monkeypatch, image=ClipboardImage(_png_bytes(800, 600), "image/png"), paths=[str(path)]
     )
     app = Host()
@@ -224,7 +232,6 @@ async def test_image_bytes_win_over_file_urls(monkeypatch, tmp_path) -> None:
         await _paste(app, pilot, "")
 
         assert editor.text == "[Image #1, 800x600] "
-        assert counts["paths"] == 0
 
 
 # -- the control: ordinary text is untouched ----------------------------------
@@ -254,7 +261,7 @@ async def test_a_plain_text_paste_is_inserted_once_and_never_reads_the_clipboard
 
         assert editor.text == "some ordinary prose"
         assert editor.referenced_images() == []
-        assert counts["image"] == 0, "a text paste must not touch the clipboard"
+        assert counts["reads"] == 0, "a text paste must not touch the clipboard"
         assert app.empty_notices == []
 
 
@@ -314,12 +321,67 @@ async def test_an_unattachable_clipboard_image_reports_rather_than_inserting(
         assert len(app.empty_notices) == 1
 
 
+@pytest.mark.parametrize(
+    ("payload", "label"),
+    [
+        ("    ", "a four-space indent"),
+        ("  ", "a two-space indent"),
+        (" ", "a single space"),
+        ("\t", "a tab"),
+        ("\n", "a blank line"),
+        ("\n\n", "two blank lines"),
+        ("\n    \n", "an indented blank line"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_an_empty_paste_never_inserts_its_payload(monkeypatch) -> None:
-    """``prevent_default`` is unconditional on this branch. Letting the base
-    handler run when the clipboard turned out to be empty would insert the
-    whitespace payload the terminal sent, putting a character in the draft that
-    the user did not type."""
+async def test_pasted_whitespace_is_inserted_verbatim_exactly_once(
+    payload: str, label: str, monkeypatch
+) -> None:
+    """Whitespace the USER copied must paste, even though it reaches this
+    branch (review round 1, F1/D1).
+
+    This is the regression the first version of the feature shipped: it treated
+    every whitespace-only payload as the terminal's empty-paste signal and
+    consumed the event unconditionally, so pasting an indent into the composer
+    silently discarded it and raised a toast about images. That is the same
+    class of failure as #372 on a gesture that has nothing to do with images,
+    and the test that used to live here asserted the broken behaviour.
+
+    The composer takes multi-line prompts, so pasting a run of indentation, a
+    tab, or a blank line between paragraphs is ordinary. The payload is
+    indistinguishable from the synthesised one, so the branch stops guessing:
+    it consults the clipboard, and consumes the event only if that attached
+    something.
+
+    ``exactly once`` is the other half. This branch calls ``prevent_default``
+    on the success path, and the MRO note on ``_on_paste`` records that getting
+    that wrong duplicates the insert.
+    """
+    _stub_clipboard(monkeypatch, image=None, paths=[])
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("X")
+        await _paste(app, pilot, payload)
+
+        assert editor.text == f"X{payload}", f"{label} was not inserted verbatim"
+        assert app.empty_notices == [], (
+            "a whitespace paste that inserted its payload has already succeeded; "
+            "a notice about images the user was not pasting is noise"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_empty_paste_inserts_nothing(monkeypatch) -> None:
+    """The terminal-synthesised payload for an image-only clipboard.
+
+    Falls through to the base handler like any other unattachable paste, which
+    inserts ``""`` — a no-op nobody can see. That is what lets the branch above
+    stop discriminating on the payload's content: the empty case needs no
+    special handling to look right.
+    """
     _stub_clipboard(monkeypatch, image=None, paths=[])
     app = Host()
     async with app.run_test() as pilot:
@@ -327,9 +389,10 @@ async def test_an_empty_paste_never_inserts_its_payload(monkeypatch) -> None:
         editor.focus()
         await pilot.pause()
         editor.insert("draft")
-        await _paste(app, pilot, "  \n  ")
+        await _paste(app, pilot, "")
 
         assert editor.text == "draft"
+        assert len(app.empty_notices) == 1
 
 
 # -- the event loop -----------------------------------------------------------
@@ -346,12 +409,11 @@ async def test_the_clipboard_read_runs_off_the_event_loop_thread(monkeypatch) ->
     """
     seen: list[str] = []
 
-    def read_image(max_bytes: int):
+    def read_clipboard(*args, **kwargs):
         seen.append(threading.current_thread().name)
-        return ClipboardImage(_png_bytes(), "image/png")
+        return ClipboardContents(image=ClipboardImage(_png_bytes(), "image/png"))
 
-    monkeypatch.setattr(editor_module, "read_clipboard_image", read_image)
-    monkeypatch.setattr(editor_module, "read_clipboard_file_paths", lambda: [])
+    monkeypatch.setattr(editor_module, "read_clipboard", read_clipboard)
     app = Host()
     async with app.run_test() as pilot:
         editor = app.query_one(Editor)
@@ -370,13 +432,12 @@ async def test_a_slow_clipboard_read_does_not_stall_the_loop(monkeypatch) -> Non
     that; an inline ``time.sleep`` would not."""
     started = threading.Event()
 
-    def read_image(max_bytes: int):
+    def read_clipboard(*args, **kwargs):
         started.set()
         threading.Event().wait(0.4)
-        return ClipboardImage(_png_bytes(), "image/png")
+        return ClipboardContents(image=ClipboardImage(_png_bytes(), "image/png"))
 
-    monkeypatch.setattr(editor_module, "read_clipboard_image", read_image)
-    monkeypatch.setattr(editor_module, "read_clipboard_file_paths", lambda: [])
+    monkeypatch.setattr(editor_module, "read_clipboard", read_clipboard)
     app = Host()
     async with app.run_test() as pilot:
         editor = app.query_one(Editor)
@@ -396,3 +457,235 @@ async def test_a_slow_clipboard_read_does_not_stall_the_loop(monkeypatch) -> Non
             if editor.referenced_images():
                 break
         assert editor.text == "[Image #1, 1568x200] "
+
+
+# -- what the notice is allowed to claim --------------------------------------
+@pytest.mark.asyncio
+async def test_an_ssh_refusal_is_not_reported_as_an_empty_clipboard(monkeypatch) -> None:
+    """Over SSH the clipboard is never read, so "no image on the clipboard" is
+    a statement about something nobody looked at (review round 1, D2/U2).
+
+    The user's screenshot really is on their local clipboard; told it is not,
+    the only move they can think of is to re-copy it, which cannot help. The
+    reason code is what lets the app name the refusal and the workaround
+    instead.
+    """
+    _stub_clipboard(monkeypatch, image=None, paths=[], refused_remote=True)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert [n.reason for n in app.empty_notices] == ["remote"]
+
+
+@pytest.mark.asyncio
+async def test_an_image_that_cannot_be_attached_says_so(monkeypatch) -> None:
+    """An image WAS found and refused, which is a different answer to the user
+    than an empty clipboard: cropping fixes one and nothing fixes the other."""
+    _stub_clipboard(monkeypatch, image=ClipboardImage(b"\x00\x01not an image", "image/png"))
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert [n.reason for n in app.empty_notices] == ["unattachable"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_clipboard_keeps_the_deliberately_vague_reason(monkeypatch) -> None:
+    """The one case that stays collapsed. An empty clipboard, a text-only one,
+    a missing ``xclip`` and a wedged daemon are indistinguishable by design, so
+    the reason must not pretend to know which."""
+    _stub_clipboard(monkeypatch, image=None, paths=[])
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert [n.reason for n in app.empty_notices] == ["nothing"]
+
+
+@pytest.mark.asyncio
+async def test_a_successful_attach_announces_itself(monkeypatch) -> None:
+    """The event that lets the app retire a paste notice still held behind an
+    actionable card (review round 1, D3). Without it that notice surfaces when
+    the slot frees and contradicts a composer holding the image."""
+    _stub_clipboard(monkeypatch, image=ClipboardImage(_png_bytes(), "image/png"))
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert editor.referenced_images()
+        assert len(app.attached_notices) == 1
+        assert app.empty_notices == []
+
+
+@pytest.mark.asyncio
+async def test_a_finder_copy_that_attaches_also_announces_itself(monkeypatch, tmp_path) -> None:
+    """The file-URL route reaches the same success, so it must retire a held
+    notice too."""
+    path = tmp_path / "shot.png"
+    path.write_bytes(_png_bytes(320, 240))
+    _stub_clipboard(monkeypatch, image=None, paths=[str(path)])
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert len(app.attached_notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_read_is_not_capped_at_the_attachment_budget(monkeypatch) -> None:
+    """The blocker from review round 1 (U1), pinned at the seam that caused it.
+
+    The composer passed ``MAX_ATTACHMENT_BYTES`` to the clipboard read, so the
+    4 MB attachment budget was applied to the RAW pasteboard bytes — before
+    ``bound_image_for_model``, whose entire job is to shrink them. A real
+    ``Cmd+Shift+Ctrl+4`` on a Retina display puts 8.4-8.5 MB on the pasteboard
+    and bounds to 0.28 MB, so the reported gesture still attached nothing and
+    still blamed the clipboard.
+
+    Asserted as "the read is not given the attachment cap", which is the
+    mistake itself, rather than by round-tripping an 8 MB fixture through the
+    encoder on every run.
+    """
+    seen: list[object] = []
+
+    def read_clipboard(*args, **kwargs):
+        seen.append(args[0] if args else kwargs.get("max_bytes"))
+        return ClipboardContents(image=ClipboardImage(_png_bytes(), "image/png"))
+
+    monkeypatch.setattr(editor_module, "read_clipboard", read_clipboard)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert editor.referenced_images(), "the image was not attached"
+        assert seen and seen[0] is None, (
+            "the composer must not hand the read a byte ceiling of its own; the "
+            "ingest default is MAX_CLIPBOARD_READ_BYTES and the attachment cap "
+            "is applied after bounding"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_large_source_image_attaches_because_the_cap_follows_the_bound(
+    monkeypatch,
+) -> None:
+    """The U1 blocker at its real seam, in the direction that was broken.
+
+    A source image LARGER than ``MAX_ATTACHMENT_BYTES`` must still attach when
+    the bound brings it under, because that is what the bound is for. The first
+    version gated on the source bytes in two places — the clipboard read and
+    the shared attachment tail — so a real Retina screenshot (8.4-8.5 MB on the
+    pasteboard, 0.28 MB bounded) was thrown away twice over before the resize
+    could run.
+
+    The fixture is deliberately high-entropy: a flat-colour PNG of any
+    dimensions compresses to a few KB and would sit under the cap by accident,
+    which is exactly why the original testing missed this.
+    """
+    from local_operator.tui.widgets.editor import MAX_ATTACHMENT_BYTES
+
+    buffer = io.BytesIO()
+    random.seed(11)
+    image = Image.new("RGB", (2400, 1600))
+    image.putdata(
+        [
+            (random.randrange(256), random.randrange(256), random.randrange(256))
+            for _ in range(2400 * 1600)
+        ]
+    )
+    image.save(buffer, "PNG")
+    source = buffer.getvalue()
+    assert len(source) > MAX_ATTACHMENT_BYTES, "fixture must exceed the attachment cap"
+
+    _stub_clipboard(monkeypatch, image=ClipboardImage(source, "image/png"))
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for _ in range(3):
+            await _paste(app, pilot, "")
+            if editor.referenced_images():
+                break
+
+        assert editor.referenced_images(), "a bounded-down image must still attach"
+        attached = base64.b64decode(editor.referenced_images()[0].data)
+        assert len(attached) <= MAX_ATTACHMENT_BYTES, "the cap must hold on what is SENT"
+        assert app.empty_notices == []
+
+
+@pytest.mark.asyncio
+async def test_a_held_paste_notice_is_retired_by_a_later_successful_paste(monkeypatch) -> None:
+    """Design round 1 (D3), reproduced against the real app and pinned.
+
+    The captured sequence: an MCP failure holds the slot, an empty paste defers
+    the notice, the user then pastes a screenshot successfully, and when the
+    failure expires the deferred card is promoted — so "couldn't attach an
+    image" paints over a composer visibly holding ``[Image #1, ...]``, seconds
+    later, with no keypress to explain it.
+
+    Uses the real ``OperatorApp`` rather than this file's ``Host``, because the
+    behaviour under test is the app's toast ownership, not the widget's.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    state: dict[str, ClipboardImage | None] = {"image": None}
+    monkeypatch.setattr(
+        editor_module,
+        "read_clipboard",
+        lambda *a, **k: ClipboardContents(image=state["image"]),
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and app._session is None:
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        toast = app.query_one(Toast)
+
+        # An actionable notice claims the slot, so the paste notice must defer.
+        toast.show("MCP github failed: command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        await _paste(app, pilot, "")
+        assert toast._deferred is not None, "the notice should be held, not shown"
+
+        state["image"] = ClipboardImage(_png_bytes(), "image/png")
+        for _ in range(3):
+            await _paste(app, pilot, "")
+            if editor.referenced_images():
+                break
+        assert editor.referenced_images(), "the second paste should have attached"
+        assert toast._deferred is None, (
+            "a successful attach must retire the held notice; otherwise it "
+            "surfaces later contradicting the composer"
+        )
+
+        toast.dismiss_toast()
+        for _ in range(6):
+            await pilot.pause()
+        assert toast.message == "", "nothing stale may be promoted into the freed slot"

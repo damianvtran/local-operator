@@ -85,7 +85,7 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult, Selection
 
-from local_operator.clipboard import read_clipboard_file_paths, read_clipboard_image
+from local_operator.clipboard import read_clipboard
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
@@ -396,6 +396,23 @@ class EditorCopyStale(Message):
         super().__init__()
 
 
+class EditorPasteAttached(Message):
+    """Posted when a clipboard paste DID attach an image.
+
+    Exists so the app can retire a paste notice that is still held behind an
+    actionable card. Without it that notice surfaces when the slot frees and
+    contradicts a composer the user can see holding the image (design round 1,
+    D3) — the same staleness :class:`EditorCopyStale` answers for the copy
+    receipt, and it uses the same machinery.
+
+    Only the clipboard route posts it. The path route cannot leave a stale
+    notice behind because it never raises one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
 class EditorPasteEmpty(Message):
     """Posted when a paste that could only have been an image attached nothing.
 
@@ -414,12 +431,31 @@ class EditorPasteEmpty(Message):
     one. It fires at most once per keypress, and only for a keypress that
     otherwise produces nothing at all.
 
-    Carries nothing: the app owns the wording, the same way
-    :class:`EditorCopyStale` leaves the card to the app.
+    ``reason`` names the outcome, and only where the code genuinely knows it
+    (review round 1, D2/U2). The first version said "no image on the clipboard"
+    for every case, which is false in two reachable ones: over SSH the
+    clipboard was never read, and an oversized screenshot IS on the clipboard.
+    Both mislead a user into the one move that cannot help — re-copying.
+
+    Three values, no more, because three is what the code can establish:
+
+    * ``"nothing"`` — the clipboard was read and had nothing attachable on it.
+      This is the deliberately vague one: an empty clipboard, a text-only one,
+      a missing ``xclip`` and a wedged daemon are indistinguishable by design
+      (see :mod:`local_operator.clipboard`) and a message naming a cause here
+      would be guessing.
+    * ``"unattachable"`` — an image was found and refused, so the user can act
+      on it by cropping or by attaching the file instead.
+    * ``"remote"`` — the read was refused because the session is remote. Not a
+      statement about the clipboard at all.
+
+    The app owns the wording, the same way :class:`EditorCopyStale` leaves the
+    card to the app; this only says which of the three happened.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, reason: str = "nothing") -> None:
         super().__init__()
+        self.reason = reason
 
 
 class EditorCopied(Message):
@@ -2442,16 +2478,27 @@ class Editor(TextArea):
         one message at a time, so marker issuance stays in paste order.
         """
         if not event.text.strip():
-            # An empty (or whitespace-only) payload is the clipboard-image
-            # signal, and it is ALWAYS consumed — including when the clipboard
-            # turns out to hold nothing attachable. Letting the base handler
-            # insert the payload instead would insert whitespace the user did
-            # not type, and the honest report is the notice raised below.
-            attached = await self._attach_clipboard_image()
+            # A payload with no text in it is the clipboard-image signal. The
+            # clipboard is consulted, but the event is consumed ONLY if that
+            # produced an attachment — the same shape the path branch below
+            # uses, and the correction from review round 1 (F1/D1).
+            #
+            # Consuming unconditionally was a real regression on a gesture that
+            # has nothing to do with images: an indent, a tab or a blank line
+            # copied and pasted into the composer is ordinary in a multi-line
+            # prompt, it worked before this feature existed, and it silently
+            # vanished with a toast about images the user was not pasting. The
+            # code cannot tell a terminal-synthesised `""` from user-authored
+            # whitespace by inspecting the payload, so it stops trying: falling
+            # through inserts whitespace the user did have on their clipboard,
+            # and for the genuinely empty payload inserting `""` is a no-op
+            # nobody can see.
+            attached = await self._attach_clipboard_image(notify=not event.text)
+            if attached is None:
+                return
             event.prevent_default()
             event.stop()
-            if attached is not None:
-                self.insert(attached)
+            self.insert(attached)
             return
         attached = await self._attach_pasted_images(event.text)
         if attached is None:
@@ -2460,7 +2507,7 @@ class Editor(TextArea):
         event.stop()
         self.insert(attached)
 
-    async def _attach_clipboard_image(self) -> str | None:
+    async def _attach_clipboard_image(self, *, notify: bool = True) -> str | None:
         """The empty-paste branch: read the clipboard and attach what is there.
 
         Two shapes, tried in the order they are likely. IMAGE BYTES first, the
@@ -2472,35 +2519,71 @@ class Editor(TextArea):
 
         The read runs in a thread for the same reason the decode does: it
         shells out to ``osascript``/``wl-paste``/``xclip``/PowerShell, and this
-        is the keystroke handler. The measured macOS read is ~265 ms for a
-        20 KB PNG, which is a visible freeze inline and nothing at all off the
-        loop. ``local_operator.clipboard`` bounds it further with a 2 s cap and
-        never raises, so a wedged clipboard daemon costs one pause.
+        is the keystroke handler. The measured macOS read is ~0.6 s for an 8 MB
+        Retina screenshot, which is a visible freeze inline and nothing at all
+        off the loop. ``local_operator.clipboard`` bounds the WHOLE read \u2014 both
+        shapes, every subprocess \u2014 with one 2 s deadline and never raises, so a
+        wedged clipboard daemon costs one pause.
+
+        The read is bounded by :data:`~local_operator.clipboard.
+        MAX_CLIPBOARD_READ_BYTES` and NOT by :data:`MAX_ATTACHMENT_BYTES`.
+        Those are different budgets and conflating them broke the exact gesture
+        this branch exists for (review round 1, U1): a native screenshot on a
+        Retina display is 8.4-8.5 MB on the pasteboard and bounds down to
+        0.28 MB, so capping the READ at the 4 MB attachment budget threw the
+        screenshot away before :func:`~local_operator.imaging.
+        bound_image_for_model` \u2014 whose entire job is to make it attachable \u2014
+        could run. ``_attach_image_bytes`` remains the authority on what may be
+        attached, and applies the attachment cap after the resize.
 
         Returns ``None`` when nothing was attached, and posts
         :class:`EditorPasteEmpty` on the way out so the app can say so. That
         notice is the other half of the reported bug: before it, a ``Cmd+V``
-        that attached nothing was indistinguishable from a broken keyboard.
+        that attached nothing was indistinguishable from a broken keyboard. It
+        carries the outcomes the app can honestly name \u2014 see
+        :class:`EditorPasteEmpty`.
+
+        ``notify`` is FALSE when the payload was whitespace the user actually
+        copied. Such a paste still consults the clipboard (it reaches this
+        branch, and an image may genuinely be there), but when it finds nothing
+        the paste has already SUCCEEDED on its own terms: the whitespace goes
+        into the buffer where the user can see it, and a card about images they
+        were not pasting is noise on an ordinary gesture. The notice exists for
+        the one case that otherwise produces no visible response at all \u2014 the
+        terminal's empty payload \u2014 so that is the only case that raises it.
         """
-        image = await asyncio.to_thread(read_clipboard_image, MAX_ATTACHMENT_BYTES)
-        if image is not None:
-            markers = await self._attach_image_bytes([image.data])
+        contents = await asyncio.to_thread(read_clipboard)
+        if contents.image is not None:
+            markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:
+                self.post_message(EditorPasteAttached())
                 return markers
-            # Bytes were on the clipboard and could not be attached (an
-            # unsupported format, a decode failure, past the size cap). That is
-            # a DIFFERENT event from an empty clipboard, but the same answer to
-            # the user: nothing was attached, and the notice below says so.
-        paths = await asyncio.to_thread(read_clipboard_file_paths)
-        if paths:
+            # An image WAS on the clipboard and could not be attached: too
+            # large even after bounding, an undecodable payload, a
+            # decompression bomb. Reported as its own outcome rather than as
+            # "no image", because the two lead to different moves — cropping
+            # versus copying something (review round 1, D2/U2).
+            if notify:
+                self.post_message(EditorPasteEmpty(reason="unattachable"))
+            return None
+        if contents.paths:
             # Rejoins the path branch rather than duplicating it: shell quoting
             # is what `_pasted_paths` exists to undo, and these paths come from
             # an API rather than a terminal, so they are quoted here to keep one
             # parser rather than two.
-            markers = await self._attach_pasted_images(" ".join(shlex.quote(p) for p in paths))
+            markers = await self._attach_pasted_images(
+                " ".join(shlex.quote(path) for path in contents.paths)
+            )
             if markers is not None:
+                self.post_message(EditorPasteAttached())
                 return markers
-        self.post_message(EditorPasteEmpty())
+            if notify:
+                self.post_message(EditorPasteEmpty(reason="unattachable"))
+            return None
+        if notify:
+            self.post_message(
+                EditorPasteEmpty(reason="remote" if contents.refused_remote else "nothing")
+            )
         return None
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
@@ -2608,8 +2691,6 @@ class Editor(TextArea):
         """
         loaded: list[tuple[ImageContent, str]] = []
         for data in payloads:
-            if len(data) > MAX_ATTACHMENT_BYTES:
-                return None
             info = sniff_image(data)
             # `sendable` and not merely "recognised": HEIC sniffs fine and no
             # provider will take it, so attaching it would trade a readable
@@ -2639,6 +2720,15 @@ class Editor(TextArea):
                 # outcome: the user keeps what they pasted and can see it was
                 # not attached, where a silently dropped attachment is the shape
                 # nobody notices until the model answers about nothing.
+                return None
+            if len(payload) > MAX_ATTACHMENT_BYTES:
+                # AFTER the bound, which is the only place this cap belongs.
+                # Applied to the SOURCE bytes it refuses images the resize was
+                # about to make attachable: a Retina screenshot is 8.4-8.5 MB
+                # on the pasteboard and 0.28 MB once bounded, so a pre-bound
+                # gate discarded the exact gesture this feature exists for
+                # (review round 1, U1). What must not reach a provider is the
+                # payload actually sent, and this is it.
                 return None
             loaded.append(
                 (

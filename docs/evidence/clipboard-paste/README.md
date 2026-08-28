@@ -11,7 +11,11 @@ Captured on macOS (Darwin 25.6.0, arm64) and in Debian bookworm under Docker
 | `composer-after.png` | The same gesture on this branch: `[Image #1, 1200×700]` |
 | `composer-no-image-notice.png` | The notice a paste raises when nothing was attachable |
 | `baseline-preexisting.txt` | The failing tests reproduced on clean `origin/main` |
+| `round1-remediation.txt` | Review round 1 fixes verified: U1, F1/D1, D2/U2, D3, F2 |
+| `composer-whitespace-paste.png` | A pasted indent lands in the buffer again (D1) |
+| `composer-notice-ssh.png` | The SSH notice, which no longer claims the clipboard is empty (D2/U2) |
 | `macos_evidence.sh` | Reproduces `macos-pasteboard.txt` |
+| `round1_evidence.sh` | Reproduces `round1-remediation.txt` |
 | `linux_evidence.sh` | Reproduces `linux-xclip-wlpaste.txt` (runs inside the container) |
 
 ## What is proven
@@ -72,6 +76,40 @@ type on the result describes the bytes. Regression-tested in
 **Frames are settled.** Each capture saves two consecutive frames; `paste.svg`
 and `settled.svg` are byte-identical in all three states, so nothing reflows
 after paint.
+
+## Review round 1 remediation
+
+`round1-remediation.txt` is the re-verification after the three review rounds,
+run the same way: real pasteboard state through the real `OperatorApp`.
+
+**U1 (blocker) — a real Retina screenshot attaches.** The pasteboard PNG is
+7.37 MB; reading it at the old 4 MB attachment cap still returns `None`, which
+is the blocker reproduced. With the ingest ceiling the composer shows
+`[Image #1, 1568x1014 ↓]` in 0.77 s, the attachment is 1.01 MB (under the cap
+that governs what is sent), and submitting delivers one image to the model. The
+fixture is deliberately high-entropy: a flat-colour image of the same
+dimensions compresses under the old cliff by accident, which is exactly why the
+first round of testing missed this.
+
+**F1/D1 (blocker) — pasted whitespace is inserted again.** All seven payloads
+(`'    '`, `'  '`, `' '`, `'\t'`, `'\n'`, `'\n\n'`, and the genuinely empty
+one) now land in the buffer verbatim, and a whitespace paste raises no notice
+at all — it succeeded on its own terms.
+
+**D2/U2 (major) — the message states the outcome.** Four states, three
+sentences: an empty or text-only clipboard gets "Couldn't attach an image from
+the clipboard", an image that was found and refused gets "Try a smaller one, or
+paste its file path", and SSH gets "Clipboard images aren't read over SSH".
+Nothing asserts the clipboard is empty when the app did not look.
+
+**D3 (major) — a held notice cannot be replayed after it is false.** The
+designer's captured sequence, re-run: the MCP failure holds the slot, the empty
+paste defers the notice, the screenshot attaches, and the deferred card is
+`None` — so when the failure expires nothing stale surfaces.
+
+**F2 (major) — the whole read is bounded.** With every `xclip` hanging and four
+MIME types tried, total blocking time is 2.00 s against a 2.0 s cap (it was
+8.0 s), and each spawn is handed the remaining budget rather than a fresh one.
 
 ## What is NOT proven
 

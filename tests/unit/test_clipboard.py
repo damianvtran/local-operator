@@ -81,8 +81,49 @@ JPEG = _jpeg()
 BIG = 4 * 1024 * 1024
 
 
+class FakeProcess:
+    """The subset of ``Popen`` that :func:`clipboard._run` actually drives.
+
+    A ``Popen`` stand-in rather than a ``subprocess.run`` one because the read
+    is bounded by ``stdout.read(limit)`` — the module stopped using ``run``
+    precisely so a hostile clipboard owner cannot make it buffer 300 MB before
+    the ceiling is consulted (review round 1, F3). Faking ``run`` would test a
+    code path that no longer exists.
+
+    ``stdout.read(n)`` honours ``n``, so a test can assert the bound is applied
+    to the READ and not merely to the result.
+    """
+
+    def __init__(self, payload: bytes | None, error: BaseException | None = None) -> None:
+        self._payload = b"" if payload is None else payload
+        self._error = error
+        self.returncode = 1 if payload is None else 0
+        self.stdout = io.BytesIO(self._payload)
+        self.stdin = io.BytesIO()
+        self.killed = False
+
+    def wait(self, timeout=None):  # noqa: ANN001, ANN201
+        if self._error is not None:
+            raise self._error
+        return self.returncode
+
+    def poll(self):  # noqa: ANN201
+        # Reports "already exited" unless a test staged a hang, so `_run` only
+        # reaches its kill path where a real one would.
+        return None if self._error is not None and not self.killed else self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, *exc) -> None:  # noqa: ANN002
+        return None
+
+
 class FakeRun:
-    """Stands in for ``subprocess.run`` and records the argv it was given.
+    """Stands in for ``subprocess.Popen`` and records the argv it was given.
 
     Keyed on the FIRST argument (the binary), so a test says what ``xclip``
     returns without also having to model ``wl-paste``. A binary with no answer
@@ -99,9 +140,9 @@ class FakeRun:
         answer = self.answers.get(Path(argv[0]).name)
         if callable(answer):
             answer = answer(list(argv), kwargs)
-        if answer is None:
-            return subprocess.CompletedProcess(argv, 1, b"", b"")
-        return subprocess.CompletedProcess(argv, 0, answer, b"")
+        if isinstance(answer, BaseException):
+            raise answer
+        return FakeProcess(answer if answer is None or isinstance(answer, bytes) else None)
 
 
 @pytest.fixture
@@ -118,7 +159,7 @@ def which_none(monkeypatch):
 
 def _install(monkeypatch, answers: dict[str, object]) -> FakeRun:
     fake = FakeRun(answers)
-    monkeypatch.setattr(clipboard_module.subprocess, "run", fake)
+    monkeypatch.setattr(clipboard_module.subprocess, "Popen", fake)
     return fake
 
 
@@ -167,13 +208,16 @@ def test_macos_reads_the_script_from_stdin_not_the_argv(monkeypatch, which_all) 
 
     def osascript(argv, kwargs):
         assert argv[1] == "-", "the script must come from stdin"
-        assert b"NSPasteboard" in kwargs["input"]
-        assert b"public.tiff" in kwargs["input"], "the TIFF fallback must be in the script"
+        assert kwargs["stdin"] is subprocess.PIPE, "the script must not ride in argv"
         Path(argv[2]).write_bytes(PNG)
         return b"ok"
 
     _install(monkeypatch, {"osascript": osascript})
     assert read_clipboard_image(BIG, platform="darwin", env={}) is not None
+    # The script itself carries both flavours; asserted on the source rather
+    # than on the pipe write, which the fake swallows.
+    assert "NSPasteboard" in clipboard_module._MACOS_IMAGE_SCRIPT
+    assert "public.tiff" in clipboard_module._MACOS_IMAGE_SCRIPT
 
 
 def test_macos_with_an_empty_pasteboard_is_no_image(monkeypatch, which_all) -> None:
@@ -200,8 +244,19 @@ def test_the_sniffed_type_is_what_comes_back_not_the_requested_one(monkeypatch, 
 def test_macos_file_urls_come_back_as_paths(monkeypatch, which_all) -> None:
     """Finder's Cmd+C puts only ``public.file-url`` on the pasteboard — no
     text, no image bytes — so this is the only route to what was copied."""
-    _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/a.png\n/tmp/b c.png\n"})
+    _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/a.png\x00/tmp/b c.png\x00"})
     assert read_clipboard_file_paths(platform="darwin", env={}) == ["/tmp/a.png", "/tmp/b c.png"]
+
+
+def test_a_copied_filename_containing_a_newline_survives(monkeypatch, which_all) -> None:
+    """A newline is legal in a macOS filename, and splitting the script's
+    output on newlines turned one real path into two nonexistent ones — which
+    the composer's all-or-nothing rule then refused, so a Finder copy of such a
+    file silently attached nothing (review round 1, F5). NUL cannot occur in a
+    path, so it is the one separator that cannot be ambiguous.
+    """
+    _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/we\nird.png\x00"})
+    assert read_clipboard_file_paths(platform="darwin", env={}) == ["/tmp/we\nird.png"]
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
@@ -432,8 +487,7 @@ def test_every_backend_is_bounded_by_the_timeout(
     backend cannot be added without it."""
 
     def hang(argv, kwargs):
-        assert kwargs["timeout"] == CLIPBOARD_TIMEOUT_S
-        raise subprocess.TimeoutExpired(argv, CLIPBOARD_TIMEOUT_S)
+        return subprocess.TimeoutExpired(argv, CLIPBOARD_TIMEOUT_S)
 
     _install(monkeypatch, {binary: hang})
     assert read_clipboard_image(BIG, platform=platform, env=env) is None
@@ -497,3 +551,144 @@ def test_an_unknown_platform_reads_nothing(monkeypatch, which_all) -> None:
     fake = _install(monkeypatch, {"xclip": PNG, "osascript": PNG})
     assert read_clipboard_image(BIG, platform="sunos5", env={"DISPLAY": ":0"}) is None
     assert fake.calls == []
+
+
+# -- the bounds that review round 1 corrected ---------------------------------
+def test_the_whole_operation_shares_one_deadline_not_one_per_subprocess(
+    monkeypatch, which_all
+) -> None:
+    """The X11 loop tries four MIME types and the composer adds a file-URL
+    read, so a per-``_run`` cap let a wedged selection owner cost **8.0 s**
+    against a constant that says 2 (review round 1, F2).
+
+    Asserted on the budget each call is handed: the second spawn must see less
+    time than the first, and once the deadline is spent no further process is
+    spawned at all. A wall-clock assertion would either sleep for the real
+    timeout or be flaky under load.
+    """
+    budgets: list[float] = []
+
+    def slow(argv, kwargs):
+        budgets.append(kwargs["timeout"] if "timeout" in kwargs else 0.0)
+        return None
+
+    fake = FakeRun({"xclip": slow})
+
+    class TimedProcess(FakeProcess):
+        def wait(self, timeout=None):  # noqa: ANN001, ANN201
+            budgets.append(float(timeout if timeout is not None else 0.0))
+            return self.returncode
+
+    def popen(argv, **kwargs):  # noqa: ANN001, ANN003
+        fake.calls.append(list(argv))
+        return TimedProcess(None)
+
+    monkeypatch.setattr(clipboard_module.subprocess, "Popen", popen)
+    assert read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"}) is None
+    assert len(budgets) > 1, "the X11 loop should have tried several types"
+    assert budgets == sorted(budgets, reverse=True), (
+        "each call must be handed the REMAINING budget, so the sequence is "
+        "non-increasing; equal budgets mean each subprocess got a fresh 2 s"
+    )
+    assert budgets[0] <= CLIPBOARD_TIMEOUT_S
+
+
+def test_an_exhausted_deadline_spawns_nothing_further(monkeypatch, which_all) -> None:
+    """Once the budget is gone, further spawns can only end in a kill, and each
+    one still costs an interpreter start on the keystroke handler."""
+    fake = _install(monkeypatch, {"xclip": PNG})
+    spent = clipboard_module._Deadline(0.0)
+    assert spent.expired is True
+    assert clipboard_module._run(["xclip", "-o"], spent) is None
+    assert fake.calls == [], "an expired deadline must not reach the process table"
+
+
+def test_the_read_ceiling_stops_the_read_rather_than_judging_it_after(
+    monkeypatch, which_all
+) -> None:
+    """``subprocess.run`` reads the pipe to EOF, so a ceiling applied to its
+    result is a verdict on memory already spent — round 1 (F3) measured 300 MB
+    buffered and 750 MB of peak RSS against a 4 MB cap.
+
+    Pinned by asserting the READ was bounded: the module must ask for at most
+    ``max_bytes + 1`` bytes, which is the smallest amount that still proves the
+    stream was longer than allowed.
+    """
+    asked: list[int | None] = []
+
+    class RecordingProcess(FakeProcess):
+        def __init__(self) -> None:
+            super().__init__(b"x" * 5000)
+
+        @property
+        def stdout(self):  # noqa: ANN201
+            outer = self
+
+            class Reader:
+                def read(self, size=None):  # noqa: ANN001, ANN201
+                    asked.append(size)
+                    return outer._payload[: size or len(outer._payload)]
+
+            return Reader()
+
+        @stdout.setter
+        def stdout(self, value) -> None:  # noqa: ANN001
+            pass
+
+    monkeypatch.setattr(
+        clipboard_module.subprocess, "Popen", lambda argv, **kwargs: RecordingProcess()
+    )
+    deadline = clipboard_module._Deadline(CLIPBOARD_TIMEOUT_S)
+    assert clipboard_module._run(["xclip", "-o"], deadline, max_bytes=1024) is None
+    assert asked == [1025], "the read itself must carry the bound, not the check after it"
+
+
+def test_a_payload_over_the_ingest_ceiling_is_refused_without_truncation(
+    monkeypatch, which_all
+) -> None:
+    """Dropped rather than cut short: a truncated PNG still sniffs as a PNG and
+    would be attached as a corrupt image block."""
+    _install(monkeypatch, {"xclip": PNG + b"\x00" * 4096})
+    assert read_clipboard_image(64, platform="linux", env={"DISPLAY": ":0"}) is None
+
+
+def test_the_ingest_ceiling_is_far_above_the_attachment_budget(monkeypatch) -> None:
+    """The blocker from round 1 (U1), stated as the invariant that prevents it.
+
+    A native ``Cmd+Shift+Ctrl+4`` on a Retina display puts 8.4-8.5 MB on the
+    pasteboard and bounds down to 0.28 MB, so an ingest ceiling at the 4 MB
+    attachment budget discarded the reported gesture's screenshot before the
+    resize that makes it attachable could run.
+    """
+    from local_operator.tui.widgets.editor import MAX_ATTACHMENT_BYTES
+
+    assert clipboard_module.MAX_CLIPBOARD_READ_BYTES > MAX_ATTACHMENT_BYTES * 4
+    # A real full-screen Retina PNG is ~8.5 MB; the ceiling must clear that
+    # with room for a multi-display capture rather than sitting just above it.
+    assert clipboard_module.MAX_CLIPBOARD_READ_BYTES >= 32 * 1024 * 1024
+
+
+def test_read_clipboard_reports_a_remote_refusal_as_its_own_outcome() -> None:
+    """ "No image on the clipboard" is false over SSH: the clipboard was never
+    read. The caller needs that distinction to avoid sending a remote user to
+    re-copy something, which cannot help (round 1, D2/U2)."""
+    contents = clipboard_module.read_clipboard(env={"SSH_TTY": "/dev/ttys001"})
+    assert contents.refused_remote is True
+    assert contents.image is None
+    assert contents.found_nothing is False, "a refusal is not a failure to find"
+
+
+def test_read_clipboard_answers_both_shapes_under_one_deadline(monkeypatch, which_all) -> None:
+    """One gesture, one budget. Two entry points meant two deadlines and a 4 s
+    worst case on macOS (F2)."""
+
+    def osascript(argv, kwargs):
+        if len(argv) > 2:  # the image script writes to a destination path
+            return None
+        return b"/tmp/a.png\x00"
+
+    fake = _install(monkeypatch, {"osascript": osascript})
+    contents = clipboard_module.read_clipboard(platform="darwin", env={})
+    assert contents.paths == ("/tmp/a.png",)
+    assert contents.image is None
+    assert len(fake.calls) == 2, "the image read and the file-URL read are one operation"
