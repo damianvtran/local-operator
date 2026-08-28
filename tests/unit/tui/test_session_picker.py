@@ -1245,9 +1245,8 @@ async def test_the_soft_tier_is_skipped_once_the_exact_tiers_fill_a_page() -> No
     now reaches uncapped, against ~5 ms for the exact tier.
 
     Since the picker went uncapped that build sat on the first character typed.
-    It is deferred behind the cheap tiers: a query that already returns a
-    query the exact tiers can answer at all has nothing for soft matching to
-    rescue.
+    It is deferred behind the cheap tiers: a query the exact tiers can answer at
+    all has nothing for soft matching to rescue.
     """
     rows = [_row(f"s{i:03d}", f"classifier run {i}") for i in range(15)]
     digests = {row.id: "body text" for row in rows}
@@ -1299,14 +1298,16 @@ async def test_the_header_tally_reports_the_stores_true_total() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
-        assert "2700 sessions" in "\n".join(screen.render_lines_for_test())
+        # Grouped: the separator is part of the fix for reading a 4-digit
+        # total at a glance (design round 1, D4).
+        assert "2,700 sessions" in "\n".join(screen.render_lines_for_test())
 
         screen.set_query("session 1")
         await pilot.pause()
         lines = "\n".join(screen.render_lines_for_test())
         shown = len(screen.visible_rows)
-        assert f"of {len(rows)}" in lines  # header tally: the store total
-        assert f"of {shown}" in lines  # position counter: the filtered count
+        assert f"of {len(rows):,}" in lines  # header tally: the store total
+        assert f"of {shown:,}" in lines  # position counter: the filtered count
 
 
 @pytest.mark.asyncio
@@ -1413,3 +1414,27 @@ async def test_the_soft_tier_runs_only_when_the_exact_tiers_find_nothing() -> No
         assert [r.id for r in screen.visible_rows] == ["aaa1"]
         assert calls == ["classifer"], "the soft tier did not run for a typo"
 
+
+def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> None:
+    """The paging hint was offered where paging does nothing and withdrawn where
+    it is the fastest way through the list.
+
+    A scrolling list is also long enough to contain a marked row, so the legend
+    shed `pgup/pgdn` to make room for itself. Uncapping the store made that the
+    normal case rather than the rare one (design round 1, D3).
+    """
+    width = 62  # narrow enough that legend and paging cannot both fit
+
+    not_scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=False)]
+    scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=True)]
+
+    assert _MARKER_LEGEND[0] in not_scrolling, "the legend should win when nothing scrolls"
+    assert "pgup/pgdn" not in not_scrolling
+
+    assert "pgup/pgdn" in scrolling, "paging must survive when the list actually pages"
+    assert _MARKER_LEGEND[0] not in scrolling
+
+    # A wide card keeps both regardless: the reorder is a shed policy, not a
+    # removal, so nothing is lost when there is room for everything.
+    wide = [key for key, _ in _footer_hints(100, has_marked=True, scrolls=True)]
+    assert "pgup/pgdn" in wide and _MARKER_LEGEND[0] in wide

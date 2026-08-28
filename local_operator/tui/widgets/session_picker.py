@@ -895,7 +895,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         if self._query:
             lead = "  filter "
             compact_lead = "filter "
-            tally = f"  {len(rows)} of {len(self._all)}"
+            # Grouped: `24,310` is read at a glance where `24310` is parsed as
+            # a digit string. Only worth doing since the picker was uncapped —
+            # at a 200-row ceiling the number never reached four digits. One
+            # cell per group, and at the widths where that matters the tally
+            # has already been shed entirely (see the shed order below).
+            tally = f"  {len(rows):,} of {len(self._all):,}"
             full_width = cell_len(title) + cell_len(lead) + cell_len(self._query) + cell_len(tally)
             titled_width = cell_len(title) + cell_len(lead) + cell_len(self._query)
             if full_width <= width:
@@ -920,7 +925,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # one-row list the common case rather than the rare one: a machine
             # whose delegated fan-out dominates now lands there routinely.
             count = len(self._all)
-            tally = f"  {count} session" if count == 1 else f"  {count} sessions"
+            tally = f"  {count:,} session" if count == 1 else f"  {count:,} sessions"
             if cell_len(title) + cell_len(tally) > width:
                 header.append(truncate_cells(title, width), style=Style(color=fg_colour))
             else:
@@ -991,9 +996,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # stay quiet at ``faint`` because it is adjacent to those anchors.
             first, last, total = counter
             out.append("showing ", style=faint)
-            out.append(f"{first}–{last}", style=dim)
+            out.append(f"{first:,}–{last:,}", style=dim)
             out.append(" of ", style=faint)
-            out.append(str(total), style=dim)
+            out.append(f"{total:,}", style=dim)
             out.append("\n")
         # Key NAMES at `dim` and their labels at `faint`, matching the usage
         # card: at `faint` on this ground the keys themselves were 1.49:1.
@@ -1004,7 +1009,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # screen, so an empty query or a pure name match never advertises a mark
         # the user cannot see (D2: teach the glyph where it is used, not always).
         has_marked = bool(self.body_matched_ids)
-        for index, (key, what) in enumerate(_footer_hints(width, has_marked=has_marked)):
+        # ``counter`` is set exactly when the list is longer than a page, so it
+        # is already the "does this scroll" fact the shed order needs.
+        for index, (key, what) in enumerate(
+            _footer_hints(width, has_marked=has_marked, scrolls=counter is not None)
+        ):
             if index:
                 out.append(" · ", style=faint)
             out.append(key, style=dim)
@@ -1042,8 +1051,19 @@ _MARKER_LEGEND: tuple[str, str] = (BODY_MATCH_MARKER.strip(), "matched inside")
 #: be exactly the artifact-looking mark D2 flagged.
 _FOOTER_DROP_ORDER_MARKED = ("pgup/pgdn", "type", _MARKER_LEGEND[0], "↑↓")
 
+#: Drop order once the list actually SCROLLS: the marker legend goes before the
+#: paging keys. With the fixed order above, a list that grew past one page shed
+#: ``pgup/pgdn`` to make room for the legend — so the picker advertised paging
+#: in the state where paging does nothing and withdrew it in the state where it
+#: is the fastest way through the list (design round 1, D3). Uncapping the store
+#: is what made scrolling the normal case rather than the rare one, so the shed
+#: order has to know whether there is anything to page through.
+_FOOTER_DROP_ORDER_MARKED_SCROLLING = ("type", _MARKER_LEGEND[0], "pgup/pgdn", "↑↓")
 
-def _footer_hints(width: int, *, has_marked: bool = False) -> list[tuple[str, str]]:
+
+def _footer_hints(
+    width: int, *, has_marked: bool = False, scrolls: bool = False
+) -> list[tuple[str, str]]:
     """The key hints that fit in ``width`` cells, dropping the least needed.
 
     Three stages, because the footer is the one row that must not overflow the
@@ -1058,12 +1078,19 @@ def _footer_hints(width: int, *, has_marked: bool = False) -> list[tuple[str, st
     read as a key) and is shed under width pressure per
     :data:`_FOOTER_DROP_ORDER_MARKED` — above the disposable hints so it can
     actually appear on a normal card, below the movement and action keys.
+
+    ``scrolls`` says the list is longer than one page, which REORDERS the shed
+    rather than adding a hint: the paging keys outrank the legend exactly when
+    there is something to page through (see
+    :data:`_FOOTER_DROP_ORDER_MARKED_SCROLLING`). Without it the two features
+    fought — a list long enough to scroll is also long enough to contain a
+    marked row, so the legend evicted the very hint the reader needed.
     """
     hints = list(_FOOTER_HINTS)
     drop_order = _FOOTER_DROP_ORDER
     if has_marked:
         hints = [_MARKER_LEGEND, *hints]
-        drop_order = _FOOTER_DROP_ORDER_MARKED
+        drop_order = _FOOTER_DROP_ORDER_MARKED_SCROLLING if scrolls else _FOOTER_DROP_ORDER_MARKED
 
     def cells(pairs: list[tuple[str, str]]) -> int:
         return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
