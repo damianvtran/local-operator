@@ -20,6 +20,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 cd = Path(sys.argv[1])
 label = sys.argv[2]
@@ -37,14 +38,26 @@ from local_operator.session.search_index import (  # noqa: E402
 res: dict[str, float | int] = {}
 
 
-def timed(fn, reps=3):
-    ts = []
+def timed(fn: Callable[[], Any], reps: int = 3) -> tuple[float, Any]:
+    """Run ``fn`` ``reps`` times and report its BEST time plus its last result.
+
+    The minimum rather than the mean: this machine runs several agents' test
+    suites at once, so a slow sample measures contention, not the code. The
+    fastest run is the one least polluted by whatever else was scheduled.
+
+    ``gc.collect()`` before each sample so a collection triggered by the
+    previous run is not billed to this one.
+    """
+    if reps < 1:
+        raise ValueError("timed() needs at least one repetition to have a result")
+    ts: list[float] = []
+    result: Any = None
     for _ in range(reps):
         gc.collect()
         t = time.perf_counter()
-        r = fn()
+        result = fn()
         ts.append((time.perf_counter() - t) * 1000)
-    return min(ts), r
+    return min(ts), result
 
 
 # --- scan -------------------------------------------------------------------
