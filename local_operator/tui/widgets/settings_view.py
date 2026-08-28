@@ -204,6 +204,7 @@ class SettingsView(Vertical):
         self._rule_text = Text()
         self._list_text = Text()
         self._detail_text = Text()
+        self._pane_text = Text()
 
     # -- composition --------------------------------------------------------
     def compose(self):  # type: ignore[override]
@@ -1082,6 +1083,7 @@ class SettingsView(Vertical):
         # instead of the pane sitting there at an unreadable width.
         self._pane_view.display = self._pane_fits()
         if not self._pane_fits():
+            self._pane_text = Text()
             return
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -1132,6 +1134,7 @@ class SettingsView(Vertical):
                 if summary:
                     text.append(f"    {truncate_cells(summary, room - 4)}\n", style=faint)
         text.append("\n  read-only", style=dim)
+        self._pane_text = text
         self._pane_view.update(text)
 
     def _paint_chrome(self) -> None:
@@ -1235,6 +1238,10 @@ class SettingsView(Vertical):
         rows.extend(self._list_text.plain.split("\n"))
         rows.append(self._detail_text.plain)
         return rows
+
+    def rendered_pane(self) -> str:
+        """The read-only pane as plain text. Assertable, and "" when hidden."""
+        return self._pane_text.plain
 
     def rendered_hints(self) -> str:
         """The footer as one string, for the width-shedding assertions."""
