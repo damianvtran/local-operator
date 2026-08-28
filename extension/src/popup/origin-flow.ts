@@ -80,3 +80,39 @@ export function originPromptView(
   if (!pendingOrigin) return "none";
   return decided && decided.origin === pendingOrigin ? "ack" : "prompt";
 }
+
+export interface OriginNotice {
+  title: string;
+  sub: string;
+}
+
+/** The notice a REJECTED decision shows, or null when none should appear.
+ *
+ * A rejection with an EMPTY shown prompt id came from a /health-fallback
+ * render (worker restarted, queue storage empty, or the entry expired while
+ * the daemon still echoed it) — the request was never "replaced", the popup
+ * simply had no generation to aim at. resolveOrigin's origin fallback and the
+ * daemon's cleared-event reconciliation retry or retire that render, so a
+ * scary "Request changed." interstitial there was pure noise — and looping it
+ * every click was the reported bug.
+ *
+ * A rejection WITH a shown id is a real miss: the generation the buttons were
+ * drawn for is gone. If the origin is still pending under a NEWER generation
+ * the prompt was replaced; if the live queue holds no entry for the origin at
+ * all, the request expired or was cancelled. */
+export function noticeForRejectedDecision(
+  shownPromptId: string,
+  originStillPending: boolean,
+): OriginNotice | null {
+  if (!shownPromptId) return null;
+  if (originStillPending) {
+    return {
+      title: "Request changed.",
+      sub: "The site request was replaced while this window was open. Review the new request.",
+    };
+  }
+  return {
+    title: "Request expired.",
+    sub: "This request expired or was cancelled.",
+  };
+}

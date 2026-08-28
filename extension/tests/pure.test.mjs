@@ -394,6 +394,29 @@ test("origin render holds the ack through the decision round-trip race", async (
   } finally { await module.close(); }
 });
 
+test("rejected decision notice skips the interstitial for fallback renders", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { noticeForRejectedDecision } = module.loaded;
+    // An EMPTY prompt id means the popup rendered from the /health fallback —
+    // the request was never "replaced", so no interstitial: the origin
+    // fallback already retried the click, and looping the notice on every
+    // click was the reported bug.
+    assert.equal(noticeForRejectedDecision("", true), null);
+    assert.equal(noticeForRejectedDecision("", false), null);
+    // A real miss with the origin still pending under a NEWER generation.
+    assert.deepEqual(noticeForRejectedDecision("gen-1", true), {
+      title: "Request changed.",
+      sub: "The site request was replaced while this window was open. Review the new request.",
+    });
+    // A real miss with the origin gone from the live queue entirely.
+    assert.deepEqual(noticeForRejectedDecision("gen-1", false), {
+      title: "Request expired.",
+      sub: "This request expired or was cancelled.",
+    });
+  } finally { await module.close(); }
+});
+
 test("surface tokens resolve only with an exact nonce-bearing handle", async () => {
   const module = await load("src/state.ts");
   try {

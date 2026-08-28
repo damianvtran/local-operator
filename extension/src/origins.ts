@@ -1,5 +1,5 @@
 import { reconcileActionSurface } from "./action-surface";
-import { requesterOriginKey, type AccessQueueEntry, type OriginDecision } from "./access-queue";
+import { liveQueue, requesterOriginKey, type AccessQueueEntry, type OriginDecision } from "./access-queue";
 import {
   cancelAccess,
   decideAccess,
@@ -17,16 +17,21 @@ export type { OriginDecision } from "./access-queue";
 
 // In-command continuations are keyed by immutable queue generation, never by
 // origin: two commands paused on the same redirect must resume independently.
-const waiting = new Map<string, (decision: OriginDecision) => void>();
+// Each generation can hold SEVERAL resolvers: enqueueAccess dedupes a retried
+// same-command navigation onto the existing entry (approval-store), and every
+// paused document waiting on that entry registered its own resolver here — a
+// single-slot map would overwrite the first and strand its navigation.
+const waiting = new Map<string, Set<(decision: OriginDecision) => void>>();
 let onPendingChange: ((snapshot: QueueSnapshot) => void) | null = null;
 
 function reconcileWaiters(snapshot: QueueSnapshot): void {
-  for (const [entryId, resolve] of waiting) {
+  for (const [entryId, resolvers] of waiting) {
     if (snapshot.queue.some((entry) => entry.entryId === entryId)) continue;
     const receipt = Object.values(snapshot.results).find((candidate) => candidate.entryId === entryId);
     if (!receipt) continue;
     waiting.delete(entryId);
-    resolve(receipt.state === "allowed" ? "always" : "deny");
+    const decision: OriginDecision = receipt.state === "allowed" ? "always" : "deny";
+    for (const resolve of resolvers) resolve(decision);
   }
 }
 
@@ -124,8 +129,12 @@ export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
   const queued = await enqueueAccess(url, requestId, "in_command", requestId, (entry) => {
     // enqueueAccess invokes this callback under the same mutation lock that
     // publishes the entry. No decision or expiry sweep can interleave between
-    // visibility and registration.
-    waiting.set(entry.entryId, resolveWaiter);
+    // visibility and registration. The callback also fires for a DEDUPED
+    // enqueue (retried same-command navigation), so several resolvers can
+    // attach to one generation — see the `waiting` map's comment.
+    const resolvers = waiting.get(entry.entryId) ?? new Set<(decision: OriginDecision) => void>();
+    resolvers.add(resolveWaiter);
+    waiting.set(entry.entryId, resolvers);
   });
   if (!queued.entry) return false;
   await updatePromptSurfaces(await sweepQueue());
@@ -133,12 +142,30 @@ export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
 }
 
 export async function resolveOrigin(
-  _origin: string,
+  origin: string,
   decision: OriginDecision,
   entryId: string = "",
 ): Promise<boolean> {
-  if (!entryId || !["once", "always", "all_ports", "deny"].includes(decision)) return false;
-  const result = await decideAccess(entryId, decision);
+  if (!["once", "always", "all_ports", "deny"].includes(decision)) return false;
+  let targetId = entryId;
+  const session = await getSession();
+  const queue = liveQueue(session.accessQueue, Date.now());
+  if (!targetId || !queue.some((entry) => entry.entryId === targetId)) {
+    // Generation miss: a /health-fallback render carries no entry id (queue
+    // storage empty after a worker restart, or the entry expired while the
+    // daemon still echoes it), and a stale id means the entry was replaced.
+    // The click still names the ORIGIN the user looked at, so honour it
+    // against that origin's single live entry — the mismatch came from a
+    // fallback render, not a replaced prompt. Zero or several matches stay
+    // REJECTED: with several live entries for the origin the click cannot say
+    // which paused navigation the user meant, so round-2 B1's consent hole
+    // stays closed.
+    const match = queue.filter((entry) => entry.origin === origin);
+    if (match.length !== 1) return false;
+    targetId = match[0]?.entryId ?? "";
+    if (!targetId) return false;
+  }
+  const result = await decideAccess(targetId, decision);
   if (!result.applied) return false;
   // decideAccess persisted receipts before releasing the mutation lock; the
   // queue observer resolves every matching waiter from those receipts.
