@@ -1842,15 +1842,26 @@ def mcp_command(args: argparse.Namespace) -> int:
                 return 1
             key, value = item.split("=", 1)
             env[key] = value
-        return mcp_config.add_server(
-            args.name,
-            command=getattr(args, "command", None),
-            args=getattr(args, "server_args", None),
-            env=env or None,
-            url=getattr(args, "url", None),
-            oauth=bool(getattr(args, "oauth", False)),
-            scope=getattr(args, "scope", "global"),
-        )
+        # The config writers raise instead of printing so the TUI can call the
+        # SAME implementation without writing to the terminal underneath its
+        # Textual frame; the CLI's stderr text and exit codes are reproduced
+        # here, at the CLI's own boundary. One error line per problem, exactly
+        # as the writer used to print them.
+        try:
+            mcp_config.add_server(
+                args.name,
+                command=getattr(args, "command", None),
+                args=getattr(args, "server_args", None),
+                env=env or None,
+                url=getattr(args, "url", None),
+                oauth=bool(getattr(args, "oauth", False)),
+                scope=getattr(args, "scope", "global"),
+            )
+        except mcp_config.MCPConfigWriteError as exc:
+            for error in exc.errors:
+                print(f"error: {error}", file=sys.stderr)
+            return 1
+        return 0
     if args.mcp_command == "login":
         import asyncio
 
@@ -1869,7 +1880,13 @@ def mcp_command(args: argparse.Namespace) -> int:
 
         return asyncio.run(_mcp_reauth_server(args.name, Path.cwd()))
     if args.mcp_command == "remove":
-        return mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
+        try:
+            mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
+        except mcp_config.MCPConfigWriteError as exc:
+            for error in exc.errors:
+                print(f"error: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     print(f"\n\033[1;31mError: Invalid mcp command: {args.mcp_command}\033[0m")
     return 1
