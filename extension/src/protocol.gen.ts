@@ -54,10 +54,12 @@ export interface Pong { event: 'pong'; }
 export interface TabClosed { event: 'tab_closed'; tab: string; }
 export interface TabUpdate { event: 'tab_update'; url: string; title: string; }
 export interface AwaitingOrigin { event: 'awaiting_origin'; id: string; origin: string; }
+export interface AwaitingOriginCleared { event: 'awaiting_origin_cleared'; id: string; }
 export interface Unpair { event: 'unpair'; }
 export interface OriginDecision {
   event: 'origin_decision'; origin: string; decision: 'once' | 'always' | 'deny';
 }
 export type ExtensionEvent =
-  | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | Unpair | OriginDecision;
+  | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared
+  | Unpair | OriginDecision;
 export type DaemonMessage = HelloAck | PairResult | Ping | Request;

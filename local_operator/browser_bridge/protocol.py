@@ -235,6 +235,18 @@ class AwaitingOrigin(WireModel):
     origin: str = ""
 
 
+class AwaitingOriginCleared(WireModel):
+    """Extension -> daemon: a previously announced command is NO LONGER blocked
+    on a human origin decision — its queue entry expired, was cancelled, or was
+    decided without a response the daemon will see. The daemon pops its record
+    so /health stops echoing a prompt the extension no longer shows; without
+    this the echo outlived the queue entry and the popup looped on a stale
+    request it could never resolve."""
+
+    event: Literal["awaiting_origin_cleared"] = "awaiting_origin_cleared"
+    id: str
+
+
 class Unpair(WireModel):
     """Extension -> daemon: the options page revoked pairing, so the daemon must
     drop the live socket, not merely the next reconnect (findings A5/U1)."""
