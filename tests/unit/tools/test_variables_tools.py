@@ -50,6 +50,62 @@ def test_list_variables_returns_names_only() -> None:
     assert "project-value" not in result.text
 
 
+def test_list_variables_names_session_credentials_without_values() -> None:
+    """A stored credential is invisible to ``names()`` by design, but a
+    model that sees only "(no variables)" has no way to know the operator's
+    just-stored key exists (session 835fbcafdc27: the model guessed
+    conventional names for ten minutes). The listing must carry the NAMES,
+    and never the value."""
+    tool = build_list_variables_tool()
+    store = VariableStore(cwd="/tmp", env={})
+    store.store_credential("OSWORLD_OPENAI_API_KEY", "sk-secret-value-xyz", "command")
+    ctx = ToolContext(cwd="/tmp", variables=store)
+    result = _result(tool.execute, "t1", {}, ctx)
+    assert not result.is_error
+    assert "OSWORLD_OPENAI_API_KEY" in result.text
+    assert "session credentials" in result.text
+    # The VALUE must never ride a tool result.
+    assert "sk-secret-value-xyz" not in result.text
+    assert result.details["credentials"] == 1
+
+
+def test_list_variables_without_credentials_keeps_the_old_shape() -> None:
+    """Idle sessions pay nothing: no stored credentials means no section."""
+    tool = build_list_variables_tool()
+    result = _result(tool.execute, "t1", {}, _ctx())
+    assert "session credentials" not in result.text
+    assert result.details["credentials"] == 0
+
+
+def test_read_variable_on_a_credential_names_the_bash_contract() -> None:
+    """``read_variable FOO_KEY`` for a stored credential must not answer
+    "unknown variable (see list_variables)" — circular advice now that the
+    listing names credentials — but say where the value lives."""
+    tool = build_read_variable_tool()
+    store = VariableStore(cwd="/tmp", env={})
+    store.store_credential("FOO_KEY", "sk-secret-value-xyz", "command")
+    ctx = ToolContext(cwd="/tmp", variables=store)
+    result = _result(tool.execute, "t1", {"name": "FOO_KEY"}, ctx)
+    assert result.is_error
+    assert "SESSION CREDENTIAL" in result.text
+    assert "$FOO_KEY" in result.text
+    assert "never readable" in result.text
+    assert "unknown variable" not in result.text
+    # The VALUE must never ride even an error.
+    assert "sk-secret-value-xyz" not in result.text
+
+
+def test_forget_removes_the_credential_from_the_listing() -> None:
+    store = VariableStore(cwd="/tmp", env={})
+    store.store_credential("FOO_KEY", "sk-secret-value-xyz", "command")
+    store.forget_credential("FOO_KEY")
+    tool = build_list_variables_tool()
+    ctx = ToolContext(cwd="/tmp", variables=store)
+    result = _result(tool.execute, "t1", {}, ctx)
+    assert "FOO_KEY" not in result.text
+    assert "session credentials" not in result.text
+
+
 def test_secret_shaped_and_non_prefixed_env_are_denied() -> None:
     """Security contract: secret-pattern names and non-opted-in env vars are
     never surfaced, so a model cannot enumerate or exfiltrate credentials."""

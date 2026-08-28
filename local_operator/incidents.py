@@ -27,6 +27,22 @@ from dataclasses import dataclass
 #: resumed replay see the same incident.
 SESSION_INCIDENT_MESSAGE_TYPE = "session_incident"
 
+#: Custom-message type journaled by the session when a session credential is
+#: stored or forgotten mid-conversation. The ONLY other advertisement of a
+#: stored credential is the ``<session-credentials>`` block in the volatile
+#: system-prompt tail, which the model has no reason to re-read when it
+#: changes — so an operator who runs ``/credential FOO_KEY`` and says "I just
+#: added the key" left the model to guess names until it happened to notice
+#: the tail. This message lands in the LIVE context only, naming the KEY
+#: ONLY: the value must never ride a message the provider sees. It is
+#: deliberately NOT persisted — credentials are process-memory-only, so a
+#: replayed "$FOO_KEY is injected into every bash command" would assert an
+#: env var a restarted session does not have (review round 1, R2). Resume-time
+#: discovery is already served honestly by the ``<session-credentials>``
+#: block, which the prompt tail rebuilds from the (empty) live store each
+#: turn.
+SESSION_CREDENTIAL_MESSAGE_TYPE = "session_credential"
+
 #: Custom-message type journaled by the session when the running model changes
 #: (a deliberate ``set_model``, or a failover fallback to another model).
 #: Rendered to a user message the same way as an incident, so the model NOTICES
@@ -184,6 +200,39 @@ def classify_incident(raw: str, provider: str = "", model: str = "") -> Incident
 def format_incident_message(raw: str, provider: str = "", model: str = "") -> str:
     """One-call formatter for the rendered user-visible text."""
     return classify_incident(raw, provider, model).render()
+
+
+def format_credential_message(
+    key: str,
+    *,
+    action: str = "stored",
+    replaced: bool = False,
+) -> str:
+    """Render the credential-change text injected into the model's context.
+
+    ``key`` is the NORMALIZED credential name (the env-var name bash injects).
+    The text states where the value lives and what may be done with it, because
+    the two failure modes this exists to prevent are a model that does not know
+    the credential exists (and guesses wrong names) and a model that tries to
+    READ it back (``read_variable``, ``echo``) and burns turns on a refusal.
+
+    The value is deliberately absent — this text is journaled to the transcript
+    and sent to the provider, so it carries the key and nothing else.
+    """
+    if action == "forgot":
+        return (
+            f"[session credential] {key} was removed. It is no longer "
+            "available as an environment variable to bash commands in this "
+            "session; do not reference it."
+        )
+    verb = "replaced" if replaced else "stored"
+    return (
+        f"[session credential] {key} was just {verb} by the operator. Its "
+        "value is held in session memory and injected as the environment "
+        f"variable ${key} into every bash command — use it there (a child "
+        "process reads it), never echo, print, or write it. It is not "
+        "readable through read_variable."
+    )
 
 
 def format_model_switch_message(
