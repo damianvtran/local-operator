@@ -70,6 +70,12 @@ test("settings list and revoke exact and all-port grants independently", async (
     ]);
     assert.equal(hostGrants.grants[key].scope, "all_ports", "broader grant remains");
     assert.equal(rows[0].key, key, "host revoke targets the canonical authority");
+    const accessibleNames = rows.map(module.loaded.removeGrantAccessibleName);
+    assert.deepEqual(accessibleNames, [
+      "Remove all-ports grant for http://localhost",
+      "Remove this-port grant for http://localhost:5173",
+    ]);
+    assert.equal(new Set(accessibleNames).size, rows.length, "each Remove control is distinguishable");
     assert.equal(origins["http://localhost:5173"], "allow", "exact grant remains");
 
     assert.deepEqual(
