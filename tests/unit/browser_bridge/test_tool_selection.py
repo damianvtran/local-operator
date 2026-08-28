@@ -112,7 +112,7 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
     assert "logs" in builtin.BROWSER_ACTIONS
     assert "tabs" in builtin.BROWSER_ACTIONS
     assert builtin.BRIDGE_ONLY_BROWSER_ACTIONS == frozenset(
-        {"scroll", "logs", "tabs", "request_access", "await_access"}
+        {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
     )
 
 
@@ -428,28 +428,30 @@ async def test_request_access_reports_already_allowed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_access_reports_loopback_all_ports_scope(monkeypatch) -> None:
+async def test_cancel_access_uses_the_callers_stable_identity(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
 
     async def fake_call(tool_call_id, action, params, *, surface=""):
-        return {
-            "origin": "http://[::1]:8000",
-            "state": "allowed",
-            "grant_scope": "loopback_all_ports",
-        }, None
+        assert action == "cancel_access"
+        assert params == {
+            "url": "https://example.com",
+            "requester": "session:abc",
+            "session_label": "Session",
+        }
+        return {"origin": "https://example.com", "state": "cancelled", "pending_count": 2}, None
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(browser=BrowserSurface(), session_id="abc")
     result = await builtin.execute_browser(
-        "t",
-        {"action": "request_access", "url": "http://[::1]:8000"},
-        None,
-        None,
-        ToolContext(browser=BrowserSurface()),
+        "t", {"action": "cancel_access", "url": "https://example.com"}, None, None, context
     )
-    assert "http://[::1] is allowed on all ports" in result.text
-    assert result.details is not None
-    assert result.details["grant_scope"] == "loopback_all_ports"
+    assert "cancelled" in result.text
+    assert result.details == {
+        "origin": "https://example.com",
+        "state": "cancelled",
+        "pending_count": 2,
+    }
 
 
 @pytest.mark.asyncio

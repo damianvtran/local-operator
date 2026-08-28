@@ -57,8 +57,10 @@ your choices:
   a random nonce, page-element references, and any pending site prompt.
 
 The pairing token, bridge port, and site list are stored in
-`chrome.storage.local` in your browser profile. Temporary tab state is stored
-in `chrome.storage.session` and ends with the browser session. The local
+`chrome.storage.local` in your browser profile. Temporary tab state and the bounded site-approval queue, including decisions
+and requester-bound one-time grants, are stored in `chrome.storage.session` and
+end with the browser session. Requester identifiers are never shown in the popup
+or system notifications. The local
 bridge stores only a SHA-256 hash of the pairing token and the paired
 extension ID in a user-only file on your computer.
 

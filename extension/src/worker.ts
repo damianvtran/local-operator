@@ -1,4 +1,4 @@
-import { awaitAccess, requestAccess } from "./commands/access";
+import { awaitAccess, cancelAccessCommand, requestAccess } from "./commands/access";
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
@@ -7,12 +7,9 @@ import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
-import {
-  clearAllAccessGrants,
-  revokeExactOrigin,
-  revokeLoopbackHost,
-} from "./access-grants";
-import { expireAccessRequest, resolveOrigin, setPendingObserver } from "./origins";
+import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost } from "./access-grants";
+import { ACCESS_EXPIRY_ALARM } from "./approval-store";
+import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
 import { reconcileCommandTab } from "./tab-groups";
 import {
@@ -48,6 +45,7 @@ const HANDLERS: Record<
   // explains why slices, not a daemon long-poll).
   request_access: requestAccess,
   await_access: awaitAccess,
+  cancel_access: cancelAccessCommand,
 };
 
 // How long a dial may sit unresolved before we force it closed and retry. A
@@ -65,9 +63,6 @@ let alive = false;
 // worker is alive; it dies with a suspending worker and the alarm floor takes
 // over — nothing may depend on it firing.
 let fastPathTimer: ReturnType<typeof setTimeout> | undefined;
-// The request id currently being handled, so an origin pause can tell the
-// daemon WHICH command to keep alive past the base timeout (finding A3).
-let activeRequestId = "";
 
 function send(frame: object): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
@@ -83,19 +78,33 @@ function send(frame: object): void {
 // it to message the user through the harness, which notifies reliably. This
 // banner stays because it costs nothing and helps the machines where it works.
 const PENDING_NOTIFICATION_ID = "lop-origin-pending";
-setPendingObserver((pending) => {
-  if (pending) {
-    send({ event: "awaiting_origin", id: activeRequestId, origin: pending.origin });
+let notificationQueueKey = "unreconciled";
+setPendingObserver((snapshot) => {
+  for (const entry of snapshot.queue) {
+    if (entry.kind === "in_command" && entry.commandId) {
+      send({ event: "awaiting_origin", id: entry.commandId, origin: entry.origin });
+    }
+  }
+  const count = snapshot.queue.length;
+  // Badge/title reconciliation may legitimately repeat during a sweep, but an
+  // identical aggregate OS notification is noise. Entry generations form a
+  // stable key that changes on enqueue, decision, cancellation, and expiry.
+  const nextNotificationKey = snapshot.queue.map((entry) => entry.entryId).join("\n");
+  if (nextNotificationKey === notificationQueueKey) return;
+  notificationQueueKey = nextNotificationKey;
+  if (count) {
+    const first = snapshot.queue[0]!;
     chrome.notifications?.create(PENDING_NOTIFICATION_ID, {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
       title: "Local Operator needs your OK",
-      message: `Allow the agent to open ${pending.authority}? Click the extension icon in the toolbar to decide.`,
+      message:
+        count === 1
+          ? `Allow the agent to open ${first.displayAuthority}? Click the extension icon in the toolbar to decide.`
+          : `${count} site requests are waiting. Click the extension icon in the toolbar to decide.`,
       priority: 2,
     });
-  } else {
-    chrome.notifications?.clear(PENDING_NOTIFICATION_ID);
-  }
+  } else chrome.notifications?.clear(PENDING_NOTIFICATION_ID);
 });
 
 // Clicking the banner opens the consent popup directly — one click instead of
@@ -129,7 +138,6 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: `unknown method ${request.method}`, data: {} } });
     return;
   }
-  activeRequestId = request.id;
   try {
     // Rename propagation is presentation-only and deliberately precedes every
     // owned-tab command; failures never mask the command's real result.
@@ -281,11 +289,10 @@ function ensureReconnectAlarm(): void {
 ensureReconnectAlarm();
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONNECT_ALARM_NAME && shouldDialOnAlarm({ connected, connecting })) void connect();
-  // TTL sweep for an async access request nobody is polling: without it an
-  // abandoned request would leave the "!" badge and popup prompt up until the
-  // next access RPC happened to run the lazy sweep. The alarm is created by
-  // request_access with the record's own expiry time.
-  if (alarm.name === "lop-access-expiry") void expireAccessRequest();
+  // The sweep persists receipts, resolves in-command waiters through the queue
+  // observer, and centrally re-arms the earliest remaining queue/result/grant
+  // deadline. No caller owns this alarm independently.
+  if (alarm.name === ACCESS_EXPIRY_ALARM) void expireAccessRequest();
 });
 chrome.runtime.onStartup.addListener(() => {
   alive = true;
@@ -304,10 +311,17 @@ chrome.runtime.onInstalled.addListener(() => {
 // socket. `connecting` is never persisted, so a suspend can never leave it
 // wedged true across a restart — a fresh worker always starts able to dial.
 alive = true;
-void connect();
+// Observer registration above precedes restoration. Chain startup so persisted
+// queue state reconciles its global badge/title before connection work, and
+// contain failure so MV3 never reports an unhandled top-level rejection.
+void restoreAccessQueue()
+  .catch((error) => console.warn("approval queue restore failed", error))
+  .finally(() => void connect());
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.pendingOrigin) void chrome.runtime.sendMessage({ event: "origin_prompt", pending: changes.pendingOrigin.newValue });
+  if (area === "session" && changes.accessQueue) {
+    void chrome.runtime.sendMessage({ event: "origin_prompt", queue: changes.accessQueue.newValue });
+  }
 });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Decisions are keyed by ORIGIN (finding A6) and carry the prompt
@@ -332,14 +346,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.event === "origin_decision") {
-    // The worker treats popup messages as hostile input. resolveOrigin validates
-    // both the decision vocabulary and loopback eligibility before persistence.
     // sendResponse + `return true` keeps the MV3 event alive until the
     // decision is DURABLY recorded (record, grant, allowlist, prompt
     // teardown). A fire-and-forget here let Chrome settle the popup's
     // sendMessage and suspend this worker mid-persistence, losing the
     // user's approval (round-2 M2).
-    resolveOrigin(String(message.origin), message.decision, String(message.promptId ?? ""))
+    resolveOrigin(String(message.origin), message.decision, String(message.entryId ?? message.promptId ?? ""))
       .then((applied) => sendResponse({ applied }))
       .catch(() => sendResponse({ applied: false }));
     return true;

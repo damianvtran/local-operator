@@ -1,4 +1,10 @@
-import { displayAuthority, isLoopbackHost } from "../origin-policy";
+import {
+  adjacentEntryId,
+  liveQueue,
+  selectEntry,
+  type AccessQueueEntry,
+} from "../access-queue";
+import { isLoopbackHost } from "../origin-policy";
 import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
@@ -54,6 +60,9 @@ let shownPromptOrigin: string | undefined;
 // a /health-fallback render (worker restarted, no session record); the worker
 // then still requires the ORIGIN to match its live prompt.
 let shownPromptId = "";
+// Popup-local selection follows an immutable generation, not an index. Storage
+// changes retain it while alive; when it disappears FIFO becomes current.
+let selectedEntryId: string | undefined;
 
 interface Health {
   extension_connected: boolean;
@@ -105,36 +114,38 @@ async function render(): Promise<void> {
   // A pending site decision wins the popup: it is the one thing the user must
   // act on (findings U2/D1). The daemon reports it in /health so the popup
   // shows it even after a worker restart.
-  const { pendingOrigin } = await getSession();
+  const session = await getSession();
   const health = await daemonHealth();
-  // Compare by ORIGIN (not display hostname): the latch must match exactly the
-  // key the decision was sent under (A6).
-  const pendingOriginValue = pendingOrigin?.origin || health?.pending_origin;
-  const originView = originPromptView(pendingOriginValue, decidedOrigin);
-  if (originView === "none") {
+  const queue = liveQueue(session.accessQueue, Date.now());
+  const selected = selectEntry(queue, selectedEntryId);
+  selectedEntryId = selected?.entryId;
+  // A health-only fallback keeps an older daemon/extension pairing usable, but
+  // queue storage is authoritative whenever it has an entry.
+  const pendingOriginValue = selected?.origin || session.pendingOrigin?.origin || health?.pending_origin;
+  const pendingHost = selected?.displayAuthority || session.pendingOrigin?.authority || hostnameOf(health?.pending_origin);
+  if (!pendingOriginValue) {
     shownPromptOrigin = undefined;
-    // Round-trip landed and the prompt is gone: clear the latch so a future
-    // prompt for the SAME origin (a retry after deny) is not swallowed.
+    shownPromptId = "";
     decidedOrigin = null;
-  } else if (originView === "ack") {
-    // Stale echo of the decided prompt — hold the acknowledgement.
-    showOriginAck(decidedOrigin!.decision);
-    return;
   }
-  const pendingAuthority = pendingOrigin?.authority || authorityOf(health?.pending_origin);
-  if (pendingAuthority) {
+  if (pendingHost) {
     // The heading is fixed prose; the host — the string the user must verify
     // before granting a standing browsing grant — goes in the monospace trough
     // where it renders intact and reads unambiguously as data (D11). The
     // heading id stays constant, so no per-host text in the serif face.
     const host = document.getElementById("origin-host");
-    if (host) host.textContent = pendingAuthority;
+    if (host) host.textContent = pendingHost;
     shownPromptOrigin = pendingOriginValue;
-    const loopback = isLoopbackOrigin(pendingOriginValue);
-    document.getElementById("origin-all-ports")?.classList.toggle("hidden", !loopback);
-    const always = document.getElementById("origin-always");
-    if (always) always.textContent = loopback ? "Always this port" : "Always allow";
-    shownPromptId = pendingOrigin?.promptId ?? "";
+    shownPromptId = selected?.entryId ?? session.pendingOrigin?.promptId ?? "";
+    renderQueueControls(queue, selected);
+    const allPorts = document.getElementById("origin-all-ports");
+    let loopbackEligible = false;
+    try {
+      loopbackEligible = !!pendingOriginValue && isLoopbackHost(new URL(pendingOriginValue));
+    } catch {
+      // Health fallback from an older peer can be malformed; broad scope stays hidden.
+    }
+    allPorts?.classList.toggle("hidden", !loopbackEligible);
     // A fresh prompt must arrive with live buttons even if a previous
     // decision's lock is still set.
     setOriginBusy(false);
@@ -193,21 +204,12 @@ async function render(): Promise<void> {
   show(viewForHealth(false, locallyPaired));
 }
 
-function authorityOf(origin: string | undefined): string {
+function hostnameOf(origin: string | undefined): string {
   if (!origin) return "";
   try {
-    return displayAuthority(new URL(origin));
+    return new URL(origin).hostname;
   } catch {
     return origin;
-  }
-}
-
-function isLoopbackOrigin(origin: string | undefined): boolean {
-  if (!origin) return false;
-  try {
-    return isLoopbackHost(new URL(origin));
-  } catch {
-    return false;
   }
 }
 
@@ -327,15 +329,51 @@ document.getElementById("origin-allow")?.addEventListener("click", () => void de
 document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
 document.getElementById("origin-all-ports")?.addEventListener("click", () => void decide("all_ports"));
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
+document.getElementById("origin-previous")?.addEventListener("click", () => void moveQueue(-1));
+document.getElementById("origin-next")?.addEventListener("click", () => void moveQueue(1));
 
-// Lock every consent button the moment one is clicked: the session-storage
+// Lock the three consent buttons the moment one is clicked: the session-storage
 // read below is async, and a second click in that window would double-send the
 // decision. render()'s prompt path unlocks for the next genuine prompt.
 function setOriginBusy(busy: boolean): void {
-  for (const id of ["origin-allow", "origin-always", "origin-all-ports", "origin-deny"]) {
+  for (const id of [
+    "origin-allow",
+    "origin-always",
+    "origin-all-ports",
+    "origin-deny",
+    "origin-previous",
+    "origin-next",
+  ]) {
     const button = document.getElementById(id) as HTMLButtonElement | null;
     if (button) button.disabled = busy;
   }
+}
+
+function renderQueueControls(queue: AccessQueueEntry[], selected: AccessQueueEntry | undefined): void {
+  const position = selected ? queue.findIndex((entry) => entry.entryId === selected.entryId) + 1 : 1;
+  const count = Math.max(1, queue.length);
+  const positionEl = document.getElementById("origin-position");
+  const waitingEl = document.getElementById("origin-waiting");
+  if (positionEl) positionEl.textContent = `${position} of ${count}`;
+  if (waitingEl) waitingEl.textContent = `${count} ${count === 1 ? "request" : "requests"} waiting`;
+  for (const id of ["origin-previous", "origin-next"]) {
+    const button = document.getElementById(id) as HTMLButtonElement | null;
+    if (button) button.disabled = queue.length < 2;
+  }
+  const authority = selected?.displayAuthority ?? shownPromptOrigin ?? "site";
+  document
+    .getElementById("origin-previous")
+    ?.setAttribute("aria-label", `Previous site request before ${authority}, ${position} of ${count}`);
+  document
+    .getElementById("origin-next")
+    ?.setAttribute("aria-label", `Next site request after ${authority}, ${position} of ${count}`);
+}
+
+async function moveQueue(delta: -1 | 1): Promise<void> {
+  const { accessQueue } = await getSession();
+  const queue = liveQueue(accessQueue, Date.now());
+  selectedEntryId = adjacentEntryId(queue, selectedEntryId, delta);
+  await render();
 }
 
 function showOriginAck(decision: OriginDecision): void {
@@ -378,7 +416,7 @@ async function decide(decision: OriginDecision): Promise<void> {
       event: "origin_decision",
       origin,
       decision,
-      promptId: shownPromptId,
+      entryId: shownPromptId,
     })) as { applied?: boolean } | undefined;
     if (!response?.applied) {
       // The worker refused the decision: the prompt was replaced (or expired)
@@ -397,6 +435,9 @@ async function decide(decision: OriginDecision): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   }
+  // A successful decision removes this generation; FIFO becomes current. A
+  // stale rejection also reselects deterministically from the live queue.
+  selectedEntryId = undefined;
   await render();
 }
 
@@ -419,7 +460,7 @@ function showOriginNotice(title: string, sub: string): void {
 // popup (review finding m3). connState flips exactly when something the popup
 // shows has changed, so this is cheaper and quieter than polling /health.
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "session" && (changes.connState || changes.pendingOrigin)) void render();
+  if (area === "session" && (changes.connState || changes.pendingOrigin || changes.accessQueue)) void render();
 });
 
 void render();
