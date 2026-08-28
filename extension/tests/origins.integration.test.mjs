@@ -124,6 +124,76 @@ test("allow once grants only one requester while always reconciles exact-origin 
   } finally { await bundle.close(); chrome.restore(); }
 });
 
+test("loopback all-port decision reconciles only same scheme and literal host", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadStore();
+  try {
+    const store = await bundle.import();
+    const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
+    await store.enqueueAccess(url("http://localhost:5173"), "session:B", "async");
+    await store.enqueueAccess(url("https://localhost:5173"), "session:C", "async");
+    await store.enqueueAccess(url("http://127.0.0.1:5173"), "session:D", "async");
+    const decided = await store.decideAccess(selected.entryId, "all_ports");
+    assert.deepEqual(decided.decided.map((entry) => entry.requester), ["session:A", "session:B"]);
+    assert.deepEqual(chrome.session("accessQueue").map((entry) => entry.requester), ["session:C", "session:D"]);
+    assert.equal((await store.accessStatus("http://localhost:5173", "session:B")).state, "allowed");
+    assert.ok(chrome.local("hostGrants").grants['["http:","localhost"]']);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("exact persistent decision reconciles only the selected origin", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadStore();
+  try {
+    const store = await bundle.import();
+    const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
+    await store.enqueueAccess(url("http://localhost:3000"), "session:B", "async");
+    await store.enqueueAccess(url("http://localhost:5173"), "session:C", "async");
+    await store.decideAccess(selected.entryId, "always");
+    assert.deepEqual(chrome.session("accessQueue").map((entry) => entry.requester), ["session:C"]);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("persisted loopback grant survives module restart and admits a second port", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadStore();
+  const originsBundle = await loadModule("src/origins.ts");
+  try {
+    const store = await bundle.import();
+    const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
+    await store.decideAccess(selected.entryId, "all_ports");
+    const origins = await originsBundle.import("restart");
+    assert.equal(await origins.originAllowed(url("http://localhost:5173")), true);
+  } finally {
+    await bundle.close();
+    await originsBundle.close();
+    chrome.restore();
+  }
+});
+
+test("revoking a loopback all-port grant makes a later port prompt again", async () => {
+  const chrome = installChromeStub();
+  const storeBundle = await loadStore();
+  const originsBundle = await loadModule("src/origins.ts");
+  const grantsBundle = await loadModule("src/access-grants.ts");
+  try {
+    const store = await storeBundle.import();
+    const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
+    await store.decideAccess(selected.entryId, "all_ports");
+    const grants = await grantsBundle.import();
+    assert.equal(await grants.revokeLoopbackHost('["http:","localhost"]'), true);
+    const origins = await originsBundle.import("after-revoke");
+    assert.equal(await origins.originAllowed(url("http://localhost:5173")), false);
+    const queued = await store.enqueueAccess(url("http://localhost:5173"), "session:B", "async");
+    assert.equal(queued.state, "pending");
+  } finally {
+    await storeBundle.close();
+    await originsBundle.close();
+    await grantsBundle.close();
+    chrome.restore();
+  }
+});
+
 test("decision between enqueue publication and return cannot miss the waiter", async () => {
   const chrome = installChromeStub();
   const bundle = await loadModule("src/origins.ts");
@@ -230,11 +300,11 @@ test("migration handles each equal, request-only, and pending-only combination",
       const store = await bundle.import(mode);
       const now = Date.now();
       if (mode !== "pending-only") chrome.setSession("accessRequest", {
-        origin: "https://legacy.example", hostname: "legacy.example", requester: "session:L",
+        origin: "https://legacy.example", authority: "legacy.example", requester: "session:L",
         requestedAt: now, expiresAt: now + 60_000,
       });
       if (mode !== "request-only") chrome.setSession("pendingOrigin", {
-        origin: "https://legacy.example", hostname: "legacy.example", requestId: "session:L", promptId: "legacy-generation",
+        origin: "https://legacy.example", authority: "legacy.example", requestId: "session:L", promptId: "legacy-generation",
       });
       await store.sweepQueue(now);
       const queue = chrome.session("accessQueue");
@@ -272,11 +342,11 @@ test("queue cap rejects without loss and migration imports legacy generation onc
     const store = await bundle.import();
     const now = Date.now();
     chrome.setSession("accessRequest", {
-      origin: "https://legacy.example", hostname: "legacy.example", requester: "session:L",
+      origin: "https://legacy.example", authority: "legacy.example", requester: "session:L",
       requestedAt: now, expiresAt: now + 60_000,
     });
     chrome.setSession("pendingOrigin", {
-      origin: "https://legacy.example", hostname: "legacy.example", requestId: "session:L", promptId: "legacy-generation",
+      origin: "https://legacy.example", authority: "legacy.example", requestId: "session:L", promptId: "legacy-generation",
     });
     await store.sweepQueue(now);
     await store.sweepQueue(now + 1);

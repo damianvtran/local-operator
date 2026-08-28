@@ -20,6 +20,8 @@ import {
   type OnceGrants,
   type OriginDecision,
 } from "./access-queue";
+import { grantExactOriginLocked, grantLoopbackHostLocked } from "./access-grants";
+import { isLoopbackHost } from "./origin-policy";
 import { getLocal, getSession, withSessionMutation, type SessionState } from "./state";
 
 export interface QueueSnapshot {
@@ -123,7 +125,7 @@ async function normalizedLocked(now: number): Promise<QueueSnapshot> {
       queue.push(
         newEntry(
           pending.origin,
-          pending.hostname,
+          pending.authority,
           pendingOwner,
           "in_command",
           now,
@@ -285,9 +287,18 @@ export function decideAccess(entryId: string, decision: OriginDecision): Promise
     if (!selected) return { applied: false, decided: [], snapshot };
     let decided = [selected];
     if (decision === "always") {
-      const { origins = {} } = await getLocal();
-      await chrome.storage.local.set({ origins: { ...origins, [selected.origin]: "allow" } });
+      // Commit persistent policy first. If MV3 stops before queue receipts are
+      // reconciled, a restarted worker still admits every covered request.
+      await grantExactOriginLocked(selected.origin);
       decided = snapshot.queue.filter((entry) => policyCovers(selected.origin, entry.origin));
+    } else if (decision === "all_ports") {
+      const selectedUrl = new URL(selected.origin);
+      if (!isLoopbackHost(selectedUrl) || !(await grantLoopbackHostLocked(selectedUrl))) {
+        return { applied: false, decided: [], snapshot };
+      }
+      decided = snapshot.queue.filter((entry) =>
+        policyCovers(selected.origin, entry.origin, "loopback_all_ports"),
+      );
     }
     const state: AccessReceipt["state"] = decision === "deny" ? "denied" : "allowed";
     const ids = new Set(decided.map((entry) => entry.entryId));

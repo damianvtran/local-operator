@@ -4,6 +4,7 @@ import {
   selectEntry,
   type AccessQueueEntry,
 } from "../access-queue";
+import { isLoopbackHost } from "../origin-policy";
 import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
@@ -121,7 +122,7 @@ async function render(): Promise<void> {
   // A health-only fallback keeps an older daemon/extension pairing usable, but
   // queue storage is authoritative whenever it has an entry.
   const pendingOriginValue = selected?.origin || session.pendingOrigin?.origin || health?.pending_origin;
-  const pendingHost = selected?.displayAuthority || session.pendingOrigin?.hostname || hostnameOf(health?.pending_origin);
+  const pendingHost = selected?.displayAuthority || session.pendingOrigin?.authority || hostnameOf(health?.pending_origin);
   if (!pendingOriginValue) {
     shownPromptOrigin = undefined;
     shownPromptId = "";
@@ -137,6 +138,14 @@ async function render(): Promise<void> {
     shownPromptOrigin = pendingOriginValue;
     shownPromptId = selected?.entryId ?? session.pendingOrigin?.promptId ?? "";
     renderQueueControls(queue, selected);
+    const allPorts = document.getElementById("origin-all-ports");
+    let loopbackEligible = false;
+    try {
+      loopbackEligible = !!pendingOriginValue && isLoopbackHost(new URL(pendingOriginValue));
+    } catch {
+      // Health fallback from an older peer can be malformed; broad scope stays hidden.
+    }
+    allPorts?.classList.toggle("hidden", !loopbackEligible);
     // A fresh prompt must arrive with live buttons even if a previous
     // decision's lock is still set.
     setOriginBusy(false);
@@ -318,6 +327,7 @@ document.getElementById("retry")?.addEventListener("click", () => void render())
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
 document.getElementById("origin-allow")?.addEventListener("click", () => void decide("once"));
 document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
+document.getElementById("origin-all-ports")?.addEventListener("click", () => void decide("all_ports"));
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
 document.getElementById("origin-previous")?.addEventListener("click", () => void moveQueue(-1));
 document.getElementById("origin-next")?.addEventListener("click", () => void moveQueue(1));
@@ -326,7 +336,14 @@ document.getElementById("origin-next")?.addEventListener("click", () => void mov
 // read below is async, and a second click in that window would double-send the
 // decision. render()'s prompt path unlocks for the next genuine prompt.
 function setOriginBusy(busy: boolean): void {
-  for (const id of ["origin-allow", "origin-always", "origin-deny", "origin-previous", "origin-next"]) {
+  for (const id of [
+    "origin-allow",
+    "origin-always",
+    "origin-all-ports",
+    "origin-deny",
+    "origin-previous",
+    "origin-next",
+  ]) {
     const button = document.getElementById(id) as HTMLButtonElement | null;
     if (button) button.disabled = busy;
   }
