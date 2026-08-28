@@ -1,5 +1,5 @@
 import { DEFAULT_PORT, getLocal } from "../state";
-import { grantRows } from "./grant-list";
+import { grantRows, removeGrantAccessibleName } from "./grant-list";
 import { runWorkerMutation } from "./mutation-flow";
 
 const port = document.getElementById("port") as HTMLInputElement;
@@ -60,7 +60,7 @@ async function render(): Promise<void> {
     const remove = document.createElement("button");
     remove.className = "btn";
     remove.textContent = "Remove";
-    remove.setAttribute("aria-label", `Remove ${entry.label} access`);
+    remove.setAttribute("aria-label", removeGrantAccessibleName(entry));
     remove.addEventListener("click", async () => {
       const message = entry.scope === "host"
         ? { event: "host_grant_revoke", canonicalKey: entry.key }
