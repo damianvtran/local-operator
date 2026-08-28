@@ -4364,6 +4364,9 @@ class Session:
         return ToolContext(
             cwd=self._cwd,
             session_id=self._session_id,
+            # Re-read the live holder every turn so generated, user-set, and
+            # resumed titles reach display-only browser metadata after renames.
+            session_name=self.conversation_name,
             agent_id=self._agent_id,
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
