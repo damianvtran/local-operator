@@ -8,6 +8,7 @@ import {
   type OriginAdmission,
 } from "../origins";
 import { settle } from "../settle";
+import { reconcileTabGroup } from "../tab-groups";
 import {
   atSurfaceCap,
   getSurfaces,
@@ -107,6 +108,9 @@ export async function open(params: Record<string, unknown>, requestId: string): 
   const admission = await ensureTopLevelAccess(url, requestId, sessionRequester(params));
   if (params.tab !== undefined && params.tab !== null && params.tab !== "") {
     const surface = await requireSurface(params.tab);
+    // Explicit resume refreshes trusted metadata and is the one command that
+    // may rejoin a tab the user manually ungrouped.
+    await reconcileTabGroup(surface, params, true);
     // Re-arm log capture on the resumed surface: after a worker restart the
     // ring buffer was lost and the domains may need re-enabling, and
     // startLogCapture is idempotent when they are already on.
@@ -155,12 +159,16 @@ export async function open(params: Record<string, unknown>, requestId: string): 
   // navigating, so the `logs` command captures output from the destination
   // page's very first script (finding: logs must be "since the surface opened").
   await startLogCapture(tab.id, cdp);
+  // Security-sensitive ordering stays intact: blank tab persisted, debugger
+  // attached, and log capture armed before presentation, then navigation.
+  await reconcileTabGroup(surface, params, true);
   const live = await navigate(tab.id, url, requestId, admission);
   return { tab: surfaceToken(surface), ...live };
 }
 
 export async function goto(params: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
+  await reconcileTabGroup(surface, params, false);
   const url = safeHttpUrl(params.url);
   // Same early refusal as open — see the comment there. Consumption likewise
   // happens HERE, once, bound to this command's request id.
