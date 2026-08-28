@@ -444,20 +444,121 @@ async def test_cooldown_after_an_advisory_pass(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_kill_switch_on_a_pass_that_does_not_clear_the_band(tmp_path, monkeypatch):
-    """Non-negotiable: an advisory pass that fails to clear
-    ``RECOVERY_BAND * advisor_floor`` disables the advisor for the session.
-    A feature that can spend money in a loop must fail closed."""
+async def test_kill_switch_on_a_pass_that_reclaims_nothing(tmp_path, monkeypatch):
+    """Non-negotiable: an advisory pass that frees essentially nothing disables
+    the advisor for the session. A feature that can spend money in a loop must
+    fail closed.
+
+    "Reclaimed nothing" is measured as a REDUCTION against what the pass
+    started from. The earlier version of this test compared an absolute
+    residual and called ``400,000 -> 190,000`` — a 52.5% reduction — "the
+    advice reclaimed nothing", which pinned the defect instead of catching it
+    (agent review round 2, major-3).
+    """
     session = make_session(tmp_path, compaction_settings=advisor_settings())
     await talk(session, turns=6)
     seed_hint(session)
     pin_measured_context(monkeypatch, 400_000)
     plan = as_plan(await session._plan_compaction(respect_threshold=True))
-    # Residual well above 0.8 * 200k: the advice reclaimed nothing.
-    bad = CompactionOutcome(ran=True, strategy="snapcompact", tokens_after=190_000)
+    # 400,000 -> 396,000: 1% freed for the price of a summary call. THIS is a
+    # pass that reclaimed nothing.
+    bad = CompactionOutcome(
+        ran=True, strategy="snapcompact", tokens_before=400_000, tokens_after=396_000
+    )
     session._settle_advisor(plan, bad)
     assert session._advisor_disabled is True
     assert session._advisor_settings() is None
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (400_000, 242_857),  # this PR's own headline end-to-end evidence
+        (500_000, 300_000),
+        (350_000, 210_000),
+        (590_000, 354_000),
+    ],
+)
+async def test_a_successful_advisory_pass_keeps_the_advisor_alive(
+    tmp_path, monkeypatch, before, after
+):
+    """THE major-3 regression: a pass that reclaims ~40% must NOT switch the
+    feature off.
+
+    Every pair here disabled the advisor under the old absolute-residual rule,
+    including the first, which is the exact scenario this PR presents as the
+    feature working. A beta that switches itself off after one good pass cannot
+    collect the evidence the flag exists to gather.
+    """
+    session = make_session(tmp_path, compaction_settings=advisor_settings())
+    await talk(session, turns=6)
+    seed_hint(session)
+    pin_measured_context(monkeypatch, before)
+    plan = as_plan(await session._plan_compaction(respect_threshold=True))
+    good = CompactionOutcome(
+        ran=True, strategy="snapcompact", tokens_before=before, tokens_after=after
+    )
+    session._settle_advisor(plan, good)
+    reclaimed = (before - after) / before
+    assert (
+        session._advisor_disabled is False
+    ), f"a pass reclaiming {reclaimed:.1%} disabled the advisor"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_yardstick_does_not_contradict_the_auto_continue_band(
+    tmp_path, monkeypatch
+):
+    """A residual must not be "created headroom" and "reclaimed nothing" at
+    once.
+
+    The old rule compared against ``RECOVERY_BAND * advisor_floor`` while the
+    auto-continue guard compares against ``RECOVERY_BAND * threshold``, making
+    the kill switch 3.75x stricter on the same pass. This pins the resolution:
+    any residual the auto-continue band accepts as headroom must not
+    simultaneously disable the advisor.
+    """
+    session = make_session(tmp_path, compaction_settings=advisor_settings())
+    await talk(session, turns=6)
+    seed_hint(session)
+    pin_measured_context(monkeypatch, 400_000)
+    plan = as_plan(await session._plan_compaction(respect_threshold=True))
+
+    residual = 242_857
+    threshold = compaction_api.resolve_threshold_tokens(
+        session.effective_model.context_window, session._compaction_settings
+    )
+    assert (
+        residual <= compaction_api.RECOVERY_BAND * threshold
+    ), "fixture invalid: this residual is not inside the auto-continue band"
+    session._settle_advisor(
+        plan,
+        CompactionOutcome(
+            ran=True, strategy="snapcompact", tokens_before=400_000, tokens_after=residual
+        ),
+    )
+    assert session._advisor_disabled is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_refuses_to_judge_without_a_before_figure(tmp_path, monkeypatch):
+    """A missing "before" is a measurement failure, not a behavioural one, so
+    it must not disable the feature."""
+    session = make_session(tmp_path, compaction_settings=advisor_settings())
+    await talk(session, turns=6)
+    seed_hint(session)
+    pin_measured_context(monkeypatch, 400_000)
+    plan = as_plan(await session._plan_compaction(respect_threshold=True))
+    # Force both the outcome's and the plan's "before" to zero.
+    object.__setattr__(plan, "context_tokens", 0)
+    session._settle_advisor(
+        plan, CompactionOutcome(ran=True, strategy="snapcompact", tokens_after=396_000)
+    )
+    assert session._advisor_disabled is False
     await session.dispose()
 
 
@@ -869,4 +970,57 @@ async def test_hint_preserve_window_is_capped(tmp_path, monkeypatch):
     assert isinstance(
         planned, _CompactionPlan
     ), f"a wide hint suppressed a mandatory pass: {planned!r}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_one_boundary_spawns_at_most_one_advisor_call(tmp_path, monkeypatch):
+    """A single tool-loop boundary must not spend two advisor calls.
+
+    The round-1 fix hoisted the spawn above the mid-turn pre-gate but left the
+    original site below it, so `_on_turn_end` had TWO spawn sites. Below the
+    ordinary trigger the pre-gate returns and only the first runs, which is why
+    the band tests did not see it; ABOVE the trigger both are reached in the
+    same boundary. The `_advisor_in_flight` latch usually collapses them, but it
+    is released when the call completes, so a boundary whose first call settles
+    during the `_persist_new_messages` await between the two sites spawned a
+    second one (agent review round 2, minor-1).
+
+    Driven at 700k — above the 600k trigger, so the pre-gate does NOT return
+    early and both former sites are reachable — with `advisor_every_n_turns=0`
+    so the interval gate cannot mask a duplicate the way the shipped default
+    does.
+    """
+    stream = BoundaryStream()
+    session = make_session(
+        tmp_path,
+        stream=stream,
+        compaction_settings=advisor_settings(advisor_every_n_turns=0),
+    )
+    await talk(session, turns=3)
+    pin_measured_context(monkeypatch, 700_000)
+
+    # The latch alone hides the duplicate: with both sites present and no
+    # yield between them, the second spawn finds `_advisor_in_flight` set and
+    # skips. The defect needs the first call to SETTLE in the gap, so the
+    # persistence await between the two sites is made to yield -- which is
+    # what it does in production, where it writes to disk.
+    real_persist = session._persist_new_messages
+
+    async def yielding_persist(messages):
+        await real_persist(messages)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(session, "_persist_new_messages", yielding_persist)
+
+    await _drive_boundary(session, 700_000)
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+
+    assert session._advisor_calls <= 1, (
+        f"one boundary spent {session._advisor_calls} advisor calls — "
+        "_on_turn_end has more than one spawn site again"
+    )
+    assert stream.advisor_calls <= 1
     await session.dispose()

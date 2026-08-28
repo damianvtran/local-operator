@@ -953,6 +953,27 @@ def _should_compact(
         return bool(compaction_api.should_compact(context_tokens, window_tokens, settings))
 
 
+#: Minimum fraction of the pre-pass context an ADVISORY compaction has to free
+#: before the advisor is judged to be earning its calls. Below it, the advisor
+#: is disabled for the session (see :meth:`Session._settle_advisor`).
+#:
+#: Deliberately a REDUCTION fraction rather than an absolute residual band. The
+#: kill switch answers "is the advice reclaiming anything?", which is a
+#: property of the pass, not of where the context happens to sit; the previous
+#: absolute form disabled the advisor after a measured 39.3% reduction (agent
+#: review round 2, major-3).
+#:
+#: 0.10 is set well below the reductions an advisory pass actually achieves
+#: (39-40% across every size measured on the real path) and well above zero,
+#: so it catches the failure it exists for — a pass that fires, spends a
+#: summary call, and frees essentially nothing — without firing on passes that
+#: are working. It is NOT ``RECOVERY_BAND``: that constant answers a different
+#: question (is there room to continue the turn?) against a different
+#: yardstick (the trigger threshold), and reusing it here is exactly how one
+#: residual came to be both "created headroom" and "reclaimed nothing".
+_ADVISOR_MIN_RECLAIM_FRACTION = 0.10
+
+
 def _advisor_detail(hint: Any | None) -> str | None:
     """Receipt sentence for an advisor-triggered pass, or ``None``.
 
@@ -5264,13 +5285,6 @@ class Session:
         # crash mid-run leaves a transcript that replays to what actually
         # happened rather than losing the run outright.
         await self._persist_new_messages(messages)
-        # Off-loop advisory (BETA, inert by default). Spawned HERE, after the
-        # cheap pre-gate has already proved the context is worth thinking
-        # about and before the plan gate reads any hint: this is the one place
-        # in a session that is both at a safe boundary and holding a fresh
-        # provider context figure. Nothing awaits it — see
-        # :meth:`_maybe_spawn_advisor`.
-        self._maybe_spawn_advisor()
         planned = await self._plan_compaction(respect_threshold=True)
         if isinstance(planned, CompactionOutcome):
             return None
@@ -5672,15 +5686,40 @@ class Session:
            the advisor would be asked to judge, so an immediate re-ask is a
            question about a conversation that no longer exists.
 
-        2. **Kill switch, non-negotiable.** An advisory pass that fails to
-           clear ``RECOVERY_BAND * advisor_floor`` did not merely fire early,
-           it fired where there was nothing to reclaim — the same signature as
-           the live dead-loop bug ``RECOVERY_BAND`` was added for, except the
-           advisor would keep re-authorising it below the configured
-           threshold. So the advisor is DISABLED for the rest of the session
-           and the fact is logged once, loudly enough to be found. Nothing
-           re-enables it short of a new session: a feature that can spend money
-           in a loop must fail closed.
+        2. **Kill switch, non-negotiable.** An advisory pass that RECLAIMED
+           almost nothing did not merely fire early, it fired where there was
+           nothing to reclaim — the same signature as the live dead-loop bug
+           ``RECOVERY_BAND`` was added for, except the advisor would keep
+           re-authorising it below the configured threshold. So the advisor is
+           DISABLED for the rest of the session and the fact is logged once,
+           loudly enough to be found. Nothing re-enables it short of a new
+           session: a feature that can spend money in a loop must fail closed.
+
+           The test is a REDUCTION test, and it has to be. It previously
+           compared the absolute residual against ``RECOVERY_BAND *
+           advisor_floor``, which is independent of what the pass achieved and
+           was wrong three separate ways (agent review round 2, major-3):
+
+           - It disabled the advisor after obviously good passes. Measured on
+             the real path: ``400,000 -> 242,857`` (39.3% reclaimed) tripped
+             it, and that was this feature's own headline evidence.
+           - It made ``RECOVERY_BAND`` mean two different things in one file.
+             The auto-continue guard below asks ``residual <= 0.8 * threshold``
+             (480k on a 1M window); this asked ``residual <= 0.8 * floor``
+             (160k), 3.75x stricter, so one residual was simultaneously
+             "created headroom, safe to continue" and "reclaimed nothing,
+             switch the feature off".
+           - It was close to unsatisfiable. A pass may legally preserve up to
+             ``_advisor_floor_cap`` (300k on the shipped default), which alone
+             exceeds the 160k residual the old rule demanded, so a single long
+             task was enough to end the session's advisor.
+
+           ``cleared_headroom(residual, before)`` is the notion the compaction
+           module already owns for "how much did this pass actually free", so
+           the rule is expressed with it rather than with a second private
+           formula. The advisor survives whenever a pass freed at least
+           :data:`_ADVISOR_MIN_RECLAIM_FRACTION` of the context it started
+           from; a pass that freed less than that genuinely is not helping.
 
         An ordinary size-triggered pass (``advisor_hint is None``) is not the
         advisor's business and returns immediately.
@@ -5694,22 +5733,30 @@ class Session:
             self._advisor_cooldown_until = self._generation + cooldown
         try:
             compaction_api = plan.compaction_api
-            floor = compaction_api.resolve_advisor_floor_tokens(
-                self.effective_model.context_window, settings
-            )
-            band = compaction_api.RECOVERY_BAND * floor
+            # Measured against what the pass STARTED from, which is the figure
+            # the gate acted on and the receipt reports as "before".
+            before = int(outcome.tokens_before or plan.context_tokens or 0)
+            reclaimed: Any = compaction_api.cleared_headroom(int(outcome.tokens_after), before)
         except Exception:  # noqa: BLE001 — a partial double must not break the pass
             return
-        if outcome.tokens_after > band:
-            self._advisor_disabled = True
-            logger.warning(
-                "compaction advisor disabled for this session: an advisor-triggered pass "
-                "left %s tokens, above the %.0f-token recovery band for the %s-token "
-                "advisor floor — the advice was not reclaiming headroom",
-                f"{outcome.tokens_after:,}",
-                band,
-                f"{floor:,}",
-            )
+        if before <= 0:
+            # No usable "before" figure: refuse to judge rather than guess. A
+            # kill switch that fires on missing data disables the feature for
+            # a measurement failure instead of a behavioural one.
+            return
+        fraction = int(reclaimed) / before
+        if fraction >= _ADVISOR_MIN_RECLAIM_FRACTION:
+            return
+        self._advisor_disabled = True
+        logger.warning(
+            "compaction advisor disabled for this session: an advisor-triggered pass "
+            "reclaimed only %s of %s tokens (%.1f%%, below the %.0f%% floor) — the "
+            "advice was not reclaiming headroom",
+            f"{int(reclaimed):,}",
+            f"{before:,}",
+            fraction * 100,
+            _ADVISOR_MIN_RECLAIM_FRACTION * 100,
+        )
 
     def _advisory_is_usable(self, hint: Any | None, settings: Any) -> bool:
         """Whether a pending hint may lower the trigger right now.
