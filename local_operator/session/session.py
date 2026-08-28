@@ -1558,7 +1558,6 @@ class Session:
         # treadmill on the user's bill. Non-negotiable: once set, the advisor
         # is done for the life of the session.
         self._advisor_disabled = False
-        self._advisor_triggered_pending = False  # last pass fired on advice
         # Last completed provider request (epoch ms). Distinct from
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
         # age, and stamping turn bookkeeping right before the check made the
@@ -5206,11 +5205,46 @@ class Session:
         provider_reported = (
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
+        # Off-loop advisory (BETA, inert by default) — spawned ABOVE the cheap
+        # pre-gate, and the ordering is the whole point of the feature.
+        #
+        # The advisor's entire purpose is to pull the trigger EARLIER, so its
+        # operating band is by definition BELOW the ordinary trigger. The
+        # pre-gate below returns as soon as the provider figure fails that
+        # ordinary trigger, so a spawn placed after it could only ever be
+        # reached once the context had already passed the line — the one
+        # moment a size pass was about to fire anyway and the advice is worth
+        # nothing. Measured before this was moved: ctx 350k/400k/500k/590k on
+        # a 600k trigger produced ZERO advisor calls, and only 650k produced
+        # one. The feature was inert across the whole 200k-600k band it exists
+        # for (agent review round 1, blocker-1).
+        #
+        # Spawning first is safe and cheap: ``_maybe_spawn_advisor`` applies
+        # its own gates (beta flag, advisor_trigger_tokens, in-flight latch,
+        # call ceiling, cooldown, kill switch) and returns immediately for a
+        # session that has not opted in, so a default session pays one
+        # attribute read. Nothing is awaited, so the boundary is not slowed.
+        #
+        # It also deliberately does NOT depend on ``_persist_new_messages``
+        # below: the advisor reads the live context to form an opinion and
+        # writes nothing, so it has no replayable-cut requirement of its own.
+        self._maybe_spawn_advisor()
         if provider_reported is not None:
             from local_operator.compaction import api as compaction_api
 
-            if not compaction_api.should_compact(
-                provider_reported, self.effective_model.context_window, settings
+            # The pre-gate must ask the SAME question the plan gate will, or it
+            # answers "no pass due" for a context the plan gate would have
+            # compacted on advice — the hint would be spawned, land, and then
+            # be unreachable because this gate returned first. It PEEKS at the
+            # pending hint rather than consuming it: the hint is consumed at
+            # exactly one point (``_plan_compaction``), and a pre-gate that
+            # consumed it would leave the plan gate nothing to act on.
+            if not _should_compact(
+                compaction_api,
+                provider_reported,
+                self.effective_model.context_window,
+                settings,
+                self._has_pending_advisory(settings),
             ):
                 return None
         # Persist what the run has produced SO FAR before planning a cut.
@@ -5469,8 +5503,12 @@ class Session:
         # ``find_cut_point``. ``_run_compaction`` is untouched and manual
         # ``/compact`` never gets here with a hint, so there is no path by
         # which a hallucinated hint reaches the summarizer or the transcript.
+        # ``_take_advisor_hint`` returns only a USABLE hint (fresh, advisor
+        # still enabled, and actually saying "now"), so a hint in hand IS the
+        # authorisation — the peek in the mid-turn pre-gate applies the same
+        # rule, which is what keeps the two gates from disagreeing.
         advisor_hint = self._take_advisor_hint(settings) if respect_threshold else None
-        advisory_ok = advisor_hint is not None and advisor_hint.compact_now
+        advisory_ok = advisor_hint is not None
 
         if respect_threshold:
             # Cheap proof first. ``should_compact`` is strictly monotonic in
@@ -5546,7 +5584,23 @@ class Session:
             )
             keep_recent = max(keep_recent, int(floor_value))
         if advisor_hint is not None:
-            keep_recent = max(keep_recent, int(advisor_hint.preserve_tokens))
+            # Clamped with the SAME cap the local floor uses. Uncapped, a wide
+            # but perfectly legal hint turns "keep more" into "never compact":
+            # the widen-only guard has no upper bound of its own, and
+            # ``_candidate_messages`` offers text messages while
+            # ``preserve_tokens`` sums every intervening entry, so in a
+            # tool-heavy session the widest legal anchor spans far more context
+            # than the candidate list suggests. Measured at 2.7x the cap
+            # (800,340 tokens against a 300,000 cap), which was enough to turn
+            # a mandatory 800k-on-1M pass into ``nothing_to_compact`` — the
+            # exact failure the cap exists to prevent, arrived at through the
+            # guard meant to make hints safe (agent review round 1, major-1).
+            #
+            # The clamp cannot narrow below the local floor: ``max`` is applied
+            # against ``keep_recent``, which already carries the capped
+            # ``task_boundary_floor``, so the widen-only property survives.
+            capped_hint = min(int(advisor_hint.preserve_tokens), self._advisor_floor_cap(settings))
+            keep_recent = max(keep_recent, capped_hint)
 
         cut = await self._offloaded(compaction_api, "find_cut_point", llm_history, keep_recent)
         if cut is None or cut <= 0:
@@ -5657,26 +5711,57 @@ class Session:
                 f"{floor:,}",
             )
 
+    def _advisory_is_usable(self, hint: Any | None, settings: Any) -> bool:
+        """Whether a pending hint may lower the trigger right now.
+
+        ONE definition of "usable", shared by the peek
+        (:meth:`_has_pending_advisory`) and the consume
+        (:meth:`_take_advisor_hint`). Two copies of this rule is how the
+        mid-turn pre-gate and the plan gate would come to disagree about
+        whether a pass is due — the same class of drift
+        ``resolve_threshold_tokens`` exists to prevent for the threshold
+        itself.
+
+        Stale hints are not usable. ``advisor_every_n_turns`` bounds how far
+        behind a hint may be: one produced more than an advisory interval ago
+        describes a conversation that has since moved, and a late hint is
+        nearly no hint.
+        """
+        if hint is None or self._advisor_disabled:
+            return False
+        if not getattr(hint, "compact_now", False):
+            return False
+        every = int(getattr(settings, "advisor_every_n_turns", 0) or 0)
+        if every > 0 and self._generation - int(getattr(hint, "turn_index", 0)) > every:
+            return False
+        return True
+
+    def _has_pending_advisory(self, settings: Any) -> bool:
+        """PEEK: is there a usable hint the plan gate would act on?
+
+        Read-only on purpose. The mid-turn pre-gate has to ask the same
+        question the plan gate will, or it short-circuits a boundary the plan
+        gate would have compacted on advice — but it must not CONSUME the
+        hint, because consumption happens at exactly one point and a pre-gate
+        that took it would leave the plan gate nothing to act on (the pass
+        would then be refused as below_threshold, one gate later).
+        """
+        return self._advisory_is_usable(self._advisor_hint, settings)
+
     def _take_advisor_hint(self, settings: Any) -> Any | None:
-        """The pending advisory, consumed (single-use) and freshness-checked.
+        """The pending advisory, CONSUMED (single-use) and freshness-checked.
 
         Single-use because a hint is an opinion about one moment: leaving it
         in place would let one call's judgement lower the trigger on every
         subsequent gate until the next call replaced it, which is a stuck
-        threshold wearing an advisory's clothes.
-
-        Stale hints are dropped rather than applied. ``advisor_every_n_turns``
-        bounds how far behind a hint may be: a hint produced more than one
-        advisory interval ago describes a conversation that has since moved,
-        and a late hint is nearly no hint.
+        threshold wearing an advisory's clothes. The slot is cleared before
+        every early return, so an unusable hint cannot persist either.
         """
         hint = self._advisor_hint
         self._advisor_hint = None
-        if hint is None or self._advisor_disabled:
-            return None
-        every = int(getattr(settings, "advisor_every_n_turns", 0) or 0)
-        if every > 0 and self._generation - int(getattr(hint, "turn_index", 0)) > every:
-            logger.debug("compaction advisor: discarded stale hint")
+        if not self._advisory_is_usable(hint, settings):
+            if hint is not None:
+                logger.debug("compaction advisor: discarded unusable hint")
             return None
         return hint
 

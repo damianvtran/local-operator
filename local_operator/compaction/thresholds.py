@@ -172,7 +172,14 @@ class CompactionSettings(BaseModel):
     )
     advisor_max_calls: int = Field(
         default=200,
-        description="Ceiling on advisor calls per session, so a very long run cannot drift.",
+        description=(
+            "Ceiling on advisor calls per session, so a very long run cannot"
+            " drift. 0 means NO CALLS (the advisor is off), not 'unlimited' —"
+            " deliberately unlike the sibling knobs, where 0 disables a"
+            " restriction. This one IS the restriction, so the fail-closed"
+            " reading is the safe one: a config that zeroes a spend ceiling"
+            " must not thereby remove it."
+        ),
     )
     advisor_cooldown_turns: int = Field(
         default=60,
