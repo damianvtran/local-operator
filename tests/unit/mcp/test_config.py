@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 
 from local_operator.mcp.config import (
+    MCPConfigWriteError,
     MCPHttpServerConfig,
     MCPServerConfig,
     MCPStdioServerConfig,
     add_server,
     list_effective_servers,
     load_all_mcp_configs,
+    owned_scope_for_source,
     read_disabled_servers,
     read_enabled_servers,
     remove_server,
@@ -290,6 +292,9 @@ class TestCliHelpers:
     def test_add_remove_roundtrip_project_scope(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
         cwd.mkdir()
+        path = cwd / ".local-operator" / "mcp.json"
+        # The writers return the PATH they wrote, so a caller can name the file
+        # in its receipt rather than restating an invisible scope default.
         assert (
             add_server(
                 "srv",
@@ -299,9 +304,8 @@ class TestCliHelpers:
                 scope="project",
                 cwd=cwd,
             )
-            == 0
+            == path
         )
-        path = cwd / ".local-operator" / "mcp.json"
         doc = json.loads(path.read_text())
         assert doc["mcpServers"]["srv"] == {
             "type": "stdio",
@@ -309,33 +313,86 @@ class TestCliHelpers:
             "args": ["-y", "pkg"],
             "env": {"K": "V"},
         }
-        # Duplicate add is rejected.
-        assert add_server("srv", command="x", scope="project", cwd=cwd) == 1
-        # Both command and url is rejected; neither is rejected.
-        assert add_server("u", command="x", url="http://x", scope="project", cwd=cwd) == 1
-        assert add_server("u", scope="project", cwd=cwd) == 1
-        assert add_server("bad name!", command="x", scope="project", cwd=cwd) == 1
+        # Every refusal RAISES rather than printing to stderr and returning an
+        # exit code: the TUI calls these same writers from inside a Textual
+        # screen, where a print would corrupt the frame underneath it.
+        with pytest.raises(MCPConfigWriteError):  # duplicate
+            add_server("srv", command="x", scope="project", cwd=cwd)
+        with pytest.raises(MCPConfigWriteError):  # both command and url
+            add_server("u", command="x", url="http://x", scope="project", cwd=cwd)
+        with pytest.raises(MCPConfigWriteError):  # neither
+            add_server("u", scope="project", cwd=cwd)
+        with pytest.raises(MCPConfigWriteError):  # invalid name
+            add_server("bad name!", command="x", scope="project", cwd=cwd)
         # Remove roundtrip.
-        assert remove_server("srv", scope="project", cwd=cwd) == 0
+        assert remove_server("srv", scope="project", cwd=cwd) == path
         assert json.loads(path.read_text())["mcpServers"] == {}
-        assert remove_server("srv", scope="project", cwd=cwd) == 1
+        with pytest.raises(MCPConfigWriteError):
+            remove_server("srv", scope="project", cwd=cwd)
+
+    def test_write_error_carries_every_reason_for_the_cli_to_print(self, tmp_path: Path) -> None:
+        """The CLI prints one ``error:`` line per problem, so the exception has
+        to keep them as a LIST — collapsing validation output into one string
+        here would silently change what a user (or a script) reads."""
+        with pytest.raises(MCPConfigWriteError) as excinfo:
+            add_server("bad name!", url="ftp://nope", scope="project", cwd=tmp_path)
+        assert len(excinfo.value.errors) > 1
+        # str() joins them for the single-line callers (the TUI notice).
+        assert all(error in str(excinfo.value) for error in excinfo.value.errors)
+
+    def test_owned_scope_only_claims_files_local_operator_writes(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        """The gate behind ``/mcp remove``'s refusal. ``load_all_mcp_configs``
+        merges seven sources but ``_scope_path`` writes exactly two, so every
+        other source must come back unowned — deleting from one would either
+        fail or shadow a config the user still maintains in another tool."""
+        cwd = tmp_path / "owned-proj"
+        cwd.mkdir()
+        assert owned_scope_for_source(home / ".local-operator" / "mcp.json", cwd) == "global"
+        assert owned_scope_for_source(cwd / ".local-operator" / "mcp.json", cwd) == "project"
+        # Read by the loader, never written by _scope_path.
+        assert owned_scope_for_source(cwd / ".mcp.json", cwd) is None
+        assert owned_scope_for_source(home / ".claude.json", cwd) is None
+        assert owned_scope_for_source(home / ".cursor" / "mcp.json", cwd) is None
+        # tomllib is read-only, so a Codex source can never be removed in place.
+        assert owned_scope_for_source(home / ".codex" / "config.toml", cwd) is None
+        assert owned_scope_for_source(None, cwd) is None
+
+    def test_owned_scope_compares_resolved_paths_not_strings(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        """A string compare would call an owned file foreign the moment the
+        path reached it by a symlink or an unnormalised prefix (macOS hands out
+        both /var and /private/var for the same directory)."""
+        cwd = tmp_path / "resolved-proj"
+        (cwd / "sub").mkdir(parents=True)
+        link = tmp_path / "link-home"
+        link.symlink_to(home)
+        assert owned_scope_for_source(link / ".local-operator" / "mcp.json", cwd) == "global"
+        unnormalised = cwd / "sub" / ".." / ".local-operator" / "mcp.json"
+        assert owned_scope_for_source(unnormalised, cwd) == "project"
 
     def test_add_url_server_global_scope(self, tmp_path: Path, home: Path) -> None:
-        assert add_server("remote", url="https://example.com/mcp", headers={"a": "b"}) == 0
-        doc = json.loads((home / ".local-operator" / "mcp.json").read_text())
+        global_path = home / ".local-operator" / "mcp.json"
+        assert add_server("remote", url="https://example.com/mcp", headers={"a": "b"}) == (
+            global_path
+        )
+        doc = json.loads(global_path.read_text())
         assert doc["mcpServers"]["remote"]["type"] == "http"
         assert doc["mcpServers"]["remote"]["headers"] == {"a": "b"}
-        assert remove_server("remote") == 0
+        assert remove_server("remote") == global_path
 
     def test_add_oauth_url_server(self, tmp_path: Path, home: Path) -> None:
-        assert add_server("linear", url="https://mcp.linear.app/mcp", oauth=True) == 0
+        assert add_server("linear", url="https://mcp.linear.app/mcp", oauth=True) is not None
         doc = json.loads((home / ".local-operator" / "mcp.json").read_text())
         assert doc["mcpServers"]["linear"] == {
             "type": "http",
             "url": "https://mcp.linear.app/mcp",
             "auth": {"type": "oauth"},
         }
-        assert add_server("stdio-oauth", command="npx", oauth=True) == 1
+        with pytest.raises(MCPConfigWriteError):
+            add_server("stdio-oauth", command="npx", oauth=True)
 
     def test_list_effective_servers(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
