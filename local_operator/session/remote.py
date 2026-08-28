@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable
 
@@ -566,7 +566,7 @@ class RemoteSession:
         self.wake_scheduler.replace(state.wakes)
         self.mcp_manager.replace(state.mcp_servers)
         startup = state.mcp_startup
-        if isinstance(startup, dict):
+        if isinstance(startup, Mapping):
             from local_operator.session.mcp_status import McpStartupOutcome
 
             startup = McpStartupOutcome(
@@ -692,10 +692,12 @@ class RemoteSession:
                 return
             options = [
                 AskOption(
-                    label=(option.get("label", "") if isinstance(option, dict) else option.label),
+                    label=(
+                        option.get("label", "") if isinstance(option, Mapping) else option.label
+                    ),
                     description=(
                         option.get("description", "")
-                        if isinstance(option, dict)
+                        if isinstance(option, Mapping)
                         else option.description
                     ),
                 )

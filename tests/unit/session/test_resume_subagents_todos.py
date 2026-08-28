@@ -681,12 +681,50 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_live_progress_never_schedules_the_roster_writer(tmp_path, monkeypatch):
+    """Transient activity publishes to frontends without touching durability."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="x", prompt="p")
+    await wait_for(lambda: _status(parent, job_id) == "completed")
+    await parent._await_subagent_roster_writer()
+    generation = parent._subagent_roster_generation
+    updates = []
+    subscription = parent.subscribe_frontend(updates.append)
+    updates.clear()  # discard the join-time source reconciliation
+
+    report = parent.jobs._progress_fn(job_id)
+    started = asyncio.get_running_loop().time()
+    for index in range(60):
+        report(f"boundary {index}")
+    assert updates == []  # publication waits for the one 50 ms coalescer
+    assert parent._subagent_roster_generation == generation
+    assert parent._subagent_roster_writer is None
+    await wait_for(lambda: bool(updates), timeout=0.25)
+    assert asyncio.get_running_loop().time() - started <= 0.25
+    assert len(updates) == 1
+    assert updates[0].changes["jobs"][0]["latest_details"] == {"progress": "boundary 59"}
+    subscription.unsubscribe()
+
+    # Settlement remains durable even though progress is not. A fresh task must
+    # advance the generation at registration and again at its terminal outcome.
+    before_second = parent._subagent_roster_generation
+    second = parent._launch_subagent(label="y", prompt="q")
+    await wait_for(lambda: _status(parent, second) == "completed")
+    await parent._await_subagent_roster_writer()
+    assert parent._subagent_roster_generation > before_second
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_redundant_roster_events_skip_the_sidecar_write(tmp_path, monkeypatch):
     """A roster event that does not change the persisted projection writes no
     sidecar, but the generation watermark still advances.
 
-    The persist hook fires on every job-row mutation, most of which (usage,
-    heartbeat) leave the durable {version, jobs, records} projection identical.
+    Defensive/manual persist signals can still repeat without a projection
+    change. Transient progress never reaches this hook; this test guards the
+    fingerprint fallback for the remaining redundant durable notifications.
     Each write is a full fsync + os.replace + directory-fsync; firing one per
     identical event is the disk-write volume that tripped the macOS throttle on
     a long delegating session. The guard collapses those, and the watermark must

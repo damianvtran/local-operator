@@ -9241,7 +9241,14 @@ class OperatorApp(App[None]):
         comms = getattr(session, "_subagent_comms", None) if session is not None else None
         try:
             lookup = getattr(comms, "job", None) if comms is not None else None
-            job = lookup(job_id) if callable(lookup) else manager.get(job_id) if manager else None
+            job = lookup(job_id) if callable(lookup) else None
+            # Owner comms resolves durable attempt aliases to a live job. The
+            # follower graph facade deliberately has no job objects of its own;
+            # its canonical SnapshotJobs ledger is authoritative instead. A
+            # callable lookup returning None must therefore fall through, not
+            # turn every follower child page into a false "no longer on ledger".
+            if job is None and manager is not None:
+                job = manager.get(job_id)
         except Exception:
             job = manager.get(job_id) if manager is not None else None
         # Comms accepts durable predecessor IDs, but the panel contains only the
@@ -9263,6 +9270,8 @@ class OperatorApp(App[None]):
             ancestors = comms.ancestors(job_id) if comms is not None else []
         except Exception:
             ancestors = []
+        details = getattr(job, "latest_details", None)
+        progress = details.get("progress") if isinstance(details, Mapping) else ""
         view.show(
             job_id=job_id,
             label=str(getattr(job, "label", "") or getattr(node, "label", "") or job_id),
@@ -9296,7 +9305,7 @@ class OperatorApp(App[None]):
                 or ""
             ),
             events=getattr(job, "trajectory", None) or [],
-            progress=str((getattr(job, "latest_details", None) or {}).get("progress") or ""),
+            progress=str(progress or ""),
             # Launch-time identity: the child's role and effort tier, recorded
             # on the job at registration (`AsyncJob.agent_role`/`effort`). The
             # title names them so the page says WHAT kind of child this is; the
@@ -15600,16 +15609,16 @@ class OperatorApp(App[None]):
         self._working_fallback = DEFAULT_ACTIVITY
         self._refresh_working_activity()
 
-    # Subagent events arrive through the Controller's `_post` on the shared
-    # stream; each is an immediate repaint trigger for the band, paired with
-    # the 1 Hz poll as the belt (see `_refresh_band`). The panel re-reads the
-    # manager itself, so the handlers only need to fire the refresh, never to
-    # carry job data.
+    # Start/end edges repaint immediately because they change the set or
+    # lifecycle of durable rows. Progress takes the canonical-state route only:
+    # the job manager coalesces it within 50 ms, and repainting this raw event as
+    # well made the owner perform the same band scan twice while a remote
+    # follower, which sees canonical updates only, behaved differently.
     def on_subagent_started(self, message: SubagentStarted) -> None:
         self._refresh_band()
 
     def on_subagent_progress(self, message: SubagentProgress) -> None:
-        self._refresh_band()
+        pass
 
     def on_subagent_ended(self, message: SubagentEnded) -> None:
         self._refresh_band()

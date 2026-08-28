@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import pickle
 from collections import deque, namedtuple
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,6 +18,7 @@ from local_operator.harness.types import (
     AgentStartEvent,
     Message,
     ModelSpec,
+    SubagentProgressEvent,
     Usage,
 )
 from local_operator.session.frontend_state import (
@@ -105,6 +107,32 @@ def test_state_json_roundtrip_preserves_full_model_usage_and_future_fields() -> 
     assert wire["last_usage"]["future_usage_field"] == 7
 
 
+def test_snapshot_jobs_preserve_immutable_mapping_and_sequence_interfaces() -> None:
+    state = FrontendStateStore(
+        _state(
+            jobs=[
+                JobState(
+                    id="child",
+                    type="task",
+                    latest_details={"progress": "reading files"},
+                    trajectory=[{"type": "message_update", "delta": "hello"}],
+                )
+            ]
+        )
+    ).state
+    jobs = SnapshotJobs(state.jobs)
+
+    for job in [*jobs.list(), jobs.get("child")]:
+        assert job is not None
+        assert isinstance(job.latest_details, Mapping)
+        assert job.latest_details.get("progress") == "reading files"
+        with pytest.raises((AttributeError, TypeError)):
+            job.latest_details["progress"] = "corrupted"  # type: ignore[index]
+        assert isinstance(job.trajectory, Sequence)
+        assert isinstance(job.trajectory[0], Mapping)
+        assert job.trajectory[0].get("delta") == "hello"
+
+
 def test_missing_model_and_cost_remain_explicit_unknowns() -> None:
     restored = FrontendSessionState.model_validate({"session_id": "s1", "epoch": "e"})
     assert restored.selected_model is None
@@ -166,6 +194,64 @@ def test_usage_join_and_turn_end_does_not_double_count_mixed_calls() -> None:
         ("openrouter", "fallback-a", 0.4),
         ("openai", "gpt-5.6-sol", 0.6),
     ]
+
+
+def test_subagent_progress_defers_job_publication_to_the_coalescer(monkeypatch) -> None:
+    """A raw progress edge neither rescans nor publishes canonical state itself.
+
+    The manager's 50 ms ``refresh_jobs`` callback is the one owner publication;
+    followers receive that same update, so owner and follower visual cadence are
+    identical without a duplicate full-session fallback on every boundary.
+    """
+    job = AsyncJob(
+        id="child",
+        type="task",
+        status="running",
+        start_time=1.0,
+        label="child",
+        latest_details={"progress": "reading files"},
+    )
+    session = SimpleNamespace(
+        jobs=SimpleNamespace(list=lambda: [job]),
+        _subagent_comms=None,
+        model=None,
+        effective_model=None,
+        session_id="s1",
+        cwd="/repo",
+        queued_steering=lambda: [],
+        conversation_name="Canonical state",
+        goal="",
+        active_agent="",
+        active_team_name="",
+        wake_scheduler=None,
+        mcp_manager=None,
+        mcp_startup=None,
+    )
+    store = FrontendStateStore(_state(jobs=[]))
+    updates: list[FrontendUpdate] = []
+    store.subscribe(updates.append)
+    rescans = 0
+    original = store.refresh_from_session
+
+    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal rescans
+        rescans += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "refresh_from_session", counted)
+    assert (
+        store.observe_event(
+            session,
+            SubagentProgressEvent(job_id="child", label="child", progress="reading files"),
+        )
+        is None
+    )
+    assert (rescans, updates) == (0, [])
+
+    update = store.refresh_jobs(session)
+    assert update is not None
+    assert len(updates) == 1
+    assert updates[0].changes["jobs"][0]["latest_details"] == {"progress": "reading files"}
 
 
 def test_slash_capabilities_classify_every_advertised_command_and_images() -> None:
