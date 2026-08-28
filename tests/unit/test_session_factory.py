@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -2392,3 +2393,69 @@ def test_the_origin_cache_drops_entries_for_disposed_sessions(tmp_path: Path) ->
     resume_mod.recent_sessions(tmp_path, limit=10**9)
     entries = json.loads(resume_mod.origin_cache_path(tmp_path).read_text())["entries"]
     assert set(entries) == {"c1"}, "a disposed session kept its cache entry"
+
+
+def test_a_transient_marker_read_failure_is_not_memoised(tmp_path: Path) -> None:
+    """A read failure describes the MOMENT; the cache key describes the FILE.
+
+    ``session_origin`` collapses an `OSError` into the same ``""`` as a genuine
+    empty origin — correct for its own tolerant contract, since a claim that
+    cannot be read must not hide the user's session. But the traversal keys its
+    memo on the marker's ``(mtime, size)``, and the marker is immutable by
+    design, so caching that verdict would serve one transient EMFILE or volume
+    blip as a PERMANENT wrong verdict for the life of the file.
+
+    Reproduced by making a valid subagent marker briefly unreadable with the
+    cache cleared first, so the failed read is the one that would populate it.
+    """
+    sessions = tmp_path / "sessions"
+    for name in ("user0001", "sub00001"):
+        (sessions / name).mkdir(parents=True)
+        (sessions / name / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    resume_mod.mark_session_origin(sessions / "sub00001", resume_mod.ORIGIN_SUBAGENT)
+    marker = sessions / "sub00001" / resume_mod.ORIGIN_NAME
+
+    def listed() -> list[str]:
+        return sorted(row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9))
+
+    assert listed() == ["user0001"], "the subagent should be hidden when readable"
+
+    # Simulate the outage without touching the file's bytes, so its (mtime,
+    # size) — the cache key — is byte-for-byte what it was before and after.
+    cache = resume_mod.origin_cache_path(tmp_path)
+    cache.unlink(missing_ok=True)
+    real_read = Path.read_text
+
+    def failing(self: Path, *args: object, **kwargs: object) -> str:
+        if self == marker:
+            raise OSError(24, "Too many open files")
+        return real_read(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with mock.patch.object(Path, "read_text", failing):
+        during = listed()
+    assert during == ["sub00001", "user0001"], "an unreadable claim must not hide a session"
+
+    # The outage is over and the file never changed. A cached failure would
+    # keep leaking the subagent into the picker forever.
+    assert listed() == ["user0001"], "a transient read failure was memoised permanently"
+
+
+def test_a_corrupt_payload_is_memoised_because_it_describes_the_file(tmp_path: Path) -> None:
+    """The other side of the rule, so the distinction is pinned in both
+    directions: a parse failure is a fact about the file's CONTENT, stable while
+    the bytes are, so it IS cached — and rewriting the marker changes its
+    ``(mtime, size)`` and expires the entry, which is exactly when the verdict
+    could differ.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "cut").mkdir(parents=True)
+    (sessions / "cut" / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    (sessions / "cut" / resume_mod.ORIGIN_NAME).write_bytes(b'{"origin": "subagent", "l": "caf\xc3')
+
+    assert [row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)] == ["cut"]
+    entries = json.loads(resume_mod.origin_cache_path(tmp_path).read_text())["entries"]
+    assert "cut" in entries, "a corrupt payload is stable per-file and should be cached"
+
+    # Repaired by hand: the key moves, so the new verdict is derived, not served.
+    resume_mod.mark_session_origin(sessions / "cut", resume_mod.ORIGIN_SUBAGENT)
+    assert resume_mod.recent_sessions(tmp_path, limit=10**9) == []

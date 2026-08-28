@@ -69,17 +69,27 @@ ORIGIN_SUBAGENT = "subagent"
 #: whose ``(mtime, size)`` is unchanged cannot have changed its meaning.
 #:
 #: What may NOT go in here, and why each would be a bug:
-#: * Only a verdict actually PARSED from a marker that existed is stored. A
-#:   stat failure, an unreadable file, or a corrupt payload falls through to
-#:   the real read every time — caching those would let one bad sidecar hide a
-#:   real session persistently instead of transiently.
+#: * Only a verdict actually PARSED from a marker that was READ is stored. A
+#:   stat failure or an unreadable file falls through to the real read every
+#:   time (:func:`_session_origin_read` reports readability separately for
+#:   exactly this): those describe the MOMENT — EMFILE under the descriptor
+#:   pressure this scan itself creates, a network volume blip — while the key
+#:   is the marker's immutable ``(mtime, size)``, so caching one would serve a
+#:   transient outage as a permanent wrong verdict for the life of the file.
+#: * A CORRUPT payload is cached, and that is deliberate rather than an
+#:   oversight: a parse failure is a fact about the file's CONTENT, stable for
+#:   as long as the bytes are, and re-deriving it every scan would return the
+#:   same ``""``. Rewriting the marker changes its ``(mtime, size)`` and
+#:   expires the entry, which is exactly when the verdict could differ.
 #: * ABSENCE is never cached. Unmarked already means user and is the cheap path,
 #:   and a directory the backfill stamps later must be re-read, not answered
 #:   from a stale "no marker" fact.
 ORIGIN_CACHE_NAME = "origin-verdicts.json"
 
 #: Bumped when the cache's shape or key changes, so an older file is discarded
-#: rather than misread. Mirrors ``search_index.INDEX_VERSION``.
+#: rather than misread. Independent of ``search_index.INDEX_VERSION`` — the two
+#: caches version separately and neither number constrains the other; only the
+#: mechanism is borrowed.
 ORIGIN_CACHE_VERSION = 1
 
 #: Journals the session's title (and every name it has ever borne) beside the
@@ -311,18 +321,42 @@ def session_origin(session_dir: Path) -> str:
     picker and every ``--resume`` with no id, for every session, until the
     user found and deleted the file by hand.
     """
+    origin, _readable = _session_origin_read(session_dir)
+    return origin
+
+
+def _session_origin_read(session_dir: Path) -> tuple[str, bool]:
+    """:func:`session_origin`'s verdict, plus whether the marker was READ at all.
+
+    Exists because those two facts are different and only the traversal needs
+    the second. ``session_origin`` deliberately collapses every failure into
+    ``""`` — that tolerance is its whole point and its public contract, and a
+    caller asking "is this the user's session" is right to be told "yes" when
+    the claim cannot be trusted.
+
+    A CACHE, though, must not memoise that answer. ``""`` from a parse failure
+    is a fact about the file's CONTENT, so it is stable while the bytes are:
+    re-deriving it on every scan would return the same verdict, and the marker
+    changing is exactly when the memo's ``(mtime, size)`` key expires. ``""``
+    from an ``OSError`` is a fact about the MOMENT — EMFILE under the descriptor
+    pressure a 30,000-directory scan creates, a network volume blip, a
+    permissions change mid-scan — and the file it describes is immutable by
+    design, so memoising it pins a wrong verdict for the life of the marker
+    rather than for the life of the outage. ``readable=False`` is how the
+    traversal tells those apart and declines to cache the second.
+    """
     try:
         raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return ""
+        return "", False
     try:
         payload = json.loads(raw)
     except ValueError:
-        return ""
+        return "", True
     if not isinstance(payload, dict):
-        return ""
+        return "", True
     origin = payload.get("origin")
-    return origin if isinstance(origin, str) else ""
+    return (origin if isinstance(origin, str) else ""), True
 
 
 class SessionTitle(NamedTuple):
@@ -1089,14 +1123,22 @@ def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]
                     # reads as the user's own session rather than vanishing from
                     # the picker. Treating "file exists" as "subagent" would
                     # invert that fail-safe and hide real work.
-                    origin = session_origin(Path(entry.path))
-                    # Only a verdict actually parsed off an existing marker is
-                    # memoised. "" covers both "no origin claimed" and "could
-                    # not read this claim", and the two are indistinguishable
-                    # here — so a "" verdict is stored against the key that
-                    # produced it and re-derived the moment the file changes,
-                    # which is exactly when a corrupt marker gets rewritten.
-                    fresh[entry.name] = {"key": key, "origin": origin}
+                    origin, readable = _session_origin_read(Path(entry.path))
+                    # Only a verdict PARSED off a marker that was actually read
+                    # is memoised. A read failure yields the same "" as a
+                    # corrupt payload — safe for the listing, which shows the
+                    # session — but it describes the moment, not the file, and
+                    # the key is the marker's immutable (mtime, size): caching
+                    # it would serve one transient EMFILE or volume blip as a
+                    # permanent wrong verdict for the life of that marker. So it
+                    # falls through and is re-read on the next scan instead.
+                    if readable:
+                        fresh[entry.name] = {"key": key, "origin": origin}
+                    else:
+                        # Drop any entry inherited from ``cached``: this scan
+                        # could not confirm it, and ``merged`` below is built
+                        # from the names seen here.
+                        seen.discard(entry.name)
                 if origin:
                     continue
             rows.append((entry.name, mtime))
