@@ -1338,6 +1338,89 @@ async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None
 
 
 @pytest.mark.asyncio
+async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
+    """Queued canonical updates repaint once, from the newest complete state."""
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    class StatefulSession(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.frontend_state = FrontendSessionState(session_id="sess", epoch="owner")
+
+    session = StatefulSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        scheduled: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
+        applied: list[FrontendSessionState] = []
+
+        def schedule(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
+            scheduled.append((callback, args))
+            return True
+
+        def apply(state: Any) -> None:
+            applied.append(cast(FrontendSessionState, state))
+
+        app.call_later = schedule
+        app._apply_frontend_state = apply
+
+        session.frontend_state = session.frontend_state.model_copy(
+            update={"conversation_title": "first"}
+        )
+        app._on_frontend_update(object())
+        session.frontend_state = session.frontend_state.model_copy(
+            update={"conversation_title": "latest"}
+        )
+        app._on_frontend_update(object())
+
+        assert len(scheduled) == 1
+        callback, args = scheduled[0]
+        callback(*args)
+        assert [state.conversation_title for state in applied] == ["latest"]
+
+
+@pytest.mark.asyncio
+async def test_pending_frontend_update_cannot_repaint_after_session_adoption() -> None:
+    """An old queued callback is retired before a replacement snapshot paints."""
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        scheduled: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
+        applied: list[str] = []
+
+        def schedule(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
+            scheduled.append((callback, args))
+            return True
+
+        app.call_later = schedule
+        app._apply_frontend_state = lambda state: applied.append(state.conversation_title)
+
+        class StatefulSession(FakeSession):
+            frontend_state: FrontendSessionState
+
+        old = StatefulSession()
+        old.frontend_state = FrontendSessionState(
+            session_id="old", epoch="old", conversation_title="old"
+        )
+        app._session = old
+        app._on_frontend_update(object())
+        assert len(scheduled) == 1
+
+        app._invalidate_pending_frontend_state()
+        replacement = FakeSession()
+        app._session = replacement
+        app._apply_frontend_state(
+            FrontendSessionState(session_id="new", epoch="new", conversation_title="new")
+        )
+        callback, args = scheduled[0]
+        callback(*args)
+
+        assert applied == ["new"]
+
+
+@pytest.mark.asyncio
 async def test_takeover_preserves_the_status_band_verbatim() -> None:
     """D2 (round 2): a transport rotation must not move the band's segments."""
     from local_operator.session.frontend_state import (
