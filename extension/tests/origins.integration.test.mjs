@@ -272,6 +272,58 @@ test("future host-grant schema is preserved when a decision is attempted", async
   }
 });
 
+test("all-port grant atomically removes only covered exact allows", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    chrome.areas.local.set("origins", {
+      "http://localhost:3334": "allow",
+      "http://localhost:6215": "allow",
+      "http://localhost:6274": "allow",
+      "https://localhost:443": "allow",
+      "http://127.0.0.1:3334": "allow",
+      "http://api.localhost:3334": "allow",
+      "https://example.com": "allow",
+      "http://localhost:9999": "deny",
+    });
+    const grants = await bundle.import();
+    assert.equal(await grants.grantLoopbackHost(new URL("http://localhost:5173")), true);
+    assert.deepEqual(chrome.areas.local.get("origins"), {
+      "https://localhost:443": "allow",
+      "http://127.0.0.1:3334": "allow",
+      "http://api.localhost:3334": "allow",
+      "https://example.com": "allow",
+      "http://localhost:9999": "deny",
+    });
+    await grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"]));
+    assert.equal(chrome.areas.local.get("origins")["http://localhost:3334"], undefined);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("broad grant prevents concurrent exact approval from recreating covered rows", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    const grants = await bundle.import();
+    await Promise.all([
+      grants.grantLoopbackHost(new URL("http://localhost:5173")),
+      grants.grantExactOrigin("http://localhost:6215"),
+      grants.revokeExactOrigin("http://localhost:3334"),
+    ]);
+    assert.deepEqual(chrome.areas.local.get("origins"), {});
+    assert.equal(Object.keys(chrome.areas.local.get("hostGrants").grants).length, 1);
+    const restarted = await bundle.import("supersession-restart");
+    assert.equal(await restarted.grantExactOrigin("http://localhost:6274"), true);
+    assert.deepEqual(chrome.areas.local.get("origins"), {});
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
 test("worker queue prevents delayed broad approval from resurrecting completed revoke", async () => {
   const chrome = installChromeStub();
   const bundle = await loadAccessGrants();
@@ -363,7 +415,8 @@ test("worker snapshot stays bounded across churn and survives restart", async ()
       assert.equal(await grants.grantLoopbackHost(url), true);
       assert.equal(await grants.revokeLoopbackHost(key), true);
     }
-    assert.deepEqual([...chrome.areas.local.keys()], ["hostGrants"]);
+    assert.deepEqual([...chrome.areas.local.keys()], ["origins", "hostGrants"]);
+    assert.deepEqual(chrome.areas.local.get("origins"), {});
     assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
     grants = await bundle.import("restart");
     assert.equal(await grants.grantLoopbackHost(url), true);
@@ -388,6 +441,24 @@ test("two settings-context revokes serialize through the worker queue", async ()
       grants.revokeLoopbackHost(JSON.stringify(["http:", "127.0.0.1"])),
     ]);
     assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("malformed host snapshot refuses broad grant without cleaning exact origins", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    const malformed = { version: 2, grants: { opaque: "future" } };
+    const origins = { "http://localhost:3334": "allow" };
+    chrome.areas.local.set("hostGrants", malformed);
+    chrome.areas.local.set("origins", origins);
+    const grants = await bundle.import();
+    assert.equal(await grants.grantLoopbackHost(new URL("http://localhost:5173")), false);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), malformed);
+    assert.deepEqual(chrome.areas.local.get("origins"), origins);
   } finally {
     await bundle.close();
     chrome.restore();
