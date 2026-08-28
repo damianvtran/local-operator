@@ -14696,10 +14696,13 @@ class OperatorApp(App[None]):
         reload = getattr(manager, "reload", None)
         if not callable(reload):
             return
+        # ``getattr`` on an untyped facade yields ``object``; the callable check
+        # above is the real guard, so name the awaitable shape for the checker.
+        typed_reload = cast(Callable[[], Awaitable[Any]], reload)
 
         async def _reload() -> None:
             try:
-                await reload()
+                await typed_reload()
             except Exception:  # noqa: BLE001 — a failed refresh must not crash the app
                 logger.debug("MCP reload after a config change failed", exc_info=True)
             self._refresh_mcp_status()

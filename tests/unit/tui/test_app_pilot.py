@@ -5445,7 +5445,13 @@ async def test_mcp_remove_list_offers_every_server_not_just_the_oauth_ones(
         _set_editor_line(editor, "/mcp remove ")
         for _ in range(6):
             await pilot.pause()
-        rows = {name: choice for name, choice in editor.picker.suggestions()}
+        rows = {}
+        for name, choice in editor.picker.suggestions():
+            # An ARGUMENT list only ever carries ArgumentChoice rows;
+            # suggestions() is typed as the union it shares with the
+            # command-word list, so assert the mode rather than casting.
+            assert isinstance(choice, ArgumentChoice), "the picker is not in argument mode"
+            rows[name] = choice
         assert sorted(rows) == ["remove filesystem", "remove grafana", "remove notion"]
         # The detail column carries the SOURCE FILE, abbreviated: that is what
         # turns the refusal into something the user saw coming.
