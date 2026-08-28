@@ -129,6 +129,15 @@ test("loopback all-port decision reconciles only same scheme and literal host", 
   const bundle = await loadStore();
   try {
     const store = await bundle.import();
+    await globalThis.chrome.storage.local.set({
+      origins: {
+        "http://localhost:3000": "allow",
+        "http://localhost:5173": "allow",
+        "https://localhost:5173": "allow",
+        "http://127.0.0.1:5173": "allow",
+        "http://localhost:9999": "deny",
+      },
+    });
     const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
     await store.enqueueAccess(url("http://localhost:5173"), "session:B", "async");
     await store.enqueueAccess(url("https://localhost:5173"), "session:C", "async");
@@ -138,6 +147,23 @@ test("loopback all-port decision reconciles only same scheme and literal host", 
     assert.deepEqual(chrome.session("accessQueue").map((entry) => entry.requester), ["session:C", "session:D"]);
     assert.equal((await store.accessStatus("http://localhost:5173", "session:B")).state, "allowed");
     assert.ok(chrome.local("hostGrants").grants['["http:","localhost"]']);
+    assert.deepEqual(chrome.local("origins"), {
+      "https://localhost:5173": "allow",
+      "http://127.0.0.1:5173": "allow",
+      "http://localhost:9999": "deny",
+    });
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("covered exact approval does not recreate a compacted Settings row", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/access-grants.ts");
+  try {
+    const grants = await bundle.import();
+    assert.equal(await grants.grantLoopbackHost(url("http://localhost:3000")), true);
+    assert.equal(await grants.grantExactOrigin("http://localhost:5173"), true);
+    assert.deepEqual(chrome.local("origins"), {});
+    assert.equal(Object.keys(chrome.local("hostGrants").grants).length, 1);
   } finally { await bundle.close(); chrome.restore(); }
 });
 
