@@ -72,6 +72,102 @@ async def test_owner_two_followers_share_full_1m_state_and_live_updates(
 
 
 @pytest.mark.asyncio
+async def test_real_socket_follower_consumes_immutable_subagent_progress_and_settlement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Registrant → RemoteSession keeps the follower's full child ledger usable."""
+    import time
+
+    from local_operator.session.frontend_state import JobState
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.subagent_panel import SubagentPanel
+    from local_operator.tui.widgets.subagent_view import LEDGER_GONE_NOTE, SubagentView
+    from tests.unit.tui.test_reconnect_parity import _boot, _remote_factory
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    started = time.time() - 2
+    running = JobState(
+        id="child",
+        type="task",
+        label="streaming child",
+        status="running",
+        start_time=started,
+        started_at=started,
+        latest_details={"progress": "reading files"},
+        trajectory=[
+            {"type": "message_start", "message": {"role": "assistant", "id": "m1"}},
+            {
+                "type": "message_update",
+                "message": {"role": "assistant", "id": "m1"},
+                "delta": "Inspecting the follower path.",
+            },
+        ],
+    )
+    handle._frontend.mutate(jobs=[running])
+    registrant = Registrant(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        app = OperatorApp(_remote_factory(remote))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(app, pilot)
+            panel = app.query_one(SubagentPanel)
+            app._refresh_band()
+            panel._tick()
+            await pilot.pause()
+            assert "reading files" in str(getattr(panel._rows["child"], "content", ""))
+
+            app._open_subagent_view("child")
+            for _ in range(20):
+                await pilot.pause()
+                if "Inspecting the follower path." in " ".join(
+                    app.query_one(SubagentView).rendered_rows()
+                ):
+                    break
+            view = app.query_one(SubagentView)
+            assert "Inspecting the follower path." in " ".join(view.rendered_rows())
+
+            completed = running.model_copy(
+                update={
+                    "status": "completed",
+                    "settled_at": time.time(),
+                    "result_text": "follower path complete",
+                    "latest_details": {"progress": "thinking"},
+                }
+            )
+            handle._frontend.mutate(jobs=[completed])
+            for _ in range(100):
+                await pilot.pause()
+                row = remote.jobs.get("child")
+                if row is not None and row.status == "completed":
+                    break
+            assert remote.jobs.get("child") is not None
+            assert remote.jobs.get("child").status == "completed"  # type: ignore[union-attr]
+            assert "completed" in view.rendered_rows()[0]
+
+            await pilot.press("escape")
+            await pilot.pause()
+            app._open_subagent_view("child")
+            for _ in range(10):
+                await pilot.pause()
+            reopened = app.query_one(SubagentView)
+            rendered = " ".join(reopened.rendered_rows())
+            assert LEDGER_GONE_NOTE not in rendered
+            assert "completed" in rendered
+            assert remote.jobs.get("child") is not None
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
 async def test_daemon_never_receives_frontend_frames(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     handle = FakeHandle()

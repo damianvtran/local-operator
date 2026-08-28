@@ -237,6 +237,18 @@ class _FrozenMapping(tuple[tuple[str, Any], ...]):
     def __len__(self) -> int:
         return tuple.__len__(self)
 
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def keys(self) -> Iterator[str]:
+        return self.__iter__()
+
+    def values(self) -> Iterator[Any]:
+        return (value for _key, value in tuple.__iter__(self))
+
     def items(self) -> Iterator[tuple[str, Any]]:
         return tuple.__iter__(self)
 
@@ -710,15 +722,17 @@ class SnapshotJobs:
         self.replace(values)
 
     def replace(self, values: Iterable[JobState]) -> None:
-        self._values = [value.model_copy(deep=True) for value in values]
+        # Canonical jobs already own recursively immutable retained payloads.
+        # Route copies through the public detacher instead of asking Pydantic to
+        # deep-copy tuple-backed Mapping/Sequence wrappers: the wrappers must
+        # stay immutable while consumers retain their abstract container API.
+        self._values = [_public_job(value) for value in values]
 
     def list(self) -> list[JobState]:
-        return [value.model_copy(deep=True) for value in self._values]
+        return [_public_job(value) for value in self._values]
 
     def get(self, job_id: str) -> JobState | None:
-        return next(
-            (value.model_copy(deep=True) for value in self._values if value.id == job_id), None
-        )
+        return next((_public_job(value) for value in self._values if value.id == job_id), None)
 
 
 class SnapshotWakeScheduler:
@@ -1357,11 +1371,14 @@ class FrontendStateStore:
         update = self.mutate(**changes) if changes else None
         # Expensive source snapshots are explicit mutation hooks. Turn edges and
         # tool/result boundaries are the defensive fallback; token deltas never
-        # rescan transcript/jobs or publish replacement state.
+        # rescan transcript/jobs or publish replacement state. Subagent progress
+        # is excluded too: the job manager already coalesces that live row onto
+        # ``refresh_jobs`` within 50 ms. Re-scanning the entire session here
+        # published a duplicate frame for every child boundary and made remote
+        # followers pay a second wire update for the same activity string.
         kind = str(getattr(event, "type", ""))
         if isinstance(event, (AgentEndEvent, MessageEndEvent)) or kind in {
             "tool_execution_end",
-            "subagent_progress",
             "subagent_end",
             "model_change",
         }:

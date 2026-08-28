@@ -18,7 +18,7 @@ not one of them. Settled rows follow the tool ledger's ink law: ✓ dim,
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
 
@@ -379,7 +379,7 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
     queued = bool(getattr(job, "queued", False))
     running = status == "running" and not queued
     details = getattr(job, "latest_details", None)
-    if not isinstance(details, dict):
+    if not isinstance(details, Mapping):
         details = {}
     if queued:
         # The word ``status_glyph`` already derived for this state, rather

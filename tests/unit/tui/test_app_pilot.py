@@ -1380,6 +1380,44 @@ async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_raw_subagent_progress_waits_for_canonical_band_update() -> None:
+    """Owner progress has the same single visual invalidation as a follower."""
+    from local_operator.session.frontend_state import FrontendSessionState, JobState
+    from local_operator.tui.events import SubagentProgress
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        refreshes = 0
+
+        def refreshed() -> None:
+            nonlocal refreshes
+            refreshes += 1
+
+        app._refresh_band = refreshed
+        app.on_subagent_progress(SubagentProgress("child", "child", "reading files"))
+        assert refreshes == 0
+
+        # The canonical apply is the owner/follower-common route and owns the
+        # one repaint after the manager's <=50 ms coalescing window.
+        app._apply_frontend_state(
+            FrontendSessionState(
+                session_id="sess",
+                epoch="owner",
+                jobs=[
+                    JobState(
+                        id="child",
+                        type="task",
+                        status="running",
+                        latest_details={"progress": "reading files"},
+                    )
+                ],
+            )
+        )
+        assert refreshes == 1
+
+
+@pytest.mark.asyncio
 async def test_pending_frontend_update_cannot_repaint_after_session_adoption() -> None:
     """An old queued callback is retired before a replacement snapshot paints."""
     from local_operator.session.frontend_state import FrontendSessionState

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -151,14 +151,14 @@ HISTORY_UNAVAILABLE_NOTE = "history unavailable"
 HISTORY_ERROR_NOTE = "load failed · Home retry"
 
 
-def _as_dict(event: Any) -> dict[str, Any]:
+def _as_dict(event: Any) -> Mapping[str, Any]:
     """One trajectory entry as a dict.
 
     Entries are normally serialized dicts already; an engine that hands over
     live event objects is tolerated by dumping them, and anything neither is
     skipped (empty dict) rather than raised on.
     """
-    if isinstance(event, dict):
+    if isinstance(event, Mapping):
         return event
     dump = getattr(event, "model_dump", None)
     if callable(dump):
@@ -178,17 +178,17 @@ def _content_text(payload: Any) -> str:
     refresh timer — a repeating handler exception, not the skipped row this
     module promises.
     """
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         return ""
     content = payload.get("content")
-    if not isinstance(content, (list, tuple)):
+    if not isinstance(content, Sequence) or isinstance(content, (str, bytes, bytearray)):
         return ""
     parts: list[str] = []
     for block in content:
         # Transcript encoding excludes pydantic defaults, including the text
         # block's ``type`` discriminator. The presence of ``text`` is therefore
         # the durable signal; trajectory events still carry the explicit type.
-        if isinstance(block, dict) and (
+        if isinstance(block, Mapping) and (
             block.get("type") == "text" or ("text" in block and "data" not in block)
         ):
             parts.append(str(block.get("text", "")))
@@ -298,7 +298,7 @@ def fold_transcript_entries(
             call_id = str(payload.get("tool_call_id") or "")
             if call_id:
                 provider_payload = payload.get("provider_payload")
-                metadata = provider_payload if isinstance(provider_payload, dict) else {}
+                metadata = provider_payload if isinstance(provider_payload, Mapping) else {}
                 details = metadata.get("details")
                 duration = _duration(metadata.get("duration_s"))
                 # Tool result text is the model-facing payload; presentation
@@ -307,7 +307,7 @@ def fold_transcript_entries(
                 results[call_id] = (
                     _content_text(payload),
                     bool(payload.get("is_error")),
-                    details if isinstance(details, dict) else None,
+                    dict(details) if isinstance(details, Mapping) else None,
                     duration,
                 )
     communication_ids: set[str] = set()
@@ -367,7 +367,7 @@ def fold_transcript_entries(
             if text:
                 folded.append(SubagentEntry(entry.id, "text", text=text))
             for raw_call in payload.get("tool_calls") or ():
-                if not isinstance(raw_call, dict):
+                if not isinstance(raw_call, Mapping):
                     continue
                 call_id = str(raw_call.get("id") or raw_call.get("tool_call_id") or "")
                 if not call_id:
@@ -448,7 +448,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
         etype = event.get("type")
         if etype in ("message_start", "message_update", "message_end"):
             message = event.get("message")
-            if not isinstance(message, dict) or message.get("role") != "assistant":
+            if not isinstance(message, Mapping) or message.get("role") != "assistant":
                 continue
             message_id = str(message.get("id") or f"m{index}")
             if etype == "message_start":
@@ -479,7 +479,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 key=call_id,
                 kind="tool",
                 tool_name=str(event.get("tool_name") or "tool"),
-                tool_args=args if isinstance(args, dict) else {},
+                tool_args=dict(args) if isinstance(args, Mapping) else {},
                 intent=intent if isinstance(intent, str) and intent else None,
             )
             remember("tool", call_id)
@@ -489,7 +489,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             if started is None:
                 continue  # an end without a start: nothing to settle
             result = event.get("result")
-            result = result if isinstance(result, dict) else {}
+            result = result if isinstance(result, Mapping) else {}
             details = result.get("details")
             event_duration = _duration(event.get("duration_s"))
             tools[call_id] = SubagentEntry(
@@ -500,7 +500,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 intent=started.intent,
                 outcome="error" if (event.get("is_error") or result.get("is_error")) else "success",
                 result_text=_content_text(result),
-                details=details if isinstance(details, dict) else None,
+                details=dict(details) if isinstance(details, Mapping) else None,
                 duration_s=(
                     event_duration
                     if event_duration is not None

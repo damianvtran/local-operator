@@ -47,6 +47,87 @@ async def quick_runner(job_id, signal, report_progress):
     return f"done:{job_id}"
 
 
+@pytest.mark.asyncio
+async def test_task_notification_callers_classify_transient_and_durable_mutations() -> None:
+    """Only fields retained by the resume projection schedule persistence.
+
+    This enumerates every public manager mutation that notifies while a task is
+    alive: registration, queue promotion, progress, output, and settlement.
+    Launch metadata/model/usage use ``_notify_roster_change`` directly in the
+    subagent runner and are covered by the same durable callback below.
+    """
+    durable: list[str] = []
+    live: list[str] = []
+    release_running = asyncio.Event()
+    release_queued = asyncio.Event()
+    started = asyncio.Event()
+    queued = ""
+
+    async def blocked(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        started.set()
+        await (release_queued if job_id == queued else release_running).wait()
+        return "settled result"
+
+    manager = AsyncJobManager(
+        max_running=1,
+        on_roster_change=lambda: durable.append("persist"),
+        on_job_change=lambda: live.append("publish"),
+    )
+    running = manager.register("task", "running", blocked)
+    queued = manager.register("task", "queued", blocked, queued=True)
+    assert (len(durable), len(live)) == (2, 2)  # both registrations
+    await started.wait()
+
+    manager._progress_fn(running)("reading files")
+    manager.append_output(running, "one live line\n")
+    assert (len(durable), len(live)) == (2, 4)
+
+    release_running.set()
+    await manager.settled_event(running).wait()
+    # Settlement frees capacity and atomically promotes the queued row: both are
+    # durable lifecycle moves, so each publishes and persists once.
+    assert (len(durable), len(live)) == (4, 6)
+    assert manager.start_queued(queued) is False  # already auto-promoted
+    release_queued.set()
+    await manager.settled_event(queued).wait()
+    assert (len(durable), len(live)) == (5, 7)  # second settlement
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_progress_burst_publishes_every_edge_without_persisting() -> None:
+    """Live activity stays smooth while the durable writer remains untouched."""
+    durable = 0
+    live = 0
+    release = asyncio.Event()
+
+    def persisted() -> None:
+        nonlocal durable
+        durable += 1
+
+    def published() -> None:
+        nonlocal live
+        live += 1
+
+    async def blocked(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        await release.wait()
+        return "done"
+
+    manager = AsyncJobManager(on_roster_change=persisted, on_job_change=published)
+    job_id = manager.register("task", "streaming", blocked)
+    durable = live = 0
+    report = manager._progress_fn(job_id)
+    for index in range(60):
+        report(f"edge {index}")
+    assert (durable, live) == (0, 60)
+
+    release.set()
+    await manager.settled_event(job_id).wait()
+    assert (durable, live) == (1, 61)
+    assert require_job(manager, job_id).result_text == "done"
+    await manager.dispose()
+
+
 def test_accumulate_usage_preserves_provider_reported_calls() -> None:
     """A tool-using child's receipts stay attached to their original calls."""
     from local_operator.harness.subagent import _accumulate_usage

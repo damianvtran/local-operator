@@ -24,6 +24,7 @@ safe to call from any thread that serializes calls per session.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from local_operator.harness.comms import HUB_MESSAGE_TYPE
@@ -857,7 +858,8 @@ class ProjectionFold:
                 )
                 if lifecycle.age_s is not None:
                     row.elapsed_s = max(0.0, float(lifecycle.age_s))
-            progress = str((getattr(job, "latest_details", None) or {}).get("progress") or "")
+            details = getattr(job, "latest_details", None)
+            progress = str(details.get("progress") or "") if isinstance(details, Mapping) else ""
             row.progress = progress if row.status == "running" else ""
             row.activity = row.progress or ("thinking" if row.status == "running" else "")
             # NOTE: no ``Transcript`` construction here. #298's full-screen
