@@ -2202,3 +2202,226 @@ async def test_the_scroll_caption_keeps_the_space_every_other_hint_has() -> None
         view = await _open(pilot, app, _job_with(TRAJECTORY))
         assert "↑↓ scroll" in view.rendered_rows()[-1]
         assert "↑↓scroll" not in view.rendered_rows()[-1]
+
+
+# -- streaming reconciliation -----------------------------------------------
+#
+# The page used to re-derive its whole transcript and REMOUNT the tail on every
+# refresh tick, where the main conversation mutates one long-lived block in
+# place. A growing message never compares equal to itself, so its block was
+# destroyed and rebuilt per tick: measured on the predecessor at 240 mounts and
+# 239 removes over 120 ticks, with a new WorkingBlock (and therefore a restarted
+# shimmer sweep and clock) every time. The tests below fail on that code.
+
+
+def _stream(mid: str, body: str) -> list[dict[str, Any]]:
+    """An assistant message still being streamed — start, then one delta."""
+    return [
+        {"type": "message_start", "message": {"role": "assistant", "id": mid}},
+        {"type": "message_update", "message": {"role": "assistant", "id": mid}, "delta": body},
+    ]
+
+
+class _MountCounter:
+    """Counts what a refresh actually costs the container."""
+
+    def __init__(self, view: SubagentView) -> None:
+        self.mounts = 0
+        self.removes = 0
+        body = view._body
+        append, remove = body.append_block, body.remove_block
+
+        def append_block(block: Any) -> Any:
+            self.mounts += 1
+            return append(block)
+
+        def remove_block(block: Any) -> Any:
+            self.removes += 1
+            return remove(block)
+
+        body.append_block = append_block  # type: ignore[method-assign]
+        body.remove_block = remove_block  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_message_keeps_one_block_across_refreshes() -> None:
+    """The row being streamed is UPDATED, not rebuilt.
+
+    Block identity is the assertion because it is what the user feels: a
+    rebuilt AssistantBlock is constructed unmounted (so it folds at the
+    fallback width for a frame, which reads as the message flashing narrow)
+    and it discards the incremental markdown cache, so the settling final
+    response is re-lexed in full on every tick.
+    """
+    job = _job_with(_stream("m1", ""), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        counter = _MountCounter(view)
+        identities: set[int] = set()
+        text = ""
+        for index in range(12):
+            text += f"token{index} "
+            job.trajectory = _stream("m1", text)
+            app._refresh_subagent_view()
+            await pilot.pause()
+            block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+            identities.add(id(block))
+        assert len(identities) == 1, "the streaming block was rebuilt"
+        assert counter.removes == 0, f"{counter.removes} rows torn down while streaming"
+        # The message on screen is the whole accumulated text, not a fragment.
+        assert "token0 " in block.text() and block.text().endswith("token11")
+
+
+@pytest.mark.asyncio
+async def test_the_working_tail_survives_every_refresh() -> None:
+    """The tail line owns an animation and a clock, and both restart when the
+    widget does. It is pinned (`TranscriptView.pin_tail`, the same lever the
+    main conversation uses) so rows mount ABOVE it instead of replacing it."""
+    job = _job_with(_stream("m1", "opening"), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        identities: set[int] = set()
+        events = list(job.trajectory)
+        for index in range(6):
+            # Rows keep arriving UNDER the tail: each pass adds a settled tool,
+            # which is exactly the case that used to drag the tail down with it.
+            events.append(_call(f"c{index}", "read", path=f"f{index}.py"))
+            events.append(_result(f"c{index}", "read", "ok"))
+            job.trajectory = list(events)
+            app._refresh_subagent_view()
+            await pilot.pause()
+            tail = [b for b in view._body.blocks() if isinstance(b, WorkingBlock)]
+            assert len(tail) == 1, "the page grew a second working line"
+            identities.add(id(tail[0]))
+        assert len(identities) == 1, "the working line was rebuilt under the reader"
+        # It is still LAST: the whole point of pinning it.
+        assert isinstance(view._body.blocks()[-1], WorkingBlock)
+
+
+@pytest.mark.asyncio
+async def test_a_settling_mid_list_tool_does_not_rebuild_the_rows_beneath_it() -> None:
+    """One parallel batch settling oldest-first used to rebuild the whole
+    suffix under each result — 272 mounts for 16 pairs, quadratic in the rows
+    below the one that changed. Settling a card is now an update to that card."""
+    events: list[dict[str, Any]] = []
+    for index in range(4):
+        events.extend(_text(f"m{index}", f"step {index}"))
+        events.append(_call(f"c{index}", "bash", command=f"step {index}"))
+    job = _job_with(list(events), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        cards = {id(block) for block in view._body.blocks() if isinstance(block, ToolCard)}
+        assert len(cards) == 4
+        counter = _MountCounter(view)
+        for index in range(4):
+            events.append(_result(f"c{index}", "bash", "ok"))
+            job.trajectory = list(events)
+            app._refresh_subagent_view()
+            await pilot.pause()
+        assert counter.mounts == 0, f"{counter.mounts} rows remounted by settling tools"
+        assert counter.removes == 0, f"{counter.removes} rows torn down by settling tools"
+        # Same widgets, now carrying their outcome and the executor's duration.
+        settled = [block for block in view._body.blocks() if isinstance(block, ToolCard)]
+        assert {id(card) for card in settled} == cards
+        assert all(card.is_finalized() for card in settled)
+
+
+@pytest.mark.asyncio
+async def test_a_row_folds_at_the_body_width_it_is_mounted_into() -> None:
+    """No block is built at the 80-column fallback and re-folded a frame later.
+
+    That flash was visible on ANY mount path, not only the streaming one: a
+    block authors its own rows and PINS its height to the count of them, so a
+    fallback-width build pinned a fallback-width height until the resize
+    landed. On a 140-column terminal the block measurably built at 80 and
+    settled at 134.
+    """
+    prose = "a paragraph of the child's prose that folds differently at 80 columns. "
+    job = _job_with(_stream("m1", prose * 3), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(140, 34)) as pilot:
+        view = await _open(pilot, app, job)
+        for _ in range(4):
+            await pilot.pause()
+        body_width = view._body.scrollable_content_region.width
+        assert body_width > 80, "the fixture needs a body wider than the fallback"
+
+        # Every fold performed from here on, whichever path builds it. The
+        # predecessor rebuilt the row on each streaming tick, and a rebuilt
+        # block is constructed with no parent to ask for a width, so it folded
+        # at 80 and re-folded once `on_resize` landed — a frame of narrow text
+        # per tick.
+        folds: list[int] = []
+        original = AssistantBlock._apply_rows
+
+        def record(self: AssistantBlock, text: Any) -> Any:
+            folds.append(self._flat_width())
+            return original(self, text)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(AssistantBlock, "_apply_rows", record)
+        try:
+            job.trajectory = _stream("m1", prose * 4)
+            app._refresh_subagent_view()
+            for _ in range(4):
+                await pilot.pause()
+        finally:
+            monkeypatch.undo()
+
+        assert folds, "no fold was performed"
+        assert all(width == body_width for width in folds), folds
+        block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+        assert block._built_width == body_width
+
+
+@pytest.mark.asyncio
+async def test_a_settled_message_is_committed_in_the_block_it_streamed_into() -> None:
+    """Settling COMMITS the row rather than rebuilding it.
+
+    The streaming splice concatenates a frozen prefix with the volatile tail,
+    which cannot produce the blank row between two paragraphs until the whole
+    message is re-rendered once (`AssistantBlock.finalize_text`). The main
+    conversation does that at `message_end`; this page has no such event, so it
+    commits on the refresh that observes the job settle. Without it a finished
+    child kept its mid-stream fold forever — a paragraph break the same text
+    shows in the main transcript, missing here.
+    """
+    body = "First paragraph here.\n\nSecond paragraph here."
+    job = _job_with(_stream("m1", body), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(140, 34)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+        streaming = str(block.renderable)
+        assert not block.is_finalized()
+
+        # The child stops. Note the trajectory does NOT change: the settle is
+        # the job's status moving, which is the case a text-only diff misses.
+        job.status = "completed"
+        job.settled_at = job.start_time + 5
+        app._refresh_subagent_view()
+        await pilot.pause()
+
+        settled = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+        assert id(settled) == id(block), "the message was rebuilt to settle it"
+        assert settled.is_finalized()
+        rows = str(settled.renderable).split("\n")
+        assert any(not row.strip() for row in rows), rows
+        assert len(rows) == len(streaming.split("\n")) + 1
