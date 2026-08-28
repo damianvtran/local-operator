@@ -441,6 +441,98 @@ def slash_argument(
     return None if context is None else context.value
 
 
+class CompletionMode(Enum):
+    """Which slot :func:`completion_for` is completing.
+
+    The three completion sites in ``Editor`` differ only in which span they
+    rewrite and whether a trailing space follows the inserted name, and that
+    difference is exactly what this enum names.
+    """
+
+    #: The command WORD — ``/mc`` → ``/mcp `` (``Editor._apply_command``).
+    COMMAND = "command"
+    #: An enum-tail ARGUMENT — ``/mcp lo`` → ``/mcp login``, no trailing space
+    #: so the matcher keeps matching (``Editor._complete_argument``).
+    ARGUMENT = "argument"
+    #: A NAME+message argument — ``/team fro`` → ``/team frontend-guild ``, the
+    #: space opening the message tail (``Editor._complete_name_argument``).
+    NAME_ARGUMENT = "name_argument"
+
+
+def completion_for(
+    text: str,
+    caret: int,
+    mode: CompletionMode,
+    row_name: str,
+    commands: tuple[str, ...],
+    known: frozenset[str] = frozenset(),
+) -> tuple[str, int] | None:
+    """The buffer and caret that accepting ``row_name`` produces — pure.
+
+    THE single source of truth for "what does choosing this row put in the
+    buffer". The three ``Editor`` completion methods delegate their string
+    arithmetic here and keep only their side effects (running the command, the
+    inline reassembly), and the composer's inline GHOST TEXT is derived from
+    the very same call. That shared derivation is what makes the ghost's
+    invariant true by construction rather than by two implementations agreeing:
+    the dimmed cells the user sees are computed from the same ``new_text`` that
+    Tab commits, so ``buffer + ghost == buffer_after_tab`` cannot drift the way
+    two parallel string builders would.
+
+    Every mode replaces a SPAN — ``[start, end)`` — rather than splicing to the
+    end of the buffer, because inline detection means a message may follow the
+    command token (``fix this /te|``) and that suffix is the user's prose. Note
+    the consequence for the ghost: a span replacement is only an APPEND when
+    the row extends what was typed, which is why the ghost rule tests
+    ``new_text.startswith(text)`` instead of assuming it.
+
+    Returns ``None`` when the caret is not in the slot ``mode`` names — the
+    parse the caller would otherwise have had to repeat.
+    """
+    if mode is CompletionMode.COMMAND:
+        context = slash_context(text, caret, known)
+        if context is None:
+            return None
+        # The trailing space is load-bearing, not cosmetic: it terminates the
+        # word (closing the command list) and, for a list-taking command, opens
+        # the argument list. It is part of what Tab commits, so it is part of
+        # the ghost too.
+        completed = f"{text[: context.start]}/{row_name} {text[context.end :]}"
+        return completed, context.start + len(row_name) + 2
+    argument = slash_argument_context(text, commands, caret, known)
+    if argument is None:
+        return None
+    # NAME+message commands take the terminating space (it opens the message
+    # tail); enum-tail arguments must NOT, or the matcher would stop matching
+    # and Tab would appear to fill the field and abandon it in one keystroke.
+    suffix = " " if mode is CompletionMode.NAME_ARGUMENT else ""
+    filled = f"{text[: argument.start]}{row_name}{suffix}{text[argument.end :]}"
+    return filled, argument.start + len(row_name) + len(suffix)
+
+
+def ghost_for(completion: tuple[str, int] | None, text: str) -> str:
+    """The dimmed remainder to preview, or ``""`` when none can be honest.
+
+    The ghost is shown IF AND ONLY IF the completion is a pure APPEND to what
+    the user typed. Completion rewrites a SPAN (see :func:`completion_for`), so
+    for a prefix match that happens to look like an append but for a FUZZY one
+    it rewrites characters already on screen: ``/lg`` + Tab yields ``/login ``,
+    which is not ``/lg`` plus anything. No string appended at the caret can
+    describe that edit, so any ghost there would display characters Tab does
+    not produce — a lie about the next keystroke. The picker row already
+    carries the meaning in that case, so showing nothing costs nothing.
+
+    ``startswith`` is deliberately CASE-SENSITIVE. ``/MCP lo`` + Tab inserts
+    the registry's own casing (``login``), so a case-insensitive check would
+    pass and then paint a ghost whose visible characters differ from the ones
+    Tab commits. Same rule, same reason: only an exact append is honest.
+    """
+    if completion is None:
+        return ""
+    new_text, _caret = completion
+    return new_text[len(text) :] if new_text.startswith(text) else ""
+
+
 #: Below this many typed characters the fuzzy tail is suppressed. A one- or
 #: two-letter query matches an arbitrary-looking set by subsequence — `/u`
 #: offered `usage, quit, accounts, logout` and `/g` offered
@@ -687,6 +779,24 @@ class CommandPicker(Static):
         if not self._matches:
             return None
         return self._matches[self._selected][0]
+
+    def highlighted_choice(self) -> ArgumentChoice | None:
+        """The highlighted ARGUMENT row itself, or ``None``.
+
+        The row OBJECT, not just its name, so a caller can read the flags the
+        app set on it. The safety gate needs ``alert`` — whether choosing this
+        row destroys something — and that is a per-ROW fact the command word
+        cannot answer: ``/mcp remove <server>`` deletes a config while
+        ``/mcp login <server>`` does not, and both live under the same word
+        (see ``Editor._argument_is_destructive``).
+
+        Returns ``None`` in COMMAND mode, where the match is a
+        :class:`SlashCommand` and the question does not apply.
+        """
+        if not self._matches or self._mode is not PickerMode.ARGUMENT:
+            return None
+        choice = self._matches[self._selected][1]
+        return choice if isinstance(choice, ArgumentChoice) else None
 
     @property
     def selected_index(self) -> int:
