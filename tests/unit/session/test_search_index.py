@@ -451,3 +451,45 @@ def test_search_digests_sees_a_rebuilt_corpus_rather_than_a_stale_one(tmp_path: 
     second = build_index(tmp_path, ["s1"])
     assert search_digests(second, "migration") == {"s1"}
     assert search_digests(second, "classifier") == {"s1"}  # the opener is still in the digest
+
+
+def test_the_lowered_memo_survives_a_recycled_dict_address():
+    """The memo keys on ``id(digests)``, and an ``id`` is unique only among LIVE
+    objects. Before the source mapping was retained, a caller that dropped its
+    digests let CPython recycle the address for the next dict of similar shape;
+    a successor with the same ``len`` matched the key and was answered from its
+    PREDECESSOR's lowered bodies.
+
+    ``mobile.daemon``'s search is exactly that shape — a fresh ``build_index``
+    result per request, dropped at return, with ``limit`` pinning the length —
+    and it measured 2 wrong session sets in 60 real searches.
+
+    The loop below forces the collision rather than waiting for it: each corpus
+    is built, queried and dropped without ever being bound to a surviving name,
+    so the allocator is free to reuse the address immediately. Any trial whose
+    answer comes from a previous corpus is a wrong search result.
+    """
+    wrong = 0
+    for trial in range(200):
+        # Same length every time, so ``len`` cannot rescue the key; unique body
+        # per trial, so a stale corpus is detectable rather than coincidental.
+        word = f"unique{trial}word"
+        corpus = {"s0": f"alpha {word} omega", "s1": "beta unrelated gamma"}
+        if search_digests(corpus, word) != {"s0"}:
+            wrong += 1
+        del corpus
+
+    assert wrong == 0, f"{wrong}/200 searches answered from a recycled corpus"
+
+
+def test_the_lowered_memo_re_derives_for_a_new_equal_length_corpus():
+    """The narrower statement of the same rule: two DIFFERENT mappings of equal
+    length must get their own lowered corpus, whether or not their addresses
+    collide. Pins the behaviour the identity key is a performance shortcut for.
+    """
+    first = {"s0": "RETENTION sweep", "s1": "classifier"}
+    assert search_digests(first, "retention") == {"s0"}
+
+    second = {"s0": "unrelated", "s1": "RETENTION sweep"}
+    assert search_digests(second, "retention") == {"s1"}
+    assert search_digests(first, "retention") == {"s0"}

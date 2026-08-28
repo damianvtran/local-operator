@@ -388,6 +388,19 @@ def search_digests(digests: dict[str, str], query: str) -> set[str]:
 #: one-shot: a larger cache would retain corpora nobody will ask for again.
 _LOWERED_KEY: tuple[int, int] | None = None
 _LOWERED: dict[str, str] = {}
+#: The mapping ``_LOWERED`` was derived from, retained ONLY so its ``id()``
+#: cannot be handed to a different object. Without it the memo was unsound: an
+#: ``id`` is unique among LIVE objects, not over time, so once a caller dropped
+#: its digests CPython could recycle the address for the next dict of similar
+#: shape, and a successor with the same ``len`` matched the key and was answered
+#: from its predecessor's lowered bodies. ``mobile.daemon``'s search is exactly
+#: that shape (a fresh ``build_index`` result per request, dropped at return,
+#: with ``limit`` pinning the length); it measured 2 wrong session sets in 60
+#: real searches, and a search returning the wrong rows is the failure this
+#: module exists to prevent. Retaining the source makes the address
+#: un-recyclable for as long as the memo can answer for it, which is what the
+#: identity key silently assumed all along.
+_LOWERED_SRC: dict[str, str] | None = None
 
 
 def _lowered(digests: dict[str, str]) -> dict[str, str]:
@@ -395,16 +408,30 @@ def _lowered(digests: dict[str, str]) -> dict[str, str]:
 
     Identity-keyed rather than content-keyed on purpose: hashing 10 MB of
     digests to decide whether to lower 10 MB of digests would cost what it
-    saves. The picker builds its digest mapping once and holds it, so identity
-    is a sound key there; a caller that MUTATES a mapping in place between
-    queries would see a stale corpus, which is why ``build_index`` returns a
-    fresh dict on every call rather than updating one.
+    saves. Soundness rests on :data:`_LOWERED_SRC` pinning the source mapping
+    alive, so its ``id`` cannot be reused by a later dict while this memo would
+    still answer for it — an ``id`` identifies an object only among the living.
+
+    A caller that MUTATES a mapping in place between queries would still see a
+    stale corpus, which is why ``build_index`` returns a fresh dict on every
+    call rather than updating one.
+
+    One entry, so alternating between two equally sized LIVE mappings re-lowers
+    every call (2700 digests: 20 queries against one mapping is 4.3 ms,
+    alternating between two is 102 ms). Still far cheaper than the per-query
+    lowering this replaced, and the picker never alternates — it holds one
+    corpus for its whole life. Recorded so a future mixed caller does not
+    assume the memo is free.
     """
-    global _LOWERED_KEY, _LOWERED
+    global _LOWERED_KEY, _LOWERED, _LOWERED_SRC
     key = (id(digests), len(digests))
     if _LOWERED_KEY != key:
         _LOWERED = {sid: digest.lower() for sid, digest in digests.items()}
         _LOWERED_KEY = key
+        # Assigned in the SAME branch that sets the key: the retained source and
+        # the id it protects are one fact, and letting them drift apart reopens
+        # the recycled-address bug.
+        _LOWERED_SRC = digests
     return _LOWERED
 
 
