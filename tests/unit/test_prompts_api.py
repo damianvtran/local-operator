@@ -157,6 +157,16 @@ def test_system_md_states_harness_identity() -> None:
     assert "`lop`" in text
 
 
+def test_system_md_requires_owned_browser_cleanup_before_final_response() -> None:
+    """Long-lived interactive sessions do not dispose between turns, so the
+    packaged invariant must make normal cleanup the agent's responsibility."""
+    text = render_template("system.md", {})
+    assert "action=close" in text
+    assert "BEFORE the final response" in text
+    assert "Never close another" in text
+    assert "session teardown is a fallback" in text
+
+
 def test_system_md_teaches_eval_digest_pipeline() -> None:
     """The prompt must steer multi-step work into one ``eval`` that prints a
     compact digest, with full output kept fetchable via ``spill://`` — the

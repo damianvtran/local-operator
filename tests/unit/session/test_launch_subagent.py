@@ -178,6 +178,40 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_completed_subagent_disposes_its_owned_browser_surface(tmp_path, monkeypatch):
+    """Runner completion reaches Session.dispose, whose browser close is the
+    fallback when a child misses the before-handoff instruction."""
+    from local_operator.harness import subagent as subagent_mod
+    from local_operator.tools import builtin
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    calls: list[tuple[str, dict[str, str], str]] = []
+
+    async def fake_bridge_call(tool_call_id, action, params, *, surface=""):
+        calls.append((action, params, surface))
+        return {}, None
+
+    original_build = subagent_mod._build_child_session
+
+    async def build_with_owned_tab(**kwargs):
+        child = await original_build(**kwargs)
+        child._browser.surface_id = "bridge:44:childnonce"
+        return child
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge_call)
+    monkeypatch.setattr(subagent_mod, "_build_child_session", build_with_owned_tab)
+    parent = make_session(tmp_path, OneShotStream())
+
+    job_id = parent._launch_subagent(label="sub", prompt="finish and hand off")
+    await wait_for(
+        lambda: (job := parent.jobs.get(job_id)) is not None and job.status == "completed"
+    )
+
+    assert calls == [("close", {"tab": "bridge:44:childnonce"}, "bridge:44:childnonce")]
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_completion_survives_cancellation_during_end_event_fanout(tmp_path, monkeypatch):
     """A result is final before its end event fan-out begins.
 

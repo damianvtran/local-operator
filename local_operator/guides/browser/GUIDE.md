@@ -264,7 +264,7 @@ Prefer `snapshot` to discover click targets (it returns stable refs), `read`
 for content, `screenshot` for visual verification, `logs` when a page
 misbehaves. Capture before/after screenshots for any visual change.
 
-### Multi-tab: parallel sessions each own a tab
+### Multi-tab lifecycle: parallel sessions each own one tab
 
 The extension drives MULTIPLE tabs concurrently (capped at 8), so parallel
 agents/sessions never fight over one surface:
@@ -272,18 +272,41 @@ agents/sessions never fight over one surface:
 - **A fresh `open` (no existing surface) always creates a NEW background
   tab** — it never hijacks another session's tab. Your session then pins that
   surface and every later action drives it.
-- **Your surface persists**: `open` again navigates YOUR tab (resume), it
-  does not spawn more. One session = one tab unless you deliberately need
-  more.
-- **`tabs` lists all live extension-owned tabs** — URL, title, created/last
-  used — with handles REDACTED (`bridge:123:abc…`). Listings are awareness
-  only: you can see what other sessions are doing but cannot drive their tabs
-  (driving requires the full handle only the owning session holds).
-- **`close` when you are done.** Tabs you leave behind sit in the user's
-  browser and count against the cap; a `tab_limit` error means the fleet
-  should close finished tabs, not that the bridge is broken.
+- **One session = one owned tab.** Reuse it: `open` again navigates YOUR tab
+  (resume); do not open a new surface for each URL.
+- **`tabs` audits all live extension-owned tabs** — URL, title, created/last
+  used — with handles REDACTED (`bridge:123:abc…`). Your entry is marked
+  `(yours)`. Listings are awareness only: you can identify and close your
+  pinned tab, but cannot drive or close another session's redacted tab.
+- **Close before your final answer.** Once the task or turn no longer needs the
+  surface, call `browser` with `action=close` before responding. Screenshots
+  already captured and dev servers still running are not reasons to keep it.
+- **Leave it open only for an explicit need:** the user asked you to, user
+  action/login/approval is pending in that exact tab, or the next immediate
+  turn must continue it. Say what remains, then close promptly when resolved.
+  A user-provided tab follows the same rule: it remains only on explicit
+  request or while that interaction is pending.
+- **Automatic disposal is only a fallback.** Session disposal closes an owned
+  surface, but it runs only when the session process actually closes.
+  Long-lived TUI/cmux processes stay alive between turns, so relying on
+  teardown leaves tabs in the user's browser and consumes the surface cap.
+- A `tab_limit` error means close YOUR finished tab if one is marked `(yours)`.
+  If none is yours, another session or the user must close one; redacted
+  listings do not grant permission to close it yourself.
 - cmux backend: `tabs`, `request_access`, `await_access`, `cancel_access`, `scroll`, and
   `logs` are extension-only; on cmux they return a typed not-supported error.
+
+Before the final answer, check:
+
+1. Did this session open or inherit an owned surface?
+2. If yes, has `action=close` succeeded, or does one of the explicit exceptions
+   above still apply and appear in the response?
+3. For subagents/reviewers, did cleanup happen before terminal handoff rather
+   than waiting for the parent to dispose the child?
+
+If `close` errors, the tool drops the stale handle so it cannot accidentally
+control another tab. Report that the close failed and the handle was dropped;
+do not try to close redacted tabs from `tabs` as a substitute.
 
 ## Troubleshooting (what each error means)
 

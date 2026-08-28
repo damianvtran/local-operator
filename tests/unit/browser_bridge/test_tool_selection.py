@@ -316,6 +316,7 @@ async def test_tabs_lists_surfaces_and_marks_own(monkeypatch) -> None:
     assert "bridge:9:aaaaaa\u2026 (yours)" in result.text
     assert "bridge:12:bbbbbb\u2026:" in result.text
     assert "awareness-only" in result.text
+    assert builtin._BROWSER_TABS_CLEANUP_FOOTER in result.text
     assert result.details is not None and result.details["tab_count"] == 2
 
 
@@ -345,6 +346,30 @@ async def test_tabs_works_without_an_owned_surface(monkeypatch) -> None:
     result = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
     assert not result.is_error
     assert "No extension-driven browser tabs" in result.text
+    assert builtin._BROWSER_TABS_CLEANUP_FOOTER in result.text
+
+
+@pytest.mark.asyncio
+async def test_bridge_open_reminds_only_when_it_creates_a_new_tab(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        calls.append(params)
+        return {
+            "tab": params.get("tab", "bridge:33:fresh"),
+            "url": "https://example.com/",
+            "title": "Example",
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+
+    created = await builtin._bridge_open("t1", surface, "https://example.com")
+    resumed = await builtin._bridge_open("t2", surface, "https://example.com/next")
+
+    assert builtin._BROWSER_OPEN_CLEANUP_REMINDER in created.text
+    assert builtin._BROWSER_OPEN_CLEANUP_REMINDER not in resumed.text
+    assert "tab" not in calls[0] and calls[1]["tab"] == "bridge:33:fresh"
 
 
 @pytest.mark.asyncio
@@ -371,6 +396,8 @@ async def test_bridge_open_recovers_from_a_dead_pinned_tab(monkeypatch) -> None:
     assert not result.is_error
     assert surface.surface_id == "bridge:33:fresh"
     assert len(calls) == 2 and "tab" in calls[0] and "tab" not in calls[1]
+    # Recovery creates replacement ownership after the stale handle is dropped.
+    assert builtin._BROWSER_OPEN_CLEANUP_REMINDER in result.text
 
 
 # ---------------------------------------------------------------------------

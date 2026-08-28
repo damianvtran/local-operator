@@ -246,6 +246,7 @@ def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
         "false",
     ]
     assert "surface:73" in result.text
+    assert builtin._BROWSER_OPEN_CLEANUP_REMINDER in result.text
     assert ctx.browser is not None
     assert ctx.browser.surface_id == "surface:73"
 
@@ -260,6 +261,7 @@ def test_open_reuses_the_surface_it_already_has(monkeypatch) -> None:
     assert not result.is_error
     assert "new-surface" not in fake.verbs()
     assert "goto" in fake.verbs()
+    assert builtin._BROWSER_OPEN_CLEANUP_REMINDER not in result.text
     assert ctx.browser is not None
     assert ctx.browser.surface_id == "surface:9"
 
@@ -1016,6 +1018,11 @@ def test_description_states_the_persistence_that_makes_it_worth_choosing(monkeyp
     assert "sign in" in text
     # ...so there is never a reason to build a second browser stack.
     assert "never install" in text
+    # Lifecycle is near open/close semantics in the high-salience schema, not
+    # left solely to a guide the model may never need to read.
+    assert "fresh 'open' creates one" in text
+    assert "before your final response" in text
+    assert "ends only your own tab" in text
 
 
 def test_unavailable_error_refuses_the_substitution_too(monkeypatch) -> None:
@@ -1143,6 +1150,24 @@ def test_dispose_closes_a_surface_the_model_left_open(monkeypatch, tmp_path) -> 
 
     asyncio.run(session.dispose())
     assert fake.calls[-1] == ["close-surface", "--surface", "surface:73"]
+    assert session._browser.surface_id == ""
+
+
+def test_dispose_closes_a_bridge_surface_the_model_left_open(monkeypatch, tmp_path) -> None:
+    """The fallback covers extension tabs too, not only cmux surfaces."""
+    calls: list[tuple[str, dict[str, Any], str]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        calls.append((action, params, surface))
+        return {}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    session = _session(tmp_path)
+    session._browser.surface_id = "bridge:73:ownednonce"
+
+    asyncio.run(session.dispose())
+
+    assert calls == [("close", {"tab": "bridge:73:ownednonce"}, "bridge:73:ownednonce")]
     assert session._browser.surface_id == ""
 
 

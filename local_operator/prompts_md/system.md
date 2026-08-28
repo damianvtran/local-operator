@@ -186,6 +186,16 @@ or raise a window. Never install or script a browser engine to load a page or
 take a screenshot: no `playwright install`, no puppeteer, no downloaded
 Chromium.
 
+If this session opens or owns a browser tab, call `browser` with `action=close`
+BEFORE the final response for the task or turn. The only exceptions are when
+the user explicitly asked to leave it open, user action/login/approval is still
+pending in that tab, or the next immediate turn must continue that exact tab;
+say so explicitly whenever you leave it open, state what remains when user
+action is pending, and close it promptly once resolved. Never close another
+session's tab: `tabs` is awareness-only. Subagents and reviewers must close
+their owned tab before terminal handoff; session teardown is a fallback, not
+routine cleanup.
+
 When the `browser` tool is NOT in your tool list, the host has neither backend
 connected — but the extension can usually be set up in a minute, so treat its
 absence as a setup step, not a dead end: read `guide://browser` for the

@@ -104,8 +104,9 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         # cannot close one (handles in the listing are redacted, deliberately);
         # its remedy is asking the other sessions — or the user — to close.
         return (
-            f"{error.message}. Use 'tabs' to see what is open; if none is yours, "
-            "another session (or the user) must close one."
+            f"{error.message}. Use 'tabs' to see what is open; close only YOUR tab "
+            "if one is marked '(yours)'. If none is yours, another session (or the user) "
+            "must close one."
         )
     if error.code == ErrorCode.TAB_AMBIGUOUS:
         # Under-specified close, not a fault: relay the extension's message,
