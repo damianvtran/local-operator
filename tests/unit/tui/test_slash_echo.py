@@ -59,6 +59,8 @@ ECHO_POLICY = {
     "provider": False,
     "search": False,
     "accounts": False,
+    # The cascade tree IS the receipt, and there is no argument to restate.
+    "failovers": False,
     "usage": False,
     # The screen it opens IS the receipt (same rule as `/usage`); the argument
     # names a view, never words the model is told.
@@ -110,6 +112,7 @@ PROMPT_POLICY = {
     "provider": False,
     "search": False,
     "accounts": False,
+    "failovers": False,
     "usage": False,
     # A view selector, not a prompt: `/analytics [view]` names which screen to
     # open, so it splices-and-runs inline like `/usage` rather than reassembling.

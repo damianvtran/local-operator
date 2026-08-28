@@ -831,9 +831,18 @@ def _chain_specificity(key: str, selector: str) -> int | None:
     return None
 
 
-def resolve_chain(selector: str, chains: Mapping[str, Sequence[Any]]) -> list[Any] | None:
-    """Pick the fallback chain for ``selector`` by specificity:
+def resolve_chain_key(selector: str, chains: Mapping[str, Sequence[Any]]) -> str | None:
+    """WHICH chain key serves ``selector``, by specificity:
     exact ``provider/model`` → longest matching wildcard prefix → ``default``.
+
+    ``None`` when nothing matches and no ``default`` is configured.
+
+    Split out of :func:`resolve_chain` because the key is an ANSWER, not just an
+    intermediate: a diagnostic that shows the user their cascade has to say
+    which of several plausible keys is actually in force (an exact entry
+    silently outranking a ``provider/*`` one is the whole confusion), and a
+    caller re-deriving that with its own matching loop is a second definition of
+    specificity that can disagree with the routing engine.
     """
     best_key: str | None = None
     best_score = -1
@@ -845,10 +854,19 @@ def resolve_chain(selector: str, chains: Mapping[str, Sequence[Any]]) -> list[An
             best_score = score
             best_key = key
     if best_key is None:
-        if DEFAULT_CHAIN_KEY in chains:
-            return list(chains[DEFAULT_CHAIN_KEY])
+        return DEFAULT_CHAIN_KEY if DEFAULT_CHAIN_KEY in chains else None
+    return best_key
+
+
+def resolve_chain(selector: str, chains: Mapping[str, Sequence[Any]]) -> list[Any] | None:
+    """The fallback chain for ``selector``, or ``None`` when none applies.
+
+    Selection lives in :func:`resolve_chain_key`; this is the entries behind it.
+    """
+    key = resolve_chain_key(selector, chains)
+    if key is None:
         return None
-    return list(chains[best_key])
+    return list(chains[key])
 
 
 def _fallback_target(entry: Any) -> FallbackTarget | None:

@@ -441,6 +441,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("search", "Configure web search providers and load balancing"),
     # The listing is the receipt.
     SlashCommand("accounts", "List stored credentials"),
+    # The listing is the receipt — the cascade tree IS the whole answer, and
+    # the command takes no argument to restate.
+    SlashCommand("failovers", "Show the model failover cascade and what is serving"),
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("context", "Show prompt, tool-schema and message token usage"),
@@ -9933,6 +9936,8 @@ class OperatorApp(App[None]):
             self._cmd_search(arg, notice)
         elif command == "/accounts":
             self._cmd_accounts(notice)
+        elif command == "/failovers":
+            self._cmd_failovers(notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
         elif command == "/analytics":
@@ -11770,6 +11775,165 @@ class OperatorApp(App[None]):
                 self._append_block(block)
         except Exception as error:
             notice(f"accounts failed: {error}", "error")
+
+    def _account_counts(self) -> dict[str, int]:
+        """How many stored credentials each provider has, keyed by STORAGE id.
+
+        Grouped through ``credential_provider_id`` so a login flavour and the
+        provider it authenticates collapse into one number: ``xai-oauth`` writes
+        its row under ``xai``, and counting the literal ids would report the same
+        account twice under two names — the exact confusion
+        ``store_credentials_as`` exists to prevent.
+
+        COUNTS ONLY. Identities live in ``/accounts``, which is the one surface
+        that has thought about showing an email address; this tree must never
+        read ``row.data``.
+        """
+        from local_operator.providers.registry import credential_provider_id
+
+        counts: dict[str, int] = {}
+        if self._providers is None:
+            return counts
+        for row in self._providers.credentials():
+            storage = credential_provider_id(str(row.provider))
+            counts[storage] = counts.get(storage, 0) + 1
+        return counts
+
+    @staticmethod
+    def _account_detail(provider: str, counts: Mapping[str, int]) -> str:
+        """``2 accounts`` / ``1 account`` / ``no accounts`` for a provider."""
+        from local_operator.providers.registry import credential_provider_id
+
+        total = counts.get(credential_provider_id(provider), 0)
+        if total == 0:
+            return "no accounts"
+        return "1 account" if total == 1 else f"{total} accounts"
+
+    def _failover_rows(self, notice: NoticeFn) -> list[tuple[str, str]] | None:
+        """The ``/failovers`` tree rows, or ``None`` when a notice was issued.
+
+        NEVER resolves a model spec over the network. ``spec_for_target`` (and
+        anything else that resolves an unlisted model's metadata) can take ~10
+        seconds on a cold memo, and this runs on the paint path of a synchronous
+        slash command — a cascade listing that freezes the TUI for ten seconds is
+        a worse answer than no listing. The effort shown is therefore the
+        CONFIGURED effort from the chain entry, not the effort a resolved spec
+        would report; a future "let's show what it really resolves to" is exactly
+        the change that reintroduces the freeze, and it belongs on a worker if
+        anyone ever wants it.
+
+        Degrades rather than hides: the most likely caller is a default install
+        with nothing configured at all, and "you have no cascade, here is the key
+        that would create one" is the useful answer for them.
+        """
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.providers.failover import (
+            DEFAULT_CHAIN_KEY,
+            RetrySettings,
+            expand_fallback_targets,
+            resolve_chain,
+            resolve_chain_key,
+        )
+
+        if self._providers is None:
+            # Same shape as `/accounts`: name the terminal command that answers
+            # the question this surface cannot, and warn rather than error —
+            # nothing is broken, this frontend just lacks the facade.
+            notice("run: local-operator config list (TUI lacks the provider facade)", "warning")
+            return None
+
+        session = self._session
+        if session is None:
+            # House phrasing for "ask again in a moment" (`_cmd_team`): the
+            # cascade is a property of the session's model, and there is no
+            # model to have a cascade for until it attaches.
+            notice("session is still starting…", "warning")
+            return None
+        selected = _model_spec(session)
+        primary = str(getattr(session, "model_label", "") or "")
+        if selected is not None:
+            primary = f"{selected.provider}/{selected.model_id}"
+        if not primary:
+            notice("no model selected yet", "warning")
+            return None
+
+        counts = self._account_counts()
+        configured_effort = str(getattr(selected, "reasoning_effort", "") or "")
+        primary_accounts = self._account_detail(primary.split("/")[0], counts)
+        primary_detail = " · ".join(
+            part for part in (primary, configured_effort, primary_accounts) if part
+        )
+
+        # The model ACTUALLY serving, via `effective_model` rather than the
+        # route's `active_fallback`: RemoteSession implements `effective_model`
+        # but not the route state, so this is the one comparison that is correct
+        # on both the owning terminal and an attached follower.
+        effective = _effective_spec(session)
+        serving = ""
+        if effective is not None:
+            serving = f"{effective.provider}/{effective.model_id}"
+        else:
+            serving = str(getattr(session, "effective_model_label", "") or "")
+
+        rows: list[tuple[str, str]] = [("primary", primary_detail)]
+
+        retry = RetrySettings.from_settings(
+            ConfigManager(config_dir()).get_config().values,
+        )
+        if not retry.enabled or not retry.model_fallback:
+            # Name the KEY, not just the state: "off" without the key leaves the
+            # user hunting through config.yml for which of two switches did it.
+            disabled_by = "retry.enabled" if not retry.enabled else "retry.modelFallback"
+            rows.append(("cascade off", f"{disabled_by} is false — no fallback route is used"))
+            return rows
+
+        chain_key = resolve_chain_key(primary, retry.fallback_chains)
+        chain = resolve_chain(primary, retry.fallback_chains) if chain_key else None
+        targets = expand_fallback_targets(primary, chain) if chain else []
+        if not targets:
+            rows.append(
+                (
+                    "no chain",
+                    f"nothing matches {primary} — set "
+                    f"values.retry.fallbackChains.{DEFAULT_CHAIN_KEY}",
+                )
+            )
+            return rows
+
+        # The key IS the answer to "which chain am I on"; the parenthetical only
+        # earns its width when the key alone does not say how it was picked —
+        # `default` is self-describing, `anthropic/claude-opus-5` could be either
+        # an exact entry or a wildcard that happened to expand.
+        if chain_key == DEFAULT_CHAIN_KEY:
+            matched = DEFAULT_CHAIN_KEY
+        else:
+            matched = f"{chain_key} ({'exact' if chain_key == primary else 'wildcard'})"
+        rows.append(("matched chain", matched))
+
+        if serving and serving == primary:
+            rows[0] = (rows[0][0], f"{rows[0][1]}   ← serving")
+        for index, target in enumerate(targets, start=1):
+            effort = f"{target.effort} effort" if target.effort else "model default effort"
+            detail = f"{effort} · {self._account_detail(target.selector.split('/')[0], counts)}"
+            if serving and serving == target.selector:
+                detail = f"{detail}   ← serving"
+            rows.append((f"{index}. {target.selector}", detail))
+
+        # House phrasing for "this is not a read-only wall": the agent owns the
+        # config, so the user does not have to learn the YAML to change it.
+        rows.append(("", "ask the agent to change models, effort or providers in this cascade"))
+        return rows
+
+    def _cmd_failovers(self, notice: NoticeFn) -> None:
+        """``/failovers`` — the model failover cascade and what is serving."""
+        try:
+            rows = self._failover_rows(notice)
+        except Exception as error:  # never crash the app on a config read
+            notice(f"failover list failed: {error}", "error")
+            return
+        if rows:
+            self._append_block(RichBlock(_tree_listing(rows, "failover cascade")))
 
     def _clock_ms(self) -> float:
         import time

@@ -3403,6 +3403,171 @@ async def test_accounts_command_renders_credentials() -> None:
     assert "api_key (login)" in texts
 
 
+def _failover_config(tmp_path, chains) -> None:
+    """Write a real config.yml with ``chains`` under ``values.retry``.
+
+    Through ConfigManager rather than a hand-written YAML file: the loader
+    validates the document, and a hand-rolled one missing a bookkeeping key
+    fails in the app as an unrelated error.
+    """
+    from local_operator.config import ConfigManager
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "anthropic")
+    manager.set_config_value("model_name", "claude-opus-5")
+    retry = dict(manager.get_config_value("retry", {}) or {})
+    retry.update(chains)
+    manager.set_config_value("retry", retry)
+
+
+async def _failover_text(app) -> str:
+    """Run `/failovers` once the session has attached, and read the transcript.
+
+    The command reports the model's cascade, so running it before the session
+    lands captures the "still starting" degrade rather than the listing.
+    """
+    for _ in range(200):
+        if app._session is not None:
+            break
+        await asyncio.sleep(0.01)
+    app._run_slash_command("/failovers")
+    return _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_failovers_command_renders_the_cascade(monkeypatch, tmp_path) -> None:
+    """The populated case: order, matched key, accounts, and what is serving."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(
+        tmp_path,
+        {
+            "fallbackChains": {
+                "test/*": [
+                    {"provider": "openrouter", "model": "deepseek/deepseek-chat", "effort": "high"},
+                    "deepseek/deepseek-reasoner",
+                ]
+            }
+        },
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert "failover cascade" in text
+    # The matched key AND how it matched: an exact entry silently outranking a
+    # wildcard is the confusion this row exists to end.
+    assert "test/* (wildcard)" in text
+    # Configured order is the routing order, numbered so it reads as a cascade.
+    assert "1. openrouter/deepseek/deepseek-chat" in text
+    assert "2. deepseek/deepseek-reasoner" in text
+    # CONFIGURED effort, never a resolved spec (that would be a network call on
+    # the paint path); a target without one says so rather than guessing.
+    assert "high effort" in text
+    assert "model default effort" in text
+    # The fake never falls back, so the primary is what serves.
+    assert "← serving" in text
+    assert text.index("← serving") < text.index("1. openrouter")
+    assert "ask the agent to change models, effort or providers" in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_counts_accounts_without_printing_identities(monkeypatch, tmp_path) -> None:
+    """Counts collapse login flavours; `/accounts` keeps the identities.
+
+    The fake holds an openrouter key and a deepseek OAuth row carrying an email.
+    Printing `row.data` here would leak an address onto a surface that never
+    promised one.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {"default": ["deepseek/deepseek-reasoner"]}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert "1 account" in text
+    assert "a@b.c" not in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_without_a_chain_points_at_the_key_to_set(monkeypatch, tmp_path) -> None:
+    """The default install — nothing configured — is the most likely caller."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    # The primary is still shown: "you have no cascade" is only useful beside
+    # what would have had one.
+    assert "primary" in text
+    assert "values.retry.fallbackChains.default" in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_names_the_key_that_disabled_the_cascade(monkeypatch, tmp_path) -> None:
+    """Switched off reads as switched off, and names WHICH switch."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(
+        tmp_path,
+        {"modelFallback": False, "fallbackChains": {"default": ["deepseek/x"]}},
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        text = await _failover_text(app)
+        await pilot.pause()
+
+    assert "retry.modelFallback is false" in text
+    # The configured chain must NOT be listed as a route: nothing would use it.
+    assert "deepseek/x" not in text
+
+
+@pytest.mark.asyncio
+async def test_failovers_without_a_provider_facade_warns(monkeypatch, tmp_path) -> None:
+    """Same shape as `/accounts`: name the terminal command that can answer."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _failover_text(app)
+        await pilot.pause()
+        notices = [b._text for b in app.query(NoticeBlock)]
+
+    assert any("local-operator config list" in n for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_failovers_reports_an_unreadable_config_as_an_error(monkeypatch, tmp_path) -> None:
+    """A config read that raises is named, not swallowed into an empty tree."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _failover_config(tmp_path, {"fallbackChains": {}})
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await asyncio.sleep(0.01)
+        import local_operator.config as config_mod
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(config_mod, "ConfigManager", explode)
+        app._run_slash_command("/failovers")
+        await pilot.pause()
+        notices = [b._text for b in app.query(NoticeBlock)]
+
+    assert any("failover list failed: database is locked" in n for n in notices)
+
+
 def _usage_reports(*, used: float = 5.0):
     from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
