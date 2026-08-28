@@ -688,23 +688,58 @@ class Editor(TextArea):
     #: overriding them, so declaring this attribute does not cost the editor any
     #: inherited key (verified against textual 8.2.8: the instance's resolved
     #: binding map holds ``alt+left`` AND ``ctrl+left``).
+    #: The vertical entries carry no motion of their own — they exist so that
+    #: `⌥↑`/`⌥↓` on a CSI-modifier terminal (which parses to `alt+up`, a key
+    #: nothing binds) does the SAME thing as on an Esc-prefixed terminal (which
+    #: passes through as a plain `up`). Without them the two encodings diverge:
+    #: one recalls history, the other silently does nothing. See
+    #: :attr:`ESCAPE_CHORD_KEYS` for why the vertical chord is a pass-through
+    #: rather than a paragraph motion.
     BINDINGS = [
         Binding("alt+left", "cursor_word_left", "Cursor word left", show=False),
         Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", "Select word left", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", "Select word right", show=False),
+        Binding("alt+up", "composer_up", "Cursor up", show=False),
+        Binding("alt+down", "composer_down", "Cursor down", show=False),
     ]
 
-    #: The keys that, arriving on the message pump turn after an ``escape``,
-    #: mean that escape was the first half of an option+arrow chord rather
-    #: than a press of its own. Vertical arrows are deliberately absent: no
-    #: word-movement chord produces them, and ``up``/``down`` carry history
-    #: navigation, so swallowing an Esc for them would lose a stop.
-    ESCAPE_CHORD_KEYS = {
-        "left": ("cursor_word_left", False),
-        "right": ("cursor_word_right", False),
-        "shift+left": ("cursor_word_left", True),
-        "shift+right": ("cursor_word_right", True),
+    #: Every key that, arriving on the message pump turn after an ``escape``,
+    #: proves that escape was the first half of an option+arrow chord rather
+    #: than a press of its own. Maps the key to what the chord should DO.
+    #:
+    #: ``None`` means "cancel the escape and let the key through to its ordinary
+    #: handler". The vertical arrows use it: ``⌥↑``/``⌥↓`` is a real macOS chord
+    #: (move by paragraph), so a user who has just learned ``⌥←`` works will try
+    #: it, and on an Esc-prefixed terminal that used to stop the turn AND
+    #: overwrite the draft from history — strictly worse than the bug this class
+    #: set out to fix (ux round 1, U2). They map to ``None`` rather than to a
+    #: paragraph action deliberately: this composer's ``up``/``down`` already
+    #: carry history navigation and caret movement, and inventing a paragraph
+    #: motion here would be a second, competing meaning for the same physical
+    #: key. Cancelling the stop and passing the key through gives ``⌥↑`` exactly
+    #: the behaviour of ``↑``, which is the conservative reading and never
+    #: destroys a turn or a draft.
+    #:
+    #: An earlier revision excluded the vertical arrows entirely, reasoning that
+    #: swallowing an Esc for them would lose a stop. That was written when the
+    #: deferral was a 100 ms wall-clock window; at one pump turn the race is
+    #: microseconds wide and the same argument that admits ``left``/``right``
+    #: admits these.
+    #:
+    #: Values are UNBOUND METHODS, not action-name strings. A string went
+    #: through ``getattr(self, f"action_{name}")`` and could only fail at
+    #: keypress time if an action were ever renamed (code round 1, F4); a
+    #: direct reference fails at import instead.
+    ESCAPE_CHORD_KEYS: dict[str, tuple[Callable[..., None], bool] | None] = {
+        "left": (TextArea.action_cursor_word_left, False),
+        "right": (TextArea.action_cursor_word_right, False),
+        "shift+left": (TextArea.action_cursor_word_left, True),
+        "shift+right": (TextArea.action_cursor_word_right, True),
+        "up": None,
+        "down": None,
+        "shift+up": None,
+        "shift+down": None,
     }
 
     #: Maximum remembered prompts.
@@ -1371,14 +1406,22 @@ class Editor(TextArea):
         # that before any picker or history handler claims it. See the
         # escape-coalescing block below `_on_key` for the whole rationale.
         if self._pending_escape is not None and key in self.ESCAPE_CHORD_KEYS:
-            action, select = self.ESCAPE_CHORD_KEYS[key]
+            chord = self.ESCAPE_CHORD_KEYS[key]
             # The escape is DROPPED, not run: the user pressed one chord, so
-            # the turn must not also be stopped.
+            # whatever that escape would have done — stop the turn, leave shell
+            # mode, dismiss a list — must not also happen.
             self._cancel_escape()
-            getattr(self, f"action_{action}")(select)
-            event.stop()
-            event.prevent_default()
-            return
+            if chord is None:
+                # A chord with no motion of its own (the vertical arrows): the
+                # key carries on to its ordinary handler below, so `⌥↑` behaves
+                # exactly like `↑`. Not consumed, deliberately.
+                pass
+            else:
+                action, select = chord
+                action(self, select)
+                event.stop()
+                event.prevent_default()
+                return
         # Any other key ends the chord window: the escape stood alone, so its
         # action is owed now and must land BEFORE this key is handled (an Esc
         # then a typed character must stop the turn, then type the character).
@@ -1428,7 +1471,11 @@ class Editor(TextArea):
             if key == "escape":
                 # Esc closes the LIST, not the command: the text survives so a
                 # user who wanted to type the id by hand can carry on.
-                self._model_picker.close()
+                #
+                # Deferred like every other escape meaning, so `⌥←` with the
+                # model list open moves by word instead of closing the list and
+                # nudging one character (ux round 1, U3).
+                self._defer_escape(self._model_picker.close)
                 event.stop()
                 event.prevent_default()
                 return
@@ -1469,13 +1516,13 @@ class Editor(TextArea):
             # gate DROPPED the Esc: the user dismissed the list and then watched
             # it appear anyway. Dismissing an empty argument list records the
             # query, which is what the arriving rows are checked against.
-            self._picker.dismiss()
+            self._defer_escape(self._picker.dismiss)
             event.stop()
             event.prevent_default()
             return
         if self._picker.is_open():
             if key == "escape":
-                self._picker.dismiss()
+                self._defer_escape(self._picker.dismiss)
                 event.stop()
                 event.prevent_default()
                 return
@@ -1558,7 +1605,17 @@ class Editor(TextArea):
             # a prompt, and a user who entered the mode by accident is one
             # keystroke from the resting composer. Stop is one Esc away after.
             if self._shell_mode:
-                self.set_shell_mode(False)
+                # Deferred, and this is the branch where it matters most.
+                # Bang-mode is a full-width editable buffer with a visible
+                # caret, so fixing a typo in a half-typed command is exactly why
+                # someone reaches for `⌥←`. Running this synchronously ejected
+                # the user from shell mode on an Esc-prefixed terminal, and the
+                # ejection is INVISIBLE — the mode's only indicator is the
+                # placeholder, which is hidden the moment the buffer has text.
+                # The user saw an identical frame and their next Enter sent the
+                # command to the model as a prompt instead of running it
+                # (code round 1 F1, ux round 1 U1).
+                self._defer_escape(lambda: self.set_shell_mode(False))
                 event.stop()
                 event.prevent_default()
                 return
@@ -1648,6 +1705,32 @@ class Editor(TextArea):
             return
         await super()._on_key(event)
 
+    # -- vertical option chords ----------------------------------------------
+
+    def action_composer_up(self) -> None:
+        """``⌥↑`` — exactly what ``↑`` does in this composer.
+
+        Bound so the CSI-modifier encoding (`alt+up`, which nothing else binds)
+        matches the Esc-prefixed one (a plain `up` passed through by the chord
+        coalescing). Without this the same physical chord recalls history on one
+        terminal and does nothing on another.
+
+        Deliberately NOT macOS paragraph movement: ``↑`` here already means
+        history-at-the-edge and caret-move inside the text, and a second
+        competing meaning for the key would be a defect rather than a feature.
+        """
+        if self._caret_at_top_edge() and self._history:
+            self._navigate_history(-1)
+        else:
+            self.action_cursor_up()
+
+    def action_composer_down(self) -> None:
+        """``⌥↓`` — exactly what ``↓`` does in this composer. See above."""
+        if self._caret_at_bottom_edge() and (self._history_index is not None or self._history):
+            self._navigate_history(+1)
+        else:
+            self.action_cursor_down()
+
     # -- escape/arrow chord coalescing ---------------------------------------
     #
     # WHY THIS EXISTS. There is no single byte sequence for option+arrow. Three
@@ -1706,15 +1789,27 @@ class Editor(TextArea):
     # the old window (one event-loop turn, not a tenth of a second) and cannot
     # realistically be hit by hand.
     #
-    # ONLY THE BOTTOM BRANCH IS DEFERRED. The picker-dismiss, model-picker-close
-    # and shell-mode-exit branches return before reaching here and run
-    # SYNCHRONOUSLY, deliberately: those are direct manipulations of something
-    # visible on screen, and a tenth of a second between the key and the list
-    # closing reads as lag. They are also unambiguous — with a list open the
-    # user is dismissing the list, not word-moving through a buffer they cannot
-    # see the caret in — so there is nothing to disambiguate. Deferral is
-    # confined to the branch where Esc means "stop the turn"/"recall a steer",
-    # which is exactly the branch the chord was corrupting.
+    # EVERY ESCAPE MEANING IS DEFERRED, not just the bottom one. An earlier
+    # revision deferred only the stop-the-turn branch and let the picker-dismiss,
+    # model-picker-close and shell-mode-exit branches run synchronously, arguing
+    # that a visible list closing late would read as lag and that those presses
+    # were unambiguous anyway. Both halves of that argument were wrong:
+    #
+    #   - The lag argument was sized against a 100 ms wall-clock window. At one
+    #     pump turn the delay is ~4 ms and measurably inside the noise of the
+    #     synchronous path, so there is no perceptible cost to paying it
+    #     everywhere.
+    #   - The unambiguity argument does not survive contact with shell mode,
+    #     which is a full-width editable buffer with a visible caret — the state
+    #     where word movement is MOST useful, not least. It left `⌥←` ejecting
+    #     the user from bang-mode with an identical frame, flipping what Enter
+    #     does (F1/U1). The picker case was the same defect with visible
+    #     feedback (U3).
+    #
+    # Deferring uniformly also removes a whole class of future bug: any escape
+    # meaning added later is covered by default instead of silently becoming the
+    # next uncovered branch. The cost is that an escape's effect lands one pump
+    # turn later than the keypress, which is not observable to a user.
 
     def _defer_escape(self, action: Callable[[], object]) -> None:
         """Hold ``action`` for one pump turn, in case a queued arrow follows.
@@ -1768,9 +1863,15 @@ class Editor(TextArea):
         self._flush_escape()
 
     def _on_unmount(self) -> None:
-        # Teardown (widget removal, app quit) is the one case where the action
-        # is DROPPED rather than flushed: there is no surface left for a stop or
-        # a steer-recall to act on.
+        # Teardown drops the action rather than flushing it: there is no surface
+        # left for a stop, a steer-recall or a mode exit to act on.
+        #
+        # In practice this is a BACKSTOP, not the usual path. A real
+        # ``remove()`` blurs the widget first, so ``_on_blur`` has already
+        # flushed by the time this runs; only an unfocused teardown reaches here
+        # with something still pending. Kept because the invariant it guarantees
+        # — the slot is always settled by teardown, so no queued ``call_later``
+        # can fire into a widget that is gone — must not depend on focus state.
         self._cancel_escape()
 
     # -- submit -------------------------------------------------------------

@@ -205,10 +205,11 @@ current session's cost live).
 - `shift+tab` — cycle reasoning effort.
 - `ctrl+l` — clear the transcript (history is untouched).
 - `option+←` / `option+→` (`ctrl+←` / `ctrl+→` on Linux and Windows) — move the
-  caret a word at a time in the composer; add `shift` to select by word. On
-  macOS this works whichever option-key mode your terminal is set to — the
-  default, "Use Option as Meta", and "Esc+" all behave the same, so there is
-  nothing to configure.
+  caret a word at a time in the composer; add `shift` to select by word. Works
+  the same in shell (`!`) mode and with a command list open, and `option+↑` /
+  `option+↓` behave as plain `↑` / `↓`. On macOS this works whichever
+  option-key mode your terminal is set to — the default, "Use Option as Meta",
+  and "Esc+" all behave the same, so there is nothing to configure.
 
 ## 🔌 Providers
 

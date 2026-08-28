@@ -298,22 +298,50 @@ async def test_losing_focus_flushes_a_held_escape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unmount_drops_a_held_escape() -> None:
-    """Teardown drops the action: no callback into a widget that is gone."""
+async def test_real_teardown_settles_a_held_escape_and_leaks_no_callback() -> None:
+    """Drive REAL teardown and pin what actually happens (code round 1, F3).
+
+    An earlier version of this test called ``_on_unmount()`` by hand and
+    asserted the action was dropped. That pinned a path users never take: on a
+    real ``await editor.remove()`` the widget is blurred first, and
+    ``_on_blur`` FLUSHES before ``_on_unmount`` could drop. So a focused
+    composer being torn down runs its held escape, and ``_on_unmount`` is the
+    backstop for the unfocused case rather than the usual path.
+
+    What matters either way is the invariant this asserts: teardown always
+    settles the slot, so no ``call_later`` callback can survive into a widget
+    that is gone.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
         await pilot.pause()
 
         fired: list[str] = []
-
         editor._defer_escape(lambda: fired.append("escape"))
         assert editor._pending_escape is not None, "the escape is held"
 
-        # The teardown hook is driven directly: a real ``remove()`` is awaited,
-        # and the one-turn deferral resolves inside that await, so the flush
-        # would win the race and the drop-on-teardown contract would go
-        # unobserved. This asserts the contract at the boundary that owns it.
+        await editor.remove()
+        await _settle(pilot)
+
+        assert fired == ["escape"], "blur wins the race and flushes"
+        assert editor._pending_escape is None, "nothing is left pending"
+
+
+@pytest.mark.asyncio
+async def test_unmount_without_focus_drops_a_held_escape() -> None:
+    """The backstop: an unfocused teardown drops rather than flushes.
+
+    Reached when the composer never had focus, so no blur precedes the unmount.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        editor.blur()
+        await pilot.pause()
+
+        fired: list[str] = []
+        editor._defer_escape(lambda: fired.append("escape"))
         editor._on_unmount()
 
         assert editor._pending_escape is None
@@ -321,12 +349,12 @@ async def test_unmount_drops_a_held_escape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_escape_still_dismisses_a_picker_synchronously() -> None:
-    """The picker branches are NOT deferred: a list must close on the keystroke.
+async def test_a_lone_escape_still_dismisses_a_picker() -> None:
+    """A real Esc with a list open still closes the list, one pump turn later.
 
-    Deferral is confined to the bottom escape branch. A tenth of a second
-    between the key and a visible list closing reads as lag, and with a list
-    open the press is unambiguous anyway.
+    The dismissal is deferred like every other escape meaning (ux round 1, U3),
+    but a deferral of one pump turn is not observable: by the time the press
+    returns, the list is gone.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 24)) as pilot:
@@ -339,17 +367,15 @@ async def test_escape_still_dismisses_a_picker_synchronously() -> None:
         stops = _watch_stops(app)
 
         await pilot.press("escape")
-        # No settle: the dismissal must already have happened.
-        assert not editor._picker.is_open(), "the list closed on the keystroke"
-        assert editor._pending_escape is None, "and nothing was deferred"
+        assert not editor._picker.is_open(), "the list closed"
 
         await _settle(pilot)
         assert stops == [], "dismissing a list never stops the turn"
 
 
 @pytest.mark.asyncio
-async def test_escape_still_leaves_shell_mode_synchronously() -> None:
-    """Shell-mode exit is likewise immediate, for the same lag reason."""
+async def test_a_lone_escape_still_leaves_shell_mode() -> None:
+    """A real Esc in bang-mode still leaves the mode, one pump turn later."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
@@ -359,8 +385,7 @@ async def test_escape_still_leaves_shell_mode_synchronously() -> None:
         stops = _watch_stops(app)
 
         await pilot.press("escape")
-        assert not editor.shell_mode, "the mode ended on the keystroke"
-        assert editor._pending_escape is None
+        assert not editor.shell_mode, "the mode ended"
 
         await _settle(pilot)
         assert stops == [], "leaving the mode never stops the turn"
@@ -431,6 +456,136 @@ async def test_the_cleanup_hooks_do_not_double_dispatch_the_base_handler() -> No
             await pilot.pause()
 
         assert calls == [1], "the base blur handler ran exactly once"
+
+
+@pytest.mark.parametrize(
+    ("raw", "terminals"),
+    [
+        ("\x1b[1;3D", "Ghostty / kitty / WezTerm / iTerm2 CSI mode"),
+        ("\x1bb", "iTerm2 default preset / Terminal.app Option-as-Meta"),
+        ("\x1b\x1b[D", "iTerm2 Esc+ / Terminal.app Esc+"),
+    ],
+    ids=["csi-modifier-3", "readline-meta", "escape-prefixed"],
+)
+@pytest.mark.asyncio
+async def test_option_left_in_shell_mode_keeps_the_mode_on_every_encoding(
+    raw: str, terminals: str
+) -> None:
+    """⌥← while editing a bang-mode command moves by word and KEEPS the mode.
+
+    Code round 1 F1 / ux round 1 U1. The escape-prefixed encoding used to eject
+    the user from shell mode as a side effect of nudging the caret, and the
+    ejection was invisible — the mode's only indicator is the placeholder, which
+    is hidden whenever the buffer has text. The user's next Enter then sent the
+    command to the model as a prompt instead of running it, so this asserts the
+    mode as well as the caret.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await pilot.press("!")
+        await pilot.pause()
+        assert editor.shell_mode, "bang entered shell mode"
+        editor.text = "git commit --amend"
+        editor.move_cursor((0, len("git commit --amend")))
+        await pilot.pause()
+        stops = _watch_stops(app)
+
+        await _feed(app, raw)
+        await _settle(pilot)
+
+        assert editor.shell_mode, f"⌥← must not leave shell mode ({terminals})"
+        # Start of "amend", i.e. one word left rather than one character.
+        assert editor.cursor_location == (0, len("git commit --")), terminals
+        assert stops == [], f"⌥← must not stop the turn ({terminals})"
+
+
+@pytest.mark.parametrize(
+    ("raw", "terminals"),
+    [
+        ("\x1b[1;3D", "Ghostty / kitty / WezTerm / iTerm2 CSI mode"),
+        ("\x1b\x1b[D", "iTerm2 Esc+ / Terminal.app Esc+"),
+    ],
+    ids=["csi-modifier-3", "escape-prefixed"],
+)
+@pytest.mark.asyncio
+async def test_option_left_with_a_picker_open_keeps_the_list(raw: str, terminals: str) -> None:
+    """⌥← with a command list open moves by word and leaves the list up.
+
+    Ux round 1 U3: the same physical chord used to mean two different things
+    depending on whether a list happened to be open.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        editor.text = "/analytics"
+        await pilot.pause()
+        editor._sync_picker()
+        await pilot.pause()
+        assert editor._picker.is_open(), "the command list is up"
+        editor.move_cursor((0, len("/analytics")))
+        await pilot.pause()
+
+        await _feed(app, raw)
+        await _settle(pilot)
+
+        assert editor._picker.is_open(), f"the list must survive ⌥← ({terminals})"
+        assert editor.cursor_location == (0, 1), terminals
+
+
+@pytest.mark.parametrize(
+    ("raw", "terminals"),
+    [
+        ("\x1b[1;3A", "Ghostty / kitty / WezTerm / iTerm2 CSI mode"),
+        ("\x1b\x1b[A", "iTerm2 Esc+ / Terminal.app Esc+"),
+    ],
+    ids=["csi-modifier-3", "escape-prefixed"],
+)
+@pytest.mark.asyncio
+async def test_option_up_never_stops_the_turn(raw: str, terminals: str) -> None:
+    """⌥↑ behaves as plain ↑ and never aborts the turn.
+
+    Ux round 1 U2. On the escape-prefixed encoding this used to stop the turn
+    AND overwrite the draft from history — strictly worse than the bug #370
+    fixed, since it lost the turn and the draft. ⌥↑ is a real macOS chord, so a
+    user who has just learned ⌥← works will try it.
+
+    The chord maps to a pass-through rather than to a paragraph motion: this
+    composer's ↑ already carries history navigation, and a second competing
+    meaning for the same key would be the defect, not the fix. So this asserts
+    the ordinary ↑ outcome — history recall — with no stop.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        editor._history = ["an earlier prompt"]
+        await pilot.pause()
+        stops = _watch_stops(app)
+
+        await _feed(app, raw)
+        await _settle(pilot)
+
+        assert stops == [], f"⌥↑ must never stop the turn ({terminals})"
+        assert editor.text == "an earlier prompt", "it behaves as plain ↑"
+
+
+@pytest.mark.asyncio
+async def test_option_up_does_not_eat_a_draft_mid_buffer() -> None:
+    """With the caret inside the text, ⌥↑ moves the caret and keeps the draft."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        editor.text = "first line\nsecond line"
+        editor.move_cursor((1, 6))
+        await pilot.pause()
+        stops = _watch_stops(app)
+
+        await _feed(app, "\x1b\x1b[A")
+        await _settle(pilot)
+
+        assert stops == [], "no stop"
+        assert editor.text == "first line\nsecond line", "the draft survives"
+        assert editor.cursor_location[0] == 0, "the caret moved up a line"
 
 
 @pytest.mark.asyncio
