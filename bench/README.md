@@ -88,3 +88,56 @@ Cross-instance findings (DA-rows in the remediation):
   measured: exactly ONE live fetch, all five served. Degrades to
   fetch-anywhere on any coordination failure — a read-only cache dir can
   never block a session start.
+
+## resume-picker-before.json / resume-picker-after.json
+
+The `/resume` picker reach fix (uncapping the row list, plus the scan, index
+and search-tier work that makes uncapping affordable). Captured on this machine
+(macOS/APFS) against `origin/main` @ `fa62d097` (before) and the same tree with
+the fixes (after), on a synthetic three-month store built by
+`scripts/bench_resume_picker_store.py`: 2,700 user sessions and 29,000 subagent
+sessions, 31,700 directories, 584 MB. That 10.6:1 subagent-to-user ratio is
+what the real store shows, and it is the ratio that drives the scan cost.
+
+```sh
+.venv/bin/python scripts/bench_resume_picker_store.py /tmp/synth-store 2700 29000
+PYTHONPATH=. .venv/bin/python scripts/bench_resume_picker.py /tmp/synth-store after --json out.json
+```
+
+| Stage | Before | After |
+| --- | --- | --- |
+| `recent_sessions`, uncapped | 1,073 ms | **314 ms** |
+| `recent_session_rows`, uncapped | 1,256 ms | **409 ms** |
+| `build_index`, warm cache | 62 ms | 60 ms |
+| `build_index` after the daemon's narrow call | **768 ms** | **94 ms** |
+| exact search, steady keystroke | 3.4 ms | **0.8 ms** |
+| soft search, first keystroke | 161 ms | 154 ms (now deferred; see below) |
+| **picker open, total** | **1,355 ms** | **494 ms** |
+
+The operator's real store (230 user / 2,451 subagent), same command, is
+`picker open 102 ms -> 34 ms` while listing 30 MORE rows than before.
+
+Reading the table:
+
+- The **scan** win is the origin verdict cache (`resume.ORIGIN_CACHE_NAME`).
+  The listing must read and parse every `origin.json` that exists — existence
+  alone must never be read as "subagent" — and the markers that exist are the
+  subagent ones, so that rule costs one file read per subagent directory:
+  1,127 ms over 31,700 dirs, of which 639 ms is reads and only 17 ms parsing.
+  Skipping the read for unmarked directories alone saves ~8% and cannot fix it.
+  Memoising the parsed verdict on the marker's own `(mtime, size)` is sound
+  because the marker is written once at directory creation and never rewritten.
+- The **`build_index`** win is cache preservation. Before, any narrow caller
+  (the mobile daemon asks for 200 or 100 ids) pruned the on-disk index to its
+  own ids and the next picker open re-digested the whole store. After, a
+  wide → narrow → wide sequence re-digests **zero** transcripts, verified by
+  counting `digest_transcript` calls, not by timing.
+- The **soft-search** row is unchanged per call and that is the point: the tier
+  is now deferred behind the exact tier, so it does not run at all for a query
+  the cheap tiers already answer with a screenful. Its cost on the operator's
+  real 2,681-digest / 10.04 MB corpus is 324 ms and 95 MB resident, which is
+  what used to land on the first character typed once the picker was uncapped.
+
+Cold-cache numbers are reported separately and never averaged into the warm
+ones: the first scan after the cache is deleted is 1.6-5.2 s on this store,
+dominated by reading 29,000 marker files, and it writes the cache as it goes.

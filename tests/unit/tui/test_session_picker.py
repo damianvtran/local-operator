@@ -28,6 +28,7 @@ from local_operator.resume import (
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     _MARKER_LEGEND,
+    _SOFT_TIER_MIN_HITS,
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
@@ -1236,3 +1237,108 @@ def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
     assert (_MARKER_LEGEND[0], "") not in narrow
     assert ("enter", "resume") in narrow
     assert ("esc", "cancel") in narrow
+
+
+@pytest.mark.asyncio
+async def test_the_soft_tier_is_skipped_once_the_exact_tiers_fill_a_page() -> None:
+    """The soft tier's first call tokenises every digest and builds a vocabulary
+    over them — 324 ms and 95 MB resident over the 2681-digest store the picker
+    now reaches uncapped, against ~5 ms for the exact tier.
+
+    Since the picker went uncapped that build sat on the first character typed.
+    It is deferred behind the cheap tiers: a query that already returns a
+    screenful has nothing for soft matching to rescue, and the extra recall
+    would land below the fold.
+    """
+    rows = [_row(f"s{i:03d}", f"classifier run {i}") for i in range(_SOFT_TIER_MIN_HITS + 5)]
+    digests = {row.id: "body text" for row in rows}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        calls: list[str] = []
+        real = screen._soft_index.search
+
+        def counting(digests_arg, query):
+            calls.append(query)
+            return real(digests_arg, query)
+
+        screen._soft_index.search = counting  # type: ignore[method-assign]
+        screen.set_query("classifier")
+        await pilot.pause()
+
+        assert len(screen.visible_rows) == len(rows)
+        assert calls == [], "the soft tier ran for a query the exact tiers already answered"
+
+
+@pytest.mark.asyncio
+async def test_the_soft_tier_still_runs_when_the_exact_tiers_come_up_short() -> None:
+    """The other half of the gate: a typo the exact tiers cannot answer must
+    still reach the soft tier, or deferring it would silently cost recall."""
+    rows = [_row("aaa1", "vague title"), _row("bbb2", "another")]
+    digests = {"aaa1": "improve adm classifier throughput"}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_query("classifer")  # typo: no exact hit anywhere
+        await pilot.pause()
+        assert [r.id for r in screen.visible_rows] == ["aaa1"]
+        assert screen.body_matched_ids == {"aaa1"}
+
+
+@pytest.mark.asyncio
+async def test_the_header_tally_reports_the_stores_true_total() -> None:
+    """Once the cap is gone ``_all`` IS the store's user-session total, so the
+    counter stops reporting a number that is not the total and never said so.
+
+    The filtered ``showing a-b of N`` counter keeps reporting the FILTERED
+    count — the two answer different questions and must not converge.
+    """
+    rows = [_row(f"s{i:04d}", f"session {i}") for i in range(2700)]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert "2700 sessions" in "\n".join(screen.render_lines_for_test())
+
+        screen.set_query("session 1")
+        await pilot.pause()
+        lines = "\n".join(screen.render_lines_for_test())
+        shown = len(screen.visible_rows)
+        assert f"of {len(rows)}" in lines  # header tally: the store total
+        assert f"of {shown}" in lines  # position counter: the filtered count
+
+
+@pytest.mark.asyncio
+async def test_a_large_row_set_does_not_move_a_row_under_the_cursor() -> None:
+    """R1 at the scale the uncapped picker now reaches.
+
+    A fixed query must order rows identically across repaints AND a resize, and
+    the row under the cursor must keep its identity — a row moving out from
+    under the cursor is how a user resumes the wrong session.
+    """
+    rows = [_row(f"s{i:04d}", f"session {i} work") for i in range(2700)]
+    digests = {row.id: f"body {row.id}" for row in rows}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_query("session 12")
+        await pilot.pause()
+        first = [r.id for r in screen.visible_rows]
+        screen.action_move(1)
+        screen.action_move(1)
+        selected = screen.selected_id()
+
+        screen._repaint()
+        screen._repaint()
+        assert [r.id for r in screen.visible_rows] == first
+        assert screen.selected_id() == selected
+
+        # A resize repaints at a different width; ordering is a pure function of
+        # the query, so it must survive that too.
+        await pilot.resize_terminal(60, 30)
+        await pilot.pause()
+        assert [r.id for r in screen.visible_rows] == first
+        assert screen.selected_id() == selected

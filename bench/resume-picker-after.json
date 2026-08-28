@@ -1,0 +1,16 @@
+{
+  "label": "AFTER final",
+  "recent_sessions_uncapped_ms": 313.5,
+  "user_sessions": 2700,
+  "recent_sessions_limit200_ms": 360.7,
+  "recent_session_rows_uncapped_ms": 409.1,
+  "build_index_warm_ms": 59.8,
+  "digests": 2700,
+  "build_index_after_daemon_thrash_ms": 94.4,
+  "exact_search_first_ms": 3.77,
+  "exact_search_steady_ms": 0.82,
+  "soft_first_keystroke_ms": 153.6,
+  "soft_steady_keystroke_ms": 1.6,
+  "rss_mb": 100.2,
+  "picker_open_total_ms": 493.6
+}

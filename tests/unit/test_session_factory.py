@@ -2218,3 +2218,177 @@ def test_the_backfill_reaches_every_directory_not_just_the_first_page(tmp_path: 
     assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 5
     assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 3
     assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 0
+
+
+def test_recent_sessions_returns_every_user_session_when_uncapped(tmp_path: Path) -> None:
+    """The reported bug: sessions past the picker's cap were unreachable.
+
+    ``/resume`` now asks for the whole store, so the scan must answer with all
+    of it — a filter can only find a row it was handed
+    (``session_picker.filter_rows`` scans what the screen was given), which is
+    why a truncated list made a real session indistinguishable from a deleted
+    one.
+    """
+    sessions = tmp_path / "sessions"
+    for i in range(250):
+        session = sessions / f"u{i:04d}"
+        session.mkdir(parents=True)
+        (session / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    # Subagent runs stay excluded regardless of how far the listing reaches.
+    for i in range(20):
+        child = sessions / f"c{i:04d}"
+        child.mkdir(parents=True)
+        (child / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+        resume_mod.mark_session_origin(child, resume_mod.ORIGIN_SUBAGENT)
+
+    rows = resume_mod.recent_sessions(tmp_path, limit=10**9)
+
+    assert len(rows) == 250
+    assert not [row for row in rows if row[0].startswith("c")]
+    # The default short listing still truncates — only the picker went uncapped.
+    assert len(resume_mod.recent_sessions(tmp_path)) == 10
+
+
+def test_a_subagent_marker_is_parsed_not_merely_detected(tmp_path: Path) -> None:
+    """The traversal skips the READ when no marker exists; it must never treat
+    "a file is there" as "this is a subagent".
+
+    ``session_origin`` deliberately returns "" for a marker it cannot parse so a
+    CORRUPT sidecar reads as the user's own session. Encoding existence as the
+    verdict would invert that fail-safe and hide real work — the exact incident
+    the tolerant parse was written for.
+    """
+    sessions = tmp_path / "sessions"
+    for name, marker in (
+        ("real_child", b'{"origin": "subagent"}'),
+        ("corrupt", b'{"origin": "subagent", "l": "caf\xc3'),  # cut mid-character
+        ("empty_origin", b'{"origin": ""}'),
+        ("not_a_dict", b'["subagent"]'),
+        ("garbage", b"not json at all"),
+    ):
+        session = sessions / name
+        session.mkdir(parents=True)
+        (session / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+        (session / resume_mod.ORIGIN_NAME).write_bytes(marker)
+
+    listed = {row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)}
+
+    # Only the marker that PARSES to a non-empty origin is hidden.
+    assert listed == {"corrupt", "empty_origin", "not_a_dict", "garbage"}
+
+
+def test_recent_sessions_skips_a_directory_with_no_transcript(tmp_path: Path) -> None:
+    """The stat on the transcript is what proves a directory is a session at
+    all, and it stays ahead of the origin check: a stray directory under
+    ``sessions/`` must cost neither a row nor a marker read."""
+    sessions = tmp_path / "sessions"
+    (sessions / "real").mkdir(parents=True)
+    (sessions / "real" / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    (sessions / "stray").mkdir(parents=True)
+    (sessions / "loose-file").parent.mkdir(parents=True, exist_ok=True)
+    (sessions / "loose-file").write_text("not a session", encoding="utf-8")
+
+    assert [row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)] == ["real"]
+
+
+def test_recent_sessions_on_a_store_with_no_sessions_directory(tmp_path: Path) -> None:
+    """A machine that has never run a session has no ``sessions/`` at all, and
+    the listing is an error path whose whole job is to be helpful — it must
+    answer empty rather than raise out of the picker's open."""
+    assert resume_mod.recent_sessions(tmp_path, limit=10**9) == []
+
+
+def test_a_corrupt_marker_lists_as_the_users_session_cold_and_cached(tmp_path: Path) -> None:
+    """The exact regression the origin verdict cache could introduce.
+
+    ``recent_sessions`` memoises the parsed origin keyed on the marker's own
+    ``(mtime, size)``. The fail-safe it must not break: a sidecar cut mid-write
+    parses to ``""`` and therefore reads as the USER's session, so it stays in
+    the picker rather than vanishing from it.
+
+    Asserted BOTH cold (no cache file) and warm (second call, cache populated),
+    because caching "subagent" for a file that merely EXISTS would pass the
+    cold assertion and hide the session on every subsequent open.
+    """
+    sessions = tmp_path / "sessions"
+    for name in ("mine", "cut", "child"):
+        (sessions / name).mkdir(parents=True)
+        (sessions / name / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    # 0xc3 opens a two-byte sequence that never arrives.
+    (sessions / "cut" / resume_mod.ORIGIN_NAME).write_bytes(b'{"origin": "subagent", "l": "caf\xc3')
+    resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT)
+
+    cold = {row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)}
+    assert cold == {"mine", "cut"}, "a corrupt marker must read as the user's own session"
+
+    assert resume_mod.origin_cache_path(tmp_path).is_file(), "the cache did not persist"
+    warm = {row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)}
+    assert warm == cold, "the cache changed a verdict it had already answered correctly"
+
+    # And a third time, now that the cache is being READ rather than written.
+    assert {row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)} == cold
+
+
+def test_the_origin_cache_re_reads_a_marker_that_changed(tmp_path: Path) -> None:
+    """The key is the marker's own ``(mtime, size)``, so rewriting it re-derives
+    the verdict rather than serving the stale one.
+
+    This is the backfill's path: a session unmarked at one open can be stamped
+    before the next, and a session's marker can be corrected by hand.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "s1").mkdir(parents=True)
+    (sessions / "s1" / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+
+    # Unmarked: listed, and deliberately NOT cached as a fact.
+    assert [row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)] == ["s1"]
+
+    # Stamped afterwards (as the backfill does) — the next scan must see it.
+    resume_mod.mark_session_origin(sessions / "s1", resume_mod.ORIGIN_SUBAGENT)
+    assert resume_mod.recent_sessions(tmp_path, limit=10**9) == []
+
+    # Corrected back by hand: a changed marker re-derives rather than serving
+    # the cached "subagent".
+    (sessions / "s1" / resume_mod.ORIGIN_NAME).write_text('{"origin": ""}', encoding="utf-8")
+    assert [row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)] == ["s1"]
+
+
+def test_an_unreadable_origin_cache_degrades_to_full_reads(tmp_path: Path) -> None:
+    """A corrupt cache file must cost the SPEED of the scan, never its answer.
+
+    Mirrors ``search_index._load``: every failure yields an empty cache and the
+    markers are read for real, so the listing is identical to the uncached one.
+    """
+    sessions = tmp_path / "sessions"
+    for name in ("mine", "child"):
+        (sessions / name).mkdir(parents=True)
+        (sessions / name / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT)
+
+    cache = resume_mod.origin_cache_path(tmp_path)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    for garbage in (b"not json at all", b'{"version": 999, "entries": {}}', b'{"entries": []}'):
+        cache.write_bytes(garbage)
+        assert [row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)] == ["mine"]
+
+
+def test_the_origin_cache_drops_entries_for_disposed_sessions(tmp_path: Path) -> None:
+    """The cache is rewritten to the markers seen in the current scan, so a
+    session the user disposed of stops occupying an entry — the file tracks the
+    live store rather than every session that ever existed."""
+    import shutil
+
+    sessions = tmp_path / "sessions"
+    for name in ("c1", "c2"):
+        (sessions / name).mkdir(parents=True)
+        (sessions / name / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+        resume_mod.mark_session_origin(sessions / name, resume_mod.ORIGIN_SUBAGENT)
+    resume_mod.recent_sessions(tmp_path, limit=10**9)
+
+    entries = json.loads(resume_mod.origin_cache_path(tmp_path).read_text())["entries"]
+    assert set(entries) == {"c1", "c2"}
+
+    shutil.rmtree(sessions / "c2")
+    resume_mod.recent_sessions(tmp_path, limit=10**9)
+    entries = json.loads(resume_mod.origin_cache_path(tmp_path).read_text())["entries"]
+    assert set(entries) == {"c1"}, "a disposed session kept its cache entry"

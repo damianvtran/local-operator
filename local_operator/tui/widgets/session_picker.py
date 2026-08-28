@@ -114,6 +114,16 @@ RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are
 #: :meth:`SessionPickerScreen._page_rows`.
 PAGE_ROWS_MAX = 10
 
+#: Exact-tier hits below which the picker also consults the bounded SOFT tier
+#: (see ``SessionPickerScreen.visible_rows``). Deliberately one full page: the
+#: soft tier's job is to rescue a query the exact tiers answered poorly, and a
+#: query that already fills the visible page has nothing to rescue — the extra
+#: recall would land below the fold at the cost of a 324 ms / 95 MB first-call
+#: tokenise over the whole store. Tied to the page ceiling rather than being a
+#: second free-standing number, because "a screenful" is exactly the threshold
+#: being described.
+_SOFT_TIER_MIN_HITS = PAGE_ROWS_MAX
+
 #: Non-row lines the card always draws: header, rule, blank spacer, the
 #: position counter, and the key hints. Reserved UNCONDITIONALLY (the counter
 #: included, even when the list fits) so the height never depends on content
@@ -550,7 +560,30 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # query change, never per repaint — scanning 200 digests per paint
             # is the cost this cache exists to avoid.
             self._body_matches = search_digests(self._digests, self._query)
-            soft = self._soft_index.search(self._digests, self._query)
+            # The soft tier runs ONLY when the cheap tiers came up short. Its
+            # first call tokenises every digest and builds a vocabulary over
+            # them — measured at 324 ms and 95 MB resident over the 2681-digest
+            # store this picker now reaches uncapped — while the exact tier
+            # answers the same keystroke in ~5 ms. Since the picker was
+            # uncapped, that build sat on the first character typed, which is
+            # the worst possible moment to spend a third of a second.
+            #
+            # Gating on the RESULT COUNT rather than on query length is what
+            # keeps the tier honest: soft matching exists to rescue a typo, a
+            # prefix, or remembered-out-of-order words, and all three are cases
+            # where the exact tiers return nothing useful. When they already
+            # return a screenful, the extra recall is invisible below the fold
+            # and not worth the stall.
+            #
+            # Deterministic in ``(digests, query)``, which the picker's
+            # ordering invariant requires: the gate reads only the exact-tier
+            # result for this same query, so a fixed query admits a fixed set
+            # and rows still never move under the cursor between repaints.
+            near = filter_rows(self._all, self._query, self._body_matches)
+            if len(near) < _SOFT_TIER_MIN_HITS:
+                soft = self._soft_index.search(self._digests, self._query)
+            else:
+                soft = frozenset()
             self._admitted = self._body_matches | soft
             admitted = filter_rows(self._all, self._query, self._admitted)
             self._filtered = rank_rows(admitted, self._query, self._body_matches)
