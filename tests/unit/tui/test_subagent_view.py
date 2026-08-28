@@ -1173,6 +1173,42 @@ async def test_leaving_restores_the_conversation_and_the_composer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_canonical_progress_refresh_keeps_child_page_live() -> None:
+    """The single canonical invalidation updates an already-open child page."""
+    from local_operator.session.frontend_state import FrontendSessionState, JobState
+
+    job = _Job("sub-1", "audit the ingest path", status="running")
+    job.trajectory = [*_text("m1", "Reading the ingest path.")]
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        prose = view._body.blocks()[0]
+        job.trajectory.append(_call("c1", "bash", command="pytest -q"))
+
+        # This is the frame the 50 ms jobs coalescer publishes to both owner and
+        # follower. No raw SubagentProgress repaint participates any more.
+        app._apply_frontend_state(
+            FrontendSessionState(
+                session_id="sess",
+                epoch="owner",
+                jobs=[
+                    JobState.from_job(job).model_copy(
+                        update={"latest_details": {"progress": "running pytest"}}
+                    )
+                ],
+            )
+        )
+        await pilot.pause()
+        blocks = view._body.blocks()
+        assert blocks[0] is prose
+        assert isinstance(blocks[1], ToolCard)
+        assert blocks[1]._state == "running"
+        assert isinstance(blocks[2], WorkingBlock)
+
+
+@pytest.mark.asyncio
 async def test_the_page_follows_a_running_subagent() -> None:
     """A running child keeps working after the page opens. The old modal
     snapshotted the trajectory at open and then sat still."""

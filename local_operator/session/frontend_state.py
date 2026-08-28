@@ -1357,11 +1357,14 @@ class FrontendStateStore:
         update = self.mutate(**changes) if changes else None
         # Expensive source snapshots are explicit mutation hooks. Turn edges and
         # tool/result boundaries are the defensive fallback; token deltas never
-        # rescan transcript/jobs or publish replacement state.
+        # rescan transcript/jobs or publish replacement state. Subagent progress
+        # is excluded too: the job manager already coalesces that live row onto
+        # ``refresh_jobs`` within 50 ms. Re-scanning the entire session here
+        # published a duplicate frame for every child boundary and made remote
+        # followers pay a second wire update for the same activity string.
         kind = str(getattr(event, "type", ""))
         if isinstance(event, (AgentEndEvent, MessageEndEvent)) or kind in {
             "tool_execution_end",
-            "subagent_progress",
             "subagent_end",
             "model_change",
         }:

@@ -1489,10 +1489,11 @@ class Session:
         self._subagent_roster_written_generation = 0
         self._subagent_roster_writer: asyncio.Task[None] | None = None
         # The CONTENT of the roster payload last written to the sidecar, so a
-        # redundant write can be skipped. The roster persist hook fires on every
-        # job-row mutation — usage/heartbeat churn included — but most of those
-        # events leave the persisted projection ({version, jobs, records}, minus
-        # the ever-incrementing ``generation`` counter) byte-identical. A real
+        # redundant write can be skipped. Live-only progress/output no longer
+        # reach this hook, but defensive duplicate lifecycle signals and usage
+        # updates can still leave the persisted projection ({version, jobs,
+        # records}, minus the ever-incrementing ``generation`` counter)
+        # byte-identical. A real
         # fan-out fired ~3 sidecar writes per settle, ~2 of them identical, and
         # each is a full mkstemp + fsync + os.replace + directory-fsync cycle;
         # that fsync volume is what tripped the macOS "disk writes exceeding

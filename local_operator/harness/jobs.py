@@ -458,12 +458,23 @@ class AsyncJobManager:
         self._invalidate_accounting()
 
     def _notify_roster_change(self) -> None:
-        """Signal a task-roster mutation to persistence and observers."""
-        self._notify_job_change(task_roster=True)
+        """Publish and persist a mutation of the durable task-row projection."""
+        self._notify_job_change(persist_roster=True)
 
-    def _notify_job_change(self, *, task_roster: bool) -> None:
-        """Publish every job mutation while persisting only resumable tasks."""
-        callbacks = ([self._on_roster_change] if task_roster else []) + [self._on_job_change]
+    def _notify_transient_job_change(self) -> None:
+        """Publish a live-only job mutation without scheduling durable I/O.
+
+        Progress is deliberately absent from the resume projection: after a
+        restart there is no live child behind that activity string, and the
+        restored row is stamped ``interrupted`` instead. Sending it through the
+        persistence callback made every tool/message boundary fingerprint the
+        entire historical child roster for bytes the sidecar never retained.
+        """
+        self._notify_job_change(persist_roster=False)
+
+    def _notify_job_change(self, *, persist_roster: bool) -> None:
+        """Publish every job mutation and persist only durable task fields."""
+        callbacks = ([self._on_roster_change] if persist_roster else []) + [self._on_job_change]
         for callback in callbacks:
             if callback is None:
                 continue
@@ -676,7 +687,7 @@ class AsyncJobManager:
         # only carry a resumable transcript, but the listener filters that).
         if type == "task":
             self._invalidate_accounting()
-        self._notify_job_change(task_roster=type == "task")
+        self._notify_job_change(persist_roster=type == "task")
         return job_id
 
     def start_queued(self, job_id: str) -> bool:
@@ -701,7 +712,7 @@ class AsyncJobManager:
         # in between would restore the row as if it were still parked.
         if job.type == "task":
             self._invalidate_accounting()
-        self._notify_job_change(task_roster=job.type == "task")
+        self._notify_job_change(persist_roster=job.type == "task")
         return True
 
     # -- delivery -----------------------------------------------------------
@@ -810,7 +821,7 @@ class AsyncJobManager:
         self._sweep_due()
         if job.type == "task":
             self._invalidate_accounting()
-        self._notify_job_change(task_roster=job.type == "task")
+        self._notify_job_change(persist_roster=job.type == "task")
         return True
 
     # -- lifecycle ----------------------------------------------------------
@@ -865,7 +876,9 @@ class AsyncJobManager:
         # recent end is the informative one (the current step, the error that
         # just landed), while the opening lines have usually already been read.
         job.output_tail = combined[-OUTPUT_TAIL_CHARS:]
-        self._notify_job_change(task_roster=job.type == "task")
+        # The durable result arrives at settlement; this rolling observation
+        # window is intentionally excluded from the resume projection.
+        self._notify_transient_job_change()
 
     def read_output(self, job_id: str, since: int = 0) -> tuple[str, int, bool] | None:
         """``(text, seq, gap)`` for a peek, or ``None`` when the job is unknown.
@@ -900,7 +913,7 @@ class AsyncJobManager:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.latest_details = {"progress": details}
-                self._notify_job_change(task_roster=job.type == "task")
+                self._notify_transient_job_change()
 
         return report
 
@@ -926,7 +939,7 @@ class AsyncJobManager:
             self._settle(job)
             self._tasks.pop(job.id, None)
             self._sweep_due()
-            self._notify_job_change(task_roster=job.type == "task")
+            self._notify_job_change(persist_roster=job.type == "task")
             return
         except Exception as exc:
             job.status = "failed"
@@ -940,7 +953,7 @@ class AsyncJobManager:
         # leaves the outcome on disk for the next resume.
         if job.type == "task":
             self._invalidate_accounting()
-        self._notify_job_change(task_roster=job.type == "task")
+        self._notify_job_change(persist_roster=job.type == "task")
         try:
             await self._deliver(job)
         except Exception:

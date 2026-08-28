@@ -15563,16 +15563,16 @@ class OperatorApp(App[None]):
         self._working_fallback = DEFAULT_ACTIVITY
         self._refresh_working_activity()
 
-    # Subagent events arrive through the Controller's `_post` on the shared
-    # stream; each is an immediate repaint trigger for the band, paired with
-    # the 1 Hz poll as the belt (see `_refresh_band`). The panel re-reads the
-    # manager itself, so the handlers only need to fire the refresh, never to
-    # carry job data.
+    # Start/end edges repaint immediately because they change the set or
+    # lifecycle of durable rows. Progress takes the canonical-state route only:
+    # the job manager coalesces it within 50 ms, and repainting this raw event as
+    # well made the owner perform the same band scan twice while a remote
+    # follower, which sees canonical updates only, behaved differently.
     def on_subagent_started(self, message: SubagentStarted) -> None:
         self._refresh_band()
 
     def on_subagent_progress(self, message: SubagentProgress) -> None:
-        self._refresh_band()
+        pass
 
     def on_subagent_ended(self, message: SubagentEnded) -> None:
         self._refresh_band()
