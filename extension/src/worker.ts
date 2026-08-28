@@ -79,7 +79,15 @@ function send(frame: object): void {
 // banner stays because it costs nothing and helps the machines where it works.
 const PENDING_NOTIFICATION_ID = "lop-origin-pending";
 let notificationQueueKey = "unreconciled";
-setPendingObserver((snapshot) => {
+
+/** Chrome's notification typings retain callback overloads across versions,
+ * while MV3 implementations return promises. Normalize the runtime result so
+ * the action-surface allSettled boundary always owns rejection handling. */
+async function notificationResult(result: Promise<unknown> | unknown): Promise<void> {
+  await Promise.resolve(result);
+}
+
+setPendingObserver(async (snapshot) => {
   for (const entry of snapshot.queue) {
     if (entry.kind === "in_command" && entry.commandId) {
       send({ event: "awaiting_origin", id: entry.commandId, origin: entry.origin });
@@ -91,10 +99,9 @@ setPendingObserver((snapshot) => {
   // stable key that changes on enqueue, decision, cancellation, and expiry.
   const nextNotificationKey = snapshot.queue.map((entry) => entry.entryId).join("\n");
   if (nextNotificationKey === notificationQueueKey) return;
-  notificationQueueKey = nextNotificationKey;
   if (count) {
     const first = snapshot.queue[0]!;
-    chrome.notifications?.create(PENDING_NOTIFICATION_ID, {
+    await notificationResult(chrome.notifications?.create(PENDING_NOTIFICATION_ID, {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
       title: "Local Operator needs your OK",
@@ -103,8 +110,14 @@ setPendingObserver((snapshot) => {
           ? `Allow the agent to open ${first.displayAuthority}? Click the extension icon in the toolbar to decide.`
           : `${count} site requests are waiting. Click the extension icon in the toolbar to decide.`,
       priority: 2,
-    });
-  } else chrome.notifications?.clear(PENDING_NOTIFICATION_ID);
+    }));
+  } else {
+    await notificationResult(chrome.notifications?.clear(PENDING_NOTIFICATION_ID));
+  }
+  // Commit dedup state only after Chrome accepts create/clear. A transient
+  // rejection leaves the previous key intact so the next identical sweep
+  // retries instead of suppressing recovery.
+  notificationQueueKey = nextNotificationKey;
 });
 
 // Clicking the banner opens the consent popup directly — one click instead of

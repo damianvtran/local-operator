@@ -9,11 +9,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-function installChromeStub(actionFailures = new Set()) {
+function installChromeStub(actionFailures = new Set(), notificationFailures = new Map()) {
   const areas = { session: new Map(), local: new Map() };
   const listeners = [];
+  const alarmListeners = [];
   const alarms = new Map();
   const actionCalls = [];
+  const notificationCalls = [];
   const makeArea = (name) => ({
     get: async (keys) => {
       const out = {};
@@ -43,7 +45,7 @@ function installChromeStub(actionFailures = new Set()) {
     alarms: {
       create: (name, info) => alarms.set(name, info),
       clear: async (name) => alarms.delete(name),
-      onAlarm: { addListener: () => {} },
+      onAlarm: { addListener: (listener) => alarmListeners.push(listener) },
     },
     action: Object.fromEntries(
       ["setBadgeBackgroundColor", "setBadgeTextColor", "setBadgeText", "setTitle"].map((method) => [
@@ -59,7 +61,23 @@ function installChromeStub(actionFailures = new Set()) {
       onDetach: { addListener: () => {} }, sendCommand: async () => ({}),
     },
     notifications: {
-      create: async () => {}, clear: async () => {}, onClicked: { addListener: () => {} },
+      create: async (...args) => {
+        notificationCalls.push(["create", args]);
+        const remaining = notificationFailures.get("create") ?? 0;
+        if (remaining > 0) {
+          notificationFailures.set("create", remaining - 1);
+          throw new Error("create rejected");
+        }
+      },
+      clear: async (...args) => {
+        notificationCalls.push(["clear", args]);
+        const remaining = notificationFailures.get("clear") ?? 0;
+        if (remaining > 0) {
+          notificationFailures.set("clear", remaining - 1);
+          throw new Error("clear rejected");
+        }
+      },
+      onClicked: { addListener: () => {} },
     },
     runtime: {
       getURL: (path) => `chrome-extension://test/${path}`,
@@ -74,6 +92,8 @@ function installChromeStub(actionFailures = new Set()) {
     setSession: (key, value) => areas.session.set(key, value),
     alarm: (name) => alarms.get(name),
     actionCalls,
+    notificationCalls,
+    fireAlarm: (name) => Promise.all(alarmListeners.map((listener) => listener({ name }))),
     restore: () => {
       delete globalThis.chrome;
       delete globalThis.WebSocket;
@@ -151,6 +171,54 @@ test("worker cold start restores persisted badge without unhandled rejection", a
     } finally { process.off("unhandledRejection", onUnhandled); }
   } finally { await bundle.close(); chrome.restore(); }
 });
+
+for (const method of ["create", "clear"]) {
+  test(`notification ${method} rejection is contained and identical reconciliation retries`, async () => {
+    const failures = new Map([[method, 1]]);
+    const chrome = installChromeStub(new Set(), failures);
+    const bundle = await loadModule("src/worker.ts");
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args);
+    try {
+      const now = Date.now();
+      chrome.setSession("accessQueueVersion", 1);
+      chrome.setSession("accessQueue", method === "create" ? [
+        { entryId: "retry", origin: "https://retry.example", displayAuthority: "retry.example", requester: "R", kind: "async", requestedAt: now, expiresAt: now + 60_000, sequence: 1 },
+      ] : []);
+      globalThis.navigator = { userAgent: "node-test" };
+      globalThis.WebSocket = class {
+        static OPEN = 1;
+        readyState = 1;
+        constructor() { queueMicrotask(() => this.onopen?.()); }
+        send() {}
+        close() {}
+      };
+      const unhandled = [];
+      const onUnhandled = (reason) => unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        await bundle.import(method);
+        for (let attempts = 0; attempts < 20 && chrome.notificationCalls.length < 1; attempts++) await tick();
+        // A queue sweep emits the identical snapshot. Failed notification work
+        // must retry because its generation key was not committed.
+        await chrome.fireAlarm("lop-access-expiry");
+        for (let attempts = 0; attempts < 20 && chrome.notificationCalls.length < 2; attempts++) await tick();
+        assert.equal(chrome.notificationCalls.filter(([name]) => name === method).length, 2);
+        await chrome.fireAlarm("lop-access-expiry");
+        await tick();
+        assert.equal(chrome.notificationCalls.filter(([name]) => name === method).length, 2, "successful retry deduplicates");
+        assert.deepEqual(unhandled, []);
+        assert.ok(chrome.actionCalls.some(([name]) => name === "setBadgeText"));
+        assert.ok(chrome.actionCalls.some(([name]) => name === "setTitle"));
+        assert.ok(warnings.some((args) => args.some((value) => String(value).includes("pending observer"))));
+      } finally { process.off("unhandledRejection", onUnhandled); }
+    } finally {
+      console.warn = originalWarn;
+      await bundle.close(); chrome.restore();
+    }
+  });
+}
 
 test("cold-start restore reconciles a persisted two-entry queue", async () => {
   const chrome = installChromeStub();

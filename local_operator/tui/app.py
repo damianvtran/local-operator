@@ -2173,6 +2173,7 @@ class OperatorApp(App[None]):
         precondition. Anything genuinely slow belongs in a worker, the way
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
+        self._invalidate_pending_frontend_state()
         self._session = session
         self._mobile_adopted(session)
         # Every production session supplies the same frontend contract. Install
@@ -2307,12 +2308,35 @@ class OperatorApp(App[None]):
         elif getattr(session.frontend_state, "context_tokens", None) is None:
             self._measure_preloaded_context(session)
 
+    def _invalidate_pending_frontend_state(self) -> None:
+        """Retire queued paints before another session becomes authoritative."""
+        self._frontend_session_generation = getattr(self, "_frontend_session_generation", 0) + 1
+        self._pending_frontend_state = None
+        # The old callback remains queued in Textual, but it carries the retired
+        # generation and returns without clearing a newer session's scheduled bit.
+        self._frontend_apply_scheduled = False
+
     def _on_frontend_update(self, update: Any) -> None:
         session = self._session
         state = getattr(session, "frontend_state", None) if session is not None else None
-        # Socket and local callbacks share this seam. The store has already
-        # applied the typed delta; widgets always render its complete state.
-        self.call_later(self._apply_frontend_state, state)
+        # Socket and local callbacks share this seam. A burst can publish several
+        # ordered fields before Textual gets its next turn; only the latest
+        # complete snapshot needs painting, while scheduling every intermediate
+        # one repeats the full status/band scan and delays keyboard handling.
+        generation = getattr(self, "_frontend_session_generation", 0)
+        self._pending_frontend_state = state
+        if getattr(self, "_frontend_apply_scheduled", False):
+            return
+        self._frontend_apply_scheduled = True
+        self.call_later(self._apply_pending_frontend_state, generation)
+
+    def _apply_pending_frontend_state(self, generation: int) -> None:
+        if generation != getattr(self, "_frontend_session_generation", 0):
+            return
+        self._frontend_apply_scheduled = False
+        state = getattr(self, "_pending_frontend_state", None)
+        self._pending_frontend_state = None
+        self._apply_frontend_state(state)
 
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
@@ -2389,6 +2413,7 @@ class OperatorApp(App[None]):
         if callable(unsubscribe_frontend):
             unsubscribe_frontend()
         self._unsubscribe_frontend = None
+        self._invalidate_pending_frontend_state()
         self._session = session
         self._mobile_adopted(session)
         subscribe_frontend = getattr(session, "subscribe_frontend", None)
@@ -8817,6 +8842,14 @@ class OperatorApp(App[None]):
         treat a missing manager as empty).
         """
         session = self._session
+        # The settle loop deliberately runs several panel passes, but the job
+        # ledger cannot change synchronously inside one refresh. Snapshot once
+        # so 100-child sessions do not copy and sort the same roster per pass.
+        try:
+            manager = getattr(session, "jobs", None)
+            jobs = manager.list() if manager is not None else []
+        except Exception:
+            jobs = []
         # Three steps, and the order is load-bearing rather than tidy.
         #
         # A panel's own `sync` is what decides whether it is displayed at all
@@ -8851,7 +8884,7 @@ class OperatorApp(App[None]):
         # first frame that does not move.
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
-                self._subagent_panel.sync(session)
+                self._subagent_panel.sync(session, jobs=jobs)
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
             if self._todo_panel is not None:
@@ -9050,6 +9083,11 @@ class OperatorApp(App[None]):
         # Captured before anything is blurred: this is where Esc puts the
         # user back, and it is almost always the composer.
         self._subagent_focus_restore = self.focused
+        # The expanded roster borrows nearly the whole transcript budget. It is
+        # a navigation surface, not child-page content, so collapse it before
+        # layout or a 120x40 child view can settle at zero rows.
+        if self._subagent_panel is not None:
+            self._subagent_panel.collapse_for_child_view()
         view = SubagentView(job_id)
         self._subagent_view = view
         self._transcript_view().display = False
@@ -9057,7 +9095,10 @@ class OperatorApp(App[None]):
         self.screen.add_class(SUBAGENT_LAYOUT_CLASS)
         self._sync_subagent_compact_layout(self.size.height)
         self._set_composer_read_only(True)
-        self._refresh_subagent_view(job_id)
+        # Enter paints the new mode first; folding and mounting a retained
+        # 500-event trajectory on the same key handler made the key appear lost
+        # for about a second. The next refresh fills the already-visible page.
+        self.call_after_refresh(self._refresh_subagent_view, job_id)
 
     def _close_subagent_view(self) -> bool:
         """Leave the view and put the conversation back. True if it was open.
@@ -9090,7 +9131,12 @@ class OperatorApp(App[None]):
         restore = self._subagent_focus_restore
         self._subagent_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # Opening from an expanded roster collapses that navigation window;
+            # its focused row may now be hidden. Return to the composer unless
+            # the original control is still visible, preserving the draft while
+            # ensuring the next typed key has an on-screen owner.
+            target = restore if restore is not None and restore.display else self._editor()
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True
