@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from types import SimpleNamespace
 from typing import Any
 
@@ -278,6 +279,9 @@ def test_shared_job_usage_descendants_and_future_extras_are_immutable() -> None:
                 FrontendUsage(input_tokens=8, output_tokens=3).model_dump(mode="json")
             ],
             "future_payload": {"nested": [1]},
+            "future_tags": {"alpha", "beta"},
+            "future_queue": deque([{"nested": [1]}]),
+            "future_bytes": bytearray(b"abc"),
         }
     )
     store = FrontendStateStore(_state(jobs=[job]))
@@ -291,11 +295,28 @@ def test_shared_job_usage_descendants_and_future_extras_are_immutable() -> None:
     future_payload = getattr(snapshot.jobs[0], "future_payload")
     with pytest.raises(TypeError, match="immutable"):
         future_payload["nested"].append(2)
+    future_tags = getattr(snapshot.jobs[0], "future_tags")
+    with pytest.raises(AttributeError):
+        future_tags.add("corrupted")
+    future_queue = getattr(snapshot.jobs[0], "future_queue")
+    with pytest.raises(TypeError, match="immutable"):
+        future_queue.append({"nested": [2]})
+    assert getattr(snapshot.jobs[0], "future_bytes") == b"abc"
 
     canonical = store.state.jobs[0]
     assert canonical.usage is not None and canonical.usage.input_tokens == 4
     assert canonical.descendant_usage[0].output_tokens == 3
     assert getattr(canonical, "future_payload") == {"nested": [1]}
+    assert getattr(canonical, "future_tags") == {"alpha", "beta"}
+    assert getattr(canonical, "future_queue") == [{"nested": [1]}]
+    assert getattr(canonical, "future_bytes") == b"abc"
+    dumped = canonical.model_dump(mode="json")
+    assert set(dumped["future_tags"]) == {"alpha", "beta"}
+    assert dumped["future_queue"] == [{"nested": [1]}]
+    assert dumped["future_bytes"] == "abc"
+    restored = JobState.model_validate(dumped)
+    restored_tags = getattr(restored, "future_tags")
+    assert restored_tags == ["alpha", "beta"] or restored_tags == ["beta", "alpha"]
     assert store.state.sequence == 0
 
 

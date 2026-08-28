@@ -12,7 +12,14 @@ import copy
 import os
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections import deque
+from collections.abc import (
+    Callable,
+    Iterable,
+    MutableMapping,
+    MutableSequence,
+    MutableSet,
+)
 from dataclasses import dataclass
 from enum import StrEnum
 from types import SimpleNamespace
@@ -227,15 +234,44 @@ def _freeze_value(value: Any) -> Any:
         # all their data as a recursively immutable mapping rather than sharing
         # a mutable model the older follower cannot know how to freeze safely.
         return _freeze_value(value.model_dump(mode="python"))
-    if isinstance(value, dict):
+    if isinstance(value, MutableMapping):
         return _FrozenDict({str(key): _freeze_value(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, bytearray):
+        # bytearray is the remaining built-in mutable container accepted by an
+        # unconstrained extra; bytes preserves its Pydantic JSON string shape.
+        return bytes(value)
+    if isinstance(value, memoryview):
+        return bytes(value)
+    if isinstance(value, (MutableSequence, deque)):
         return _FrozenList(_freeze_value(item) for item in value)
+    if isinstance(value, MutableSet):
+        # ``frozenset`` preserves set equality/membership and Pydantic's JSON
+        # serializer emits the same array shape as a mutable set. Nested values
+        # are frozen first so a hashable mutable wrapper cannot retain an alias.
+        return frozenset(_freeze_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, frozenset):
+        return frozenset(_freeze_value(item) for item in value)
     return value
+
+
+def _is_frozen_value(value: Any) -> bool:
+    if isinstance(value, (_FrozenList, _FrozenDict, _FrozenUsage, _FrozenFrontendUsage)):
+        return True
+    if isinstance(value, (str, int, float, bool, bytes, type(None), frozenset)):
+        return True
+    if isinstance(value, tuple):
+        return all(_is_frozen_value(item) for item in value)
+    return False
 
 
 def _freeze_job(job: "JobState") -> "JobState":
     """Freeze every declared and future nested value on a shared job snapshot."""
+    if all(_is_frozen_value(value) for value in job.__dict__.values()) and all(
+        _is_frozen_value(value) for value in (job.model_extra or {}).values()
+    ):
+        return job
     values = {
         name: _freeze_value(value)
         for name, value in job.__dict__.items()

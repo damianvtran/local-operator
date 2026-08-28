@@ -9131,7 +9131,12 @@ class OperatorApp(App[None]):
         restore = self._subagent_focus_restore
         self._subagent_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # Opening from an expanded roster collapses that navigation window;
+            # its focused row may now be hidden. Return to the composer unless
+            # the original control is still visible, preserving the draft while
+            # ensuring the next typed key has an on-screen owner.
+            target = restore if restore is not None and restore.display else self._editor()
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True

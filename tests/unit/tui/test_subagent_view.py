@@ -42,7 +42,11 @@ from local_operator.session.transcript import (
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.subagent_panel import GLYPH_DONE, SubagentPanel
+from local_operator.tui.widgets.subagent_panel import (
+    GLYPH_DONE,
+    SubagentPanel,
+    SubagentRow,
+)
 from local_operator.tui.widgets.subagent_view import (
     COLLAPSE_AFFORDANCE,
     EXPAND_HINT,
@@ -418,6 +422,46 @@ async def test_opening_from_expanded_roster_preserves_child_viewport(size) -> No
         assert view.size.height > 0
         assert view._body.size.height > 0
         assert app.screen.virtual_size.height <= app.screen.size.height
+
+
+@pytest.mark.asyncio
+async def test_escape_from_child_restores_composer_when_roster_row_was_hidden() -> None:
+    jobs = [_job_with(TRAJECTORY, status="completed") for _ in range(30)]
+    for index, job in enumerate(jobs):
+        job.id = f"sub-{index:03d}"
+        job.label = f"task {index:03d}"
+    session = FakeSession()
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.text = "draft "
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        for _ in range(10):
+            await pilot.press("down")
+        selected = app.focused
+        assert isinstance(selected, SubagentRow)
+        await pilot.press("enter")
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert selected.display is False
+        assert app.focused is editor
+        await pilot.press("x")
+        await pilot.pause()
+        assert editor.text == "xdraft "
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.focused is editor
 
 
 async def _wait_history(pilot: Any, view: SubagentView) -> None:
