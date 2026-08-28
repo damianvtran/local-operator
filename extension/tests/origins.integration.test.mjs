@@ -27,7 +27,8 @@ function installChromeStub() {
   const makeArea = (name) => ({
     get: async (keys) => {
       const out = {};
-      for (const key of Array.isArray(keys) ? keys : [keys]) {
+      const selected = keys === null ? [...areas[name].keys()] : Array.isArray(keys) ? keys : [keys];
+      for (const key of selected) {
         if (areas[name].has(key)) out[key] = areas[name].get(key);
       }
       return out;
@@ -74,11 +75,11 @@ function installChromeStub() {
   return { session, areas, restore: () => { delete globalThis.chrome; } };
 }
 
-async function loadOrigins() {
+async function loadModule(entry = "src/origins.ts") {
   const dir = await mkdtemp(join(tmpdir(), "lop-origins-it-"));
   const outfile = join(dir, "module.mjs");
   await build({
-    entryPoints: ["src/origins.ts"],
+    entryPoints: [entry],
     bundle: true,
     platform: "node",
     format: "esm",
@@ -89,6 +90,9 @@ async function loadOrigins() {
     close: () => rm(dir, { recursive: true, force: true }),
   };
 }
+
+const loadOrigins = () => loadModule("src/origins.ts");
+const loadAccessGrants = () => loadModule("src/access-grants.ts");
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 const ORIGIN = "https://example.com";
@@ -225,6 +229,253 @@ test("deny persists across a worker restart via session storage", async () => {
       origins.ensureTopLevelAccess(urlOf(), "req-A"),
       (error) => error.code === "origin_not_allowed",
     );
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("loopback all-port decision persists and matches only exact scheme and host", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    let origins = await bundle.import();
+    const source = new URL("http://localhost:5173/page");
+    await origins.raiseAccessRequest(source, "req-A");
+    assert.equal(await origins.resolveOrigin(source.origin, "all_ports"), true);
+    assert.equal(await origins.originAllowed(new URL("http://localhost:9999")), true);
+    assert.equal(await origins.originAllowed(new URL("https://localhost:9999")), false);
+    assert.equal(await origins.originAllowed(new URL("http://127.0.0.1:9999")), false);
+    // Local storage, unlike worker memory, survives MV3 suspension.
+    origins = await bundle.import("host-grant-restart");
+    assert.equal(await origins.originAllowed(new URL("http://localhost:6000")), true);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("future host-grant schema is preserved when a decision is attempted", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const future = { version: 2, grants: { opaque: "newer-data" } };
+    chrome.areas.local.set("hostGrants", future);
+    const origins = await bundle.import();
+    const source = new URL("http://localhost:5173/page");
+    await origins.raiseAccessRequest(source, "req-A");
+    assert.equal(await origins.resolveOrigin(source.origin, "all_ports"), false);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), future);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("worker queue prevents delayed broad approval from resurrecting completed revoke", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    const grants = await bundle.import();
+    const originalGet = globalThis.chrome.storage.local.get;
+    let releaseRead;
+    const readBlocked = new Promise((resolve) => { releaseRead = resolve; });
+    let first = true;
+    globalThis.chrome.storage.local.get = async (keys) => {
+      if (first) {
+        first = false;
+        await readBlocked;
+      }
+      return originalGet(keys);
+    };
+    const url = new URL("http://localhost:5173");
+    const approval = grants.grantLoopbackHost(url);
+    const revoke = grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"]));
+    releaseRead();
+    assert.equal(await approval, true);
+    assert.equal(await revoke, true);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("delayed exact approval cannot resurrect access after completed unpair", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    const grants = await bundle.import();
+    const originalGet = globalThis.chrome.storage.local.get;
+    let releaseRead;
+    const readBlocked = new Promise((resolve) => { releaseRead = resolve; });
+    let first = true;
+    globalThis.chrome.storage.local.get = async (keys) => {
+      if (first) {
+        first = false;
+        await readBlocked;
+      }
+      return originalGet(keys);
+    };
+    const approval = grants.grantExactOrigin("https://example.com");
+    const clear = grants.clearAllAccessGrants();
+    releaseRead();
+    assert.equal(await approval, true);
+    assert.equal(await clear, true);
+    assert.equal(chrome.areas.local.get("origins"), undefined);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("mutation queue de-poisons after a rejected write", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    const grants = await bundle.import();
+    const originalSet = globalThis.chrome.storage.local.set;
+    let first = true;
+    globalThis.chrome.storage.local.set = async (value) => {
+      if (first) {
+        first = false;
+        throw new Error("quota");
+      }
+      return originalSet(value);
+    };
+    await assert.rejects(grants.grantExactOrigin("https://first.example"), /quota/);
+    assert.equal(await grants.grantExactOrigin("https://second.example"), true);
+    assert.equal(chrome.areas.local.get("origins")["https://second.example"], "allow");
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("worker snapshot stays bounded across churn and survives restart", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    let grants = await bundle.import();
+    const url = new URL("http://localhost:5173");
+    const key = JSON.stringify(["http:", "localhost"]);
+    for (let index = 0; index < 100; index += 1) {
+      assert.equal(await grants.grantLoopbackHost(url), true);
+      assert.equal(await grants.revokeLoopbackHost(key), true);
+    }
+    assert.deepEqual([...chrome.areas.local.keys()], ["hostGrants"]);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
+    grants = await bundle.import("restart");
+    assert.equal(await grants.grantLoopbackHost(url), true);
+    assert.equal(Object.keys(chrome.areas.local.get("hostGrants").grants).length, 1);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("two settings-context revokes serialize through the worker queue", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    const grants = await bundle.import();
+    const localhost = new URL("http://localhost:5173");
+    const ipv4 = new URL("http://127.0.0.1:3000");
+    await grants.grantLoopbackHost(localhost);
+    await grants.grantLoopbackHost(ipv4);
+    await Promise.all([
+      grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"])),
+      grants.revokeLoopbackHost(JSON.stringify(["http:", "127.0.0.1"])),
+    ]);
+    assert.deepEqual(chrome.areas.local.get("hostGrants"), { version: 1, grants: {} });
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("malformed v1 host keys are preserved and mutations fail closed", async () => {
+  const invalidKeys = [
+    "opaque",
+    "http:|localhost",
+    JSON.stringify(["http:", "example.com"]),
+    JSON.stringify(["ftp:", "localhost"]),
+    JSON.stringify(["http:", "localhost", "extra"]),
+    JSON.stringify(["http:", "local\\u0000host"]),
+    JSON.stringify(["http:", "::1"]),
+    JSON.stringify(["http:", "[0:0:0:0:0:0:0:1]"]),
+  ];
+  for (const invalidKey of invalidKeys) {
+    const chrome = installChromeStub();
+    const bundle = await loadAccessGrants();
+    try {
+      const malformed = {
+        version: 1,
+        grants: { [invalidKey]: { scope: "all_ports", createdAt: 1 } },
+      };
+      chrome.areas.local.set("hostGrants", malformed);
+      const grants = await bundle.import();
+      assert.equal(await grants.grantLoopbackHost(new URL("http://localhost:5173")), false, invalidKey);
+      assert.equal(
+        await grants.revokeLoopbackHost(JSON.stringify(["http:", "localhost"])),
+        false,
+        invalidKey,
+      );
+      assert.deepEqual(chrome.areas.local.get("hostGrants"), malformed, invalidKey);
+    } finally {
+      await bundle.close();
+      chrome.restore();
+    }
+  }
+});
+
+test("canonical loopback keys remain mutable", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadAccessGrants();
+  try {
+    const validKeys = [
+      JSON.stringify(["http:", "localhost"]),
+      JSON.stringify(["https:", "127.0.0.1"]),
+      JSON.stringify(["http:", "[::1]"]),
+    ];
+    chrome.areas.local.set("hostGrants", {
+      version: 1,
+      grants: Object.fromEntries(validKeys.map((key) => [key, { scope: "all_ports", createdAt: 1 }])),
+    });
+    const grants = await bundle.import();
+    assert.equal(await grants.revokeLoopbackHost(validKeys[0]), true);
+    assert.equal(await grants.grantLoopbackHost(new URL("https://localhost:443")), true);
+    const stored = chrome.areas.local.get("hostGrants");
+    assert.equal(stored.grants[validKeys[0]], undefined);
+    assert.equal(stored.grants[JSON.stringify(["https:", "localhost"])].scope, "all_ports");
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("all-port decision is rejected for a forged non-loopback popup message", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    const origins = await bundle.import();
+    await origins.raiseAccessRequest(urlOf(), "req-A");
+    assert.equal(await origins.resolveOrigin(ORIGIN, "all_ports"), false);
+    assert.equal(chrome.areas.local.get("hostGrants"), undefined);
+  } finally {
+    await bundle.close();
+    chrome.restore();
+  }
+});
+
+test("legacy exact-origin grants remain authoritative", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadOrigins();
+  try {
+    chrome.areas.local.set("origins", { "http://localhost:5173": "allow" });
+    const origins = await bundle.import();
+    assert.equal(await origins.originAllowed(new URL("http://localhost:5173/x")), true);
+    assert.equal(await origins.originAllowed(new URL("http://localhost:5174/x")), false);
   } finally {
     await bundle.close();
     chrome.restore();

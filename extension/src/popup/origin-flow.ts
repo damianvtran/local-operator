@@ -10,7 +10,7 @@
  * from the CLICK alone, and a stale prompt echo must hold the ack rather than
  * resurrect the buttons. */
 
-export type OriginDecision = "once" | "always" | "deny";
+export type OriginDecision = "once" | "always" | "all_ports" | "deny";
 
 /** The decision this popup already made, keyed by ORIGIN — finding A6's rule:
  * a redirect chain resolves each hop independently, so a DIFFERENT pending
@@ -55,7 +55,11 @@ export function ackForDecision(decision: OriginDecision): DecisionAck {
     };
   }
   const standing =
-    decision === "always" ? " Always-allowed sites can be taken back any time in Settings." : "";
+    decision === "all_ports"
+      ? " Every port on this loopback host is allowed for this scheme. You can take it back any time in Settings."
+      : decision === "always"
+        ? " Always-allowed sites can be taken back any time in Settings."
+        : "";
   return {
     title: "Site allowed.",
     sub: `The agent is continuing.${standing}`,

@@ -10,7 +10,14 @@ import {
   type OriginDecision,
 } from "./access-flow";
 import { BridgeCommandError, cdp } from "./cdp";
-import { safeHttpUrl, storedOriginAllowed } from "./origin-policy";
+import {
+  displayAuthority,
+  isLoopbackHost,
+  loopbackHostGrantKey,
+  matchingGrantScope,
+  safeHttpUrl,
+} from "./origin-policy";
+import { grantExactOrigin, grantLoopbackHost } from "./access-grants";
 import { ORIGIN_PROMPT_TIMEOUT_MS } from "./protocol.gen";
 import { getLocal, getSession, withSessionMutation } from "./state";
 
@@ -28,16 +35,35 @@ const waiting = new Map<string, (decision: OriginDecision) => void>();
 // A hook the worker installs so a pending decision can raise an ambient signal
 // (a system notification) the user sees without already having the popup open
 // (finding U2). Kept injectable so origins.ts stays free of worker wiring.
-let onPendingChange: ((pending: { origin: string; hostname: string } | null) => void) | null = null;
+let onPendingChange: ((pending: { origin: string; authority: string } | null) => void) | null = null;
 export function setPendingObserver(
-  observer: (pending: { origin: string; hostname: string } | null) => void,
+  observer: (pending: { origin: string; authority: string } | null) => void,
 ): void {
   onPendingChange = observer;
 }
 
 export async function originAllowed(url: URL): Promise<boolean> {
-  const { origins = {} } = await getLocal();
-  return storedOriginAllowed(origins, url);
+  const { origins = {}, hostGrants } = await getLocal();
+  return matchingGrantScope(origins, hostGrants, url) !== null;
+}
+
+export async function originGrantScope(url: URL): Promise<"origin" | "loopback_all_ports" | null> {
+  const { origins = {}, hostGrants } = await getLocal();
+  return matchingGrantScope(origins, hostGrants, url);
+}
+
+async function persistDecision(origin: string, decision: OriginDecision): Promise<boolean> {
+  const url = safeHttpUrl(origin);
+  if (decision === "always") {
+    return grantExactOrigin(url.origin);
+  } else if (decision === "all_ports") {
+    // The popup is untrusted input. Re-parse and re-classify at the storage
+    // boundary so a forged message cannot mint a broad public-site grant.
+    const key = loopbackHostGrantKey(url);
+    if (!key || !isLoopbackHost(url)) return false;
+    return grantLoopbackHost(url);
+  }
+  return true;
 }
 
 /** The outcome of the ONE admission decision a top-level navigation makes.
@@ -158,12 +184,13 @@ async function raisePrompt(url: URL, requestId: string): Promise<string> {
   // slot with (round-2 B1).
   const promptId = crypto.randomUUID().replaceAll("-", "");
   await chrome.storage.session.set({
-    pendingOrigin: { origin: url.origin, hostname: url.hostname, requestId, promptId },
+    pendingOrigin: { origin: url.origin, authority: displayAuthority(url), requestId, promptId },
   });
   await chrome.action.setBadgeBackgroundColor({ color: "#e96042" });
   await chrome.action.setBadgeText({ text: "!" });
-  await chrome.action.setTitle({ title: `Local Operator wants to open ${url.hostname}` });
-  onPendingChange?.({ origin: url.origin, hostname: url.hostname });
+  const authority = displayAuthority(url);
+  await chrome.action.setTitle({ title: `Local Operator wants to open ${authority}` });
+  onPendingChange?.({ origin: url.origin, authority });
   return promptId;
 }
 
@@ -193,10 +220,7 @@ export async function askOrigin(url: URL, requestId: string): Promise<boolean> {
     }, ORIGIN_PROMPT_TIMEOUT_MS);
   });
   await clearPrompt();
-  if (decision === "always") {
-    const { origins = {} } = await getLocal();
-    await chrome.storage.local.set({ origins: { ...origins, [url.origin]: "allow" } });
-  }
+  if (!(await persistDecision(url.origin, decision))) return false;
   return decision !== "deny";
 }
 
@@ -241,10 +265,7 @@ async function recordAccessDecisionLocked(
       },
     });
   }
-  if (decision === "always") {
-    const { origins = {} } = await getLocal();
-    await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
-  }
+  if (!(await persistDecision(origin, decision))) return false;
   // The async prompt has no waiting command to clean up after itself; clear
   // the badge/notification here so the "!" does not outlive the decision.
   await clearPrompt();
@@ -278,6 +299,14 @@ export function resolveOrigin(
   promptId: string = "",
 ): Promise<boolean> {
   return withSessionMutation(async () => {
+    if (!["once", "always", "all_ports", "deny"].includes(decision)) return false;
+    if (decision === "all_ports") {
+      try {
+        if (!isLoopbackHost(safeHttpUrl(origin))) return false;
+      } catch {
+        return false;
+      }
+    }
     // Stale rejection (round-2 B1): the popup binds its click to the promptId
     // it RENDERED. If another request replaced the slot after that render,
     // nothing resolves, no grant is minted — the user's click was an answer
