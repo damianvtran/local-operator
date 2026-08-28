@@ -1,5 +1,28 @@
 # Browser extension bridge: execution evidence
 
+## Loopback all-port grants and visible authorities
+
+Captured from the built extension v0.1.4 loaded unpacked into throwaway Google
+Chrome through CDP `Extensions.loadUnpacked`. Chrome ran off-screen in a fresh
+profile and was never focused. The rendered frames were inspected after capture:
+
+- `popup-origin-prompt.png`: ordinary `example.com` retains the existing three
+  controls and exact-origin **Always allow** choice.
+- `popup-loopback-all-ports.png`: `127.0.0.1:5173` is visible in the SITE trough;
+  **Always this port** stays beside **Allow once**, while the broader explicit
+  **Always all ports** action has its own secondary row.
+- `popup-loopback-ipv6.png`: `[::1]:8000` uses the URL parser's bracketed
+  authority and the same dedicated all-port row.
+- `options-empty.png` and `options-populated.png`: the empty state remains clear;
+  populated Settings independently labels and revokes `http://localhost · all
+  ports` and `http://localhost:5173 · this port`.
+
+The before-frame on current `origin/main` was the prior
+`popup-origin-prompt.png`: the SITE trough hid nondefault ports because it used
+`URL.hostname`, and the only standing action read **Always allow**. The new
+ordinary-site frame preserves its layout while loopback prompts add the broader
+choice explicitly. No manifest permission or privacy category changed.
+
 ## Round 3 remediation: origin-prompt host quarantined + reconnect hardening
 
 Design round 3 flagged one MAJOR (D11) and a nit (D12); code round 3 was clean

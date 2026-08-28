@@ -9,6 +9,7 @@ import {
 import {
   expireAccessRequest,
   originAllowed,
+  originGrantScope,
   raiseAccessRequest,
   safeHttpUrl,
 } from "../origins";
@@ -58,7 +59,10 @@ function requesterOf(params: Record<string, unknown>, requestId: string): string
  * is past its TTL right now (round-1 m3). Same correctness: expiry is
  * computed on read, and the sweep's side effects (prompt teardown) only
  * matter when something IS expired. */
-async function pollSnapshot(requestId: string, origin: string): Promise<{ origin: string; state: string }> {
+async function pollSnapshot(
+  requestId: string,
+  origin: string,
+): Promise<{ origin: string; state: string; grant_scope?: string }> {
   const now = Date.now();
   let session = await getSession();
   const record = session.accessRequest;
@@ -76,7 +80,8 @@ async function pollSnapshot(requestId: string, origin: string): Promise<{ origin
     requestId,
     now,
   );
-  return { origin, state };
+  const scope = state === "allowed" ? await originGrantScope(url) : null;
+  return scope ? { origin, state, grant_scope: scope } : { origin, state };
 }
 
 export async function requestAccess(
@@ -96,7 +101,12 @@ export async function requestAccess(
     requester,
     now,
   );
-  if (verdict !== "raise") return { origin: url.origin, state: verdict };
+  if (verdict !== "raise") {
+    const scope = verdict === "allowed" ? await originGrantScope(url) : null;
+    return scope
+      ? { origin: url.origin, state: verdict, grant_scope: scope }
+      : { origin: url.origin, state: verdict };
+  }
   const record = await raiseAccessRequest(url, requester);
   // Arm the TTL sweep for THIS record: chrome.alarms survives MV3 worker
   // death, a setTimeout does not. Creating a same-named alarm replaces the

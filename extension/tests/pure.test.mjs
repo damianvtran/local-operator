@@ -14,14 +14,100 @@ async function load(entry) {
   return { loaded, close: () => rm(dir, { recursive: true, force: true }) };
 }
 
-test("origin policy only permits stored HTTP origins", async () => {
+test("origin policy preserves exact grants and scopes loopback all-port grants", async () => {
   const module = await load("src/origin-policy.ts");
   try {
-    const url = module.loaded.safeHttpUrl("https://example.com/path");
-    assert.equal(module.loaded.storedOriginAllowed({ "https://example.com": "allow" }, url), true);
-    assert.equal(module.loaded.storedOriginAllowed({}, url), false);
+    const exact = module.loaded.safeHttpUrl("https://example.com/path");
+    assert.equal(module.loaded.storedOriginAllowed({ "https://example.com": "allow" }, exact), true);
+    assert.equal(module.loaded.storedOriginAllowed({}, exact), false);
     assert.throws(() => module.loaded.safeHttpUrl("chrome://settings"));
+
+    const eligible = ["http://LOCALHOST:5173", "http://127.0.0.1:3000", "http://[::1]:8000"];
+    for (const href of eligible) assert.equal(module.loaded.isLoopbackHost(new URL(href)), true, href);
+    const ineligible = [
+      "http://localhost.:5173",
+      "http://api.localhost:5173",
+      "http://127.0.0.2",
+      "http://0.0.0.0",
+      "http://[::ffff:127.0.0.1]",
+      "http://192.168.1.1",
+      "http://example.com",
+      "http://locаlhost", // Cyrillic 'a' is not ASCII localhost.
+    ];
+    for (const href of ineligible) assert.equal(module.loaded.isLoopbackHost(new URL(href)), false, href);
+    assert.throws(() => module.loaded.safeHttpUrl("http://127.1"), /127\.0\.0\.1 exactly/);
+
+    assert.equal(module.loaded.displayAuthority(new URL("http://localhost:5173")), "localhost:5173");
+    assert.equal(module.loaded.displayAuthority(new URL("http://localhost:80")), "localhost");
+    assert.equal(module.loaded.displayAuthority(new URL("https://localhost:443")), "localhost");
+    assert.equal(module.loaded.displayAuthority(new URL("http://[::1]:8000")), "[::1]:8000");
+
+    const source = new URL("http://localhost:5173");
+    const key = module.loaded.loopbackHostGrantKey(source);
+    const hostGrants = { version: 1, grants: { [key]: { scope: "all_ports", createdAt: 1 } } };
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://localhost:9999"), hostGrants), true);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("https://localhost:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://127.0.0.1:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, new URL("http://api.localhost:9999"), hostGrants), false);
+    assert.equal(module.loaded.storedOriginAllowed({}, source, { version: 2, grants: {} }), false);
+    assert.equal(module.loaded.loopbackHostGrantLabel(key), "http://localhost");
   } finally { await module.close(); }
+});
+
+test("settings list and revoke exact and all-port grants independently", async () => {
+  const module = await load("src/options/grant-list.ts");
+  try {
+    const key = JSON.stringify(["http:", "localhost"]);
+    const origins = { "http://localhost:5173": "allow" };
+    const hostGrants = {
+      version: 1,
+      grants: { [key]: { scope: "all_ports", createdAt: 1 } },
+    };
+    const rows = module.loaded.grantRows(origins, hostGrants);
+    assert.deepEqual(rows.map((row) => row.label), [
+      "http://localhost · all ports",
+      "http://localhost:5173 · this port",
+    ]);
+    assert.equal(hostGrants.grants[key].scope, "all_ports", "broader grant remains");
+    assert.equal(rows[0].key, key, "host revoke targets the canonical authority");
+    const accessibleNames = rows.map(module.loaded.removeGrantAccessibleName);
+    assert.deepEqual(accessibleNames, [
+      "Remove all-ports grant for http://localhost",
+      "Remove this-port grant for http://localhost:5173",
+    ]);
+    assert.equal(new Set(accessibleNames).size, rows.length, "each Remove control is distinguishable");
+    const compactRows = module.loaded.grantRows({}, hostGrants);
+    assert.deepEqual(compactRows.map((row) => row.label), ["http://localhost · all ports"]);
+    assert.equal(origins["http://localhost:5173"], "allow", "exact grant remains");
+
+    assert.deepEqual(
+      module.loaded.grantRows(origins, { hostGrants: { version: 2, grants: null } }),
+      [{ key: "http://localhost:5173", label: "http://localhost:5173 · this port", scope: "origin" }],
+      "malformed host state must not hide exact grants",
+    );
+  } finally { await module.close(); }
+});
+
+test("settings mutation helper reports negative acknowledgements and transport failures", async () => {
+  const previousChrome = globalThis.chrome;
+  try {
+    globalThis.chrome = { runtime: { sendMessage: async () => ({ applied: false }) } };
+    let module = await load("src/options/mutation-flow.ts");
+    assert.deepEqual(await module.loaded.runWorkerMutation({ event: "x" }, "Done"), {
+      ok: false,
+      message: "Could not update site access. Try again.",
+    });
+    await module.close();
+    globalThis.chrome.runtime.sendMessage = async () => { throw new Error("worker stopped"); };
+    module = await load("src/options/mutation-flow.ts");
+    assert.deepEqual(await module.loaded.runWorkerMutation({ event: "x" }, "Done"), {
+      ok: false,
+      message: "Could not reach the extension worker. Try again.",
+    });
+    await module.close();
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
 });
 
 test("AX compaction assigns epoch-scoped click refs", async () => {
