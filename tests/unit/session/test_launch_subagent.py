@@ -1106,6 +1106,123 @@ async def test_child_without_parent_mcp_still_builds(tmp_path, monkeypatch):
     await parent.dispose()
 
 
+# --- credential inheritance --------------------------------------------------
+#
+# The live failure (session 835fbcafdc27) had a second half nobody had tested:
+# a credential stored on the parent must reach a delegated child, or the child
+# improvises with the wrong credential the way the MCP-parity failure above
+# showed children improvising with raw tokens. The store is shared BY
+# REFERENCE, so these tests pin that decision end to end: system blocks at
+# spawn, bash env injection at execution, and a store that moved AFTER the
+# child was built.
+
+
+@pytest.mark.asyncio
+async def test_child_system_blocks_advertise_parent_credentials(tmp_path, monkeypatch):
+    """A credential stored on the parent before the spawn is named in the
+    child's system-prompt tail — names only, never the value."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.variables import VariableStore
+
+    parent = make_session(tmp_path, OneShotStream())
+    parent._variables = VariableStore(cwd=str(tmp_path), env={})
+    parent._variables.store_credential("OSWORLD_OPENAI_API_KEY", "sk-child-secret-xyz", "command")
+
+    child = await build_child(parent)
+
+    tail = knowledge_tail(child)
+    assert "<session-credentials>" in tail
+    assert "OSWORLD_OPENAI_API_KEY" in tail
+    # The value must never reach any system block. The provider is typed
+    # possibly-async (``Callable[..., list[str]] | Callable[..., Awaitable...]]``);
+    # the child's is sync, so cast rather than widen the production type.
+    from typing import cast
+
+    blocks = cast(list[str], child._system_blocks_provider("test/m"))
+    for block in blocks:
+        assert "sk-child-secret-xyz" not in block
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_child_bash_injects_parent_credential_env(tmp_path, monkeypatch):
+    """The child's bash tool reads ``context.variables`` — which must be the
+    PARENT's store, so a delegated child can use a secret its parent holds
+    without either of them ever printing it."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.tools.builtin import execute_bash
+    from local_operator.variables import VariableStore
+
+    parent = make_session(tmp_path, OneShotStream())
+    parent._variables = VariableStore(cwd=str(tmp_path), env={})
+    parent._variables.store_credential("PARENT_TOOL_KEY", "sk-inherited-secret-1", "command")
+
+    child = await build_child(parent)
+
+    # The child's per-turn tool context carries the parent's store — the same
+    # object, not a copy, so bash injection and list_variables agree with the
+    # parent's live state.
+    ctx = child._build_tool_context()
+    assert ctx.variables is parent._variables
+    result = await execute_bash(
+        "bash-1",
+        # Presence probe only: the value is redacted from output by design,
+        # so the test asserts the env var EXISTS for the child process.
+        {"command": 'test -n "$PARENT_TOOL_KEY" && echo present || echo missing'},
+        None,
+        None,
+        ctx,
+    )
+    assert not result.is_error, result.text
+    assert "present" in result.text
+    assert "sk-inherited-secret-1" not in result.text
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_child_sees_a_credential_stored_after_its_spawn(tmp_path, monkeypatch):
+    """The store is shared by reference: an operator who stores a credential
+    while a long-running child is mid-task must have it reach that child's
+    LATER turns without a respawn. Proven end to end through bash."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.tools.builtin import execute_bash
+    from local_operator.variables import VariableStore
+
+    parent = make_session(tmp_path, OneShotStream())
+    parent._variables = VariableStore(cwd=str(tmp_path), env={})
+
+    child = await build_child(parent)
+    ctx_before = child._build_tool_context()
+    result_before = await execute_bash(
+        "bash-1",
+        {"command": 'test -n "$LATE_KEY" && echo present || echo missing'},
+        None,
+        None,
+        ctx_before,
+    )
+    assert "missing" in result_before.text
+
+    # Stored AFTER the child exists — the operator's mid-task /credential.
+    parent._variables.store_credential("LATE_KEY", "sk-late-secret-2", "command")
+
+    # A later turn rebuilds the tool context; the SAME store (by reference)
+    # now injects the new credential.
+    ctx_after = child._build_tool_context()
+    result_after = await execute_bash(
+        "bash-2",
+        {"command": 'test -n "$LATE_KEY" && echo present || echo missing'},
+        None,
+        None,
+        ctx_after,
+    )
+    assert "present" in result_after.text
+    assert "sk-late-secret-2" not in result_after.text
+    await child.dispose()
+    await parent.dispose()
+
+
 @pytest.mark.asyncio
 async def test_child_inherits_a_mid_session_model_override(tmp_path, monkeypatch):
     """``/model`` swaps the spec through ``set_model``. A child spawned after

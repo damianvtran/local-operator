@@ -1032,6 +1032,16 @@ async def _build_child_session(
         job_id=job_id,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        # The parent's variable store. DEFENSIVE PARITY, not a bug fix: no
+        # current ``TOOL_BUILDERS`` entry reads ``context.variables`` at
+        # construction time (the variables readers are all execute-time, and
+        # the child ``Session`` below receives ``variables=`` directly, which
+        # is what ``_build_tool_context`` re-derives on every turn). Kept so
+        # this construction context matches the session factory's shape
+        # (session_factory.py builds one store and hands it to both contexts)
+        # and any future createIf gate that does read it sees the same store
+        # the executing tools will.
+        variables=getattr(parent_session, "_variables", None),
         resolve_internal_url=resolve_internal_url,
         subagent_comms=getattr(parent_session, "subagent_comms", None),
         # The child can work with roles too (look one up, or record what it

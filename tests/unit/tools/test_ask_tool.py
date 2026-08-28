@@ -298,6 +298,65 @@ async def test_a_secret_question_stores_the_value_and_reports_only_the_key() -> 
 
 
 @pytest.mark.asyncio
+async def test_a_stored_secret_question_announces_the_key_to_the_session() -> None:
+    """The ask result names the key once; the session journal is what makes
+    it findable on every LATER turn. Without the announce hook call, the
+    operator's pasted credential was stored and then forgotten by the model
+    two turns later (the failure behind session 835fbcafdc27)."""
+    from local_operator.variables import VariableStore
+
+    secret = "ghp_announce_me_never_show"
+    hook, _seen = await _answer_with({"GITHUB_TOKEN": [secret]})
+    store = VariableStore(cwd="/tmp", env={})
+    announced: list[tuple[str, dict[str, Any]]] = []
+
+    def journal(key: str, **kwargs: Any) -> None:
+        announced.append((key, kwargs))
+
+    context = ToolContext(
+        cwd=".",
+        session_id="s",
+        has_ui=True,
+        ask_user=hook,
+        variables=store,
+        journal_credential=journal,
+    )
+    result = await _call(context, {"questions": [_secret_question()]})
+
+    assert result.is_error is False
+    assert announced == [("GITHUB_TOKEN", {"replaced": False})]
+    # The announce payload must carry the key, never the value.
+    assert secret not in str(announced)
+
+
+@pytest.mark.asyncio
+async def test_an_announce_hook_failure_does_not_fail_the_ask() -> None:
+    """The credential is stored before the announcement runs; a host whose
+    journal hook raises must not lose the answer it already holds."""
+    from local_operator.variables import VariableStore
+
+    secret = "ghp_hook_blows_up"
+    hook, _seen = await _answer_with({"GITHUB_TOKEN": [secret]})
+    store = VariableStore(cwd="/tmp", env={})
+
+    def broken_journal(key: str, **kwargs: Any) -> None:
+        raise RuntimeError("journal unavailable")
+
+    context = ToolContext(
+        cwd=".",
+        session_id="s",
+        has_ui=True,
+        ask_user=hook,
+        variables=store,
+        journal_credential=broken_journal,
+    )
+    result = await _call(context, {"questions": [_secret_question()]})
+    assert result.is_error is False
+    assert "answer: GITHUB_TOKEN" in result.text
+    assert store.credential_names() == ["GITHUB_TOKEN"]
+
+
+@pytest.mark.asyncio
 async def test_a_declined_secret_question_is_the_same_as_answering_nothing() -> None:
     """Escaping a secret question is a refusal, not a stored blank. The
     existing unanswered path already tells the model not to ask again."""

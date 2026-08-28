@@ -4603,14 +4603,31 @@ async def execute_list_variables(
         ListVariablesParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "list_variables", exc)
-    names = _variable_store(context).names()
+    store = _variable_store(context)
+    names = store.names()
     shown = names if len(names) <= 100 else names[:100] + ["…"]
     body = "\n".join(shown) if shown else "(no variables defined)"
+    # Session credentials are a SEPARATE namespace from ``names()`` (which
+    # excludes them by design — a credential must never resolve through the
+    # ordinary read path). But a model that only sees "(no variables)" has
+    # no way to know a credential the operator just stored exists, and the
+    # live failure (session 835fbcafdc27) was exactly that: list_variables
+    # said nothing, the model guessed a conventional name, and ten minutes
+    # passed before it found the real one in the system-prompt tail. Names
+    # only — the value stays out of tool results entirely.
+    credential_names = store.credential_names() if hasattr(store, "credential_names") else []
+    if credential_names:
+        listed = ", ".join(credential_names)
+        body = (
+            f"{body}\n\n"
+            "session credentials (secret, usable via bash env, not readable): "
+            f"{listed}"
+        )
     return _text(
         tool_call_id,
         "list_variables",
         f"{len(names)} variable(s) available:\n{body}",
-        details={"count": len(names)},
+        details={"count": len(names), "credentials": len(credential_names)},
     )
 
 
@@ -4631,6 +4648,22 @@ async def execute_read_variable(
     if not params.name.strip():
         return _error(tool_call_id, "read_variable", "name must be a non-empty string")
     store = _variable_store(context)
+    # Credential check BEFORE the unknown-variable branch: a stored credential
+    # is deliberately absent from ``names()`` (values must never resolve here),
+    # so without this the tool answers "unknown variable (see list_variables)"
+    # — circular advice, now that list_variables names credentials — and the
+    # model burns a turn retrying a name that can never be read. The error
+    # says where the value DOES live instead.
+    credential_names = store.credential_names() if hasattr(store, "credential_names") else []
+    if params.name in credential_names:
+        return _error(
+            tool_call_id,
+            "read_variable",
+            f"SESSION CREDENTIAL: {params.name} is a session credential. Its "
+            "value is never readable. It is injected as an environment "
+            f"variable into every bash command — use it there (e.g. a child "
+            f"process reads ${params.name}), never echo it.",
+        )
     if params.name not in store.names():
         return _error(
             tool_call_id, "read_variable", f"unknown variable: {params.name} (see list_variables)"
@@ -7975,9 +8008,17 @@ def _report_secret_answers(
     that cannot store them itself is not silently emptied. This is the last
     hop before the result is written into the transcript, so it is also the
     last hop that can keep those bytes out of the model's context.
+
+    Also the hop that ANNOUNCES a stored credential to the model: the ask
+    result names the key, but a result is one turn's text — the
+    ``session_credential`` journal record (via the session hook on the
+    context) is what makes the key findable on every LATER turn, the same
+    way ``/credential`` does. Without it the ask path stored a secret the
+    model had already forgotten the name of two turns later.
     """
     store = context.variables if context is not None else None
     store_fn = getattr(store, "store_credential", None)
+    announce = getattr(context, "journal_credential", None) if context is not None else None
     reported: dict[str, list[str]] = {}
     for question in questions:
         chosen = list(answers.get(question.id, []))
@@ -7993,6 +8034,16 @@ def _report_secret_answers(
         key = getattr(credential, "key", None)
         if getattr(result, "ok", False) and isinstance(key, str):
             reported[question.id] = [key]
+            # Announce only on a successful store, and only the KEY: the
+            # announcement is journaled into the live context and sent to the
+            # provider, so the value must never ride it.
+            if callable(announce):
+                try:
+                    announce(key, replaced=bool(getattr(result, "replaced", False)))
+                except Exception:
+                    # The store already succeeded; an announcement failure
+                    # must not fail the ask whose answer is in hand.
+                    logger.warning("could not announce stored credential", exc_info=True)
         else:
             reported[question.id] = [ASK_SECRET_NOT_PROVIDED]
     # Preserve any extra keys the host returned (should not happen) without

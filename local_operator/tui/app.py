@@ -12986,10 +12986,20 @@ class OperatorApp(App[None]):
             notice(format_credential_list(store.list_credentials()))
             return
         if parsed.action == "forget":
-            notice(format_credential_forget(store.forget_credential(parsed.key), parsed.key))
+            removed = store.forget_credential(parsed.key)
+            self._journal_credential_change(parsed.key, action="forgot")
+            notice(format_credential_forget(removed, parsed.key))
             return
         if parsed.action == "forget-all":
-            notice(format_credential_forget_all(store.clear_credentials()))
+            # Snapshot the names BEFORE the clear: clear_credentials() empties
+            # the store, so iterating credential_names() after it reads an
+            # empty list and the model is never told anything was removed
+            # (review round 1, R1 — the loop below was dead code as written).
+            names = store.credential_names()
+            count = store.clear_credentials()
+            for key in names:
+                self._journal_credential_change(key, action="forgot")
+            notice(format_credential_forget_all(count))
             return
         self.run_worker(
             self._credential_store_flow(store, parsed.key), thread=False, group="credential"
@@ -13008,11 +13018,38 @@ class OperatorApp(App[None]):
             reason = result.reason or "empty-value"
             self._notice(describe_store_failure(reason, key), "warning")
             return
+        # Announce AFTER a successful store and through the session's journal
+        # (never a bare transcript write): the announcement must land in the
+        # live context so the next turn sees it. This is the fix for the
+        # model that never learned a key its operator had just stored
+        # (session 835fbcafdc27).
+        self._journal_credential_change(result.credential.key, replaced=bool(result.replaced))
         verb = "Replaced" if result.replaced else "Stored"
         self._notice(
             f"{verb} {result.credential.key}. Injected into every bash command "
             "as an environment variable; the agent cannot read the value."
         )
+
+    def _journal_credential_change(
+        self, key: str, *, action: str = "stored", replaced: bool = False
+    ) -> None:
+        """Best-effort pass-through to the session's credential journal.
+
+        The TUI handler is sync and may run off the turn loop (a worker for
+        the store verb), so it cannot await the session's async journal
+        methods directly — ``Session.journal_credential_change`` is sync by
+        design for exactly this caller. A session without the method (still
+        starting, or a reduced test double) is not an error: the store write
+        already happened, and only the announcement is skipped.
+        """
+        journal = getattr(self._session, "journal_credential_change", None)
+        if callable(journal):
+            try:
+                journal(key, action=action, replaced=replaced)
+            except Exception:
+                # The credential is stored; a failed announcement must not
+                # turn a successful /credential into an error notice.
+                logger.warning("could not announce credential change", exc_info=True)
 
     def _login_callbacks(self, definition: object) -> LoginCallbacks:
         """Login hooks that render into the transcript instead of the terminal.

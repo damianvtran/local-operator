@@ -437,6 +437,11 @@ def test_credentials_ride_the_volatile_tail_as_names_only() -> None:
     assert "<session-credentials>" in tail
     assert "`GITHUB_TOKEN`" in tail
     assert "`DEPLOY_KEY`" in tail
+    # The discoverability sentence: the live failure was a model that never
+    # connected "I just added the API key" with this block, because nothing
+    # told it the names below are where to look.
+    assert "added a key or credential" in tail
+    assert "list_variables" in tail
     for block in blocks[:3]:
         assert "GITHUB_TOKEN" not in block
     # Idle sessions pay nothing: no names means no block.

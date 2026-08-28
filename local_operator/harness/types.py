@@ -706,6 +706,15 @@ class ToolContext(BaseModel):
     # was never shown the question. ``None`` means the tool is not advertised
     # at all (createIf), for the same reason ``wake_scheduler`` is.
     ask_user: AskUserFn | None = None
+    # Optional host hook that makes a mid-session credential change VISIBLE to
+    # the model (``Session.journal_credential_change``). The ``ask`` tool
+    # stores secret answers through ``context.variables`` directly, so the
+    # store write succeeds with no session in sight — but without this hook
+    # nothing tells the model a key just appeared, and the live failure
+    # (session 835fbcafdc27) was the model guessing names for ten minutes.
+    # ``None`` (bare tool tests, hosts without a session) degrades to a
+    # silent store: the credential still works through bash injection.
+    journal_credential: Any | None = None
 
 
 ToolExecuteFn = Callable[
