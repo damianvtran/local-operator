@@ -413,13 +413,20 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     # settles the row that already printed; text is addressed by message id so
     # deltas accumulate into one block rather than one block per delta.
     ordered: list[tuple[str, str]] = []
+    # A child may retain 500 events and this fold runs for every relayed event
+    # plus the 1 Hz live-page poll. Membership in the ordered list made each
+    # refresh quadratic in distinct rows even though insertion order is already
+    # represented separately; the set keeps the same first-seen contract in O(1).
+    remembered: set[tuple[str, str]] = set()
     streams: dict[str, str] = {}
     tools: dict[str, SubagentEntry] = {}
     notices: dict[str, SubagentEntry] = {}
 
     def remember(kind: str, key: str) -> None:
-        if (kind, key) not in ordered:
-            ordered.append((kind, key))
+        identity = (kind, key)
+        if identity not in remembered:
+            remembered.add(identity)
+            ordered.append(identity)
 
     def note(index: int, text: str, kind: NoticeKind) -> None:
         notices[f"n{index}"] = _notice(f"n{index}", text, kind)
@@ -1554,10 +1561,14 @@ class SubagentView(Vertical):
         for block in reversed(self._blocks[common:]):
             self._body.remove_block(block)
         del self._blocks[common:]
-        for entry in entries[common:]:
-            block = entry_block(entry)
-            self._body.append_block(block)
-            self._blocks.append(block)
+        # Opening a retained 500-event child can add hundreds of rows at once.
+        # Mount them as one Textual batch so stylesheet/layout settlement happens
+        # once; live refreshes still append their ordinary one-row suffix.
+        with self._body.batch_append():
+            for entry in entries[common:]:
+                block = entry_block(entry)
+                self._body.append_block(block)
+                self._blocks.append(block)
         self._entries = list(entries)
 
     def _empty_state(self) -> str:
