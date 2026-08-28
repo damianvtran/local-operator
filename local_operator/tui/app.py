@@ -12020,12 +12020,16 @@ class OperatorApp(App[None]):
         # an exact entry or a wildcard that happened to expand. Tested on the
         # key's own SHAPE rather than "not equal to the primary", which called
         # every future match rule a wildcard.
-        if chain_key == DEFAULT_CHAIN_KEY:
+        # `chain_key` cannot be None here — a None key yields no targets and
+        # returned above — but the type does not carry that, and asserting it
+        # beats a cast that would hide a real None if the branch above moves.
+        matched_key = chain_key or DEFAULT_CHAIN_KEY
+        if matched_key == DEFAULT_CHAIN_KEY:
             matched = DEFAULT_CHAIN_KEY
-        elif chain_key.endswith("/*"):
-            matched = f"{chain_key} (wildcard)"
+        elif matched_key.endswith("/*"):
+            matched = f"{matched_key} (wildcard)"
         else:
-            matched = f"{chain_key} (exact)"
+            matched = f"{matched_key} (exact)"
         rows.append(("matched chain", matched))
 
         # ONE row is serving. The marker is a claim about a single route, and
