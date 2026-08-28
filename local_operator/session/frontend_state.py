@@ -335,14 +335,7 @@ def _wire_value(value: Any) -> Any:
     if isinstance(value, frozenset):
         return [_wire_value(item) for item in value]
     if isinstance(value, BaseModel):
-        mutable = value.model_copy(
-            update={name: _wire_value(item) for name, item in value.__dict__.items()}
-        )
-        if value.model_extra:
-            mutable.__pydantic_extra__ = {
-                name: _wire_value(item) for name, item in value.model_extra.items()
-            }
-        return mutable
+        return _thaw_model(value)
     return value
 
 
@@ -509,11 +502,30 @@ class _FrozenUsage(Usage):
 
     model_config = ConfigDict(extra="allow", frozen=True)
 
+    @model_serializer(mode="wrap")
+    def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return handler(_thaw_model(self))
+
 
 class _FrozenFrontendUsage(FrontendUsage):
     """FrontendUsage-compatible immutable descendant accounting value."""
 
     model_config = ConfigDict(extra="allow", frozen=True)
+
+    @model_serializer(mode="wrap")
+    def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return handler(_thaw_model(self))
+
+
+def _thaw_model(value: BaseModel) -> BaseModel:
+    mutable = value.model_copy(
+        update={name: _wire_value(item) for name, item in value.__dict__.items()}
+    )
+    if value.model_extra:
+        mutable.__pydantic_extra__ = {
+            name: _wire_value(item) for name, item in value.model_extra.items()
+        }
+    return mutable
 
 
 def _freeze_usage(value: Usage) -> _FrozenUsage:
