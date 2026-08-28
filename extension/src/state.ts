@@ -41,21 +41,14 @@ export interface PendingOrigin {
    * nondefault port and IPv6 brackets. */
   authority: string;
   requestId: string;
-  // Immutable per-PROMPT generation token, minted every time the prompt slot
-  // is (re)written. The popup binds its rendered view and its decision message
-  // to this id, and the worker rejects a decision whose id is no longer the
-  // live one — without it, a popup still showing origin A could click through
-  // to whatever origin B had replaced the slot with (round-2 B1: a consent UI
-  // must never approve something the user was not looking at).
+  // Legacy single-slot generation. The queue migrator imports it as entryId.
   promptId: string;
 }
 
-// Async access-request state (see access-flow.ts for the machine and the
-// incident that motivated it). Session-scoped on purpose: like `origins`
-// "once" grants, an approval should not outlive the browser session, and
-// session storage survives MV3 worker death, which worker memory does not —
-// a decision made between two await_access polls must still be readable.
-export type { AccessRequest, OnceGrants } from "./access-flow";
+// Queue authority stays session-scoped: it survives MV3 worker death but not
+// the browser session that owns the logins being approved.
+export type { AccessQueueEntry, AccessResults, OnceGrants } from "./access-queue";
+export type { AccessRequest } from "./access-flow";
 
 export interface LocalState {
   token?: string;
@@ -73,10 +66,14 @@ export interface SessionState {
   // Snapshot refs are per-surface for the same reason: one tab's snapshot must
   // not overwrite another's click targets mid-interaction.
   refs?: Record<string, Record<string, SnapshotRef>>;
+  // Legacy #329 slots are read only by the lazy migration.
   pendingOrigin?: PendingOrigin;
   accessRequest?: import("./access-flow").AccessRequest;
-  onceGrants?: import("./access-flow").OnceGrants;
   accessTombstones?: import("./access-flow").AccessTombstones;
+  accessQueueVersion?: number;
+  accessQueue?: import("./access-queue").AccessQueueEntry[];
+  accessResults?: import("./access-queue").AccessResults;
+  onceGrants?: import("./access-queue").OnceGrants;
 }
 
 export async function getLocal(): Promise<LocalState> {
@@ -89,8 +86,11 @@ export async function getSession(): Promise<SessionState> {
     "refs",
     "pendingOrigin",
     "accessRequest",
-    "onceGrants",
     "accessTombstones",
+    "accessQueueVersion",
+    "accessQueue",
+    "accessResults",
+    "onceGrants",
   ]);
 }
 
