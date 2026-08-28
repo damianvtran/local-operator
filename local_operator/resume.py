@@ -27,6 +27,16 @@ from typing import Any, NamedTuple
 #: whole "which session" decision stays ONE value threaded through one parameter.
 RESUME_LATEST = "@latest"
 
+#: Rows the CLI's ``--resume <typo>`` recovery listing prints to stderr.
+#:
+#: Named rather than a bare ``10`` at the call site because it is a DELIBERATELY
+#: short list, not an incidental one: the listing is an error message helping a
+#: user who mistyped an id, where the newest few sessions are the help and the
+#: whole store would bury it. The picker is the surface that shows everything
+#: (:func:`recent_session_rows` returns the full store by default); this is the
+#: one place a cap is the right answer, so it says so.
+RESUME_RECOVERY_LISTING = 10
+
 #: The file whose presence makes a directory a resumable session. Also what the
 #: recency ordering is read from: a directory's own mtime moves for reasons that
 #: are not turns (an origin stamp, a sibling file), so it is not the clock to use.
@@ -1036,8 +1046,18 @@ def _save_origin_cache(path: Path, entries: dict[str, Any]) -> None:
         return
 
 
-def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]]:
+def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[str, float]]:
     """``(id, mtime)`` for the USER's resumable sessions, newest first.
+
+    ``limit=None`` means NO TRUNCATION and is the default, so a caller that says
+    nothing gets the whole store. That direction is deliberate and was learned
+    the expensive way: this defaulted to ``10`` while the picker called it with
+    no argument, and the "uncapped" picker silently showed ten rows on a
+    236-session store — a worse version of the bug the change was written to
+    fix. A default that truncates makes forgetting to pass a limit look like
+    working code, so the safe default is the complete answer and every caller
+    that wants less has to say so at its own call site, where a reader can see
+    it.
 
     Subagent sessions are excluded (:func:`is_user_session`): they are the
     machine's own scratch conversations, and a listing offered to a human is
@@ -1156,7 +1176,10 @@ def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]
     if merged != cached:
         _save_origin_cache(cache_path, merged)
     rows.sort(key=lambda row: row[1], reverse=True)
-    return rows[:limit]
+    # Sliced only when a limit was actually asked for: ``rows[:None]`` would
+    # also return everything, but spelling it out keeps "no limit" a decision
+    # the code states rather than a property of slice syntax.
+    return rows if limit is None else rows[:limit]
 
 
 def format_age(seconds: float) -> str:
@@ -1413,7 +1436,7 @@ def _condense(text: str, max_chars: int) -> str:
     return cut.rstrip(" ,.;:") + "…"
 
 
-def recent_session_rows(config_dir: Path, limit: int = 10) -> list[SessionRow]:
+def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[SessionRow]:
     """:class:`SessionRow` per resumable session, newest first.
 
     Layered over :func:`recent_sessions` rather than replacing it: the CLI's
@@ -1427,12 +1450,16 @@ def recent_session_rows(config_dir: Path, limit: int = 10) -> list[SessionRow]:
     frame. Moving this to a worker would trade that for a picker that opens
     empty and fills in, which is worse for a list the user is about to read.
 
-    The ``/resume`` picker now calls this WITHOUT a limit, so it is the one
-    caller whose row count tracks the whole store. That is affordable because
-    the scan underneath is limit-independent (see :func:`recent_sessions`) and
-    the only per-row cost added is :func:`session_name`, one bounded head read.
-    ``limit`` remains for the callers that genuinely want a short list — the
-    CLI's ten-row recovery listing and the mobile daemon's summaries.
+    ``limit=None`` means NO TRUNCATION, matching :func:`recent_sessions` — see
+    its docstring for why the untruncated answer is the DEFAULT rather than the
+    opt-in. The ``/resume`` picker relies on that default; every caller that
+    wants a short list passes its own number at its own call site (the CLI's
+    recovery listing, the mobile daemon's history and search), so the cap is
+    visible where it is chosen instead of hiding in this signature.
+
+    Uncapping is affordable because the scan underneath is limit-independent
+    (see :func:`recent_sessions`) and the only per-row cost added is
+    :func:`session_name`, one bounded head read.
     """
     return [
         SessionRow(session_id, mtime, session_name(config_dir / "sessions" / session_id))

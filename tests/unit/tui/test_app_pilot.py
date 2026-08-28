@@ -6594,6 +6594,64 @@ async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_the_picker_lists_a_store_far_larger_than_any_default_limit(
+    tmp_path, monkeypatch
+) -> None:
+    """The picker shows the WHOLE store, exercised through the real command.
+
+    This is the regression that two review rounds and a full CI run missed,
+    because every other fixture here has fewer rows than the smallest cap: the
+    reach fix removed ``RESUME_PICKER_LIMIT`` but ``recent_session_rows``
+    defaulted to ``limit=10`` and ``_cmd_resume`` passed no argument, so the
+    "uncapped" picker showed ten rows on a 236-session store — strictly worse
+    than the cap of 200 it replaced.
+
+    250 sessions, chosen to exceed every limit in the codebase (10 recovery,
+    100 daemon summaries, 200 daemon search) so no default can satisfy it
+    accidentally. Driven by typing ``/resume`` rather than by calling
+    ``recent_session_rows`` directly: a parameterised stand-in for the product
+    path is exactly what let this through the first time.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    total = 250
+    for index in range(total):
+        _seed_session(tmp_path, f"s{index:04d}", prompt=f"session number {index}")
+
+    session = FakeSession()
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory([]),
+    )
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        # Every session is HELD, which is what makes it filterable: the filter
+        # only ever scans the rows the screen was handed.
+        assert (
+            len(picker.visible_rows) == total
+        ), f"picker holds {len(picker.visible_rows)} of {total} sessions"
+        # And the header says so, rather than reporting a truncated total.
+        assert f"{total:,} sessions" in "\n".join(picker.render_lines_for_test())
+
+        # The oldest session — the one furthest past every cap — is reachable by
+        # filtering, which is the user-visible failure being fixed ("a session I
+        # know exists cannot be found").
+        oldest = f"s{total - 1:04d}"
+        picker.set_query(oldest)
+        await pilot.pause()
+        assert [row.id for row in picker.visible_rows] == [oldest]
+
+
+@pytest.mark.asyncio
 async def test_choosing_in_the_picker_resumes_that_session(tmp_path, monkeypatch) -> None:
     """Enter on a row is what actually resumes it — the picker's whole job."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))

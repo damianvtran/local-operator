@@ -2246,8 +2246,14 @@ def test_recent_sessions_returns_every_user_session_when_uncapped(tmp_path: Path
 
     assert len(rows) == 250
     assert not [row for row in rows if row[0].startswith("c")]
-    # The default short listing still truncates — only the picker went uncapped.
-    assert len(resume_mod.recent_sessions(tmp_path)) == 10
+    # The DEFAULT is now the untruncated answer, and this assertion is the
+    # reason it had to change: it previously pinned the truncating default as
+    # correct, which is what made the picker's bare call look right while it
+    # silently returned ten rows. A caller that says nothing gets everything;
+    # a short list is opt-in at the call site that wants one.
+    assert len(resume_mod.recent_sessions(tmp_path)) == 250
+    assert len(resume_mod.recent_sessions(tmp_path, limit=None)) == 250
+    assert len(resume_mod.recent_sessions(tmp_path, limit=10)) == 10
 
 
 def test_a_subagent_marker_is_parsed_not_merely_detected(tmp_path: Path) -> None:

@@ -3943,7 +3943,14 @@ class OperatorApp(App[None]):
             # limit-independent (see ``resume.recent_sessions``) and the counter
             # below becomes truthful as a consequence: ``_all`` is now the
             # store's real total rather than a number that never says it is one.
-            rows = recent_session_rows(config_dir())
+            #
+            # ``limit=None`` is passed EXPLICITLY rather than left to the
+            # default. Relying on the default is what shipped this surface with
+            # a cap of ten: the signature defaulted to ``10``, this line said
+            # nothing, and "uncapped" was true only in the comment above. The
+            # argument is now visible at the call site, so the claim and the
+            # code can be checked against each other in one place.
+            rows = recent_session_rows(config_dir(), limit=None)
             if not rows:
                 # Says whose sessions, not that the disk is empty. Delegated
                 # subagent runs live in the same directory and are deliberately
