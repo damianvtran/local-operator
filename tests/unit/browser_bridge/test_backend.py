@@ -59,6 +59,16 @@ def test_error_taxonomy(code: ErrorCode, fragment: str) -> None:
     assert fragment in format_error(error, action="goto", surface="bridge:1:n")
 
 
+def test_tab_limit_tells_the_agent_to_close_only_its_own_tab() -> None:
+    error = BridgeError(ErrorCode.TAB_LIMIT, "8 browser tabs are already open")
+
+    text = format_error(error, action="open")
+
+    assert "close only YOUR tab" in text
+    assert "marked '(yours)'" in text
+    assert "another session (or the user) must close one" in text
+
+
 @pytest.mark.asyncio
 async def test_missing_state_is_actionable(tmp_path: Path) -> None:
     with pytest.raises(BridgeUnreachable, match="lop browser status"):

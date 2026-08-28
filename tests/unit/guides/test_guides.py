@@ -186,6 +186,20 @@ def test_mobile_guide_requires_a_password_delivery_ask() -> None:
     assert "context window" in body
 
 
+def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
+    guides = {guide.name: guide for guide in discover_guides()}
+    resolver = make_guide_resolver(guides)
+
+    browser = resolver("guide://browser")
+    agents = resolver("guide://agents")
+    assert browser is not None and agents is not None
+    assert "Close before your final answer" in browser
+    assert "Long-lived TUI/cmux processes stay alive between turns" in browser
+    assert "close failed and the handle was dropped" in browser
+    assert "Before a subagent's terminal handoff" in agents
+    assert "put child disposal in `finally`" in agents
+
+
 def test_configuration_guide_names_the_real_instructions_file() -> None:
     # The guide exists so an agent does not have to infer this from source and
     # end up editing a file nothing reads.
