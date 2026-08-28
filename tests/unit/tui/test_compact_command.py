@@ -365,6 +365,36 @@ async def test_the_receipt_falls_back_when_there_are_no_figures() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_post_compaction_turn_end_cannot_rebound_the_band() -> None:
+    """Automatic compaction settles before the held agent end. That boundary
+    must carry the post-pass occupancy while retaining the pre-pass usage for
+    billing; otherwise the footer visibly jumps back to 53.7% after showing
+    11.9% and the canonical state teaches attached terminals the same lie.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        assert app._status is not None
+        app._status.update(context_tokens=131_100, context_is_estimate=True)
+        app.on_turn_ended(
+            TurnEnded(
+                False,
+                None,
+                context_tokens=131_100,
+                context_is_estimate=True,
+                usage=None,
+            )
+        )
+        await pilot.pause()
+        tokens = app._status.context_tokens
+        estimated = app._status.context_is_estimate
+
+    assert tokens == 131_100
+    assert estimated is True
+
+
+@pytest.mark.asyncio
 async def test_the_band_reading_drops_by_what_the_pass_saved() -> None:
     """The band reports the next request's size, and a compaction changes only
     the history — so the saving transfers exactly. Left alone the reading would
