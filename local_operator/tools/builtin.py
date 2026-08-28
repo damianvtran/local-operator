@@ -5823,7 +5823,8 @@ def _access_result_text(
             + (f" ({position} of {pending_count})" if position and pending_count else "")
             + ". FIRST notify the user (via the ask "
             "tool or a message) to approve it in the Local Operator extension popup "
-            "(toolbar icon, badge '!') — the badge alone is not reliably seen — THEN "
+            "(toolbar icon, numbered badge showing the pending count) — the badge alone "
+            "is not reliably seen — THEN "
             "call action='await_access' with the same url to wait for the decision."
         )
     if state == "superseded":
