@@ -667,3 +667,104 @@ async def test_typing_into_the_mcp_server_slot_opens_its_rows(verb: str) -> None
 
     assert editor.picker.is_open(), f"/mcp {verb} left the picker closed"
     assert rows == [f"{verb} linear", f"{verb} notion"], rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed,ghost,caret_char,ghost_head",
+    [
+        # The D1 case: a fully typed command whose whole completion is the
+        # trailing space. With the caret block on the ghost this drew ZERO dim
+        # pixels and the frame was byte-identical to the pre-feature baseline.
+        ("/mcp", " ", "p", " "),
+        # A multi-character ghost: D2's "bright inverted cell then a dim tail".
+        ("/mc", "p ", "c", "p"),
+        ("/analytic", "s ", "c", "s"),
+    ],
+)
+async def test_the_caret_block_sits_on_typed_text_not_on_the_ghost(
+    typed: str, ghost: str, caret_char: str, ghost_head: str
+) -> None:
+    """The caret must not consume the ghost's first cell.
+
+    Textual inserts the suggestion AT ``cursor_column`` and then paints the
+    caret over that same cell, so the composer's inverted block landed on the
+    ghost's first character — invisible for a one-character ghost, and an
+    errored-looking bright cell for a longer one (design review round 1,
+    D1/D2). ``_paint_ghost_caret`` moves the block one cell left onto the last
+    typed character.
+
+    Asserted on the RENDERED SEGMENTS rather than on a screenshot, because the
+    defect is a colour assignment: the cell carrying the caret must be the
+    typed one, and the ghost's first cell must carry the suggestion ink. The
+    post-pass had no test at all, so neutering it left the suite green while
+    the most important design finding regressed (agent review round 2, N1).
+    """
+    app = _mcp_app()
+    configs = _oauth_configs()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            await _type(pilot, typed)
+            await _settle(pilot, 10)
+            assert editor.suggestion == ghost, editor.suggestion
+
+            cursor_style = editor.get_component_rich_style("text-area--cursor")
+            ghost_style = editor.get_component_rich_style("text-area--suggestion")
+            segments = [
+                (seg.text, seg.style) for seg in editor.render_line(0)._segments if seg.text
+            ]
+
+    # The caret cell: the LAST TYPED character, carrying the cursor ground.
+    caret_cells = [
+        text
+        for text, style in segments
+        if style is not None and style.bgcolor == cursor_style.bgcolor and text.strip()
+    ]
+    assert caret_cells == [caret_char], (
+        f"the caret block should sit on the typed {caret_char!r}, not on "
+        f"{caret_cells!r} — it is covering the ghost again"
+    )
+
+    # The ghost's first cell: dim ink, NOT the cursor ground.
+    ghost_cells = [
+        text for text, style in segments if style is not None and style.color == ghost_style.color
+    ]
+    assert ghost_cells, "no cell carried the suggestion colour — the ghost is invisible"
+    assert ghost_cells[0].startswith(ghost_head), ghost_cells
+
+
+@pytest.mark.asyncio
+async def test_a_live_selection_withholds_the_ghost() -> None:
+    """The SELECTION half of gate 1, isolated from ``watch_selection``.
+
+    A ghost is an insertion at a caret, and a live range means Tab's edit is
+    not that — so the preview would describe an edit the key will not make.
+    ``shift+left`` clears the ghost through ``watch_selection`` regardless, so
+    relaxing this clause left the suite green (agent review round 2, N2), the
+    same shape as round 1's M1 one clause over.
+
+    Reachable: with the anchor earlier and the selection END at the buffer end,
+    the caret-offset half of the gate passes and only this clause refuses.
+    """
+    app = _mcp_app()
+    configs = _oauth_configs()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            await _type(pilot, "/mcp")
+            await _settle(pilot, 10)
+            assert editor._ghost_completion() == " ", "precondition: caret at end ghosts"
+
+            # Anchor earlier, END still at the buffer end: the caret half of
+            # gate 1 passes, so only the selection clause can refuse.
+            editor.selection = Selection((0, 1), (0, 4))
+            assert editor._caret_offset() == len(editor.text), "the caret half must still pass"
+            assert editor._ghost_completion() == "", (
+                "a live selection admitted a ghost — Tab would replace the range, "
+                "not append at a caret"
+            )
