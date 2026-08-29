@@ -633,8 +633,8 @@ class AssistantBlock(TranscriptBlock):
         Column-trimmed markdown source is not the missing third option — it is
         **impossible**, not merely unimplemented, and that is what decides the
         rule. A rendered column does not index a source column: measured on the
-        reported bullet, ``frontend`` sits at rendered column 56 and source
-        column 57, because ``- `` paints as `` • `` (+1) and the ``**`` around
+        reported bullet, ``frontend`` sits at rendered column 57 and source
+        column 58, because ``- `` paints as `` • `` (+1) and the ``**`` around
         the word vanishes (-2). The offset is content-dependent AND signed, and
         :func:`_copy_markdown.align` deliberately maps rows to source *lines*,
         never claiming a column correspondence. So for a partial row there are

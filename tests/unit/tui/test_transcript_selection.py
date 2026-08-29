@@ -494,7 +494,7 @@ async def test_a_drag_starting_inside_the_gutter_still_copies_from_the_prose() -
 # The rule that answers it, and the reason it is drawn where it is: there is no
 # third option between "the glyphs" and "the whole source line". Column-trimmed
 # markdown would need a rendered column to index a source column, and it does
-# not — ``frontend`` sits at rendered column 56 and source column 57 in the
+# not — ``frontend`` sits at rendered column 57 and source column 58 in the
 # fixture below, because ``- `` paints as `` • `` (+1) while the ``**`` vanishes
 # (-2), an offset that is content-dependent and signed. So a take that does not
 # cover the full content of its rows AND touches at most one source line copies
@@ -561,6 +561,7 @@ async def test_a_word_dragged_out_of_a_bullet_copies_only_that_word() -> None:
         selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
         copied = block.get_selection(selection)
 
+        assert copied is not None
         assert copied == ("frontend", "\n")
         # The rest of the source line, which the old code copied wholesale.
         assert "Transient failures" not in copied[0]
@@ -708,6 +709,37 @@ async def test_a_partial_multi_line_selection_still_copies_markdown() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", [MARKDOWN, BULLETS], ids=["mixed-constructs", "bullets"])
+async def test_a_whole_message_copy_is_byte_identical_markdown(text: str) -> None:
+    """Select-all still returns the source verbatim, not a rendered flattening.
+
+    The regression this pins is the one a sub-line rule is most likely to cause
+    by accident: the glyph path is strictly better for a partial take and
+    strictly WORSE for a whole one, so a gate that is even slightly too eager
+    degrades every select-all to rendered text — bullets as ``•``, bold with
+    its ``**`` stripped, the fence unfenced. Asserted as byte equality rather
+    than by substring (which the older markdown tests use) because a leaked
+    glyph path passes every substring check while dropping the blank separator
+    rows and the trailing pad, and equality is the only predicate that sees it.
+
+    ``BULLETS`` is included alongside ``MARKDOWN`` because it is the fixture
+    the sub-line tests drag inside of: the same message must copy whole when
+    the whole of it is taken.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+
+        # ``update_text`` keeps the message's own trailing newline, which is not
+        # part of any rendered row and so is not part of the copy.
+        assert _copy_all(app, block) == text.rstrip("\n")
+
+
+@pytest.mark.asyncio
 async def test_a_word_inside_a_blockquote_copies_without_the_bar() -> None:
     """A sub-row quote take is the word, not the ``▌`` and not the ``>`` line.
 
@@ -731,6 +763,7 @@ async def test_a_word_inside_a_blockquote_copies_without_the_bar() -> None:
         selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
         copied = block.get_selection(selection)
 
+        assert copied is not None
         assert copied == ("flagged", "\n")
         assert "▌" not in copied[0]
         assert ">" not in copied[0]
@@ -789,6 +822,7 @@ async def test_a_table_cell_copies_the_cell() -> None:
         selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
         copied = block.get_selection(selection)
 
+        assert copied is not None
         assert copied == ("alpha", "\n")
         assert "|" not in copied[0]
 
