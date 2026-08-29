@@ -215,6 +215,11 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
     src = first_paint  # next unconsumed source line
     current: int | None = None  # source line rows are currently wrapping within
     budget = 0  # rendered rows the current source line may still wrap to
+    # The frame column at which the table being walked paints its FIRST cell,
+    # learned from a row already placed on one of that table's source lines.
+    # This is the positional evidence the numeric path needs; see
+    # ``_number_opens_row`` for why value equality alone is not sound (R2-1).
+    table_column: int | None = None
     for row in rendered_rows:
         word = _row_word(row)
 
@@ -229,6 +234,7 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                 mapping.append(None)
             current = None  # any break ends a wrap in progress
             budget = 0
+            table_column = None  # a break also ends the table the column described
             continue
 
         placed: int | None = None
@@ -332,7 +338,7 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                 # rendered row can be identified by; a continuation matches no
                 # first cell and is left UNPLACED, which the copy path already
                 # reads as "assume nothing" and answers with the lit glyphs.
-                if "|" in line and (word or _row_number(row)):
+                if "|" in line and (word or (_is_table_row(line) and _row_number(row))):
                     first_cell = _first_cell(line)
                     # Rich truncates a long cell with ``…``, so a truncated stem
                     # matches too: the rendered word is the cell's PREFIX, not a
@@ -350,14 +356,15 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                     # cell matches it. The row is a genuine OPENER, and dropping
                     # it cost the markdown answer at 124 sweep sites (R1-1).
                     #
-                    # Matched EXACTLY and only for a bare number, not by the
-                    # containment the word path uses: containment on a raw token
-                    # would let a continuation ``be careful`` prefix-match a
-                    # ``beta`` first cell and reopen #399's substitution. Exact
-                    # equality on a digit run cannot: ``1`` is not ``2015``.
-                    if not matched:
-                        number = _row_number(row)
-                        matched = bool(number) and _number_matches_cell(number, first_cell)
+                    # Judged POSITIONALLY, never by the number's value alone.
+                    # Value equality is not sound here: a wrapped row's note may
+                    # contain a number equal to a LATER row's id, and the fold
+                    # can land that number at the start of a continuation, which
+                    # is indented like every table continuation and so matched
+                    # the later row EXACTLY -- handing back a row the reader
+                    # never lit, which is #399's own payload (R2-1).
+                    if not matched and _is_table_row(line):
+                        matched = _number_opens_row(row, first_cell, table_column)
                     if matched:
                         placed = look
                         break
@@ -368,6 +375,19 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                 # — may wrap; the starts-structural check above re-anchors the
                 # next item or quote line when the wrap runs out.
                 budget = 0 if (placed in covered or "|" in src_lines[placed]) else _LOOKAHEAD
+                # Learn (or forget) where this table paints its first cell. Rich
+                # left-aligns every row of a table on the same column, so a row
+                # ALREADY placed on a table line -- the header, the divider, or
+                # a body row the word path resolved -- reports the column an
+                # opener must start at. Taken from the first such row and held
+                # for the rest of the table: a continuation is indented past it
+                # to a later cell's column, which is the distinction value
+                # equality could not make (R2-1).
+                if _is_table_row(src_lines[placed]):
+                    if table_column is None:
+                        table_column = _painted_column(row)
+                else:
+                    table_column = None  # left the table; the column no longer applies
         mapping.append(placed)
         current = placed
     return mapping
@@ -379,39 +399,78 @@ def _is_rule_like(text: str) -> bool:
     return bool(body) and set(body) <= {"-", "─", ":", " ", "=", "_"}
 
 
-#: An UNESCAPED cell boundary: a ``|`` not preceded by a backslash. Markdown
-#: writes a literal pipe inside a cell as ``\|``, so splitting on the raw
-#: character cuts a cell like ``ps aux \| grep x`` in half and reports the
-#: first cell as ``ps aux \`` (R1-2). Latent rather than active -- the rendered
-#: row still starts with ``ps aux``, so the truncated cell happened to match --
-#: but the parse is wrong at the source and the next change to this expression
-#: would turn it live.
-_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
-
-
 def _first_cell(line: str) -> str:
     """A table source line's first cell, lowercased, escapes resolved.
 
-    Splits on UNESCAPED pipes only, then unescapes ``\\|`` to the literal pipe
-    the reader sees, so the returned text is what Rich paints in that cell
-    rather than the markdown that produced it.
+    Splits on UNESCAPED pipes only, then unescapes to the literal characters the
+    reader sees, so the returned text is what Rich paints in that cell rather
+    than the markdown that produced it. Splitting on the raw character cuts a
+    cell like ``ps aux \\| grep x`` in half and reports ``ps aux \\`` (R1-2).
+
+    Scanned rather than matched with a ``(?<!\\\\)`` lookbehind, because that
+    lookbehind is wrong one escape deeper: in ``\\\\|`` the backslash is itself
+    escaped and the pipe IS a real delimiter, but the lookbehind sees a
+    backslash and skips it (R2-2). A left-to-right scan consuming ``\\x`` as a
+    unit cannot make that mistake, since the first backslash has already eaten
+    the second by the time the pipe is read.
     """
     body = line.strip()
     # Only a LEADING delimiter is stripped by position; ``strip("|")`` would
     # also eat a trailing escaped pipe's character and shift the escape.
     if body.startswith("|"):
         body = body[1:]
-    return _UNESCAPED_PIPE_RE.split(body)[0].replace("\\|", "|").strip().lower()
+    cell: list[str] = []
+    i = 0
+    while i < len(body):
+        char = body[i]
+        # Only ``\|`` and ``\\`` are escapes THIS parse cares about, and the
+        # restriction matters: a backslash before anything else is literal
+        # content, so treating every ``\x`` as an escape would eat the space in
+        # a Windows path cell (``c:\``) and report ``c:``. Consuming ``\\`` as a
+        # unit is what stops an escaped BACKSLASH from shielding the real
+        # delimiter after it (R2-2).
+        if char == "\\" and i + 1 < len(body) and body[i + 1] in "|\\":
+            cell.append(body[i + 1])
+            i += 2
+            continue
+        if char == "|":
+            break
+        cell.append(char)
+        i += 1
+    return "".join(cell).strip().lower()
+
+
+#: A source line that is part of a markdown TABLE, as opposed to prose that
+#: merely mentions a pipe. Requires a pipe with content on at least one side of
+#: it in a line whose shape is a row: the numeric read is meaningless off a
+#: table and must not be offered a prose line to match against (R2-4).
+_TABLE_ROW_RE = re.compile(r"^\s{0,3}\|.*\|?\s*$|^[^|\n]*\|[^|\n]*\|")
+
+
+def _is_table_row(line: str) -> bool:
+    """Does this source line render as a table row rather than as prose?
+
+    A pipe alone is not evidence: ``run a | b to filter`` is a paragraph. Rich
+    only builds a table from lines that delimit cells, so requiring the row
+    SHAPE keeps the numeric path off prose entirely instead of relying on the
+    match downstream to fail (R2-4).
+    """
+    return "|" in line and bool(_TABLE_ROW_RE.match(line.strip()))
 
 
 #: A rendered row whose first painted token is a bare number, carrying the
-#: leading pad Rich puts before a table cell. The indent is REQUIRED so this
-#: path is exactly complementary to the token ``_row_word`` skipped: that skip
-#: is itself gated on the row being indented, so a flush-left number-led
-#: paragraph (``2026 roadmap``) already reaches ``word`` and must not get a
-#: second, looser way to claim a table line. Anchored so it cannot match a
+#: leading pad Rich puts before a table cell. Anchored so it cannot match a
 #: number later in the row, and bounded to a digit run so a ``0.91`` score cell
 #: and ``2026-01`` do not read as one.
+#:
+#: The leading ``[ \t]+`` only establishes that the row is INDENTED. That is a
+#: weak gate on its own -- every table continuation, list continuation and quote
+#: body satisfies it too -- so it is not by itself the thing that keeps this
+#: path off a continuation. It excludes exactly one shape: a flush-left
+#: number-led paragraph (``2026 roadmap``), which already reaches ``word`` and
+#: must not get a second, looser way to claim a table line. Soundness comes from
+#: the caller, which requires a table source line and POSITIONAL agreement via
+#: ``_number_opens_row`` (R2-3).
 _ROW_LEADING_NUMBER_RE = re.compile(r"^[ \t]+(\d{1,9})(?:\s|$)")
 
 
@@ -421,15 +480,39 @@ def _row_number(rendered_row: str) -> str:
     return match.group(1) if match else ""
 
 
-def _number_matches_cell(number: str, first_cell: str) -> bool:
-    """Does a rendered row's leading number identify this first cell?
+def _painted_column(rendered_row: str) -> int:
+    """The frame column at which ``rendered_row`` starts painting."""
+    return len(rendered_row) - len(rendered_row.lstrip())
 
-    EXACT equality on the cell's own leading token, never containment: the
-    numeric path exists to place ``| 1 | step |`` rows (R1-1) and must not
-    become a second way for a continuation to claim a later row. ``1`` matches
-    the cell ``1`` and not the cell ``2015``, and a continuation beginning with
-    a number matches only a cell that IS that number.
+
+def _number_opens_row(rendered_row: str, first_cell: str, table_column: int | None) -> bool:
+    """Does this rendered row OPEN the table line whose first cell is given?
+
+    Positional, not value-based, and that distinction is the whole point. A bare
+    number carries no evidence that a row opens anything: ids, years, versions,
+    ranks and counts are routinely repeated inside the table's own prose, so a
+    wrapped row whose note mentions a LATER row's id folds that id to the start
+    of a continuation, where value equality matched the later row exactly and a
+    whole-row take copied a row the reader never lit (R2-1, the shape #399 is
+    about).
+
+    Rich left-aligns every row of a table on one column, so an OPENER paints its
+    first cell at that column while a continuation is indented past it to a
+    later cell's column. ``table_column`` is that column, learned from a row
+    already placed on this table. Both checks are required:
+
+    * value equality, so the number still has to name THIS row's cell; and
+    * column agreement, so a continuation carrying the same number is refused.
+
+    Without a known column the answer is REFUSED rather than guessed. Losing the
+    markdown answer is truthful and the copy path already answers such a row
+    with the lit glyphs; substituting a different row is not.
     """
+    if table_column is None:
+        return False  # no positional evidence; refuse rather than guess
+    if _painted_column(rendered_row) != table_column:
+        return False  # indented past the first cell: a continuation, not an opener
+    number = _row_number(rendered_row)
     if not number or not first_cell:
         return False
     head = first_cell.split()[0] if first_cell.split() else ""

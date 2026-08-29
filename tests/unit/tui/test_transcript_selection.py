@@ -3892,26 +3892,44 @@ def test_a_first_cell_is_parsed_with_the_markdown_pipe_escape_resolved() -> None
     assert _copy_markdown._first_cell("| alpha | 0.91 | note |") == "alpha"
     assert _copy_markdown._first_cell("alpha | 0.91 |") == "alpha"
     assert _copy_markdown._first_cell("|  spaced  | b |") == "spaced"
+    # R2-2: an escaped BACKSLASH does not shield the delimiter after it. A
+    # ``(?<!\\)`` lookbehind reads the second backslash and calls this pipe
+    # escaped, yielding ``\| b``; the cell is a lone backslash and ``b`` opens
+    # the second cell. One escape deeper than the case R1-2 fixed, same class.
+    assert _copy_markdown._first_cell("| \\\\| b |") == "\\"
+    assert _copy_markdown._first_cell("| a\\\\| b |") == "a\\"
+    # A trailing backslash with a REAL delimiter after it still parses, and an
+    # escaped pipe deeper in the same cell is still content.
+    assert _copy_markdown._first_cell("| c:\\ | note |") == "c:\\"
+    assert _copy_markdown._first_cell("| \\|\\|\\| | x |") == "|||"
 
 
-def test_a_rows_leading_number_identifies_a_cell_only_by_exact_match() -> None:
-    """R1-1's numeric path must not become a second route to a substitution.
+def test_a_rows_leading_number_places_a_row_only_with_positional_evidence() -> None:
+    """R2-1: the numeric path must judge POSITION, not just the number's value.
 
-    The word path matches by CONTAINMENT, which is safe there because the word
-    is a content token. Containment on a bare number is not: a continuation
-    beginning ``1`` would prefix-match a ``2015`` first cell and reopen #399's
-    silent substitution one construct over. Exact equality on the cell's leading
-    token is what keeps the numeric path additive rather than widening.
+    Exact value equality is not a sound opener test. A bare number carries no
+    evidence that a row OPENS anything -- ids, years and versions are routinely
+    repeated in the table's own prose -- so a wrapped row whose note cites a
+    LATER row's id folds that id to the start of a continuation, where equality
+    matched the later row exactly and a whole-row take copied a row the reader
+    never lit. That is #399's payload, reopened by the value-based read.
 
-    Also pins the indent gate: the numeric read exists only to recover the token
-    ``_row_word`` skipped, and that skip is itself gated on the row being
-    indented, so a flush-left number-led paragraph must not reach this path.
+    Rich left-aligns a table's rows on one column, so an opener paints its first
+    cell AT that column and a continuation is indented past it. Both checks are
+    required, and an unknown column REFUSES rather than guesses.
     """
-    assert _copy_markdown._number_matches_cell("1", "1")
-    assert _copy_markdown._number_matches_cell("2015", "2015")
-    assert not _copy_markdown._number_matches_cell("1", "2015")
-    assert not _copy_markdown._number_matches_cell("1", "")
-    assert not _copy_markdown._number_matches_cell("", "1")
+    # Column 1 is where this table paints its first cell.
+    assert _copy_markdown._number_opens_row(" 2015  the later milestone", "2015", 1)
+    assert _copy_markdown._number_opens_row(" 1   the first detail", "1", 1)
+    # The R2-1 shape: a CONTINUATION whose leading number equals a later row's
+    # id. Value equality accepts it; the column says it is not an opener.
+    assert not _copy_markdown._number_opens_row("       2015 nu xi omicron pi", "2015", 1)
+    assert not _copy_markdown._number_opens_row("       2 explicitly and keeps", "2", 1)
+    # Value still has to name THIS row's cell, so the column alone is not enough.
+    assert not _copy_markdown._number_opens_row(" 1   the first detail", "2015", 1)
+    # No column learned yet: refuse rather than guess.
+    assert not _copy_markdown._number_opens_row(" 2015  the later milestone", "2015", None)
+    assert not _copy_markdown._number_opens_row(" 1   x", "", 1)
 
     # Indented bare number: the ordered-marker shape ``_row_word`` skips.
     assert _copy_markdown._row_number(" 1   the first detail") == "1"
@@ -3921,6 +3939,22 @@ def test_a_rows_leading_number_identifies_a_cell_only_by_exact_match() -> None:
     # Not a bare digit run, so not a marker: a score cell, a date.
     assert _copy_markdown._row_number(" 0.91 score") == ""
     assert _copy_markdown._row_number(" 2026-01 note") == ""
+
+
+def test_the_numeric_read_is_offered_only_table_rows_not_prose_with_a_pipe() -> None:
+    """R2-4: a pipe in a sentence is not a table, so it gets no numeric read.
+
+    The branch guard ran the numeric route on ANY line containing a pipe,
+    including prose that merely mentions ``a | b``. Contained today only because
+    the match downstream almost never fires, which is a property of the data
+    rather than of the code; the shape check keeps the path off prose entirely.
+    """
+    assert _copy_markdown._is_table_row("| 1 | the first step |")
+    assert _copy_markdown._is_table_row("| --- | --- |")
+    assert _copy_markdown._is_table_row("alpha | 0.91 | note")
+    # Prose that merely contains a pipe is not a row.
+    assert not _copy_markdown._is_table_row("run a | b to filter the output")
+    assert not _copy_markdown._is_table_row("no pipe at all here")
 
 
 # -- the oracle sweep --------------------------------------------------------
@@ -4261,6 +4295,28 @@ ORACLE_SUBSTITUTION_CORPUS: dict[str, str] = {
     "table_numeric_long_notes": (
         "| id | notes |\n| --- | --- |\n"
         "| 1 | the first row with some longer note text here that wraps over rows |\n"
+        "| 2 | the second row, also with a reasonably long note that folds too |"
+    ),
+    # R2-1. The shape a value-based numeric read cannot survive: the FIRST row's
+    # note cites the SECOND row's id, so at some widths the fold lands ``2015``
+    # at the start of a continuation. Every table continuation is indented, so
+    # the row reached the numeric read and matched the later row's id EXACTLY --
+    # the continuation was placed on it and a whole-row take copied a row the
+    # reader never lit, which is #399's payload in a neighbouring shape. Its
+    # absence from this corpus is why 218 tests stayed green over a reopened
+    # #399, so it stays here permanently to cover the numeric path's soundness
+    # rather than only its recall.
+    "years_2015_in_note": (
+        "| year | milestone |\n| --- | --- |\n"
+        "| 2014 | alpha beta gamma delta epsilon zeta eta theta iota kappa lam "
+        "2015 nu xi omicron pi |\n"
+        "| 2015 | the later milestone whose note also wraps at the swept widths here |"
+    ),
+    # The same trap with small ids rather than years, which folds at different
+    # widths: a note naming ``row 2`` inside row 1.
+    "ids_2_in_note": (
+        "| id | notes |\n| --- | --- |\n"
+        "| 1 | first row whose note mentions row 2 explicitly and keeps going a while |\n"
         "| 2 | the second row, also with a reasonably long note that folds too |"
     ),
 }
