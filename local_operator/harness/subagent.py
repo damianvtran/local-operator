@@ -919,11 +919,24 @@ class _ChildMcp:
 #:
 #: It is in-memory Session state and nothing re-derives it, so it does not by
 #: itself survive a resume: ``hub op='resume'`` builds a new Session against
-#: the comms-owning root rather than the child's real parent. The durable half
-#: is ``_ChildRecord.restricted``, which persists this flag and feeds it back
-#: through ``run_subagent(restricted=...)``. BOTH halves are required for the
-#: "at any depth" claim to hold; changing one without the other reopens the
-#: escalation on the path the other covers (review round 2, R5).
+#: the comms-owning root rather than the child's real parent.
+#:
+#: The denial therefore has to be carried at THREE widening scopes, and it took
+#: three review rounds because each one held at its own scope while leaking at
+#: the next:
+#:
+#: 1. this attribute — one live lineage, read off ``parent_session`` when a
+#:    child delegates (R1: without it, depth 2 escaped);
+#: 2. ``_ChildRecord.restricted`` — one process, stamped at ``attach`` and fed
+#:    back through ``run_subagent(restricted=...)`` (R5: without it, a resume
+#:    escaped);
+#: 3. ``snapshot``/``restore`` of that field — across a process exit, since the
+#:    roster sidecar is how a child that settled hours ago is resumed at all
+#:    (R6: without it, a resume after a restart escaped).
+#:
+#: ALL THREE are required. Removing any one reopens the escalation on exactly
+#: the path the other two do not cover, and the failure is silent — the child
+#: comes back merely wider, not broken.
 #:
 #: A named constant rather than two spelled-out ``getattr``/``setattr`` strings:
 #: the reader and the writer are ~200 lines apart, and a typo in either would

@@ -1071,6 +1071,19 @@ def test_a_resume_carries_the_mcp_denial_a_role_cannot_express(tmp_path, monkeyp
     assert seen["agent"] == "task", "the role still says unrestricted"
     assert seen["restricted"] is True, "the denial must ride separately from the role"
 
+    # ...and again ACROSS A RESTART, which is the common case: a child that
+    # settled hours ago is resumed from the roster sidecar, not from a live
+    # ``_records`` map. Resuming in-process only proved the flag reaches
+    # ``run_subagent``; it did not prove the flag still exists after
+    # ``snapshot()`` (review round 3, R6).
+    seen.clear()
+    revived = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    revived.restore(comms.snapshot())
+    new_id, error = revived.resume("job-1", "carry on after a restart")
+
+    assert error is None and new_id == "job-2"
+    assert seen["restricted"] is True, "the denial must survive a restart too"
+
 
 def test_a_resume_of_an_unrestricted_child_does_not_invent_a_denial(tmp_path, monkeypatch):
     """The counter-check: the carry must not restrict what was never restricted.

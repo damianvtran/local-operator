@@ -281,6 +281,12 @@ class _ChildRecord:
     #: read in ``_build_child_session`` finds an unrestricted session and a
     #: correctly-denied grandchild came back able to activate the writes it had
     #: been refused (review round 2, R5).
+    #:
+    #: Carried by :meth:`SubagentComms.snapshot`/:meth:`restore` like
+    #: ``agent_role``, so it outlives the PROCESS and not merely this map.
+    #: Holding it only in memory left it with the same lifetime as the Session
+    #: attribute it was added to outlast, and a child that settled hours ago is
+    #: normally resumed after a restart (review round 3, R6).
     restricted: bool = False
     #: The child's transcript directory. Set at attach; the whole basis of
     #: resume, and the reason a record outlives the job row.
@@ -798,6 +804,16 @@ class SubagentComms:
                     "launch_message_id": record.launch_message_id,
                     "agent_role": record.agent_role,
                     "effort": record.effort,
+                    # Rides with the role because it is the half the role
+                    # CANNOT express (see the field). Losing it here would
+                    # leave the flag alive only for the process, which is the
+                    # lifetime the in-memory marker already had and precisely
+                    # what persisting it was meant to fix: a child that settled
+                    # hours ago is normally resumed AFTER a restart, so this row
+                    # is the only thing standing between a restricted lineage
+                    # and a resumed grandchild that can activate the writes it
+                    # was refused (review round 3, R6).
+                    "restricted": record.restricted,
                     "session_dir": str(record.session_dir),
                     "outcome": record.outcome,
                     "result_text": record.result_text,
@@ -878,6 +894,12 @@ class SubagentComms:
                 launch_message_id=str(row.get("launch_message_id") or ""),
                 agent_role=str(row.get("agent_role") or ""),
                 effort=str(row.get("effort") or ""),
+                # Missing defaults to False, which is right for a sidecar
+                # written before this field existed: it reproduces today's
+                # behaviour for old rows and cannot invent a denial that was
+                # never recorded. A denial can only ever be ADDED afterwards,
+                # by the attach stamp or the live computation.
+                restricted=bool(row.get("restricted")),
                 session_dir=session_dir,
                 settled=True,
                 settled_at=row.get("settled_at"),
