@@ -954,6 +954,19 @@ class CommandPicker(Static):
                 self._reset_rows()
                 self.display = True
                 self._repaint()
+                # The rows are gone even though the surface stays up, so the
+                # observers have to hear it: this is the ONE exit from `_apply`
+                # that used to return without reporting, and the composer's
+                # inline ghost outlived the row it described because of it. The
+                # list would sit showing "credential store unreadable" while the
+                # composer still promised `/mcp login`, and Tab — the key the
+                # dim text exists to describe — inserted a literal tab (UX
+                # review round 2, U9). `_reset_rows` has already emptied
+                # `_matches`, so the report is what turns that into a cleared
+                # preview. Every other path out of `_apply` reports; this one
+                # must too, or "a notice replaced the rows" becomes invisible to
+                # anything watching the accept target.
+                self._report_highlight()
                 return
             self._close()
             return

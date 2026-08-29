@@ -3565,7 +3565,20 @@ class Editor(TextArea):
                     # so the tracking key is the verb token and any change posts
                     # a refresh (verbs while it is bare, servers once a verb is
                     # chosen — the builder reads the space itself).
-                    subcommand = first_tok.lower() if list_argument else ""
+                    #
+                    # The SEPARATOR is part of the key, not just the token. The
+                    # builder flips from the verb rows to that verb's server
+                    # rows precisely on the terminating space, so a token-only
+                    # key made `login` and `login ` the same state and posted no
+                    # refresh across the one transition that changes the answer:
+                    # the server rows were unreachable by typing, and the picker
+                    # sat empty and closed. This is the identical trap the
+                    # `/team` branch below documents for `chart` → `chart `,
+                    # which is why that branch tracks a boundary rather than a
+                    # token (#377 review round 2). Keyed on the whole
+                    # `verb + sep` so both edges cross: entering the server slot
+                    # and backspacing out of it.
+                    subcommand = f"{first_tok.lower()}{sep}" if list_argument else ""
                     if subcommand != self._argument_subcommand:
                         self._argument_subcommand = subcommand
                         self.post_message(RefreshArgumentChoices(command))

@@ -28,6 +28,7 @@ import pytest
 from textual.widgets.text_area import Selection
 
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
 from tests.unit.tui.test_app_pilot import (
     FakeMcpManager,
@@ -571,3 +572,100 @@ async def test_a_bare_slash_predicts_nothing_until_a_row_is_chosen() -> None:
         await _type(pilot, "h")
         await _settle(pilot, 8)
         assert editor.suggestion == "elp ", "a typed character must resume predicting"
+
+
+@pytest.mark.asyncio
+async def test_a_notice_replacing_the_rows_retires_the_ghost() -> None:
+    """A list that swaps its rows for a notice must not leave a ghost behind.
+
+    ``CommandPicker._apply`` keeps the surface up when an argument list comes
+    back empty but carries a notice ("credential store unreadable…"), and that
+    branch was the one exit that returned without reporting — so the rows
+    vanished while the composer went on promising a row that no longer existed,
+    and Tab inserted a literal tab against it (UX review round 2, U9).
+
+    The control below is what makes this a test of the NOTICE path rather than
+    of emptiness: the same empty fill without a notice already retired the
+    ghost, because it falls through to ``_close()``, which reports.
+    """
+    for notice, expect_display in (("credential store unreadable", True), ("", False)):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 24)) as pilot:
+            await _settle(pilot, 6)
+            editor = app.query_one(Editor)
+            editor.focus()
+            editor.text = "/mcp "
+            editor.move_cursor(editor._end_of_buffer())
+            editor._sync_picker()
+            await _settle(pilot, 8)
+            editor.picker.set_choices(
+                [
+                    ArgumentChoice("login", ""),
+                    ArgumentChoice("logout", "", alert=True),
+                    ArgumentChoice("reauth", ""),
+                ]
+            )
+            await _settle(pilot, 6)
+            assert editor.suggestion == "login", "precondition: a ghost is showing"
+
+            # The app re-answers the OPEN list with nothing to offer.
+            if notice:
+                editor.picker.set_notice(notice)
+            editor.picker.set_choices([])
+            await _settle(pilot, 8)
+
+            assert editor.picker.display is expect_display, notice
+            assert editor.suggestion == "", (
+                f"notice={notice!r}: the ghost outlived the rows it described"
+            )
+            assert "login" not in editor.render_line(0).text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["login", "logout", "reauth"])
+async def test_typing_into_the_mcp_server_slot_opens_its_rows(verb: str) -> None:
+    """The verb→server transition must post a refresh, so typing reaches the rows.
+
+    ``_sync_picker`` keyed the ``/mcp`` refresh on the first TOKEN only, so
+    ``login`` and ``login `` were the same state — and the terminating space is
+    exactly where ``_mcp_argument_choices`` flips from the verb rows to that
+    verb's server rows. No refresh was posted across the one transition that
+    changes the answer, leaving the server rows unreachable by typing: an empty,
+    unopened picker on every entry path (#377 review round 2).
+
+    Driven with REAL key presses. Every existing test of this surface uses
+    ``_set_editor_line``, which calls ``_sync_picker()`` directly and so cannot
+    observe a missing message — which is why the defect survived a suite that
+    covers these rows.
+    """
+    from local_operator.session.mcp_status import McpStartupOutcome
+
+    configs = _oauth_configs()
+    manager = FakeMcpManager(["linear", "notion"], ["linear"])
+    manager._configs = configs
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})
+            ),
+            # `/mcp logout` offers only servers that actually hold a credential
+            # (the `/logout` rule), so both have to be staged for the three
+            # verbs to be comparable.
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={
+                    "https://mcp.linear.app/mcp",
+                    "https://mcp.notion.com/mcp",
+                },
+            ),
+        ):
+            await _type(pilot, f"/mcp {verb} ")
+            await _settle(pilot, 12)
+            rows = [name for name, _ in editor.picker.suggestions()]
+
+    assert editor.picker.is_open(), f"/mcp {verb} left the picker closed"
+    assert rows == [f"{verb} linear", f"{verb} notion"], rows
