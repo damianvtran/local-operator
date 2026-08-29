@@ -1156,47 +1156,65 @@ class Editor(TextArea):
         # the same cells: a marker opens with `[` and lives in the message tail,
         # the command word and name open with `/` on line 0 — so order is
         # immaterial for correctness (see :meth:`_paint_slash`).
-        return self._paint_ghost_caret(
+        #
+        # NO ghost-specific caret pass runs here, and adding one back is a
+        # regression, not a fix. #378 shipped `_paint_ghost_caret`, which moved
+        # the block one cell LEFT so it sat on the last typed character instead
+        # of on the ghost's first cell. Users read a block ON a committed
+        # character as the vi-normal-mode / overwrite idiom — "the next
+        # keystroke replaces this `e`" — even though the text was fully
+        # committed and the caret genuinely belonged after it. The composer
+        # contradicted itself between its GHOSTED and UN-GHOSTED states: a
+        # buffer with no completion on offer put the caret after the text,
+        # while every buffer carrying a ghost pulled it one cell back.
+        #
+        # Every autosuggestion implementation surveyed keeps the caret at the
+        # TRUE insertion point, which is exactly where the ghost starts: fish
+        # renders the suggestion after the cursor; zsh-autosuggestions holds
+        # `CURSOR == $#BUFFER` with the ghost in `POSTDISPLAY`;
+        # prompt_toolkit's `AppendAutoSuggestion` appends fragments and leaves
+        # `cursor_position` at the end of the text; Textual's own
+        # `Input.render_line` builds `value + suggestion[len(value):]` and then
+        # applies the cursor style ON TOP of the first ghost cell. There is no
+        # precedent, terminal or GUI, for retreating the caret a cell. (Browser
+        # URL bars use the other coherent convention — insert the completion and
+        # SELECT it — which is a selection, not a displaced caret.)
+        # So the base class's paint stands: block at the insertion point, on the
+        # ghost's first cell. :meth:`_paint_ghost_ink` only re-inks that one
+        # cell; it does not move the caret.
+        return self._paint_ghost_ink(
             self._paint_slash(self._paint_markers(super().render_line(y), y), y), y
         )
 
-    def _paint_ghost_caret(self, strip: Strip, y: int) -> Strip:
-        """Move the caret block OFF the ghost, onto the last typed cell.
+    def _paint_ghost_ink(self, strip: Strip, y: int) -> Strip:
+        """Dim the ONE ghost cell the caret block covers. The caret does not move.
 
-        Textual inserts the suggestion AT ``cursor_column`` and then paints the
-        caret over that same cell, so the composer's opaque block
-        (``text-area--cursor``, an inverted ground) landed on the ghost's FIRST
-        character. Two consequences, one cause (design review round 1, D1/D2):
+        The caret belongs at the insertion point (see :meth:`render_line`), and
+        with a block caret that cell is the ghost's first character. Textual
+        applies ``text-area--cursor`` on top of it wholesale, so the ghost's
+        head is painted in the caret's full ink — measured ``#1e1a14`` on
+        ``#e9e5db``, a 13.76:1 contrast, byte-identical to a caret sitting on a
+        character the user actually typed. Rendered frames of ``/resum`` show
+        the previewed ``e`` as solid black-on-cream while its own trailing
+        ``' '`` stays dim: the boundary between committed and previewed text
+        lands INSIDE the ghost, so the first suggested character reads as
+        already-typed.
 
-        * every command's completion ends in a trailing space, so a fully typed
-          command (`/mcp`) has the one-character ghost `' '` — entirely under
-          the block, drawing ZERO dim pixels. The feature was invisible in the
-          state every user passes through on the way to Enter;
-        * a longer ghost split into a bright inverted cell and a dim tail
-          (`/mcp login n` painting `o` inverted then `tion` grey), which reads
-          as one errored character rather than as a caret.
+        The fix is ink, not position: keep the caret's background (the block is
+        load-bearing — the boot composer, the read-only composer and the
+        attachment chip all assert an inverted caret cell) and restore the
+        suggestion's own foreground over it. That is 3.29:1 against the cursor
+        ground — comfortably legible, and visibly not the 13.76:1 of committed
+        text — so the cell reads as "caret, on previewed text", which is
+        exactly what it is.
 
-        The block itself is deliberate and load-bearing elsewhere — the boot
-        composer, the read-only composer and the attachment chip all assert an
-        inverted caret cell — so it is kept exactly as it is and MOVED instead:
-        one cell left, onto the last character the user actually typed. That is
-        the boundary between committed and previewed text, which is where the
-        eye needs the mark anyway, and it leaves the whole ghost painting in
-        ``$lo-dim``.
-
-        A post-pass rather than a change to the base class's ``_render_line``,
-        matching the idiom :meth:`_paint_markers` and :meth:`_paint_slash`
-        already establish: adjust cells the base class has finished painting.
-        Runs only while a ghost is showing, so ordinary editing is untouched and
-        pays one boolean.
+        A post-pass over the finished ``Strip``, matching the idiom
+        :meth:`_paint_markers` and :meth:`_paint_slash` already establish, and
+        gated on a ghost being shown so ordinary editing pays one boolean.
         """
         if not self.suggestion or not self._draw_cursor:
             return strip
         row, column = self.selection.end
-        # Nothing to move the caret onto at column 0 (a ghost on an empty line),
-        # so the base class's painting stands.
-        if column <= 0:
-            return strip
         # The ghost's gates guarantee a single line with the caret at its end,
         # but the wrap still decides WHICH screen row carries that column, and
         # only that row may be repainted.
@@ -1208,22 +1226,18 @@ class Editor(TextArea):
         if row_line != row:
             return strip
         caret_x = wrapped.location_to_offset((row, column)).x + self.gutter_width
-        typed_x = wrapped.location_to_offset((row, column - 1)).x + self.gutter_width
-        if caret_x >= strip.cell_length or typed_x >= caret_x:
+        if caret_x >= strip.cell_length:
             return strip
-        cursor_style = self.get_component_rich_style("text-area--cursor")
-        ghost_style = self.get_component_rich_style("text-area--suggestion")
-        # Rebuild three runs: text before the last typed cell, that cell now
-        # carrying the caret, and the ghost cell restored to the dim ink the
-        # base class overpainted.
-        left, rest = strip.divide([typed_x, strip.cell_length])
-        typed_cell, tail = rest.divide([caret_x - typed_x, rest.cell_length])
-        ghost_cell, right = tail.divide([1, tail.cell_length])
+        # Foreground ONLY. ``post_style`` merges, so giving it just the colour
+        # leaves the cursor background the base class painted intact — the
+        # block keeps its shape and only the glyph inside it changes ink.
+        ghost_ink = RichStyle(color=self.get_component_rich_style("text-area--suggestion").color)
+        left, rest = strip.divide([caret_x, strip.cell_length])
+        caret_cell, right = rest.divide([1, rest.cell_length])
         return Strip.join(
             [
                 left,
-                Strip(Segment.apply_style(typed_cell, post_style=cursor_style)),
-                Strip(Segment.apply_style(ghost_cell, post_style=ghost_style)),
+                Strip(Segment.apply_style(caret_cell, post_style=ghost_ink)),
                 right,
             ]
         )
@@ -4545,9 +4559,13 @@ class Editor(TextArea):
         :meth:`_paint_markers`/:meth:`_paint_slash`, which post-process a
         finished ``Strip``.
 
-        Using the native path means living with two of its properties, and the
-        THREE GATES below are what put both out of reach. They are not caution;
-        removing any one of them reintroduces a specific, reproduced defect:
+        Using the native path means living with two of its properties, and
+        gates 1-3 below are what put both out of reach. They are not caution;
+        removing any one of them reintroduces a specific, reproduced defect.
+        Gate 4 is a later addition of a different KIND — not a wrap hazard that
+        would mispaint, but an honest preview that renders to nothing — so its
+        full reasoning lives at the code site rather than here, where it would
+        outweigh the three gates that prevent actual corruption.
 
         1. **Caret at the END of the command's line, with no selection.** The
            ghost adds cells the DOCUMENT does not have, while
@@ -4564,6 +4582,11 @@ class Editor(TextArea):
            neither wraps nor crops and simply overruns the composer.
         3. **Single-line buffer.** Same wrap machinery, and a multi-line draft is
            not a state the command lists are live in anyway.
+        4. **The ghost has a visible character.** A completion that appends only
+           the command's trailing space paints nothing at all, so it is withheld
+           rather than rendered as an empty preview. See the comment at the gate
+           itself for why this is a rendering judgement and not a change to what
+           Tab commits.
 
         Beyond the gates, the ghost is shown only when accepting the row is a
         pure APPEND to the buffer (see :func:`ghost_for`) — a fuzzy match
@@ -4605,6 +4628,31 @@ class Editor(TextArea):
             return ""
         ghost = ghost_for(self._completion_for(mode, row), text)
         if not ghost:
+            return ""
+        # Gate 4: a ghost carrying no VISIBLE information is not shown.
+        #
+        # Every command's completion ends in a trailing space, so a fully typed
+        # command (`/resume`, `/mcp`) has the single-character ghost `' '` —
+        # the state every user passes through on the way to Enter. It draws
+        # zero dim pixels by construction, so with the caret back at the true
+        # insertion point (see :meth:`render_line`) the frame is a block on a
+        # blank cell one past the text: pixel-identical to the composer with no
+        # ghost at all. Painting it therefore communicates nothing, while the
+        # attempt to make it visible is what motivated #378's caret
+        # displacement and the overwrite misreading that followed.
+        #
+        # THIS DOES NOT CHANGE WHAT TAB DOES. The invariant is
+        # ``buffer + ghost == buffer after Tab``, stated over a ghost that IS
+        # shown; withholding a preview is not an edit to the completion, and
+        # Tab still inserts the trailing space here exactly as before. The
+        # honesty rule (a ghost must be a pure append — :func:`ghost_for`)
+        # stays where it is, in the completion module, which answers "can this
+        # completion be described as an append?" from the completion alone.
+        # Whether an honest append is worth PAINTING depends on the rendered
+        # frame, so it belongs here with gates 1-3 (caret position, width,
+        # single line), all of which are likewise about what the composer can
+        # legibly show rather than about what Tab commits.
+        if not ghost.strip():
             return ""
         # Gate 2. The row's text cells are ``content_size.width`` less the
         # gutter, and the caret sits at ``column`` within them (single-line by

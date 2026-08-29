@@ -356,22 +356,27 @@ async def test_gate_one_alone_withholds_a_mid_caret_ghost() -> None:
     This asks :meth:`_ghost_completion` directly with the caret parked
     mid-buffer, which is the one question the gate answers by itself. The state
     is reachable rather than synthetic: brute-forcing the pure functions finds
-    34 caret-mid combinations that yield a real ghost, of which ``/mcp `` with
-    the caret inside the word is one.
+    34 caret-mid combinations that yield a real ghost.
 
-    Verified to FAIL with the gate removed (it returns ``' '``, painting a
-    one-space ghost mid-word) and pass with it present.
+    Typed as ``/mc`` rather than the fully typed ``/mcp``: gate 4 withholds a
+    whitespace-only ghost, so a complete command no longer establishes the
+    "a ghost IS on offer here" precondition this isolation depends on. A
+    partial word keeps the precondition real and leaves gate 1 the only gate
+    that can produce the second assertion.
+
+    Verified to FAIL with the gate removed (it returns ``'p '``, painting a
+    ghost mid-word) and pass with it present.
     """
     app = _mcp_app()
     async with app.run_test(size=(100, 24)) as pilot:
         await _settle(pilot, 6)
         editor = app.query_one(Editor)
         editor.focus()
-        await _type(pilot, "/mcp")
+        await _type(pilot, "/mc")
         await _settle(pilot, 8)
         # The list is open on `mcp`, so a ghost is genuinely on offer here.
         assert editor.picker.highlighted_name() == "mcp"
-        assert editor._ghost_completion() == " ", "precondition: caret at end still ghosts"
+        assert editor._ghost_completion() == "p ", "precondition: caret at end still ghosts"
 
         # Park the caret INSIDE the word without going through a key press, so
         # `watch_selection`'s own clearing cannot be what produces the result.
@@ -687,36 +692,75 @@ async def test_typing_into_the_mcp_server_slot_opens_its_rows(verb: str) -> None
     assert rows == [f"{verb} linear", f"{verb} notion"], rows
 
 
+async def _painted_cells(pilot: Any, editor: Editor) -> list[tuple[int, str, Any]]:
+    """``(column, character, style)`` for every painted cell of the buffer row.
+
+    The COLUMN is what these tests are about — where the caret block lands
+    relative to the typed text — and a strip's ``cell_length`` cannot show it,
+    because the composer pads the row out to its box width. Walking the
+    segments is the only way to name the cell.
+    """
+    await _settle(pilot, 4)
+    cells: list[tuple[int, str, Any]] = []
+    column = 0
+    for seg in editor.render_line(0)._segments:
+        for char in seg.text:
+            cells.append((column, char, seg.style))
+            column += 1
+    return cells
+
+
+def _is_cursor(style: Any, cursor_style: Any) -> bool:
+    """A cell painted with the caret's ground, whatever ink is inside it.
+
+    Matched on BACKGROUND alone on purpose: the ghost's head keeps the cursor
+    background and swaps its foreground back to the suggestion colour, so a
+    whole-style comparison would stop recognising the caret exactly where these
+    tests need to find it.
+    """
+    return style is not None and style.bgcolor == cursor_style.bgcolor
+
+
+def _is_ghost(style: Any, ghost_style: Any) -> bool:
+    """A cell painted in the suggestion's ink, under the block or beside it."""
+    return style is not None and style.color == ghost_style.color
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "typed,ghost,caret_char,ghost_head",
+    "typed,ghost,ghost_head",
     [
-        # The D1 case: a fully typed command whose whole completion is the
-        # trailing space. With the caret block on the ghost this drew ZERO dim
-        # pixels and the frame was byte-identical to the pre-feature baseline.
-        ("/mcp", " ", "p", " "),
-        # A multi-character ghost: D2's "bright inverted cell then a dim tail".
-        ("/mc", "p ", "c", "p"),
-        ("/analytic", "s ", "c", "s"),
+        # Multi-character ghosts on the command word.
+        ("/mc", "p ", "p"),
+        ("/analytic", "s ", "s"),
+        # An ARGUMENT-slot ghost, which reaches the caret through a different
+        # completion path (`_complete_argument`) and must land identically.
+        ("/mcp lo", "gin", "g"),
     ],
 )
-async def test_the_caret_block_sits_on_typed_text_not_on_the_ghost(
-    typed: str, ghost: str, caret_char: str, ghost_head: str
+async def test_the_caret_block_sits_at_the_insertion_point_on_the_ghost_head(
+    typed: str, ghost: str, ghost_head: str
 ) -> None:
-    """The caret must not consume the ghost's first cell.
+    """The caret stays at the TRUE insertion point: the ghost's first cell.
 
-    Textual inserts the suggestion AT ``cursor_column`` and then paints the
-    caret over that same cell, so the composer's inverted block landed on the
-    ghost's first character — invisible for a one-character ghost, and an
-    errored-looking bright cell for a longer one (design review round 1,
-    D1/D2). ``_paint_ghost_caret`` moves the block one cell left onto the last
-    typed character.
+    #378 moved the block one cell LEFT, onto the last typed character, so a
+    one-character ghost would not be swallowed by it. Users read a block ON a
+    committed character as the overwrite / vi-normal-mode idiom — "the next
+    keystroke replaces this" — even though the text was committed and the caret
+    belonged after it; and the SAME command typed mid-draft (no ghost, so no
+    displacement) put the caret after the text, so the composer contradicted
+    itself between two states of one command.
 
-    Asserted on the RENDERED SEGMENTS rather than on a screenshot, because the
-    defect is a colour assignment: the cell carrying the caret must be the
-    typed one, and the ghost's first cell must carry the suggestion ink. The
-    post-pass had no test at all, so neutering it left the suite green while
-    the most important design finding regressed (agent review round 2, N1).
+    Every surveyed autosuggestion keeps the caret where the ghost starts: fish,
+    zsh-autosuggestions (``CURSOR == $#BUFFER``), prompt_toolkit's
+    ``AppendAutoSuggestion``, and Textual's own ``Input.render_line``, which
+    applies the cursor style on top of the first suggestion cell. The rule
+    pinned here is that one: block at column ``len(typed)``, on the ghost's
+    head, with the rest of the ghost dim beside it.
+
+    Asserted on the RENDERED SEGMENTS rather than on a screenshot, because both
+    halves are colour-and-column assignments. A displaced caret puts the cursor
+    ground at ``len(typed) - 1`` and fails the first assertion.
     """
     app = _mcp_app()
     configs = _oauth_configs()
@@ -731,27 +775,91 @@ async def test_the_caret_block_sits_on_typed_text_not_on_the_ghost(
 
             cursor_style = editor.get_component_rich_style("text-area--cursor")
             ghost_style = editor.get_component_rich_style("text-area--suggestion")
-            segments = [
-                (seg.text, seg.style) for seg in editor.render_line(0)._segments if seg.text
-            ]
+            cells = await _painted_cells(pilot, editor)
 
-    # The caret cell: the LAST TYPED character, carrying the cursor ground.
-    caret_cells = [
-        text
-        for text, style in segments
-        if style is not None and style.bgcolor == cursor_style.bgcolor and text.strip()
-    ]
-    assert caret_cells == [caret_char], (
-        f"the caret block should sit on the typed {caret_char!r}, not on "
-        f"{caret_cells!r} — it is covering the ghost again"
+    # The caret cell: the INSERTION POINT, which is the ghost's first character.
+    caret = [(col, char) for col, char, style in cells if _is_cursor(style, cursor_style)]
+    assert caret == [(len(typed), ghost_head)], (
+        f"the caret block should sit at column {len(typed)} on the ghost's "
+        f"{ghost_head!r}, not at {caret!r} — the #378 displacement is back"
     )
 
-    # The ghost's first cell: dim ink, NOT the cursor ground.
-    ghost_cells = [
-        text for text, style in segments if style is not None and style.color == ghost_style.color
-    ]
-    assert ghost_cells, "no cell carried the suggestion colour — the ghost is invisible"
-    assert ghost_cells[0].startswith(ghost_head), ghost_cells
+    # And EVERY ghost cell, the one under the block included, carries the
+    # suggestion foreground: the caret must not make the previewed head read as
+    # committed text (it was painted in the cursor's own 13.76:1 ink before).
+    ghost_cols = [col for col, _char, style in cells if _is_ghost(style, ghost_style)]
+    assert ghost_cols == list(range(len(typed), len(typed) + len(ghost))), (
+        f"the ghost should own columns {len(typed)}..{len(typed) + len(ghost) - 1} "
+        f"in suggestion ink, got {ghost_cols!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed",
+    [
+        # `CompletionMode.COMMAND`: the command word itself is fully typed.
+        "/resume",
+        "/mcp",
+        "/analytics",
+        # `CompletionMode.NAME_ARGUMENT`, the SECOND path that reaches gate 4.
+        # `completion_for` appends `suffix = " "` for this mode (see
+        # `command_picker.py`), so a fully typed team/agent name produces the
+        # same `' '` ghost. The gate lives in `_ghost_completion`, downstream of
+        # the mode split, so it covers both paths BY CONSTRUCTION — which is
+        # exactly why this case is pinned: a future refactor that moved the gate
+        # to the mode side would still pass every COMMAND case above while
+        # silently reintroducing the whitespace ghost here (agent review round
+        # 1, N1).
+        "/team chart",
+        "/agent coder",
+    ],
+)
+async def test_a_whitespace_only_completion_shows_no_ghost_but_tab_still_inserts_it(
+    typed: str,
+) -> None:
+    """Gate 4: a fully typed command previews nothing, and Tab is unchanged.
+
+    Every command's completion ends in a trailing space, so a fully typed
+    command has the single-character ghost ``' '`` — the state every user
+    passes through on the way to Enter. It draws zero dim pixels, so with the
+    caret at the insertion point the frame is a block on a blank cell one past
+    the text: identical to the composer with no ghost at all. Painting it
+    communicates nothing, and the attempt to make it visible is what motivated
+    #378's caret displacement and the overwrite misreading that followed.
+
+    The SECOND assertion is the load-bearing one. The feature's invariant is
+    ``buffer + ghost == buffer after Tab``, and withholding a PREVIEW must not
+    become a change to the EDIT: Tab still commits the trailing space here,
+    exactly as it did when that space was previewed. A gate implemented in
+    ``ghost_for`` or in the completion helpers would break this.
+    """
+    app = _mcp_app()
+    configs = _oauth_configs()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            await _type(pilot, typed)
+            await _settle(pilot, 10)
+            ghost = editor.suggestion
+            cursor_style = editor.get_component_rich_style("text-area--cursor")
+            cells = await _painted_cells(pilot, editor)
+            caret = [(col, char) for col, char, style in cells if _is_cursor(style, cursor_style)]
+
+            await pilot.press("tab")
+            await _settle(pilot, 10)
+            after = editor.text
+
+    assert ghost == "", f"{typed!r} previewed {ghost!r}, which paints no visible cell"
+    # The caret is where it would be with no ghost at all: one cell past the
+    # text, on a blank. Nothing is lost by withholding the preview.
+    assert caret == [(len(typed), " ")], caret
+    # Tab is untouched: the space is still committed.
+    assert after == typed + " ", (
+        f"withholding the PREVIEW changed the EDIT: Tab produced {after!r}, " f"not {typed + ' '!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -766,6 +874,10 @@ async def test_a_live_selection_withholds_the_ghost() -> None:
 
     Reachable: with the anchor earlier and the selection END at the buffer end,
     the caret-offset half of the gate passes and only this clause refuses.
+
+    Typed as ``/mc`` rather than the fully typed ``/mcp``: gate 4 withholds a
+    whitespace-only ghost, so a complete command no longer establishes the
+    "a ghost IS on offer here" precondition this isolation depends on.
     """
     app = _mcp_app()
     configs = _oauth_configs()
@@ -774,13 +886,13 @@ async def test_a_live_selection_withholds_the_ghost() -> None:
         editor = app.query_one(Editor)
         editor.focus()
         with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
-            await _type(pilot, "/mcp")
+            await _type(pilot, "/mc")
             await _settle(pilot, 10)
-            assert editor._ghost_completion() == " ", "precondition: caret at end ghosts"
+            assert editor._ghost_completion() == "p ", "precondition: caret at end ghosts"
 
             # Anchor earlier, END still at the buffer end: the caret half of
             # gate 1 passes, so only the selection clause can refuse.
-            editor.selection = Selection((0, 1), (0, 4))
+            editor.selection = Selection((0, 1), (0, 3))
             assert editor._caret_offset() == len(editor.text), "the caret half must still pass"
             assert editor._ghost_completion() == "", (
                 "a live selection admitted a ghost — Tab would replace the range, "
