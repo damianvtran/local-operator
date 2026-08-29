@@ -1352,6 +1352,25 @@ class OperatorApp(App[None]):
     TITLE = "Local Operator"
     CSS_PATH = "local_operator.tcss"
 
+    #: How long a second click still counts as part of the same chain.
+    #:
+    #: Textual's default is 0.5 s, which decided a composer double-click's
+    #: outcome on 200 ms the user cannot perceive: two clicks 0.7 s apart were
+    #: not a chain, so they made no selection, and the Ctrl+C pressed next found
+    #: no range and CLEARED THE DRAFT (design round 1, D3). The user's intent is
+    #: identical in both cases and nothing on the frame distinguishes them, so
+    #: the outcome must not swing between "word copied" and "draft cleared" on a
+    #: gap that fast.
+    #:
+    #: 0.9 s is the top of the macOS double-click slider's range (0.25-1.0 s),
+    #: which is the interval this app's users have actually calibrated their
+    #: hands against — and it skews toward the deliberate, slower clicker, who
+    #: is exactly the user least likely to know about `↑` recovery. The cost of
+    #: erring long is small and symmetric: a slow pair of clicks the user meant
+    #: as two separate caret placements selects a word instead, which the next
+    #: click or keystroke undoes. The cost of erring short is a lost draft.
+    CLICK_CHAIN_TIME_THRESHOLD = 0.9
+
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
