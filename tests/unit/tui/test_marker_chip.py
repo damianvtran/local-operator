@@ -426,3 +426,196 @@ async def test_the_receipt_row_is_inked_as_chrome_not_as_the_user_s_prose() -> N
         }
         assert muted in inks, f"the receipt wears prose ink, not the receipt ink: {inks}"
         assert prose not in inks, f"the receipt still carries the prompt's ink: {inks}"
+
+
+# -- the selection band, as RENDERED (design round 1, D1) ---------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme_name", ["dark", "light"], indirect=True)
+async def test_selected_composer_text_is_legible_on_its_band(theme_name) -> None:
+    """A selection must highlight the text, not erase it.
+
+    Design round 1, D1. `Editor .text-area--selection` set only a background,
+    so the selected run fell back to Textual's built-in `#e0e0e0` ink. On the
+    light ramp that was `#e0e0e0` on `#e5e0d5` — 1.003:1, no contrast at all —
+    and a triple-click made the whole draft read as deleted, which is the exact
+    "my draft disappeared" conclusion the multi-click gesture exists to remove.
+
+    Asserted from the CELLS the widget actually painted rather than from the
+    ramp, because the defect was in what the rule left UNSAID: the tokens were
+    fine and the rendered pair was not. Both ramps, since the dark one was
+    already correct and must stay that way.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.load_text("summarise the ingest path please")
+        await pilot.pause()
+        await pilot.pause()
+
+        editor.selection = Selection((0, 0), (0, 9))
+        await pilot.pause()
+
+        band = theme_mod.semantic_color("edge")
+        ink = theme_mod.semantic_color("fg")
+        selected = {(fg, bg) for _, fg, bg in cells(editor, 0)[:9]}
+        assert selected == {
+            (ink, band)
+        }, f"the selected run is not prose ink on the selection band: {selected}"
+        # Read from the ramp rather than from the cells: the assertion above has
+        # already established they are the same pair, and `cells` types its
+        # colours as optional because an unstyled segment carries none.
+        ratio = contrast(ink, band)
+        assert ratio >= 4.5, f"{theme_name}: selected text reads {ratio:.2f}:1 ({ink} on {band})"
+
+
+# -- the marker under the CLICK CHAIN (agent review round 1, R1-1) ------------
+#
+# Every test above drives mouse-down/up or the keyboard, and all 98 of them
+# passed while a double-click inside a chip selected the bare word `Image` —
+# the same structural blind spot the composer-copy change diagnosed for its own
+# drag helper, one file over. `pilot.click(times=...)` is what builds the chain
+# a real terminal sends, so these are the fixtures that can see the defect at
+# all.
+async def _multi_click(pilot, editor: Editor, column: int, times: int) -> None:
+    """A double/triple click at a document column, through the CLICK path."""
+    await pilot.click(editor, offset=at(editor, column), times=times)
+    await pilot.pause()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_double_click_inside_a_chip_takes_the_whole_marker(tmp_path) -> None:
+    """The marker is ATOMIC under the click chain, not just under backspace.
+
+    Regression for agent review round 1, R1-1. A double-click inside
+    `[Image #1, 1568x200]` ran a word span over the raw line and selected
+    `Image` alone; typing over that selection left `[x #1, 1568x200]` in the
+    draft, which no longer matches `IMAGE_MARKER`. `resolve_markers` then drops
+    it, so the attachment is SILENTLY not sent and what remains is neither a
+    chip nor prose — data loss reachable by double-clicking a chip.
+
+    Chain 1 already did this correctly via `_on_mouse_up`; the new handler has
+    to ask `_marker_span` the same question rather than inventing a second
+    answer.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("look at ")
+        await _paste(app, pilot, _png(tmp_path / "a.png"))
+        editor.insert("here")
+        await pilot.pause()
+        assert editor.text == "look at [Image #1, 1568x200] here"
+
+        # Column 10 is inside the word `Image`, which is what a user aiming at
+        # the chip's label hits.
+        await _multi_click(pilot, editor, editor.text.index("Image") + 2, times=2)
+
+        assert editor.selected_text == "[Image #1, 1568x200]"
+
+
+@pytest.mark.asyncio
+async def test_typing_over_a_double_clicked_chip_removes_it_whole(tmp_path) -> None:
+    """The user-visible half of R1-1: the edit after the gesture.
+
+    Type-over is the commonest edit following a double-click, and it is where
+    the fragment became data loss: the corrupted token stopped matching, the
+    image left the prompt, and nothing said so. The whole marker goes, and the
+    attachment goes with it — the contract `_delete_marker` already keeps for
+    backspace.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("look at ")
+        await _paste(app, pilot, _png(tmp_path / "a.png"))
+        editor.insert("here")
+        await pilot.pause()
+
+        await _multi_click(pilot, editor, editor.text.index("Image") + 2, times=2)
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert editor.text == "look at x here"
+        # No hanging fragment: nothing that still looks like a marker survives.
+        assert "#1" not in editor.text
+        assert editor.attachments() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_triple_click_over_a_chip_keeps_the_marker_intact(tmp_path) -> None:
+    """Chain 3 takes the line, which CONTAINS the marker entire.
+
+    Pinned beside the chain-2 case because the two reach the selection by
+    different branches, and a line selection that happened to split the token
+    would be the same silent drop by another route.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("look at ")
+        await _paste(app, pilot, _png(tmp_path / "a.png"))
+        editor.insert("here")
+        await pilot.pause()
+
+        await _multi_click(pilot, editor, editor.text.index("Image") + 2, times=3)
+
+        assert editor.selected_text == "look at [Image #1, 1568x200] here"
+
+
+@pytest.mark.asyncio
+async def test_a_double_click_beside_a_chip_still_selects_the_word(tmp_path) -> None:
+    """The marker gate must not swallow ordinary prose on the same row.
+
+    The guard is scoped to the marker's own cells: a word elsewhere on a line
+    that happens to contain a chip is still a word. Without this, "consult
+    `_marker_span` first" could be implemented as "any line with a marker is
+    atomic", which would break every draft that has an attachment in it.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("look at ")
+        await _paste(app, pilot, _png(tmp_path / "a.png"))
+        editor.insert("here")
+        await pilot.pause()
+
+        await _multi_click(pilot, editor, editor.text.index("here") + 1, times=2)
+
+        assert editor.selected_text == "here"
+
+
+@pytest.mark.asyncio
+async def test_a_double_click_on_a_fragment_that_only_looks_like_a_marker(tmp_path) -> None:
+    """Prose that matches the grammar is NOT atomic — the chip rule, unchanged.
+
+    `_marker_span` protects what `cite()` chipped and nothing else: a
+    hand-typed second citation is the user's own text, editable one character
+    at a time (design round 18, D7). Asking `_marker_span` from the click
+    handler inherits that distinction rather than restating it, and this pins
+    that the gesture and the paint keep agreeing.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, _png(tmp_path / "a.png"))
+        await pilot.pause()
+        # A second, hand-typed citation of the same number: prose, not a chip.
+        editor.text = f"{editor.text}and again [Image #1, 999x999]"
+        await pilot.pause()
+
+        duplicate = editor.text.rindex("[Image #1")
+        await _multi_click(pilot, editor, duplicate + 2, times=2)
+
+        assert editor.selected_text == "Image"
