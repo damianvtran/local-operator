@@ -244,7 +244,7 @@ reportPrivateImportUsage = false
 # Dropping `**/.*` is not cosmetic: every worktree (and the main checkout)
 # carries a `.venv` symlink into the shared uv environment, so pyright walks it
 # and enumerates the whole site-packages tree — 29466 source files instead of
-# 566, a run that exceeds 30 minutes instead of ~80 seconds, and node workers
+# 566, a run that exceeds 30 minutes instead of ~15 seconds, and node workers
 # past 3 GB RSS against a 4192 MB heap limit. CI never showed this because
 # `.github/workflows/ci.yml` installs with `pip install -e ".[dev]"` into the
 # runner's own interpreter and never creates a `.venv`, so the cost lands
