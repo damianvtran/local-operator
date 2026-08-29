@@ -290,8 +290,28 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
 # (capture disabled) both adds that noise and is incompatible with xdist,
 # which needs to capture worker output. Tests assert on return values and
 # rendered frames, never on uncaptured stdout, so neither flag was load-bearing.
-addopts = "-n auto"
+# `-m "not e2e"`: the headless TUI end-to-end stage (tests/e2e) is deselected
+# from the default run and gets its own CI job. Two reasons, both about the
+# fact that its failure mode is a HANG rather than an assertion:
+#
+#   1. It is bounded by `faulthandler.dump_traceback_later(exit=True)`, which
+#      is the only watchdog that survives the kernel-level deadlock it exists
+#      to catch (see tests/e2e/watchdog.py). When it fires it takes the whole
+#      process down — acceptable in a dedicated job, but in the unit run under
+#      xdist that would kill a worker carrying unrelated tests and report them
+#      as an infrastructure error rather than as the freeze they actually are.
+#   2. It contends real `flock` lock files and drives whole app lifecycles, so
+#      it is wall-clock bound work that does not belong in the fast inner loop.
+#
+# Run it explicitly with:
+#   env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0
+addopts = "-n auto -m \"not e2e\""
 testpaths = ["tests"]
+markers = [
+    # Applied by LOCATION in tests/e2e/conftest.py, so a module in that package
+    # cannot forget it and silently rejoin the unit run.
+    "e2e: headless end-to-end tests that drive the assembled TUI application",
+]
 
 # Coverage is measured through pytest-cov (`--cov`), which understands xdist
 # and merges each worker's data automatically — the plain `coverage run -m

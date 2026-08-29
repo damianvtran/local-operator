@@ -233,6 +233,74 @@ jobs:
           test -s err_err.txt || { echo "expected a diagnostic on stderr"; exit 1; }
           echo "error-path stdout is clean"
 
+  tui-e2e:
+    runs-on: ubuntu-latest
+    # This job exists because a FULLY GREEN unit suite did not catch a total
+    # event-loop freeze. PR #401 fixed a deadlock in the MCP OAuth refresh
+    # lock: an unbounded blocking `fcntl.flock` on a worker thread, then
+    # `os.close(fd)` on the event-loop thread during cancellation — and on
+    # macOS/BSD `close()` blocks while a sibling thread is parked in `flock()`
+    # on that descriptor. `/resume` cancels in-flight MCP connects, so typing
+    # it froze the whole TUI: banner and composer slid to the bottom and the
+    # app answered nothing, permanently. 8000+ unit tests passed throughout,
+    # because every piece was individually correct and NOTHING drove the
+    # assembled application. This stage drives it.
+    #
+    # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
+    # need a real OpenRouter key, so they are skipped on fork PRs that cannot
+    # have one. This job is scripted end to end — no key, no network, no model
+    # — precisely so the resume-liveness assertion runs on EVERY pull request
+    # including forks. A contributor reintroducing that deadlock has to see it
+    # go red on their own PR, which a secrets-gated job could never do.
+    #
+    # Fully headless: Textual's own `run_test()` pilot paints into an in-memory
+    # compositor, so there is no window, no display server and no TTY beyond
+    # what the harness makes itself. It needs no `xvfb` and must never grow a
+    # real browser or terminal dependency.
+    needs:
+      - lint
+      - type-check
+      - test
+      - pip-audit
+    # Generous relative to the ~11 s the suite takes when healthy: the failure
+    # mode under test is a hang, and each test carries its own tighter
+    # `faulthandler` bound (see tests/e2e/watchdog.py) that fires first with a
+    # full thread dump. This ceiling is only the backstop for a hang that
+    # somehow escapes those, so it should never be what reports a freeze.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set Up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The `mcp` extra is load-bearing here, not incidental: the resume test
+      # drives the REAL OAuth refresh lock through the REAL McpManager, and
+      # without the SDK the manager short-circuits every server with
+      # MCP_SDK_MISSING_ERROR — so the connect never reaches the lock and the
+      # test passes while exercising nothing at all.
+      - name: Install Package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run headless TUI end-to-end tests
+        # `-m e2e` overrides the `-m "not e2e"` in pyproject's addopts, which
+        # keeps this stage out of the unit run (a fired watchdog exits the
+        # process, which under xdist would kill a worker carrying unrelated
+        # tests). `-n0`: these contend real flock lock files and drive whole
+        # app lifecycles, so they run serially rather than under xdist.
+        # `env -u NO_COLOR TERM=xterm-256color` is what the TUI suite needs to
+        # compose a real frame, same as the documented local invocation.
+        run: |
+          env -u NO_COLOR TERM=xterm-256color \
+            python -m pytest tests/e2e -m e2e -n0 -q
+      - name: Report a hang's thread dump
+        # A tripped watchdog kills the process, so pytest never gets to print
+        # anything: the stacks of the parked threads live only in this file,
+        # and without this step a freeze reports as a bare non-zero exit.
+        if: failure()
+        run: python -m tests.e2e.watchdog
+
   server-sanity:
     runs-on: ubuntu-latest
     # Live-LLM job — same fork-secret gate as cli-sanity.
