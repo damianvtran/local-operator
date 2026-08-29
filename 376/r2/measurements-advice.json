@@ -1,0 +1,32 @@
+{
+  "bomb_56MP": {
+    "sniff": {
+      "mime": "image/png",
+      "sendable": true,
+      "w": 8000,
+      "h": 7000
+    },
+    "bound": "ValueError: it is 8000x7000 (56,000,000 pixels) and the decode limit is 50,000,000",
+    "clipboard_toast": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+    "clipboard_buffer": "",
+    "path_toast": "",
+    "path_attached": false,
+    "path_buffer_is_literal_path": true,
+    "advice_paste_file_path_works": false
+  },
+  "corrupt_png": {
+    "sniff": {
+      "mime": "image/png",
+      "sendable": true,
+      "w": 0,
+      "h": 0
+    },
+    "bound": "ValueError: could not decode the image data (UnidentifiedImageError: cannot identi",
+    "clipboard_toast": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+    "clipboard_buffer": "",
+    "path_toast": "",
+    "path_attached": false,
+    "path_buffer_is_literal_path": true,
+    "advice_paste_file_path_works": false
+  }
+}

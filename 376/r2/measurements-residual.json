@@ -1,0 +1,29 @@
+{
+  "A_whitespace_vs_image": {
+    "4-space indent": {
+      "pasted": "    ",
+      "buffer": "def handler():\n[Image #1, 1568x200] ",
+      "whitespace_kept": false,
+      "toast": ""
+    },
+    "tab": {
+      "pasted": "\t",
+      "buffer": "def handler():\n[Image #1, 1568x200] ",
+      "whitespace_kept": false,
+      "toast": ""
+    },
+    "newline": {
+      "pasted": "\n",
+      "buffer": "def handler():\n[Image #1, 1568x200] ",
+      "whitespace_kept": true,
+      "toast": ""
+    }
+  },
+  "B_file_mb": 17.02,
+  "B_cap_mb": 4.0,
+  "B_finder_copy": {
+    "toast": "",
+    "buffer": "",
+    "attached": false
+  }
+}

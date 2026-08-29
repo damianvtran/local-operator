@@ -1,0 +1,13 @@
+{
+  "file_mb": 17.02,
+  "toast_samples": [
+    [
+      0.07,
+      "Couldn't attach that image. Try a smaller one, or paste its file path."
+    ]
+  ],
+  "final_toast": "",
+  "buffer": "",
+  "attached": 0,
+  "elapsed_s": 16.12
+}

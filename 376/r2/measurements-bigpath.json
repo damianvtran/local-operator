@@ -1,0 +1,15 @@
+{
+  "source_mb": 17.02,
+  "attachment_cap_mb": 4.0,
+  "on_disk_over_cap": true,
+  "clipboard_route": {
+    "attached": true,
+    "toast": "",
+    "buffer": "[Image #1, 1568x1018 \u2193] "
+  },
+  "path_route_same_image": {
+    "attached": false,
+    "toast": "",
+    "inserted_as_plain_text": true
+  }
+}

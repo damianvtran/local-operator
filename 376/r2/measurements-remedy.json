@@ -1,0 +1,47 @@
+{
+  "A_showing_then_clipboard_success": {
+    "after_failure": {
+      "showing": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+      "display": true,
+      "deferred": null
+    },
+    "after_success": {
+      "showing": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+      "display": true,
+      "deferred": null,
+      "buffer": "[Image #1, 1568x200] "
+    }
+  },
+  "B_deferred_then_path_success": {
+    "after_ssh_notice": {
+      "showing": "MCP github failed: command not found: gh",
+      "display": true,
+      "deferred": "Clipboard images aren't read over SSH. Paste a file path instead."
+    },
+    "after_path_attach": {
+      "showing": "MCP github failed: command not found: gh",
+      "display": true,
+      "deferred": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "buffer": "[Image #1, 1568x200] "
+    },
+    "after_mcp_expiry": {
+      "showing": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "display": true,
+      "deferred": null,
+      "buffer": "[Image #1, 1568x200] "
+    }
+  },
+  "C_showing_ssh_then_path_success": {
+    "after_ssh_notice": {
+      "showing": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "display": true,
+      "deferred": null
+    },
+    "after_path_attach": {
+      "showing": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "display": true,
+      "deferred": null,
+      "buffer": "[Image #1, 1568x200] "
+    }
+  }
+}

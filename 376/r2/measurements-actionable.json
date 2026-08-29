@@ -1,0 +1,92 @@
+{
+  "TOAST_DEFAULT_MS": 5000,
+  "TOAST_FAILURE_MS": 10000,
+  "blocking": {
+    "paste_notice": {
+      "showing": "Couldn't attach an image from the clipboard.",
+      "actionable": true
+    },
+    "after_copy": {
+      "showing": "Couldn't attach an image from the clipboard.",
+      "deferred": "copied 11 characters",
+      "receipt_visible": false
+    }
+  },
+  "narrow": {
+    "30x18": {
+      "card_rows": 3,
+      "card_region": [
+        5,
+        1,
+        24,
+        3
+      ],
+      "screen": [
+        28,
+        16
+      ],
+      "pct_of_height": 19,
+      "virtual_vs_size": [
+        [
+          28,
+          16
+        ],
+        [
+          28,
+          16
+        ]
+      ],
+      "vscrollbar": false
+    },
+    "40x20": {
+      "card_rows": 2,
+      "card_region": [
+        5,
+        1,
+        34,
+        2
+      ],
+      "screen": [
+        38,
+        18
+      ],
+      "pct_of_height": 11,
+      "virtual_vs_size": [
+        [
+          38,
+          18
+        ],
+        [
+          38,
+          18
+        ]
+      ],
+      "vscrollbar": false
+    },
+    "60x24": {
+      "card_rows": 1,
+      "card_region": [
+        13,
+        1,
+        46,
+        1
+      ],
+      "screen": [
+        58,
+        22
+      ],
+      "pct_of_height": 5,
+      "virtual_vs_size": [
+        [
+          58,
+          22
+        ],
+        [
+          58,
+          22
+        ]
+      ],
+      "vscrollbar": false
+    }
+  }
+}

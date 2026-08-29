@@ -1,0 +1,514 @@
+{
+  "d1_buffer": "def handler():\n    ",
+  "d1_toast": {
+    "message": "",
+    "display": false,
+    "region": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "actionable": false,
+    "deferred": null,
+    "virtual_size": [
+      98,
+      28
+    ],
+    "size": [
+      98,
+      28
+    ],
+    "vscrollbar": false
+  },
+  "d1_table": {
+    "4-space indent": {
+      "pasted": "    ",
+      "buffer": "X    ",
+      "toast": ""
+    },
+    "2-space indent": {
+      "pasted": "  ",
+      "buffer": "X  ",
+      "toast": ""
+    },
+    "single space": {
+      "pasted": " ",
+      "buffer": "X ",
+      "toast": ""
+    },
+    "tab": {
+      "pasted": "\t",
+      "buffer": "X\t",
+      "toast": ""
+    },
+    "blank line": {
+      "pasted": "\n",
+      "buffer": "X\n",
+      "toast": ""
+    },
+    "two blank lines": {
+      "pasted": "\n\n",
+      "buffer": "X\n\n",
+      "toast": ""
+    },
+    "indent inside blanks": {
+      "pasted": "\n    \n",
+      "buffer": "X\n    \n",
+      "toast": ""
+    },
+    "EMPTY (terminal signal)": {
+      "pasted": "",
+      "buffer": "X",
+      "toast": "Couldn't attach an image from the clipboard."
+    },
+    "ordinary text": {
+      "pasted": "hello",
+      "buffer": "Xhello",
+      "toast": ""
+    }
+  },
+  "d1_ws_with_image": {
+    "buffer": "def handler():\n[Image #1, 1568x200] ",
+    "toast": "",
+    "images": 1
+  },
+  "d2": {
+    "nothing": {
+      "message": "Couldn't attach an image from the clipboard.",
+      "display": true,
+      "region": [
+        53,
+        1,
+        46,
+        1
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "buffer": ""
+    },
+    "unattachable": {
+      "message": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+      "display": true,
+      "region": [
+        39,
+        1,
+        60,
+        2
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "buffer": ""
+    },
+    "remote": {
+      "message": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "display": true,
+      "region": [
+        39,
+        1,
+        60,
+        2
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "buffer": ""
+    }
+  },
+  "d2_narrow": {
+    "nothing-60x24": {
+      "message": "Couldn't attach an image from the clipboard.",
+      "display": true,
+      "region": [
+        13,
+        1,
+        46,
+        1
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        58,
+        22
+      ],
+      "size": [
+        58,
+        22
+      ],
+      "vscrollbar": false
+    },
+    "nothing-40x20": {
+      "message": "Couldn't attach an image from the clipboard.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        34,
+        2
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        38,
+        18
+      ],
+      "size": [
+        38,
+        18
+      ],
+      "vscrollbar": false
+    },
+    "nothing-30x18": {
+      "message": "Couldn't attach an image from the clipboard.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        24,
+        3
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        28,
+        16
+      ],
+      "size": [
+        28,
+        16
+      ],
+      "vscrollbar": false
+    },
+    "remote-60x24": {
+      "message": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        54,
+        2
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        58,
+        22
+      ],
+      "size": [
+        58,
+        22
+      ],
+      "vscrollbar": false
+    },
+    "remote-40x20": {
+      "message": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        34,
+        3
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        38,
+        18
+      ],
+      "size": [
+        38,
+        18
+      ],
+      "vscrollbar": false
+    },
+    "remote-30x18": {
+      "message": "Clipboard images aren't read over SSH. Paste a file path instead.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        24,
+        4
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        28,
+        16
+      ],
+      "size": [
+        28,
+        16
+      ],
+      "vscrollbar": false
+    },
+    "unattachable-60x24": {
+      "message": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        54,
+        2
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        58,
+        22
+      ],
+      "size": [
+        58,
+        22
+      ],
+      "vscrollbar": false
+    },
+    "unattachable-40x20": {
+      "message": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        34,
+        3
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        38,
+        18
+      ],
+      "size": [
+        38,
+        18
+      ],
+      "vscrollbar": false
+    },
+    "unattachable-30x18": {
+      "message": "Couldn't attach that image. Try a smaller one, or paste its file path.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        24,
+        4
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        28,
+        16
+      ],
+      "size": [
+        28,
+        16
+      ],
+      "vscrollbar": false
+    }
+  },
+  "d3": [
+    [
+      "1 mcp claims slot",
+      {
+        "message": "MCP github failed: command not found: gh",
+        "display": true,
+        "region": [
+          57,
+          1,
+          42,
+          1
+        ],
+        "actionable": true,
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false
+      }
+    ],
+    [
+      "2 empty paste defers",
+      {
+        "message": "MCP github failed: command not found: gh",
+        "display": true,
+        "region": [
+          57,
+          1,
+          42,
+          1
+        ],
+        "actionable": true,
+        "deferred": [
+          "Couldn't attach an image from the clipboard.",
+          10000
+        ],
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false
+      }
+    ],
+    [
+      "3 screenshot attaches",
+      {
+        "message": "MCP github failed: command not found: gh",
+        "display": true,
+        "region": [
+          57,
+          1,
+          42,
+          1
+        ],
+        "actionable": true,
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "buffer": "[Image #1, 1568x200] "
+      }
+    ],
+    [
+      "4 mcp expires",
+      {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "actionable": false,
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "buffer": "[Image #1, 1568x200] "
+      }
+    ]
+  ],
+  "d3_showing": {
+    "after_first_paste": {
+      "message": "Couldn't attach an image from the clipboard.",
+      "display": true,
+      "region": [
+        53,
+        1,
+        46,
+        1
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false
+    },
+    "after_successful_paste": {
+      "message": "Couldn't attach an image from the clipboard.",
+      "display": true,
+      "region": [
+        53,
+        1,
+        46,
+        1
+      ],
+      "actionable": true,
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "buffer": "[Image #1, 1568x200] "
+    }
+  },
+  "markers": {
+    "clipboard_text": "[Image #1, 1568x200] ",
+    "path_text": "[Image #1, 1568x200] ",
+    "text_equal": true,
+    "bytes_equal": true,
+    "mime_equal": true
+  },
+  "multi": {
+    "buffer": "[Image #1, 1568x200] [Image #2, 1568x1045 \u2193] what changed between these two screenshots of the dashboard header?",
+    "toast": {
+      "message": "",
+      "display": false,
+      "region": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actionable": false,
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false
+    }
+  }
+}
