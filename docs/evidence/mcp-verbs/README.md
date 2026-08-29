@@ -10,6 +10,7 @@ or written, and the synthetic configs contain no secrets or tokens.
 | `tui_check.py` / `tui_check.txt` | The real `OperatorApp` driven through `_type_command`: `/mcp list`, `add` for stdio and http, the duplicate/extra-token/usage refusals, `remove` succeeding on an owned server, `remove` REFUSING a Claude-imported one, and the unknown-verb error. Shows the resulting `mcp.json` after each step. |
 | `audit.py` / `audit.txt` | Every `/mcp` verb's rows checked against what the verb actually destroys, with the editor's real destructive-gate verdict per row. Run on head + PR #378 (the state this ships into): it FAILS on `reauth` before the round-1 fix and passes after. |
 | `reauth_repro.py` / `reauth_repro.txt` | The M2 key-path repro: `/mcp reauth lnr` + Enter used to FIRE and forget the grant of a server the user never spelled; it now fills. |
+| `typed_path_check.py` / `.txt` | Round-2 B1/B2: types every `/mcp <verb> ` transition with `pilot.press` per character and reports whether the picker actually OPENED, what it holds, and the destructive-gate verdict. This is the only harness here that exercises the `RefreshArgumentChoices` message; run it against a worktree with #378 merged (`LOP_REPO=<path>`). |
 | `add_ownership_check.py` / `.txt` | Round-1 M1/M3/N1/N2 on the real `/mcp` path: `add` refusing to shadow a `~/.claude.json` entry, refusing the higher-priority `<cwd>/.mcp.json` case that used to print "added" for a write with no observable effect, the corrected OAuth hint, and the trailing-token refusals. Prints the EFFECTIVE server before and after each attempt, so a no-op is visible rather than asserted. |
 | `gate_repro.py` / `gate_repro.txt` | The data-loss defect behind the xfail test: a fuzzy `/mcp remove fsy` + Enter **deleted `filesystem`** from `mcp.json`, because the editor's destructive gate matches the command WORD (`logout`) and never covers `mcp`. Fixed by PR 1. |
 
@@ -25,6 +26,13 @@ bash docs/evidence/mcp-verbs/cli_check.sh /path/to/worktree
 ```
 
 ## Rendered frames
+
+**`typed-verbs.png` / `typed-remove.png` are the authoritative frames** — captured
+by TYPING. The earlier `after-*.png` stills were produced with `_set_editor_line`,
+which bypasses the message that opens the server slot, so they showed rows a real
+user could not reach (review round 2, B1). `shot.py` now types too. The typed
+`remove` frame also shows #378's ghost text, since the frames are captured on the
+merged tree.
 
 `before-verbs.png` / `after-verbs.png` — the `/mcp ` argument picker. Before:
 three verbs (`login`, `logout`, `reauth`). After: six, with `list` leading as

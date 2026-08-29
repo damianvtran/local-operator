@@ -55,7 +55,6 @@ from tests.unit.tui.test_app_pilot import (  # noqa: E402
     FakeMcpManager,
     McpSession,
     _factory,
-    _set_editor_line,
 )
 
 LINES = ["/mcp ", "/mcp remove ", "/mcp login "]
@@ -74,7 +73,13 @@ async def main() -> None:
         app.query_one(Toast).dismiss_toast()
         editor = app.query_one(Editor)
         for line in LINES:
-            _set_editor_line(editor, line)
+            editor.text = ""
+            editor.move_cursor(editor._end_of_buffer())
+            for _ in range(4):
+                await pilot.pause()
+            editor.focus()
+            for ch in line:
+                await pilot.press("space" if ch == " " else ch)
             for _ in range(8):
                 await pilot.pause()
             rows = [(n, c.detail, c.alert) for n, c in editor.picker.suggestions()]
