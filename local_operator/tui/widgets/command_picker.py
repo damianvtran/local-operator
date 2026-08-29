@@ -441,6 +441,149 @@ def slash_argument(
     return None if context is None else context.value
 
 
+class CompletionMode(Enum):
+    """Which slot :func:`completion_for` is completing.
+
+    The three completion sites in ``Editor`` differ only in which span they
+    rewrite and whether a trailing space follows the inserted name, and that
+    difference is exactly what this enum names.
+    """
+
+    #: The command WORD — ``/mc`` → ``/mcp `` (``Editor._apply_command``).
+    COMMAND = "command"
+    #: An enum-tail ARGUMENT — ``/mcp lo`` → ``/mcp login``, no trailing space
+    #: so the matcher keeps matching (``Editor._complete_argument``).
+    ARGUMENT = "argument"
+    #: A NAME+message argument — ``/team fro`` → ``/team frontend-guild ``, the
+    #: space opening the message tail (``Editor._complete_name_argument``).
+    NAME_ARGUMENT = "name_argument"
+
+
+def completion_for(
+    text: str,
+    caret: int,
+    mode: CompletionMode,
+    row_name: str,
+    commands: tuple[str, ...],
+    known: frozenset[str] = frozenset(),
+) -> tuple[str, int] | None:
+    """The buffer and caret that accepting ``row_name`` produces — pure.
+
+    THE single source of truth for "what does choosing this row put in the
+    buffer". The three ``Editor`` completion methods delegate their string
+    arithmetic here and keep only their side effects (running the command, the
+    inline reassembly), and the composer's inline GHOST TEXT is derived from
+    the very same call. That shared derivation is what makes the ghost's
+    invariant true by construction rather than by two implementations agreeing:
+    the dimmed cells the user sees are computed from the same ``new_text`` that
+    Tab commits, so ``buffer + ghost == buffer_after_tab`` cannot drift the way
+    two parallel string builders would.
+
+    Every mode replaces a SPAN — ``[start, end)`` — rather than splicing to the
+    end of the buffer, because inline detection means a message may follow the
+    command token (``fix this /te|``) and that suffix is the user's prose. Note
+    the consequence for the ghost: a span replacement is only an APPEND when
+    the row extends what was typed, which is why the ghost rule tests
+    ``new_text.startswith(text)`` instead of assuming it.
+
+    Returns ``None`` when the caret is not in the slot ``mode`` names — the
+    parse the caller would otherwise have had to repeat.
+    """
+    if mode is CompletionMode.COMMAND:
+        context = slash_context(text, caret, known)
+        if context is None:
+            return None
+        # The trailing space is load-bearing, not cosmetic: it terminates the
+        # word (closing the command list) and, for a list-taking command, opens
+        # the argument list. It is part of what Tab commits, so it is part of
+        # the ghost too.
+        completed = f"{text[: context.start]}/{row_name} {text[context.end :]}"
+        return completed, context.start + len(row_name) + 2
+    argument = slash_argument_context(text, commands, caret, known)
+    if argument is None:
+        return None
+    # NAME+message commands take the terminating space (it opens the message
+    # tail); enum-tail arguments must NOT, or the matcher would stop matching
+    # and Tab would appear to fill the field and abandon it in one keystroke.
+    suffix = " " if mode is CompletionMode.NAME_ARGUMENT else ""
+    filled = f"{text[: argument.start]}{row_name}{suffix}{text[argument.end :]}"
+    caret_after = argument.start + len(row_name) + len(suffix)
+    if mode is CompletionMode.NAME_ARGUMENT:
+        # INLINE ENGAGE. When a draft survives outside the command token,
+        # ``Editor._complete_name_argument`` does NOT stop at the span
+        # replacement above: it hands off to ``_reassemble_prompt_command``,
+        # which moves the whole ``/<cmd> <name>`` construct to the FRONT of the
+        # buffer with the surviving draft as its message. That second edit has
+        # to be modelled HERE, in the one function both Tab and the ghost read,
+        # or the ghost describes an edit that never happens — it previewed a
+        # dimmed append while Tab reordered the entire buffer (review round 1,
+        # B1). Modelling it rather than special-casing the renderer is what
+        # keeps "one function, one answer" true; a renderer-side exception
+        # would reintroduce exactly the two-implementations drift this shared
+        # helper exists to prevent.
+        #
+        # The result is deliberately NOT an append, so ``ghost_for``'s
+        # ``startswith`` rule withholds the ghost of its own accord. That is
+        # the honest outcome: no string appended at the caret can describe a
+        # whole-buffer reordering, the same reason a fuzzy match shows nothing.
+        outside = (text[: argument.token_start] + text[argument.end :]).strip()
+        if outside:
+            return _reassembled_completion(filled, caret_after, known)
+    return filled, caret_after
+
+
+def _reassembled_completion(
+    filled: str, caret: int, known: frozenset[str]
+) -> tuple[str, int] | None:
+    """Apply the inline reassembly to an already-filled NAME_ARGUMENT buffer.
+
+    Mirrors ``Editor._reassemble_prompt_command`` on the FILLED text, which is
+    the state that method actually runs against (the name is in place before
+    the token span is recomputed). Kept beside :func:`completion_for` so the
+    prediction and the edit are read together and cannot drift apart.
+    """
+    span = slash_token_span(filled, caret, known)
+    if span is None:
+        return None
+    token_start, token_end = span
+    command = filled[token_start:token_end].strip()
+    # One adjoining separator goes with the token, matching the splice rule so
+    # ``msg /goal`` and ``/goal\nmsg`` both collapse to just ``msg``. The
+    # PRECEDING separator is preferred; the following one is taken only when
+    # the token opened the buffer.
+    start, end = token_start, token_end
+    if start > 0 and filled[start - 1] in " \t\n":
+        start -= 1
+    elif end < len(filled) and filled[end] in " \t\n":
+        end += 1
+    rest = (filled[:start] + filled[end:]).strip()
+    assembled = f"{command} {rest}" if rest else f"{command} "
+    return assembled, len(assembled)
+
+
+def ghost_for(completion: tuple[str, int] | None, text: str) -> str:
+    """The dimmed remainder to preview, or ``""`` when none can be honest.
+
+    The ghost is shown IF AND ONLY IF the completion is a pure APPEND to what
+    the user typed. Completion rewrites a SPAN (see :func:`completion_for`), so
+    for a prefix match that happens to look like an append but for a FUZZY one
+    it rewrites characters already on screen: ``/lg`` + Tab yields ``/login ``,
+    which is not ``/lg`` plus anything. No string appended at the caret can
+    describe that edit, so any ghost there would display characters Tab does
+    not produce — a lie about the next keystroke. The picker row already
+    carries the meaning in that case, so showing nothing costs nothing.
+
+    ``startswith`` is deliberately CASE-SENSITIVE. ``/MCP lo`` + Tab inserts
+    the registry's own casing (``login``), so a case-insensitive check would
+    pass and then paint a ghost whose visible characters differ from the ones
+    Tab commits. Same rule, same reason: only an exact append is honest.
+    """
+    if completion is None:
+        return ""
+    new_text, _caret = completion
+    return new_text[len(text) :] if new_text.startswith(text) else ""
+
+
 #: Below this many typed characters the fuzzy tail is suppressed. A one- or
 #: two-letter query matches an arbitrary-looking set by subsequence — `/u`
 #: offered `usage, quit, accounts, logout` and `/g` offered
@@ -534,9 +677,25 @@ class CommandPicker(Static):
         self,
         on_choose: Callable[[str], None],
         on_highlight: Callable[[str | None], None] | None = None,
+        on_preview: Callable[[str | None], None] | None = None,
     ) -> None:
         super().__init__()
         self._on_choose = on_choose
+        #: Observer for the row an ACCEPT KEY would take — a SEPARATE question
+        #: from ``on_highlight``, and the reason this is its own channel rather
+        #: than another caller of that one. ``on_highlight`` answers "what is
+        #: the eye on", so it prefers the HOVER and only reports ARGUMENT rows;
+        #: both are right for a row preview and wrong for the composer's inline
+        #: ghost, which is a prediction about what Tab will insert. Reusing the
+        #: highlight channel left the ghost a row behind on every arrow press in
+        #: COMMAND mode (nothing reported there at all) and repainted it to the
+        #: hovered row while Tab still acted on the keyboard selection (review
+        #: round 1, U1/U2). Fired from the same state-change sites, so any way
+        #: the accept target moves reaches it.
+        self._on_preview = on_preview
+        #: Last name reported to ``_on_preview``, de-duplicated for the same
+        #: reason as ``_reported_highlight``.
+        self._reported_preview: str | None = None
         #: Observer for the row the user is CONSIDERING — the hover target when
         #: the mouse is over a row, else the keyboard highlight — called with
         #: ``None`` when an argument list stops showing rows. It exists for
@@ -688,6 +847,24 @@ class CommandPicker(Static):
             return None
         return self._matches[self._selected][0]
 
+    def highlighted_choice(self) -> ArgumentChoice | None:
+        """The highlighted ARGUMENT row itself, or ``None``.
+
+        The row OBJECT, not just its name, so a caller can read the flags the
+        app set on it. The safety gate needs ``alert`` — whether choosing this
+        row destroys something — and that is a per-ROW fact the command word
+        cannot answer: ``/mcp remove <server>`` deletes a config while
+        ``/mcp login <server>`` does not, and both live under the same word
+        (see ``Editor._argument_is_destructive``).
+
+        Returns ``None`` in COMMAND mode, where the match is a
+        :class:`SlashCommand` and the question does not apply.
+        """
+        if not self._matches or self._mode is not PickerMode.ARGUMENT:
+            return None
+        choice = self._matches[self._selected][1]
+        return choice if isinstance(choice, ArgumentChoice) else None
+
     @property
     def selected_index(self) -> int:
         """Index of the highlighted row within :meth:`suggestions`."""
@@ -777,6 +954,19 @@ class CommandPicker(Static):
                 self._reset_rows()
                 self.display = True
                 self._repaint()
+                # The rows are gone even though the surface stays up, so the
+                # observers have to hear it: this is the ONE exit from `_apply`
+                # that used to return without reporting, and the composer's
+                # inline ghost outlived the row it described because of it. The
+                # list would sit showing "credential store unreadable" while the
+                # composer still promised `/mcp login`, and Tab — the key the
+                # dim text exists to describe — inserted a literal tab (UX
+                # review round 2, U9). `_reset_rows` has already emptied
+                # `_matches`, so the report is what turns that into a cleared
+                # preview. Every other path out of `_apply` reports; this one
+                # must too, or "a notice replaced the rows" becomes invisible to
+                # anything watching the accept target.
+                self._report_highlight()
                 return
             self._close()
             return
@@ -1302,6 +1492,7 @@ class CommandPicker(Static):
         De-duplicated on the name: a mouse crossing five cells of one row and
         a repaint that reproduced the same set both say nothing new.
         """
+        self._report_preview()
         if self._on_highlight is None or self._suppress_report:
             return
         name: str | None = None
@@ -1312,6 +1503,31 @@ class CommandPicker(Static):
         if name != self._reported_highlight:
             self._reported_highlight = name
             self._on_highlight(name)
+
+    def _report_preview(self) -> None:
+        """Tell the observer which row an ACCEPT KEY would take right now.
+
+        Deliberately different from :meth:`_report_highlight` on both axes:
+
+        * **Both modes.** A command-word list has nothing to *preview* in the
+          ``/theme`` sense, but it certainly has an accept target — the ghost
+          in COMMAND mode is the feature's most common state.
+        * **Keyboard selection only, never the hover.** Tab acts on
+          ``_selected``, so a ghost following the pointer would promise a row
+          the key will not insert. Resting the pointer over the list while
+          reaching for Tab was enough to trigger it (U2).
+
+        Reports ``None`` when the list is not showing rows, which is what
+        retires the ghost on dismissal and on close (U3).
+        """
+        if self._on_preview is None or self._suppress_report:
+            return
+        name: str | None = None
+        if self._matches and self.display and 0 <= self._selected < len(self._matches):
+            name = self._matches[self._selected][0]
+        if name != self._reported_preview:
+            self._reported_preview = name
+            self._on_preview(name)
 
     def _reset_rows(self) -> None:
         """Drop every row and the state that pointed into them, but not the
