@@ -1,0 +1,61 @@
+--- $ lop mcp list
+No MCP servers configured.
+    exit=0
+--- $ lop mcp add demo-stdio --command npx
+    exit=0
+--- $ lop mcp add demo-http --url https://demo.example/mcp
+    exit=0
+--- $ lop mcp add demo-oauth --url https://oauth.example/mcp --oauth
+    exit=0
+--- $ lop mcp list
+
+[1;32m╭─ MCP Servers ─────────────────────────────────[0m
+[1;32m│ demo-http: https://demo.example/mcp[0m
+[1;32m│ demo-oauth: https://oauth.example/mcp[0m
+[1;32m│ demo-stdio: npx[0m
+[1;32m╰──────────────────────────────────────────────[0m
+    exit=0
+--- error paths (stderr text + exit code must be unchanged)
+--- $ lop mcp add demo-stdio --command npx
+error: server 'demo-stdio' already exists in $HOME/.local-operator/mcp.json
+    exit=1
+--- $ lop mcp add both --command npx --url https://x.example/mcp
+error: pass either command (stdio) or url (http), not both
+    exit=1
+--- $ lop mcp add neither
+error: a server needs a command (stdio) or a url (http)
+    exit=1
+--- $ lop mcp add bad name! --command npx
+error: invalid server name 'bad name!': must match [A-Za-z0-9_.:-]{1,100}
+    exit=1
+--- $ lop mcp add stdio-oauth --command npx --oauth
+error: OAuth is supported only for remote HTTP servers
+    exit=1
+--- $ lop mcp remove nope
+error: server 'nope' not found in $HOME/.local-operator/mcp.json
+    exit=1
+--- $ lop mcp remove demo-http
+    exit=0
+--- $ lop mcp list
+
+[1;32m╭─ MCP Servers ─────────────────────────────────[0m
+[1;32m│ demo-oauth: https://oauth.example/mcp[0m
+[1;32m│ demo-stdio: npx[0m
+[1;32m╰──────────────────────────────────────────────[0m
+    exit=0
+--- resulting global config
+{
+  "mcpServers": {
+    "demo-stdio": {
+      "type": "stdio",
+      "command": "npx"
+    },
+    "demo-oauth": {
+      "type": "http",
+      "url": "https://oauth.example/mcp",
+      "auth": {
+        "type": "oauth"
+      }
+    }
+  }
+}

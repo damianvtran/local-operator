@@ -1,0 +1,37 @@
+
+=== M1 shadow (foreign, lower priority)
+$ /mcp add notion https://evil.example/mcp
+! 'notion' is already defined in ~/.claude.json (imported from Claude
+     Code).
+Adding it here would shadow that entry rather than update it.
+                   Change it there, or pick another name.
+   effective notion: before=('https://mcp.notion.com/mcp', '~/.claude.json') after=('https://mcp.notion.com/mcp', '~/.claude.json')
+
+=== M1 no-effect (project, higher priority)
+$ /mcp add proj https://mine.example/mcp
+! 'proj' is already defined in ~/proj/.mcp.json, which takes priority
+     over the global config /mcp add writes.
+Adding it here would have no
+          effect. Edit that file, or remove the entry there first.
+   effective proj: before=('https://proj.example/mcp', '/private~/proj/.mcp.json') after=('https://proj.example/mcp', '/private~/proj/.mcp.json')
+
+=== M1 control: owned name still updatable?
+$ /mcp add owned https://x.example/mcp
+! could not add MCP server 'owned': server 'owned' already exists in
+                         ~/.local-operator/mcp.json
+   effective owned: before=('https://owned.example/mcp', '~/.local-operator/mcp.json') after=('https://owned.example/mcp', '~/.local-operator/mcp.json')
+
+=== M3 hint accuracy
+$ /mcp add gw https://gw.example/mcp
+✓ added MCP server 'gw' to ~/.local-operator/mcp.json — needs OAuth?
+     re-add it with: lop mcp add gw --url https://gw.example/mcp --oauth
+   effective gw: before=(None, '') after=('https://gw.example/mcp', '~/.local-operator/mcp.json')
+
+=== N1 list extra tokens
+$ /mcp list junk
+! /mcp list takes no arguments — got 'junk'
+
+=== N2 remove extra tokens
+$ /mcp remove owned extra
+! /mcp remove takes one server name — got 'owned extra'
+   effective owned: before=('https://owned.example/mcp', '~/.local-operator/mcp.json') after=('https://owned.example/mcp', '~/.local-operator/mcp.json')

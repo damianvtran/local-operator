@@ -1,0 +1,12 @@
+typed                      open  rows                                   gate
+----------------------------------------------------------------------------------
+'/mcp '                    True  ['list', 'add', 'remove', 'login', 'lo False
+'/mcp remove '             True  ['remove linear', 'remove filesystem'] True
+'/mcp remove fs'           True  ['remove filesystem']                  True
+'/mcp login '              True  ['login linear']                       False
+'/mcp logout '             True  ['logout linear']                      True
+'/mcp reauth '             True  ['reauth linear']                      True
+'/mcp reauth lnr'          True  ['reauth linear']                      True
+
+TYPED-PATH CHECK PASSED: every verb->server transition opens by typing,
+and the destructive gate is armed on the rows that destroy.
