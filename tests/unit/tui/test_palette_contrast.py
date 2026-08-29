@@ -169,6 +169,36 @@ def test_select_tint_survives_hover(name: str) -> None:
     ), f"{name}: tint-select-hi equals tint-select — hover on the selected row is invisible"
 
 
+@pytest.mark.parametrize("name", _ALL_THEMES)
+def test_selected_composer_text_stays_legible_on_its_band(name: str) -> None:
+    """Selecting text must highlight it, never erase it.
+
+    Design round 1, D1. `Editor .text-area--selection` set only a background,
+    so the selected run kept Textual's built-in `#e0e0e0` ink — a dark-theme
+    default masquerading as a neutral. On the light ramp that landed at
+    1.003:1 against the band (`#e0e0e0` on `#e5e0d5`): a triple-click made the
+    whole draft look deleted, which is precisely the "my draft disappeared"
+    reading the multi-click gesture exists to prevent.
+
+    The stylesheet now names `$lo-fg`, so this asserts the pair the user
+    actually sees for EVERY registered theme — the rule is shared by all of
+    them, and a new palette whose `edge` drifts toward its `fg` would reopen
+    the defect silently. AA (4.5:1) is the floor: this is body text the user is
+    reading and editing, not a label.
+    """
+    # Resolved through the SEMANTIC names the stylesheet uses (`$lo-fg`,
+    # `$lo-edge`), not the raw ramp keys: the light ramp aliases those to `ink`
+    # and `hairline`, so reading the tokens directly would check a pair the
+    # rule never renders.
+    ink = theme.semantic_color("fg", name)
+    band = theme.semantic_color("edge", name)
+    ratio = contrast(ink, band)
+    assert ratio >= 4.5, (
+        f"{name}: selected text reads {ratio:.2f}:1 ({ink} on {band}) — "
+        "a selection that erases its own text"
+    )
+
+
 def test_default_theme_is_operator_dark() -> None:
     """The product default stays the island night, whatever gets registered."""
     assert theme.DEFAULT_THEME == "dark"
