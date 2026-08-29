@@ -14,13 +14,49 @@ from local_operator.clients.openrouter import (
     OpenRouterModelData,
     OpenRouterModelPricing,
 )
+from local_operator.env import get_env_config
 from local_operator.server.app import app
 
 
 @pytest.fixture
 def client():
-    """Create a test client for the FastAPI app."""
-    return TestClient(app)
+    """Create a test client for the FastAPI app, with the state it depends on.
+
+    A bare ``TestClient(app)`` does NOT run the lifespan handler — that only
+    happens when the client is used as a context manager — so
+    ``app.state.env_config`` is never set here. The ``/v1/models`` routes
+    resolve it through ``Depends(get_env_config)``, which reads
+    ``request.app.state.env_config`` directly, so these tests only passed when
+    some EARLIER test in the same worker process had already populated that
+    shared state (the async fixtures in ``conftest.py`` do, and ``app`` is a
+    module-level singleton shared by every test in the process).
+
+    That made the file order-dependent rather than broken: it passes in a run
+    where a neighbour seeded the state first and fails with
+    ``AttributeError: 'State' object has no attribute 'env_config'`` in one
+    where it lands first on an xdist worker. Which happens is decided by how
+    many tests the suite collects, so adding tests ANYWHERE could flip it —
+    which is how it surfaced, on a branch whose only change here was 56 new TUI
+    tests shifting the distribution.
+
+    Setting the attribute the fixture's own tests need makes the file
+    self-contained, which is the property it should have had: a test that
+    depends on a sibling having run is not a test of anything it names.
+    """
+    # Restored afterwards so a lifespan-backed value from another test in the
+    # same process is not clobbered — this fixture owns the value only for the
+    # duration of its own test.
+    had_env_config = hasattr(app.state, "env_config")
+    previous = getattr(app.state, "env_config", None)
+    if not had_env_config or previous is None:
+        app.state.env_config = get_env_config()
+    try:
+        yield TestClient(app)
+    finally:
+        if had_env_config:
+            app.state.env_config = previous
+        elif hasattr(app.state, "env_config"):
+            delattr(app.state, "env_config")
 
 
 def test_list_providers_with_ollama_active(client):
