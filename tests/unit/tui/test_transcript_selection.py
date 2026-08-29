@@ -71,6 +71,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.markdown_theme import install_markdown_theme
+from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.assistant import AssistantBlock, flatten
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
@@ -480,6 +481,710 @@ async def test_a_drag_starting_inside_the_gutter_still_copies_from_the_prose() -
         await pilot.pause()
         selection = Selection.from_offsets(Offset(x=0, y=0), Offset(x=11, y=0))
         assert block.get_selection(selection) == ("summarise", "\n")
+
+
+# -- a sub-line take copies what was highlighted -----------------------------
+#
+# Reported from the field: dragging the eight cells of one word inside a
+# rendered bullet announced ``copied 115 characters`` and put the WHOLE source
+# line on the clipboard. ``AssistantBlock.get_selection`` reduced the selection
+# to a first and last row and dropped the column pair ``get_span`` returns, and
+# ``slice_markdown`` is row-granular by contract, so every partial row was
+# widened to the source line beneath it.
+#
+# The rule that answers it, and the reason it is drawn where it is: there is no
+# third option between "the glyphs" and "the whole source line". Column-trimmed
+# markdown would need a rendered column to index a source column, and it does
+# not — ``frontend`` sits at rendered column 57 and source column 58 in the
+# fixture below, because ``- `` paints as `` • `` (+1) while the ``**`` vanishes
+# (-2), an offset that is content-dependent and signed. So a take that does not
+# cover the full content of its rows AND touches at most one source line copies
+# glyphs; everything wider stays markdown.
+#: The reported message: a bold word mid-bullet, plus a second bullet so a
+#: multi-line drag has somewhere to go. At width 150 the first bullet renders
+#: as one row, which is what makes the sub-row drag below the reported gesture.
+BULLETS = (
+    "Here is what I found:\n\n"
+    "- Transient failures in the ingest path never reach the **frontend** "
+    "without a retry, so the user sees a stale row.\n"
+    "- The second bullet exists so a multi-line drag has somewhere to go.\n"
+)
+
+#: One long source line, rendered at a width that folds it across rows. The
+#: wrap is the point: it is ONE source line painted as several, so a phrase
+#: dragged over the fold is the same defect as one inside a single row.
+WRAPPED = (
+    "This is a single but quite important paragraph that will certainly "
+    "wrap across several rendered rows at a narrow terminal width.\n"
+)
+
+#: A blockquote long enough to WRAP, which the module had no fixture for — and
+#: that gap is why a green suite missed the furniture leak of review round 1
+#: (R1-1) and design round 1 (D1). It is the one wrapped construct whose
+#: continuation rows carry furniture: Rich repeats ``▌`` on every row of a
+#: quote, so a sub-line take over its fold is the case where a gutter of 0
+#: strips nothing.
+WRAPPED_QUOTE = (
+    "Here is a reply you can paste:\n\n"
+    "> This is a fairly long quoted sentence that will certainly wrap across "
+    "more than one rendered row at this width.\n"
+)
+
+#: A single source line holding a token wider than a narrow render segment.
+#: Rich folds it MID-TOKEN and consumes nothing, unlike a fold at a space —
+#: so a take across this fold must rejoin with no separator at all.
+LONG_TOKEN = "See supercalifragilisticexpialidociousandthensome_verylongtoken_here now.\n"
+
+#: A line using BOTH the open and closed form of a compound. The closed form is
+#: what made the round-2 rejoin weld the open one shut: the discriminator asked
+#: whether ``file`` + ``system`` occurs ANYWHERE in the line, and it does, so a
+#: real space-fold was judged mid-token (review round 2, R2-1; design round 2,
+#: D2-2). Position is the only thing that separates the two occurrences.
+COMPOUND_PAIR = (
+    "The filesystem and the file system layer are different things in this "
+    "codebase, remember that.\n"
+)
+
+#: Ordinary English compound pairs, swept rather than sampled: a
+#: membership-versus-position bug reproduces on whichever pair happens to fall
+#: either side of the fold at a given width, so one fixture proves very little.
+COMPOUND_PAIRS = (
+    ("filesystem", "file system"),
+    ("login", "log in"),
+    ("setup", "set up"),
+    ("checkout", "check out"),
+    ("timeout", "time out"),
+    ("backup", "back up"),
+    ("workflow", "work flow"),
+    ("runtime", "run time"),
+    ("database", "data base"),
+    ("frontend", "front end"),
+    ("username", "user name"),
+    ("hostname", "host name"),
+    ("keyword", "key word"),
+    ("website", "web site"),
+    ("dropdown", "drop down"),
+)
+
+#: CJK prose. ``align`` cannot place these rows (no anchor word survives), so
+#: the copy takes the ``source_line is None`` fallback — the branch that
+#: returned ``" "`` unconditionally and put a space into text whose script never
+#: writes one (review round 2, R2-2; design round 2, D2-3).
+CJK_PARAGRAPH = "这是一个很长的中文句子用来测试换行和复制的行为是否正确无误请仔细检查每一个字符是否都被正确地复制到剪贴板中。\n"
+
+JAPANESE_PARAGRAPH = "これは日本語の段落です。この行は端末の幅で折り返されますので、コピーの境界を確認するのに適しています。\n"
+
+#: Emoji in Latin prose: double-width like CJK, but space-delimited, so a fold
+#: here DID consume a space. The control that keeps the CJK fix from being
+#: written as "wide characters never rejoin with a space" (review round 2
+#: verified emoji already copied correctly and asked that it stay that way).
+EMOJI_PROSE = "The status 🎉🎉🎉 report 🚀🚀🚀 with many emoji 🔥 and more text here now.\n"
+
+#: A fenced block indented INSIDE a list item — numbered steps with a command
+#: under each, one of the most common shapes this app paints. The fence sits at
+#: four spaces, which a three-space-bounded ``_FENCE_RE`` did not recognise, so
+#: ``classify`` saw no fence, ``furniture_width`` took its LIST branch over code
+#: and read the leading ``1`` as a rendered ordered marker (design round 2,
+#: D2-1). The code lines deliberately open with digits.
+NESTED_FENCE = (
+    "1. Start the service:\n"
+    "\n"
+    "    ```sh\n"
+    "    1 / 0\n"
+    "    docker compose up -d\n"
+    "    ```\n"
+    "\n"
+    "2. Then check the row count:\n"
+    "\n"
+    "    ```sh\n"
+    "    3 rows expected\n"
+    "    psql -c 'select count(*) from ingest'\n"
+    "    ```\n"
+)
+
+#: A bulleted list nested inside a blockquote. Rich paints ``▌  • text`` — two
+#: constructs' furniture on one row — and a branch chain that returns on the
+#: first match strips the bar and leaves the bullet (design round 2, D2-4).
+QUOTED_LIST = (
+    "> Here is a quoted list:\n"
+    ">\n"
+    "> - a quoted bullet item that is long enough to wrap across two rows\n"
+)
+
+
+def _rendered_rows(block: AssistantBlock) -> list[str]:
+    """The frame's rows, as ``get_selection`` and the highlight both see them."""
+    visual = block._render()
+    assert isinstance(visual, Content)
+    return visual.plain.split("\n")
+
+
+def _find(rows: list[str], word: str) -> tuple[int, int, int]:
+    """``(row, start, end)`` of ``word`` in the RENDERED frame.
+
+    Located rather than hard-coded because the whole point of these tests is
+    that rendered columns are not source columns: a literal column here would
+    encode the very assumption the fix exists to deny, and would drift with any
+    change to how the markdown theme paints a bullet.
+    """
+    for index, row in enumerate(rows):
+        if word in row:
+            start = row.index(word)
+            return index, start, start + len(word)
+    raise AssertionError(f"{word!r} is not on the frame: {rows!r}")
+
+
+@pytest.mark.asyncio
+async def test_a_word_dragged_out_of_a_bullet_copies_only_that_word() -> None:
+    """The reported bug: 8 cells highlighted must not copy 115 characters.
+
+    Pins that a sub-row take is no longer widened to its source line. The
+    negative assertion is the one that fails on the old code — the word alone
+    is a substring of the over-copy, so equality is what makes this a
+    regression test rather than a smoke test.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "frontend")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied == ("frontend", "\n")
+        # The rest of the source line, which the old code copied wholesale.
+        assert "Transient failures" not in copied[0]
+        # The receipt the user reads is a count of exactly this string.
+        assert len(copied[0]) == 8
+
+
+@pytest.mark.asyncio
+async def test_a_phrase_across_a_wrap_boundary_copies_only_the_phrase() -> None:
+    """A wrapped paragraph is ONE source line, so a drag over its fold is sub-line.
+
+    Pins that the gate counts SOURCE LINES and not rendered rows. A row-count
+    gate (``len(content) == 1``) fixes the reported case and leaves this one
+    live: measured at width 60 it still returned all 128 characters of the
+    paragraph for a two-row drag. Anyone narrowing the gate has to fail here.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(WRAPPED)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        first_row, start, _ = _find(rows, "important")
+        last_row, _, end = _find(rows, "several")
+        assert first_row != last_row, "the fixture must actually wrap, or this proves nothing"
+
+        selection = Selection.from_offsets(Offset(x=start, y=first_row), Offset(x=end, y=last_row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        # Rejoined with the space the terminal consumed at the fold, not with
+        # the fold itself: the rows share one source line, so the break is an
+        # artifact of this width (design round 1, D2).
+        assert copied[0] == "important paragraph that will certainly wrap across several"
+        assert "\n" not in copied[0]
+        assert copied[0] in WRAPPED
+        assert "This is a single" not in copied[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["exact", "into-the-pad", "sentinel"])
+async def test_a_whole_row_still_copies_markdown_source(form: str) -> None:
+    """Full coverage keeps the markdown path, however the drag reported its end.
+
+    ``end`` arrives three ways — the exact glyph count, a column inside Rich's
+    trailing pad when the drag overran the last glyph, and ``-1`` for "to end of
+    row" — and all three mean the same thing to a reader. Pins the ``rstrip()``
+    predicate: Rich pads each row to its RENDER SEGMENT's width (measured 146
+    for this bullet against 112 glyphs), so a predicate against the block width
+    or raw ``len(row)`` would call the exact-end case partial and degrade a
+    whole-line copy to rendered text.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "frontend")
+        ends = {"exact": len(rows[row].rstrip()), "into-the-pad": len(rows[row]), "sentinel": -1}
+        # Hand-built rather than via ``from_offsets``, which normalises a -1 x
+        # into the selection START and so cannot express the sentinel form.
+        selection = cast("Any", _SpanOnRow(row, (0, ends[form])))
+
+        copied = block.get_selection(selection)
+        assert copied is not None
+        assert copied[0] == (
+            "- Transient failures in the ingest path never reach the **frontend** "
+            "without a retry, so the user sees a stale row."
+        )
+
+
+class _SpanOnRow:
+    """A selection of one hand-set span on one row.
+
+    ``Selection.from_offsets`` normalises its offsets, which makes the ``-1``
+    end sentinel unreachable through the public constructor — it is a value
+    Textual's own ``get_span`` PRODUCES for the rows in the middle of a
+    multi-row drag, not one an offset pair can state. Only ``get_span`` is
+    called by ``get_selection``, so duck-typing it is enough and keeps the test
+    honest about which of the three end forms it is exercising.
+    """
+
+    def __init__(self, row: int, span: tuple[int, int]) -> None:
+        self._row = row
+        self._span = span
+
+    def get_span(self, y: int) -> tuple[int, int] | None:
+        return self._span if y == self._row else None
+
+
+@pytest.mark.asyncio
+async def test_a_sub_row_take_inside_a_fence_copies_the_code_not_the_fence() -> None:
+    """Part of a code line copies that code, unfenced.
+
+    Pins that the glyph path does not re-fence a partial take: ``slice_markdown``
+    would return a three-line fenced block for a four-cell drag, which is both
+    more than was highlighted and not the snippet the reader pointed at.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(64, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text("```python\ndef f(x):\n    return x + 1\n```")
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "f(x)")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+
+        assert block.get_selection(selection) == ("f(x)", "\n")
+
+
+@pytest.mark.asyncio
+async def test_a_partial_multi_line_selection_still_copies_markdown() -> None:
+    """Two bullets with partial ends copy BOTH bullets whole. Deliberately.
+
+    This is the accepted cost of the rule, pinned so it cannot be "fixed" into
+    a degrade-anywhere rule without confronting the choice. Trimming the ends
+    would need a rendered-to-source column mapping that does not exist, and
+    degrading the whole take to glyphs would put the ``•`` and ``▌`` furniture
+    back into the paste — which is exactly the report that
+    ``test_blockquote_copies_as_markdown_not_the_bar`` guards against.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        first_row, _, _ = _find(_rendered_rows(block), "frontend")
+        # Mid-way through the first bullet to mid-way through the second.
+        selection = Selection.from_offsets(Offset(x=10, y=first_row), Offset(x=20, y=first_row + 1))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0].splitlines() == [
+            "- Transient failures in the ingest path never reach the **frontend** "
+            "without a retry, so the user sees a stale row.",
+            "- The second bullet exists so a multi-line drag has somewhere to go.",
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [MARKDOWN, BULLETS], ids=["mixed-constructs", "bullets"])
+async def test_a_whole_message_copy_is_byte_identical_markdown(text: str) -> None:
+    """Select-all still returns the source verbatim, not a rendered flattening.
+
+    The regression this pins is the one a sub-line rule is most likely to cause
+    by accident: the glyph path is strictly better for a partial take and
+    strictly WORSE for a whole one, so a gate that is even slightly too eager
+    degrades every select-all to rendered text — bullets as ``•``, bold with
+    its ``**`` stripped, the fence unfenced. Asserted as byte equality rather
+    than by substring (which the older markdown tests use) because a leaked
+    glyph path passes every substring check while dropping the blank separator
+    rows and the trailing pad, and equality is the only predicate that sees it.
+
+    ``BULLETS`` is included alongside ``MARKDOWN`` because it is the fixture
+    the sub-line tests drag inside of: the same message must copy whole when
+    the whole of it is taken.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+
+        # ``update_text`` keeps the message's own trailing newline, which is not
+        # part of any rendered row and so is not part of the copy.
+        assert _copy_all(app, block) == text.rstrip("\n")
+
+
+@pytest.mark.asyncio
+async def test_a_word_inside_a_blockquote_copies_without_the_bar() -> None:
+    """A sub-row quote take is the word, not the ``▌`` and not the ``>`` line.
+
+    The counterpart to ``test_blockquote_copies_as_markdown_not_the_bar``: a
+    drag that starts PAST the bar never crosses that cell, so the bar is not
+    part of what was highlighted and is not part of the copy.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Here is a reply you can paste:\n\n"
+            "> Thanks for the report. I verified the **flagged** value in out/main/index.jsc:\n"
+            "> it's the public project API key (phc_...), publishable by design.\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "flagged")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied == ("flagged", "\n")
+        assert "▌" not in copied[0]
+        assert ">" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_quote_dragged_from_column_zero_drops_the_bar() -> None:
+    """A column-0 quote drag copies the QUOTED TEXT, never the ``▌``.
+
+    This pinned the opposite until review round 1 (R1-1) and design round 1
+    (D1) independently rejected it: the bar is painted decoration, it exists
+    nowhere in the user's document, and a paste carrying it shows a glyph they
+    cannot account for. It also made the paste FORMAT depend on one invisible
+    cell of drag start — column 0 gave rendered glyphs with the bar, column 1
+    gave clean text — which is the surprise the whole method exists to remove.
+
+    The rejected fix was a regex over the row, and rejecting it was right: it
+    CORRUPTS CODE, turning a fenced ``  1 / 0`` into ``/ 0`` because a code
+    line starting with a digit is indistinguishable from an ordered marker by
+    glyph alone. The mapping-aware gutter it named as the safe alternative is
+    what now runs — ``_copy_markdown.furniture_width`` asks which SOURCE LINE
+    the row came from, so a fence is refused explicitly rather than by luck
+    (pinned by ``test_a_column_zero_drag_inside_a_fence_keeps_the_code``).
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text("Intro:\n\n> Thanks for the report, it is fixed now.\n")
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row = next(i for i, text in enumerate(rows) if text.startswith("▌"))
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=16, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "Thanks for the"
+        assert "▌" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_sub_line_take_across_a_wrapped_quote_never_copies_the_bar() -> None:
+    """The R1-1/D1 leak: a drag over a wrapped quote's fold must not paste ``▌``.
+
+    The regression both reviewers found independently, and the case the module
+    had no fixture for. A wrapped blockquote is ONE source line painted as
+    several rows, so it passes the source-line gate onto the glyph path — and
+    every one of those rows carries a ``▌``, because Rich repeats the bar on
+    continuations. With the block's inherited ``copy_gutter`` of 0 the clamp
+    stripped nothing and the bar reached the clipboard, which the markdown path
+    it replaced had never done.
+
+    Two assertions rather than one: no bar (the leak) and no newline (D2, since
+    this take also crosses a soft wrap), because the fold is where both defects
+    surface at once.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(WRAPPED_QUOTE)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        bars = [i for i, row in enumerate(rows) if row.startswith("▌")]
+        assert len(bars) >= 2, f"the quote must actually wrap, or this proves nothing: {rows!r}"
+
+        selection = Selection.from_offsets(Offset(x=10, y=bars[0]), Offset(x=12, y=bars[1]))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert "▌" not in copied[0]
+        assert "\n" not in copied[0]
+        assert copied[0] == "a fairly long quoted sentence that will certainly"
+
+
+@pytest.mark.asyncio
+async def test_a_column_zero_drag_inside_a_bullet_drops_the_marker() -> None:
+    """A column-0 bullet drag copies the item's text, never the ``•``.
+
+    The bullet half of D1, identical in mechanism to the quote bar and called
+    out in review round 1 (R1-3) as the case the documentation named nowhere.
+    Pinned separately because the two take different branches of
+    ``furniture_width``: a quote strips a repeated bar, a list strips a marker
+    on the row that opens the item.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "Transient")
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=36, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "Transient failures in the ingest"
+        assert "•" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_column_zero_drag_inside_a_fence_keeps_the_code() -> None:
+    """Furniture stripping must never touch code — the reason it is mapping-aware.
+
+    The hazard the rejected regex fix would have caused, pinned so the cheap
+    implementation cannot come back: a fenced line beginning with a digit looks
+    exactly like a rendered ordered-list marker, and a glyph-level strip turns
+    ``1 / 0`` into ``/ 0``. ``furniture_width`` refuses on the SOURCE line's
+    fence membership, so the code copies byte for byte including its indent.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text("```python\nif x:\n    1 / 0  # boom\n```\n")
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row = next(i for i, text in enumerate(rows) if "1 / 0" in text)
+        # Column 0 to just past the ``0``, stopping short of the comment: a
+        # column-0 start is what reaches the furniture clamp, and leaving the
+        # comment out is what keeps this on the sub-line path rather than
+        # widening to the whole fenced block.
+        end = rows[row].index("/ 0") + len("/ 0")
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        # The digit survives: a glyph-level strip would read `` 1 `` as an
+        # ordered-list marker and hand back ``/ 0``.
+        assert copied[0].strip() == "1 / 0"
+        assert "#" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_take_across_a_mid_token_fold_rejoins_with_no_space() -> None:
+    """A fold inside a long token consumed nothing, so the rejoin adds nothing.
+
+    The counterpart to the wrap-fold rejoin, and the case a blanket
+    ``" ".join`` would corrupt: Rich breaks a token wider than the render
+    segment mid-token, so putting a space back would invent a character the
+    document never had and silently break a pasted URL or identifier. Measured
+    reachable in ordinary prose at ordinary widths, which is why
+    ``wrap_separators`` walks the source line instead of assuming a space.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(34, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(LONG_TOKEN)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        content = [i for i, row in enumerate(rows) if row.strip()]
+        first = next(i for i in content if "supercal" in rows[i])
+        last = next(i for i in content if "here now." in rows[i])
+        assert first != last, "the token must actually fold, or this proves nothing"
+
+        selection = Selection.from_offsets(
+            Offset(x=rows[first].index("supercal"), y=first),
+            Offset(x=rows[last].index("here") + len("here"), y=last),
+        )
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "supercalifragilisticexpialidociousandthensome_verylongtoken_here"
+        assert copied[0] in LONG_TOKEN
+        assert "\n" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_whole_table_row_take_keeps_the_markdown_pipes() -> None:
+    """The escape hatch that makes D5 an accepted cost rather than a defect.
+
+    A sub-line take across a table row copies ``alpha  0.91`` without the
+    ``|``, which design round 1 (D5) flagged as the one construct where the
+    rendered form is less useful than the source. It stays the rule because the
+    WHOLE-row gesture still reaches the markdown path and still yields a
+    pasteable row. Pinned so a future widening of the sub-line gate cannot take
+    that fallback away silently.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Results:\n\n| Name | Score |\n|------|-------|\n| alpha | 0.91 |\n| beta | 0.87 |\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "alpha")
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=len(rows[row]), y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "| alpha | 0.91 |"
+
+
+@pytest.mark.asyncio
+async def test_a_drag_entirely_inside_the_trailing_pad_copies_nothing() -> None:
+    """A drag over Rich's pad selects no glyph, so nothing is written. Decided.
+
+    Review round 1 (R1-2) asked whether the silence is right. It is, and it is
+    pinned here rather than left implicit: the pad is not content the reader can
+    see, so there is nothing truthful to copy, and ``_put_on_clipboard`` drops
+    an empty payload without a receipt — the same answer a zero-width click
+    already gets. A toast here would announce a copy that did not happen.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "Transient")
+        visible_end = len(rows[row].rstrip())
+        assert visible_end < len(rows[row]), "the row must carry a pad, or this proves nothing"
+
+        selection = Selection.from_offsets(
+            Offset(x=visible_end + 5, y=row), Offset(x=visible_end + 20, y=row)
+        )
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_table_cell_copies_the_cell() -> None:
+    """One cell of a rendered table copies that cell, not the pipe row.
+
+    Pins that a sub-row take does not reintroduce markdown furniture the reader
+    cannot see: the frame draws no pipes, so a copy carrying ``| alpha | 0.91 |``
+    would contain characters no highlighted cell held.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Results:\n\n| Name | Score |\n|------|-------|\n| alpha | 0.91 |\n| beta | 0.87 |\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "alpha")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied == ("alpha", "\n")
+        assert "|" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_zero_width_selection_copies_nothing() -> None:
+    """A click is not a drag: an empty span copies an empty string.
+
+    Pins the click case, which under the old row-only reduction returned the
+    whole source line — a plain click on an answer would have put 115
+    characters on the clipboard. ``_put_on_clipboard`` drops a falsy payload
+    before the OSC 52 write, so this is also what keeps a click from raising a
+    ``copied 0 characters`` receipt.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, _ = _find(_rendered_rows(block), "frontend")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=start, y=row))
+
+        assert block.get_selection(selection) == ("", "\n")
+
+
+@pytest.mark.asyncio
+async def test_the_reported_drag_end_to_end_reports_a_small_count() -> None:
+    """The whole gesture through the real app: drag a word, read the receipt.
+
+    The unit assertions above pin ``get_selection``; this pins what the USER
+    sees, which is where the bug was reported from. It goes through the real
+    mouse events, the real ``TextSelected`` release, the real clipboard write
+    and the real toast, because the receipt is the only part of the copy the
+    reader can check — ``copied 115 characters`` for an 8-cell drag was the
+    report.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(150, 26)) as pilot:
+        await pilot.pause()
+        app._append_block(UserBlock("summarise the ingest path"))
+        block = AssistantBlock()
+        app._append_block(block)
+        await pilot.pause()
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+        app._clipboard = ""
+
+        row, start, end = _find(_rendered_rows(block), "frontend")
+        y = block.region.y + row
+        await _drag(app, pilot, (block.region.x + start, y), (block.region.x + end, y))
+
+        assert app._clipboard == "frontend"
+        assert app.query_one(Toast).message == "copied 8 characters"
 
 
 # -- the flatten's own claims ------------------------------------------------
@@ -2172,3 +2877,857 @@ async def test_a_receipt_retires_even_when_the_caret_moved_before_the_edit() -> 
         assert not any(
             "copied" in row.lower() for row in rows
         ), f"a stale copy receipt is still painted: {[r for r in rows if 'copied' in r.lower()]}"
+
+
+# -- review round 2 / design round 2 -----------------------------------------
+@pytest.mark.asyncio
+async def test_a_fold_between_two_words_keeps_the_space_the_user_had() -> None:
+    """Pins that the wrap rejoin is POSITIONAL, not a substring membership test.
+
+    The regression this replaces: ``wrap_separator`` asked whether the last
+    token of one row concatenated to the first token of the next occurred
+    ANYWHERE in the source line. A line using both ``file system`` and
+    ``filesystem`` answers yes, so a fold at a real space was judged mid-token
+    and the two words were welded shut — ``filesystem layer`` where the user
+    highlighted ``file system layer`` (review round 2, R2-1; design round 2,
+    D2-2).
+
+    That is silent corruption: unlike the over-copy it replaced and unlike the
+    newline before it, the paste looks like well-formed prose and the reader
+    cannot tell a character is missing. Swept across widths because which pair
+    lands either side of the fold is width-dependent.
+    """
+    welded: list[tuple[int, str]] = []
+    for width in range(28, 40):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(COMPOUND_PAIR)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            # Anchor on the OPEN form's first word where it is followed by the
+            # fold, i.e. the last row that ends in "file" — the closed compound
+            # "filesystem" appears earlier in the same line, which is the whole
+            # point of the fixture, so a plain index() would find the wrong one.
+            last_row, _, end = _find(rows, "layer")
+            first_row = next(
+                (i for i in range(last_row - 1, -1, -1) if rows[i].rstrip().endswith("file")),
+                None,
+            )
+            if first_row is None:
+                continue  # the fold does not fall between "file" and "system" here
+            start = rows[first_row].rstrip().rindex("file")
+
+            selection = Selection.from_offsets(
+                Offset(x=start, y=first_row), Offset(x=end, y=last_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+
+            # The clipboard must be text the source actually contains. A welded
+            # compound is not, which is what makes this a regression test.
+            if copied[0] not in COMPOUND_PAIR:
+                welded.append((width, copied[0]))
+
+    assert not welded, f"the rejoin destroyed a word boundary: {welded}"
+
+
+@pytest.mark.asyncio
+async def test_no_ordinary_compound_pair_is_welded_at_any_width() -> None:
+    """The sweep that a single fixture cannot stand in for.
+
+    A membership-versus-position bug fires only when the two words either side
+    of the fold also appear welded elsewhere in the line, so it hides from any
+    sampled test whose fixture happens to fold elsewhere. Review round 2 found
+    it by probing 15 ordinary compound pairs; design round 2 found 30
+    reproductions across five prose lines. This pins the whole class rather
+    than the one example that was reported.
+    """
+    failures: list[tuple[str, int, str]] = []
+    for joined, spaced in COMPOUND_PAIRS:
+        head = spaced.split()[0]
+        source = (
+            f"The {joined} and the {spaced} layer are different things in this "
+            f"codebase, remember that.\n"
+        )
+        for width in (29, 31, 33, 35):
+            app = StyledTranscriptApp()
+            async with app.run_test(size=(width, 40)) as pilot:
+                block = AssistantBlock()
+                await _mounted(app, block)
+                block.update_text(source)
+                block.finalize_text()
+                await pilot.pause()
+
+                rows = _rendered_rows(block)
+                try:
+                    last_row, _, end = _find(rows, "layer")
+                except AssertionError:
+                    continue
+                first_row = next(
+                    (i for i in range(last_row - 1, -1, -1) if rows[i].rstrip().endswith(head)),
+                    None,
+                )
+                if first_row is None:
+                    continue  # this width does not fold between the pair's words
+                start = rows[first_row].rstrip().rindex(head)
+
+                selection = Selection.from_offsets(
+                    Offset(x=start, y=first_row), Offset(x=end, y=last_row)
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None
+                if copied[0] not in source:
+                    failures.append((spaced, width, copied[0]))
+
+    assert not failures, f"compound pairs welded shut: {failures}"
+
+
+@pytest.mark.asyncio
+async def test_a_cjk_fold_does_not_invent_a_space() -> None:
+    """Pins the ``align``-returned-``None`` fallback as conservative.
+
+    ``wrap_separator`` returned ``" "`` unconditionally when the row could not
+    be placed. CJK rows are exactly that case — no anchor word survives, so the
+    whole message maps to ``None`` — and CJK never breaks at a space, so every
+    fold gained a character the document does not contain anywhere (review
+    round 2, R2-2; design round 2, D2-3).
+
+    In Japanese an interpolated space is not cosmetic; it reads as a deliberate
+    break. Asserted as "the clipboard is a substring of the source", the same
+    invariant the compound test uses, because that is the property a paste has
+    to have.
+    """
+    for label, text in (("chinese", CJK_PARAGRAPH), ("japanese", JAPANESE_PARAGRAPH)):
+        for width in (30, 34, 40):
+            app = StyledTranscriptApp()
+            async with app.run_test(size=(width, 40)) as pilot:
+                block = AssistantBlock()
+                await _mounted(app, block)
+                block.update_text(text)
+                block.finalize_text()
+                await pilot.pause()
+
+                rows = _rendered_rows(block)
+                content = [i for i, row in enumerate(rows) if row.strip()]
+                if len(content) < 2:
+                    continue
+                first_row, last_row = content[0], content[1]
+
+                selection = Selection.from_offsets(
+                    Offset(x=2, y=first_row),
+                    Offset(x=max(1, len(rows[last_row].rstrip()) - 4), y=last_row),
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None
+                assert " " not in copied[0], (
+                    f"{label} at width {width} gained a space the source never had: "
+                    f"{copied[0]!r}"
+                )
+                assert copied[0] in text, (
+                    f"{label} at width {width} copied text absent from the source: "
+                    f"{copied[0]!r}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_an_emoji_fold_still_rejoins_with_its_space() -> None:
+    """The control that keeps the CJK fix from over-reaching.
+
+    Emoji are double-width like CJK, but they sit in space-delimited Latin
+    prose, so a fold beside one DID consume a space and the rejoin must put it
+    back. Review round 2 verified emoji already copied correctly and explicitly
+    asked that width handling not be re-engineered, so this pins the boundary:
+    the rule is about scripts that do not write spaces, not about cell width.
+    """
+    for width in (30, 34, 40):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(EMOJI_PROSE)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            first_row, start, _ = _find(rows, "status")
+            last_row, _, end = _find(rows, "emoji")
+            if first_row == last_row:
+                continue
+
+            selection = Selection.from_offsets(
+                Offset(x=start, y=first_row), Offset(x=end, y=last_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            assert (
+                copied[0] in EMOJI_PROSE
+            ), f"emoji prose at width {width} did not rejoin as written: {copied[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_fence_indented_inside_a_list_item_keeps_its_first_character() -> None:
+    """The blocker: code nested under a list item lost its leading character.
+
+    ``test_a_column_zero_drag_inside_a_fence_keeps_the_code`` uses a TOP-LEVEL
+    fence, where both ``classify`` and ``align`` already worked, so it never
+    discriminated this case — it passes on the prior head too.
+
+    Two independent causes, either sufficient (design round 2, D2-1). The fence
+    pattern allowed at most three leading spaces while a fence under a list item
+    is conventionally indented four, so ``classify`` returned an empty covered
+    set; and ``align`` attributed the code rows to the LIST's source line rather
+    than to the fence body. With ``fenced`` false and a source line matching the
+    list pattern, ``furniture_width`` read the code's own leading ``1`` or ``3``
+    as a rendered ordered marker and stripped it, so ``3 rows expected`` pasted
+    as ``rows expected``. Silent corruption of a command the user highlighted.
+    """
+    for width in (40, 60):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(NESTED_FENCE)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            code_row, _, _ = _find(rows, "3 rows expected")
+
+            # Column 0 through the row's end: the gesture that takes a line of
+            # code as a line of code.
+            selection = Selection.from_offsets(
+                Offset(x=0, y=code_row), Offset(x=len(rows[code_row]), y=code_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            assert (
+                "3 rows expected" in copied[0]
+            ), f"the code's leading character was deleted at width {width}: {copied[0]!r}"
+
+            # And across the fold into the next code line, the shape design
+            # round 2 reported as 'rows expected psql -c'.
+            next_row, _, _ = _find(rows, "psql -c")
+            across = Selection.from_offsets(
+                Offset(x=0, y=code_row), Offset(x=len(rows[next_row].rstrip()), y=next_row)
+            )
+            copied_across = block.get_selection(across)
+            assert copied_across is not None
+            assert "3 rows expected" in copied_across[0], (
+                f"a take across the fold dropped the leading 3 at width {width}: "
+                f"{copied_across[0]!r}"
+            )
+
+
+def test_a_fence_is_recognised_at_a_list_item_indent() -> None:
+    """The first of D2-1's two causes, pinned at the unit it lives in.
+
+    A fence under ``- `` is indented four spaces and under ``1. `` five, so a
+    three-space bound made ``classify`` blind to the most common nested shape.
+    Pinned separately from the widget test because the widget test would still
+    pass if only the second cause were fixed, and this is the cheaper signal
+    about which one regressed.
+    """
+    for indent in range(0, 9):
+        source = f"{' ' * indent}```python\n{' ' * indent}1 / 0\n{' ' * indent}```\n"
+        lines: list[str] = list(source.split("\n"))
+        covered, markers = _copy_markdown.classify(lines)
+        assert markers == {0, 2}, f"indent {indent} hid the fence markers: {markers}"
+        assert 1 in covered, f"indent {indent} left the code line uncovered: {covered}"
+
+
+@pytest.mark.asyncio
+async def test_a_bullet_inside_a_quote_leaks_neither_the_bar_nor_the_dot() -> None:
+    """Constructs COMPOSE: quote furniture and list furniture on the same row.
+
+    ``furniture_width`` tested the quote pattern first and returned, so a list
+    inside a blockquote stripped the ``▌`` and kept the ``•`` — a glyph nowhere
+    in the user's document — and the paste format still flipped on a one-cell
+    change of drag start (design round 2, D2-4).
+
+    Asserted over a range of start columns because the format flip is precisely
+    a disagreement between adjacent columns: the whole-row gesture must give the
+    same answer wherever inside the painted furniture it began.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(44, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(QUOTED_LIST)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        bullet_row, _, _ = _find(rows, "quoted bullet")
+
+        answers: dict[int, str] = {}
+        for column in range(0, 5):
+            selection = Selection.from_offsets(
+                Offset(x=column, y=bullet_row), Offset(x=len(rows[bullet_row]), y=bullet_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            answers[column] = copied[0]
+            assert (
+                "•" not in copied[0]
+            ), f"start column {column} leaked a painted bullet: {copied[0]!r}"
+            assert (
+                "▌" not in copied[0]
+            ), f"start column {column} leaked a painted quote bar: {copied[0]!r}"
+
+        assert (
+            len(set(answers.values())) == 1
+        ), f"the paste format flips with the drag's start cell: {answers}"
+
+
+# -- the oracle sweep --------------------------------------------------------
+#: Ordinary assistant output, not a minimised repro. Three rounds of findings
+#: were each correct on the case the previous round named and wrong on a
+#: neighbouring one, so the corpus is deliberately BROAD rather than pointed:
+#: every construct this app actually emits, and the inline shapes (long tokens,
+#: trailing markup, intraword punctuation) whose interaction with a fold is what
+#: the walk has to get right.
+ORACLE_CORPUS: dict[str, str] = {
+    "prose_inline_markup": (
+        "The **frontend** cache lives at `/var/lib/local-operator/cache.sqlite3` "
+        "and is managed by the *supervisor* process, see [the docs](https://d.io/x)."
+    ),
+    "prose_trailing_code": (
+        "The cache lives at /var/lib/local-operator/sessions/cache-index.sqlite3 "
+        "managed by `lop`"
+    ),
+    "prose_trailing_bold": (
+        "Download https://github.com/damianvtran/local-operator/releases/latest/"
+        "download/bundle.tgz now **today**"
+    ),
+    "snake_and_kebab": (
+        "Set database_connection_pool_max_size_in_the_config and the "
+        "some-very-long-kebab-case-flag-name-here before the deploy runs."
+    ),
+    "compound_open_and_closed": (
+        "The run time of the runtime is fine, and the set up of the setup, the "
+        "log in of the login, and the back end of the backend all check out."
+    ),
+    "bullets": (
+        "- a plain bullet item that is long enough to wrap across several rows\n"
+        "- another bullet mentioning /Users/somebody/Library/Application Support/x\n"
+        "  - a nested bullet that also wraps because it is quite long indeed"
+    ),
+    "ordered": (
+        "1. the first step which is long enough that it wraps at narrow widths\n"
+        "2. the second step, running `systemctl restart ingest-worker` for real\n"
+        "   1. a nested ordered step that is also long enough to fold somewhere"
+    ),
+    "quote": (
+        "> a quoted paragraph that is long enough to wrap across several rows\n"
+        "> and continues here with https://example.com/a/long/path?x=1 inside it"
+    ),
+    "nested_quote": (
+        "> outer quote text that wraps because it is long enough to do so\n"
+        ">> an inner nested quote that also wraps at the widths swept here"
+    ),
+    "quote_in_list": (
+        "- a bullet holding a quote\n"
+        "  > the quoted line inside the bullet, long enough that it folds\n"
+    ),
+    "list_in_quote": (
+        "> - a bullet inside a quote that is long enough to wrap somewhere\n"
+        "> - a second such bullet with a_snake_case_identifier_in_it here"
+    ),
+    "table": (
+        "| name | score | notes |\n"
+        "| --- | --- | --- |\n"
+        "| alpha | 0.91 | the first row with some longer note text here |\n"
+        "| beta | 0.72 | the second row, also with a reasonably long note |"
+    ),
+    "cjk": "这是一个中文段落，用于验证在终端宽度下折行之后复制粘贴不会插入多余的空格字符。",
+    "cjk_ja": "これは日本語の段落です。この行は端末の幅で折り返されますので、コピーの境界を検証します。",
+    "cjk_mixed": ("この API は runtime を使います。The server は port 8080 で listen します。"),
+    "emoji": "The report 🚀 is ready 🎉 and the summary 📊 follows with more text to wrap here.",
+}
+
+#: Fences are swept separately: every indent 0-8, inside list items, and with
+#: bodies whose lines LOOK structural. D2-1 was a deleted first character here
+#: and R3-2 a weld between two body lines, so the shape earns its own corpus.
+ORACLE_FENCE_CORPUS: dict[str, str] = {
+    f"fence_indent_{indent}": (
+        "Run these in order:\n\n"
+        f"{' ' * indent}```sh\n"
+        f"{' ' * indent}cd /srv/ingest\n"
+        f"{' ' * indent}psql -h db.internal -U ingest -c 'select count(*) from staging.rows'\n"
+        f"{' ' * indent}systemctl restart ingest-worker\n"
+        f"{' ' * indent}```\n\nThen check the dashboard.\n"
+    )
+    for indent in range(0, 9)
+} | {
+    "fence_in_list": (
+        "1. Run the check:\n\n"
+        "    ```sh\n"
+        "    ./scripts/check --verbose --with-a-long-flag-name --and-another one\n"
+        "    ```\n"
+    ),
+    "fence_structural_body": (
+        "```text\n"
+        "- this line looks like a bullet but is code and must stay verbatim\n"
+        "> this line looks like a quote but is code and must stay verbatim\n"
+        "3. this line looks ordered but is code and must stay verbatim here\n"
+        "```\n"
+    ),
+}
+
+
+async def _oracle_truth(text: str) -> list[str]:
+    """The rendered rows at a width so wide that NOTHING folds.
+
+    The oracle is independent of the code under test: it is the same renderer,
+    asked a question with no wrapping in it. A take at a narrow width has to be
+    findable in this, because folding is the only thing that changed.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(400, 120)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+        return [row.rstrip() for row in _rendered_rows(block) if row.strip()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(ORACLE_CORPUS | ORACLE_FENCE_CORPUS))
+async def test_every_take_is_a_contiguous_substring_of_the_source(name: str) -> None:
+    """THE STRUCTURAL TEST: sweep widths, and assert no take invents or deletes.
+
+    Every previous round's tests pinned the SYMPTOM that round reported, and
+    every round the next defect landed in the neighbouring case nobody had named
+    while the whole suite stayed green. This test pins the PROPERTY instead: a
+    copy must be text the reader could find in their own document.
+
+    A single invariant catches all four failure modes seen so far without
+    predicting which one to look for -- an invented space (R3-1) breaks it, a
+    weld across two source lines (R2-1, R3-2) breaks it, a deleted leading
+    character (D2-1) breaks it, and a space put into CJK (R2-2) breaks it.
+
+    Swept broadly rather than sampled, because every defect so far was reachable
+    at ordinary widths and missed by sampling.
+    """
+    text = (ORACLE_CORPUS | ORACLE_FENCE_CORPUS)[name]
+    truth = await _oracle_truth(text)
+
+    for width in range(30, 90, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            if len(content) < 2:
+                continue
+
+            # A drag from just inside the first content row, ending both AT the
+            # last row's end and SHORT of it. Stopping short is the natural
+            # gesture for highlighting exactly a URL, and it is the case that
+            # violates the walk's end-anchored precondition -- sweeping only
+            # full-coverage drags reports all clear while the defect is live.
+            last_row = content[-1]
+            end_columns = {len(rows[last_row].rstrip()), 20, 10}
+            for start_column in (1, 2):
+                for end_column in sorted(e for e in end_columns if e > 0):
+                    selection = Selection.from_offsets(
+                        Offset(x=start_column, y=content[0]),
+                        Offset(x=end_column, y=last_row),
+                    )
+                    copied = block.get_selection(selection)
+                    if copied is None:
+                        continue
+                    for line in copied[0].split("\n"):
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        # TWO truthful answers, and exactly two. The glyph path
+                        # claims to be what was PAINTED, so it must be findable in
+                        # the unfolded frame; the markdown path claims to be what
+                        # the model WROTE, so it must be findable in the source.
+                        # Anything in neither is a character this code invented.
+                        # Testing against both is what keeps the oracle honest
+                        # without a marker blacklist -- a blacklist would be the
+                        # same guess-rather-than-know shape the fix removes.
+                        if any(stripped in row for row in truth):
+                            continue
+                        if stripped in text:
+                            continue
+                        raise AssertionError(
+                            f"{name} at width {width}, start column {start_column}: "
+                            f"copied a line that is in neither the rendered frame nor "
+                            f"the source.\n  copied: {line!r}\n  truth : {truth!r}"
+                        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(ORACLE_FENCE_CORPUS))
+async def test_no_two_fenced_lines_are_ever_welded_into_one(name: str) -> None:
+    """Two commands in a fence must never arrive as one runnable line (R3-2).
+
+    The sharpest payload found so far: ``align`` cannot place the continuation
+    rows of an over-long fence body line, the sub-line gate DROPPED those
+    ``None`` mapping entries rather than treating them as absence of evidence,
+    and a take spanning one collapsed to a single-source-line judgement it never
+    was. The clipboard then joined two shell commands with a space.
+
+    Asserted against the source's own line boundaries rather than against a
+    rendered row, because the harm is specifically that a line boundary the
+    document has went missing.
+
+    The predicate is FRAGMENT-level, not whole-line. Requiring two COMPLETE
+    source body lines in one output line made the test narrower than the defect
+    it was written for: the user-visible harm is a command TAIL meeting the next
+    command's HEAD (``cd /srv/ingest psql -h``), and a fence whose lines are
+    longer than the pane -- the common case for shell and SQL -- never puts a
+    whole body line on one row. The whole-line form passed on all nine
+    ``fence_indent_*`` fixtures, the shape D3-2 actually lived in, and caught the
+    defect only by luck on ``fence_structural_body``, whose body lines are short
+    enough to appear whole (design round 4, D4-2). Anchoring on a chunk of each
+    line catches the weld wherever it lands.
+
+    Swept from width 28 and across start columns 0-2 for the same reason: the
+    control welds at widths and start columns the old range never visited.
+    """
+    text = ORACLE_FENCE_CORPUS[name]
+    body = [
+        line.strip()
+        for line in text.split("\n")
+        if line.strip() and not line.strip().startswith("```")
+    ]
+    # A weld joins the END of one body line to the START of another, so each
+    # line is probed by its own head and tail rather than by its whole text.
+    # Only DISCRIMINATING chunks count: two body lines may legitimately share a
+    # head or tail (``fence_structural_body``'s all end "must stay verbatim"),
+    # and a shared chunk cannot say which line a fragment came from, so counting
+    # it would report a weld on an honest single-line take.
+    chunk = 12
+    marks: list[tuple[str, list[str]]] = []
+    for line in body:
+        if len(line) < chunk:
+            continue
+        parts = sorted(
+            part
+            for part in {line[:chunk], line[-chunk:]}
+            if sum(part in other for other in body) == 1
+        )
+        if parts:
+            marks.append((line, parts))
+
+    for width in range(28, 76, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            for first in content:
+                for last in content:
+                    if last <= first:
+                        continue
+                    # Ends SHORT of the last row as well as covering it. The
+                    # weld is only reachable on a sub-line take, and a take that
+                    # covers every row fully goes down the markdown path -- so a
+                    # sweep of full-coverage drags alone reports all clear while
+                    # the defect is live. That is precisely how three rounds of
+                    # sampled tests stayed green.
+                    ends = {len(rows[last].rstrip()), 20, 8}
+                    for start_column in (0, 1, 2):
+                        for end_column in sorted(e for e in ends if e > 0):
+                            selection = Selection.from_offsets(
+                                Offset(x=start_column, y=first),
+                                Offset(x=end_column, y=last),
+                            )
+                            copied = block.get_selection(selection)
+                            if copied is None:
+                                continue
+                            for line in copied[0].split("\n"):
+                                # An output line carrying a fragment of two
+                                # DISTINCT source body lines is a weld: the
+                                # boundary between them is gone, and a shell
+                                # handed that line runs two commands.
+                                hits = [
+                                    src
+                                    for src, parts in marks
+                                    if src != line.strip() and any(part in line for part in parts)
+                                ]
+                                assert len(hits) < 2, (
+                                    f"{name} at width {width}, rows {first}..{last}, start "
+                                    f"column {start_column}: welded two source lines into "
+                                    f"one.\n  copied line: {line!r}\n  welded    : {hits!r}"
+                                )
+
+
+#: Constructs whose over-long lines leave continuation rows that ``align``
+#: cannot place. That is the shape where a copy can silently SUBSTITUTE one
+#: source line for another, so the substitution oracle sweeps them specifically.
+ORACLE_SUBSTITUTION_CORPUS: dict[str, str] = {
+    "fence_long_commands": (
+        "Run these in order:\n\n```sh\ncd /srv/ingest\n"
+        "psql -h db.internal -U ingest -c 'select count(*) from staging.rows where state = 1'\n"
+        "systemctl restart ingest-worker --now --no-block\n```\n\nThen check the dashboard.\n"
+    ),
+    "fence_sql_then_prose": (
+        "```sql\n"
+        "select a.id, a.name, b.value from alpha a join beta b on b.id = a.beta_id;\n"
+        "update alpha set flagged = true where created_at < now() - interval '30 days';\n"
+        "```\n\nTRAILING_ONE is a paragraph after the fence that was never highlighted.\n"
+    ),
+    "table_long_notes": (
+        "| name | score | notes |\n| --- | --- | --- |\n"
+        "| alpha | 0.91 | the first row with some longer note text here that wraps |\n"
+        "| beta | 0.72 | the second row, also with a reasonably long note here |"
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(
+            name,
+            marks=(
+                # PRE-EXISTING and unchanged by this PR -- identical at the merge
+                # base, at `6f72a29e` and here. ``align`` maps a wrapped table
+                # row's continuation rows to the NEXT table row, so a whole-row
+                # take copies the wrong row. That lives in ``align``'s table
+                # handling rather than in this copy path, so it is tracked as
+                # issue #399 rather than widened into this PR. Marked xfail
+                # rather than dropped from the corpus: the oracle keeps reporting
+                # it, and the marker fails loudly once #399 is fixed.
+                [
+                    pytest.mark.xfail(
+                        reason="pre-existing table mis-mapping, issue #399", strict=True
+                    )
+                ]
+                if name == "table_long_notes"
+                else []
+            ),
+        )
+        for name in sorted(ORACLE_SUBSTITUTION_CORPUS)
+    ],
+)
+async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: str) -> None:
+    """A take must contain the rows the reader LIT, not merely real source text.
+
+    The companion invariant to the contiguity oracle, and the hole that admitted
+    R4-1. Contiguity is a MEMBERSHIP test: it catches text this code invented and
+    text it welded, but a copy that hands back a different, genuine source line
+    is still perfectly contiguous and sails through. That is exactly what the
+    unplaced-edge widening did -- dragging the ``psql`` command copied the
+    ``systemctl`` command, so a reader pasting into a terminal ran a command they
+    never highlighted (review round 4, R4-1; design round 4, D4-1).
+
+    So this asserts the other half: every rendered row the drag covered in FULL
+    must be represented in the copy. A fully covered row is unambiguous about the
+    reader's intent in a way a partial one is not, which is what makes the
+    assertion safe to state without predicting which construct will break it.
+    """
+    text = ORACLE_SUBSTITUTION_CORPUS[name]
+
+    for width in range(28, 102, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            for index, row in enumerate(rows):
+                lit = row.strip()
+                # Short rows carry too little to identify; a fence marker row is
+                # furniture whose own text is legitimately re-emitted elsewhere.
+                if len(lit) < 12 or lit.startswith("```"):
+                    continue
+                selection = Selection.from_offsets(
+                    Offset(x=0, y=index), Offset(x=len(row.rstrip()), y=index)
+                )
+                copied = block.get_selection(selection)
+                if copied is None:
+                    continue
+                # Compared with folds flattened: the markdown path may return the
+                # line unwrapped, which is a truthful answer to the same gesture.
+                haystack = " ".join(copied[0].split())
+                needle = " ".join(lit.split())[:12]
+                assert needle in haystack, (
+                    f"{name} at width {width}, row {index}: the fully highlighted row is "
+                    f"not in the copy -- a different line was substituted for it.\n"
+                    f"  highlighted: {lit!r}\n  copied     : {copied[0]!r}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_widening_over_unplaced_rows_needs_a_placed_row_to_rescue() -> None:
+    """``_markdown_for_rows`` widens only where a lit line can be recovered.
+
+    Direct cover for the widening itself, which shipped in round 3 with no test
+    of its own -- and was therefore free to substitute one source line for
+    another. Both halves are asserted together because the finding is precisely
+    that the two cases have DIFFERENT right answers:
+
+    * with a placed row in the band, widening over an unplaced EDGE row rescues a
+      line ``slice_markdown`` would otherwise drop;
+    * with NO placed row there is nothing to rescue, the un-widened slice is
+      empty, and the caller's fallback to the frame copy is the correct minimal
+      answer. Widening there dragged the window onto whichever line happened to
+      be placed (review round 4, R4-1; design round 4, D4-1).
+    """
+    text = ORACLE_SUBSTITUTION_CORPUS["fence_sql_then_prose"]
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(76, 120)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        mapping = _copy_markdown.align(block._full_text, rows)
+        target = next(i for i, row in enumerate(rows) if "a.beta_id;" in row)
+        assert mapping[target] is None, "fixture no longer reproduces an unplaced row"
+
+        # No placed row in the band: refuse rather than widen onto a neighbour.
+        assert block._markdown_for_rows(mapping, target, target) == ""
+
+        # The reader sees the minimal answer, not the construct plus the
+        # paragraph below the closing fence that the band never touched.
+        selection = Selection.from_offsets(
+            Offset(x=0, y=target), Offset(x=len(rows[target].rstrip()), y=target)
+        )
+        copied = block.get_selection(selection)
+        assert copied is not None
+        assert copied[0].strip() == "a.beta_id;", copied[0]
+        assert "TRAILING_ONE" not in copied[0], copied[0]
+
+    # ...and the rescue itself still works. A band whose FIRST row is unplaced
+    # but which reaches a placed row: without widening, ``slice_markdown`` picks
+    # only the placed line and the lit `psql` command is dropped from the copy.
+    text = ORACLE_SUBSTITUTION_CORPUS["fence_long_commands"]
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(76, 120)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        mapping = _copy_markdown.align(block._full_text, rows)
+        first = next(i for i, row in enumerate(rows) if "psql" in row)
+        last = next(i for i in range(first + 1, len(mapping)) if mapping[i] is not None)
+        assert mapping[first] is None, "fixture no longer reproduces an unplaced edge row"
+
+        # The un-widened slice is what would ship without the rescue.
+        unwidened = _copy_markdown.slice_markdown(block._full_text, mapping, first, last)
+        assert "psql" not in unwidened, unwidened
+
+        widened = block._markdown_for_rows(mapping, first, last)
+        assert "psql -h db.internal" in widened, widened
+        # ...and the rescue does not weld the two commands onto one line.
+        assert not any(
+            "psql" in line and "systemctl" in line for line in widened.split("\n")
+        ), widened
+
+
+@pytest.mark.asyncio
+async def test_a_fold_at_a_double_space_puts_both_spaces_back() -> None:
+    """A rejoin restores the whitespace run VERBATIM, not one space (R4-2).
+
+    ``_skip_painted_nothing`` reported WHETHER it had skipped whitespace, so a
+    fold landing on a run of two or more spaces rejoined with exactly one and the
+    document lost a character it had. The walk placed these rows, so this is not
+    a refusal failure -- it is the same "a plausible character looks like an
+    answer" shape one level down, and the fix is to carry the count.
+    """
+    text = "A line ending in two spaces  and then continuing with more text to force a fold."
+
+    seen = 0
+    for width in range(24, 92, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            if len(content) < 2:
+                continue
+            for last in content[1:]:
+                selection = Selection.from_offsets(
+                    Offset(x=1, y=content[0]), Offset(x=len(rows[last].rstrip()), y=last)
+                )
+                copied = block.get_selection(selection)
+                if copied is None or "\n" in copied[0]:
+                    continue
+                stripped = copied[0].strip()
+                if not stripped:
+                    continue
+                seen += 1
+                # The single truthful answer for a rejoined sub-line take: it is
+                # a verbatim span of the source, double space included.
+                assert stripped in text, (
+                    f"width {width}: the rejoin did not reproduce the source's spacing.\n"
+                    f"  copied: {copied[0]!r}"
+                )
+
+    assert seen, "the sweep never reached a rejoined take"
+
+
+def test_skip_painted_nothing_reports_the_whitespace_it_consumed() -> None:
+    """The unit behind R4-2: the consumed run comes back, not a boolean.
+
+    Pinned at the function level as well as end-to-end, because the bool return
+    was locally plausible -- ``" " if saw_space else ""`` reads as correct until
+    the run is longer than one character.
+    """
+    assert _copy_markdown._skip_painted_nothing("a  b", 1) == (3, "  ")
+    assert _copy_markdown._skip_painted_nothing("a b", 1) == (2, " ")
+    assert _copy_markdown._skip_painted_nothing("a\tb", 1) == (2, "\t")
+    assert _copy_markdown._skip_painted_nothing("ab", 1) == (1, "")
+    # Markers that paint nothing are skipped without contributing whitespace.
+    assert _copy_markdown._skip_painted_nothing("a**  b", 1) == (5, "  ")
+
+
+def test_a_fence_marker_in_indented_code_reads_as_a_fence_on_purpose() -> None:
+    """The knowingly-accepted `_FENCE_RE` trade-off, pinned (review round 3, R3-4).
+
+    Widening the pattern past three leading spaces is what lets ``classify`` see
+    the fence under a list item, which is routine in this app's output. The cost
+    is that a literal ```` ``` ```` inside a FOUR-SPACE indented code block now
+    reads as a fence marker too.
+
+    That cost is accepted because the failure directions are not symmetric:
+    over-recognising a fence makes the copy VERBATIM, which is the conservative
+    answer for a clipboard, while under-recognising one deletes characters from
+    the user's code (design round 2, D2-1). Pinned so the next person to narrow
+    the pattern learns the widening was deliberate rather than reading this as a
+    bug to fix, and so the conservative DIRECTION is checked rather than assumed.
+    """
+    lines = ["Text:", "", "    ```", "    still indented code", "    ```", ""]
+    covered, markers = _copy_markdown.classify(lines)
+
+    # The accepted consequence, stated as the assertion rather than in prose.
+    assert markers == {2, 4}, f"the indented backticks did not read as markers: {markers}"
+    # ...and the direction that makes it acceptable: content stays covered, so
+    # the copy is verbatim rather than losing a leading character.
+    assert 3 in covered, f"the indented code line lost its fence cover: {covered}"

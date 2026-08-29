@@ -28,9 +28,28 @@ renderer trims them.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 #: A line that opens or closes a fenced code block.
-_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+#:
+#: The indent is deliberately UNBOUNDED rather than CommonMark's three spaces.
+#: Three is the limit relative to the block's CONTAINER, and these lines arrive
+#: flat with no container context, so a fence indented under a list item — four
+#: spaces under ``- `` , five under ``1. `` , more when nested — read as ordinary
+#: text under a bounded pattern. That made ``classify`` return an EMPTY covered
+#: set for one of the most common shapes this app paints (numbered steps with a
+#: fenced command under each), which in turn let ``furniture_width`` take its
+#: list branch over CODE and strip a leading digit: ``3 rows expected`` copied as
+#: ``rows expected`` (design round 2, D2-1).
+#:
+#: The trade-off, taken knowingly: a literal `````` ``` ```` inside a FOUR-SPACE
+#: INDENTED code block is now read as a fence. That construct is vanishingly rare
+#: in assistant output (Rich's markdown renders indented code as code either
+#: way), while list-nested fences are routine, and the failure directions are not
+#: symmetric — over-recognising a fence makes the copy verbatim, which is the
+#: conservative answer for a clipboard, while under-recognising one deletes
+#: characters from the user's code.
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 #: A list item (bullet or ordered).
 _LIST_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d{1,9}[.)])\s")
 #: A blockquote line (one or more ``>`` levels).
@@ -229,15 +248,48 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                 if look in covered or not line.strip():
                     continue
                 if _LIST_RE.match(line) or _QUOTE_RE.match(line) or _HEADING_RE.match(line):
+                    # A bare ``>`` separating two quote lines paints no word of
+                    # its own, so it cannot answer whether this row starts a new
+                    # structural line. Stopping the scan there hid the quoted
+                    # LIST behind it: every row of the list was attributed to the
+                    # quote's opening line, so ``furniture_width`` was handed a
+                    # source line that is a quote but not a list item and kept
+                    # the ``•`` (design round 2, D2-4).
+                    if _QUOTE_RE.match(line) and not _strip_markup(line):
+                        continue
                     anchor = _first_word(_strip_markup(line)) or _first_word(line)
                     if word and anchor and word == anchor:
                         starts_structural = True
+                    break
+
+        # A FENCE BODY line likewise always opens its own rendered row, and it
+        # has to be checked separately because the structural scan above skips
+        # covered lines. Without this a fence indented under a list item was
+        # absorbed as a WRAP of the item that opens it: the item's wrap budget
+        # was still live, the code row matched no structural anchor, so the code
+        # was attributed to ``- Run the check:``. That mis-attribution is what
+        # made ``fenced`` False over code even once ``classify`` saw the fence,
+        # so ``furniture_width`` read the code's leading ``1`` as an ordered
+        # marker and deleted it (design round 2, D2-1, second cause).
+        #
+        # Matched on EXACT stripped text, the same key the anchor scan below
+        # uses for a covered line: a code line has no markup to normalise, and
+        # an exact match cannot steal a row from the prose it wraps.
+        starts_fence_body = False
+        if not starts_structural:
+            for look in range(src, min(src + _LOOKAHEAD, n)):
+                if look in markers or look not in covered:
+                    continue
+                line = src_lines[look]
+                if line.strip() and row.strip() == line.strip():
+                    starts_fence_body = True
                     break
         if (
             current is not None
             and budget > 0
             and not no_wrap_now
             and not starts_structural
+            and not starts_fence_body
             and not _RENDERED_MARKER_RE.match(row)
         ):
             placed = current
@@ -295,6 +347,348 @@ def _is_rule_like(text: str) -> bool:
     """A row whose visible content is only rule/divider characters."""
     body = text.strip().strip("|")
     return bool(body) and set(body) <= {"-", "─", ":", " ", "=", "_"}
+
+
+#: The quote bar as Rich paints it, repeated once per nesting level. A quote's
+#: CONTINUATION rows carry it too, which is what makes it furniture on every row
+#: of the construct rather than a marker that identifies the first one.
+_RENDERED_QUOTE_PREFIX_RE = re.compile(r"^(?:▌ ?)+")
+
+#: A rendered list marker and the space after it, with its leading indent. Only
+#: the row that OPENS the item carries this; a continuation is indented to the
+#: same column with spaces, which ``str.lstrip`` handles instead.
+_RENDERED_LIST_PREFIX_RE = re.compile(r"^\s*(?:[•◦▪]|\d{1,9})\s+")
+
+
+def furniture_width(row: str, source_line: str | None, *, opens_line: bool, fenced: bool) -> int:
+    """Leading cells of ``row`` that Rich PAINTED rather than the model wrote.
+
+    The row-level answer to the question :meth:`TranscriptBlock.copy_gutter`
+    asks per block, and it has to live here because it is only answerable with
+    the alignment: the same ``▌`` is furniture on a quote row and content on a
+    row of a fenced diagram, and nothing about the glyph itself says which.
+    ``source_line`` is the line :func:`align` mapped the row to, so the decision
+    is made from what the model actually wrote.
+
+    Why not a glyph regex over the row alone — the approach
+    ``test_a_quote_dragged_from_column_zero_keeps_the_bar`` rejects: inside a
+    fence it turns ``  1 / 0`` into ``/ 0``, because a code line that starts
+    with a digit is indistinguishable from a rendered ordered marker by glyph
+    alone. Keying on the source line makes ``fenced`` an explicit refusal
+    instead of a coincidence, so code copies byte for byte.
+
+    ``opens_line`` separates an item's first rendered row from its wrapped
+    continuations. Rich paints `` • `` once and indents the rest to the same
+    column, so a continuation's furniture is pure indent — stripping a marker
+    pattern there would eat content that merely looks like one (a continuation
+    beginning ``2026 was the year`` is the reported shape of that bug).
+    """
+    if source_line is None or fenced:
+        # Unplaceable rows and code are returned verbatim: with no source line
+        # to attribute a prefix to, every glyph is content until proven
+        # otherwise, and that is the conservative direction for a clipboard.
+        return 0
+    # Constructs COMPOSE, so the branches are applied in painted order rather
+    # than as an either/or. A list nested in a blockquote paints ``▌  • text``:
+    # testing the quote first and returning stripped the bar but kept the ``•``,
+    # leaking a glyph that is nowhere in the user's document and flipping the
+    # paste format on a one-cell change of drag start (design round 2, D2-4).
+    width = 0
+    remainder = source_line
+    if _QUOTE_RE.match(remainder):
+        match = _RENDERED_QUOTE_PREFIX_RE.match(row)
+        if match:
+            width = match.end()
+        # Peel the quote marker so the line can be re-tested for what it CONTAINS
+        # — the same source line is both a quote line and a list item.
+        remainder = _QUOTE_RE.sub("", remainder, count=1)
+
+    if _LIST_RE.match(remainder):
+        if opens_line:
+            match = _RENDERED_LIST_PREFIX_RE.match(row[width:])
+            return width + (match.end() if match else 0)
+        # A continuation is indented to the marker's column with plain spaces.
+        tail = row[width:]
+        return width + (len(tail) - len(tail.lstrip(" ")))
+    return width
+
+
+#: Inline markers Rich DROPS when it paints, so a rendered row is not a literal
+#: substring of its source line. Stepping over these is what lets the positional
+#: walk below place a row of ``**bold text** and `code```.
+_INLINE_MARKUP = "*_`~"
+
+
+def _is_word_char(char: str) -> bool:
+    """A character CommonMark counts as word-interior for emphasis purposes."""
+    return bool(char) and (char.isalnum() or char == "_")
+
+
+def _is_intraword_underscore(source: str, i: int) -> bool:
+    """``_`` at ``i`` sits inside a word, so CommonMark paints it LITERALLY.
+
+    CommonMark deliberately exempts ``_`` from intraword emphasis so that
+    ``snake_case`` survives, which ``*`` does not need. Treating such an
+    underscore as a dropped marker made the walk unable to place a row that
+    BEGINS on one -- exactly what Rich produces when it folds a long
+    ``some_very_long_identifier_name`` mid-token -- so the line fell to the
+    guess and every fold on it gained a space (review round 3, R3-2).
+    """
+    before = source[i - 1] if i else ""
+    after = source[i + 1] if i + 1 < len(source) else ""
+    return _is_word_char(before) and _is_word_char(after)
+
+
+def _skip_inline_markup(source: str, i: int) -> int:
+    """Advance past inline markers at ``i`` that render as nothing.
+
+    Handles emphasis/code runs and a link's ``](target)`` tail, whose label is
+    painted while the target is not. An intraword ``_`` is content, not a
+    marker, and is left for the literal comparison to consume.
+    """
+    while i < len(source):
+        char = source[i]
+        if char == "_" and _is_intraword_underscore(source, i):
+            break
+        if char in _INLINE_MARKUP or char == "[":
+            i += 1
+            continue
+        if char == "]" and source.startswith("](", i):
+            close = source.find(")", i + 2)
+            if close < 0:
+                return i
+            i = close + 1
+            continue
+        break
+    return i
+
+
+def _skip_painted_nothing(source: str, i: int) -> tuple[int, str]:
+    """Advance past everything at ``i`` that paints NO glyph.
+
+    Returns the new offset and the WHITESPACE that was among what was skipped --
+    at a fold that is the whole question, since the consumed whitespace is what
+    a rejoin has to put back.
+
+    The whitespace is returned VERBATIM rather than as a flag. Answering "was
+    there a space?" made the rejoin put back exactly one, so a fold landing on a
+    run of two or more spaces silently collapsed it: aligned columns in prose
+    lost their alignment and a double-spaced sentence lost a space the document
+    had (review round 4, R4-2). The walk knows what the run was, so reporting a
+    plausible single space instead of the real one is the same
+    guess-rather-than-know shape one level down from the refusals above.
+
+    One definition of "paints as nothing" serves both places the walk needs it:
+    the gap between two rows, and the tail after the last one. They were
+    written separately, and the tail test compared the RAW residual, so a line
+    ending in `` ` ``, ``**`` or ``](url)`` left a marker standing after the
+    final row, failed to place, and fell to the guess -- which is how a
+    mid-token fold on such a line gained a space that split a URL or a
+    filesystem path (review round 3, R3-1; design round 3, D3-1).
+    """
+    skipped: list[str] = []
+    while i < len(source):
+        if source[i].isspace():
+            skipped.append(source[i])
+            i += 1
+            continue
+        nxt = _skip_inline_markup(source, i)
+        if nxt == i:
+            break
+        i = nxt
+    return i, "".join(skipped)
+
+
+def _match_visible(source: str, start: int, text: str) -> int | None:
+    """End offset of ``text`` rendered from ``source`` at ``start``, or ``None``.
+
+    Compares the LITERAL character first and only treats a mismatch as markup.
+    The order matters: intraword ``_`` is literal in CommonMark, so a walk that
+    skipped markers unconditionally could not place
+    ``some_verylongtoken_here`` and fell back to guessing on exactly the
+    mid-token folds the separator has to get right.
+    """
+    i, j = start, 0
+    while j < len(text):
+        if i < len(source) and source[i] == text[j]:
+            i += 1
+            j += 1
+            continue
+        nxt = _skip_inline_markup(source, i)
+        if nxt == i:
+            return None
+        i = nxt
+    return i
+
+
+def locate_source_line(row_texts: list[str], source: str) -> str | None:
+    """The one source line these rows are the full wrapping of, or ``None``.
+
+    Used when :func:`align` placed none of the rows. That is absence of evidence
+    from the aligner, not proof the rows share a line, so instead of loosening
+    the rule the evidence is sought DIRECTLY: a line that the end-anchored walk
+    can place these rows against is a line they demonstrably came from.
+
+    ``None`` when no line places them or when several do -- an ambiguous answer
+    is still no answer, and the caller must fall back to something that does not
+    need to know. Without this, a selection over rows the aligner could not place
+    was judged a single-line take on no evidence at all, which welded three
+    separate lines of a fenced block into one (review round 3, R3-2).
+    """
+    if len(row_texts) < 2:
+        return None
+    found: str | None = None
+    for line in source.split("\n"):
+        if not line.strip():
+            continue
+        if _walk_folds([text.rstrip() for text in row_texts], line) is None:
+            continue
+        if found is not None:
+            return None
+        found = line
+    return found
+
+
+def separators_without_source(row_texts: list[str]) -> list[str]:
+    """Last-resort separators when there is NO source line to walk at all.
+
+    Reachable only when ``align`` placed none of the selected rows, so the
+    markdown path has nothing to offer either and the rendered glyphs are the
+    only truthful answer available. The name states the precondition that
+    :func:`wrap_separators` refuses to guess past: this function is chosen
+    deliberately by a caller that has checked there is no evidence, never
+    reached by falling through.
+
+    A terminal breaks CJK between any two characters because those scripts do
+    not write spaces, so a space there is never something the user had; Latin
+    text breaks at a space it then consumes, so one has to go back. Asking the
+    adjacent characters IS a heuristic, and it is kept only for the case where
+    the alternative is refusing to copy anything: it is what stops a Chinese or
+    Japanese paragraph gaining an invented space at every fold (review round 2,
+    R2-2; design round 2, D2-3).
+    """
+    stripped = [text.strip() for text in row_texts]
+    return [
+        _separator_for_scripts(stripped[i][-1:], stripped[i + 1][:1])
+        for i in range(max(len(stripped) - 1, 0))
+    ]
+
+
+def _separator_for_scripts(left: str, right: str) -> str:
+    """One fold's separator judged from the characters meeting at it."""
+    for char in (left, right):
+        if not char or unicodedata.east_asian_width(char) not in ("W", "F"):
+            continue
+        # Width alone is the WRONG test: an emoji is double-width too, and emoji
+        # sit in space-delimited Latin prose that genuinely lost a space at the
+        # fold. Review round 2 verified emoji already copied correctly, so the
+        # rule is narrowed to wide characters that are TEXT (letters and the
+        # CJK punctuation that ends a clause) rather than symbols (category
+        # ``So``, which is where emoji live).
+        if unicodedata.category(char)[0] in ("L", "P"):
+            return ""
+    return " "
+
+
+def wrap_separators(row_texts: list[str], source_line: str | None) -> list[str] | None:
+    """What the terminal CONSUMED at each fold between rows of ONE source line.
+
+    Returns one separator per fold, so ``len(row_texts) - 1`` entries.
+
+    A soft wrap is not always a space. Rich breaks at a space when it can and
+    consumes it, so rejoining needs one put back; but a token wider than the
+    render segment is broken MID-TOKEN and nothing is consumed, so putting a
+    space back would invent a character the user never had. Both are reachable
+    in ordinary prose at ordinary widths: a bare URL folds mid-token at 40
+    columns while the sentence around it folds at spaces.
+
+    **The decision is POSITIONAL.** The rows are walked against the source line
+    with a cursor, and the separator for a fold is the whitespace actually
+    sitting at that point in the line. The previous test — does
+    ``last_token_of_A + first_token_of_B`` occur ANYWHERE in the line — ignored
+    position, so a line using both ``file system`` and ``filesystem`` judged a
+    real space-fold to be mid-token and welded two words shut: ``filesystem
+    layer``, silently wrong and unrepairable by the reader (review round 2,
+    R2-1; design round 2, D2-2, 30 reproductions across five prose lines).
+
+    The walk is **end-anchored**: the rows must consume the line's whole visible
+    content, which is what forces a single correct alignment instead of letting
+    an early partial match stand. ``row_texts`` must therefore be the FULL rows
+    of the source line, not a selection's clipped ends.
+
+    **``None`` means "I cannot know", and is not a separator.** When the rows
+    cannot be placed against the line there is no evidence about what the fold
+    consumed, and every previous attempt to answer anyway shipped a defect:
+    guessing ``" "`` split a URL and a filesystem path, guessing from the
+    adjacent scripts welded a compound, and both were silent because a
+    plausible character looks like an answer. Three rounds of findings
+    (R2-1, R2-2, R3-1, R3-2) are one root cause — the precondition above was
+    documented but not enforced, so the caller's clipped or unplaced rows
+    reached a fallback that invented a character rather than refusing.
+    Refusing hands the decision back to the caller, which has a truthful
+    answer available (the markdown source) that this function does not.
+    """
+    folds = max(len(row_texts) - 1, 0)
+    if not folds:
+        # No fold, nothing to rejoin: knowable without any evidence at all, so
+        # a single-row sub-line take never depends on the walk.
+        return []
+
+    if source_line is None:
+        return None
+    # Rows keep their LEADING whitespace on purpose. When a fold's space does not
+    # fit at the end of a row Rich moves it to the start of the next one instead
+    # of consuming it, so that space is still on screen and still on the
+    # clipboard; adding a separator too would double it.
+    return _walk_folds([text.rstrip() for text in row_texts], source_line)
+
+
+def _walk_folds(row_texts: list[str], source_line: str) -> list[str] | None:
+    """Separators from a positional walk of ``row_texts`` over ``source_line``.
+
+    ``None`` when no start offset lets the rows consume the line exactly, which
+    leaves the caller its documented fallback rather than a wrong answer.
+    """
+    for start in range(len(source_line) + 1):
+        cursor = _match_visible(source_line, start, row_texts[0])
+        if cursor is None:
+            continue
+        separators: list[str] = []
+        for text in row_texts[1:]:
+            # Step over whatever sits between the rows: the whitespace the fold
+            # consumed, plus any inline marker that paints nothing. Whether that
+            # run held WHITESPACE is the whole question — that is the character
+            # the rejoin has to put back.
+            # LITERAL FIRST, the same order :func:`_match_visible` uses and for
+            # the same reason: a row that already carries the fold's whitespace
+            # at its start consumed nothing, so the rejoin must add nothing.
+            # Only when the row cannot be matched where the cursor stands is the
+            # gap skipped and its whitespace put back.
+            end = _match_visible(source_line, cursor, text)
+            if end is not None:
+                separators.append("")
+                cursor = end
+                continue
+            gap, consumed = _skip_painted_nothing(source_line, cursor)
+            end = _match_visible(source_line, gap, text)
+            if end is None:
+                separators = []
+                break
+            # The consumed run VERBATIM, not a single space standing in for it
+            # (review round 4, R4-2). Newlines cannot appear here -- the walk
+            # runs within one source line -- so this only ever restores the
+            # spaces and tabs the fold ate.
+            separators.append(consumed)
+            cursor = end
+        else:
+            # End-anchor on the VISIBLE residual. Markers that paint nothing are
+            # not content the rows failed to cover, so a line closing on
+            # `` `code` ``, ``**bold**`` or ``[label](url)`` must still count as
+            # fully consumed (review round 3, R3-1).
+            tail, _ = _skip_painted_nothing(source_line, cursor)
+            if source_line[tail:].strip() == "":
+                return separators
+    return None
 
 
 def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_row: int) -> str:
