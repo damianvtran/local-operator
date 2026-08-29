@@ -3641,6 +3641,322 @@ async def test_a_bullet_inside_a_quote_leaks_neither_the_bar_nor_the_dot() -> No
         ), f"the paste format flips with the drag's start cell: {answers}"
 
 
+#: A wrapped list item, and the shape issue #395 was reported on. The
+#: CONTINUATION row is the subject: D2-4 fixed the format flip on the row that
+#: carries the marker, and the flip survived one row down.
+WRAPPING_BULLET = "- a plain bullet item that is long enough to wrap across two rendered rows here"
+
+#: A quoted list whose second item's first word is ALSO the first word of the
+#: previous item's continuation row (both ``a``). ``align``'s structural scan
+#: anchors on that shared word, so the continuation is mis-mapped to the second
+#: item. Found by the differential sweep for #395 rather than reported: fixing
+#: ``opens_line`` to read the mapping made this pre-existing mis-mapping visible
+#: as a NEW format flip, which is why the fix reads the FRAME first.
+AMBIGUOUS_QUOTED_LIST = (
+    "> - a quoted bullet that is long enough to wrap onto a continuation row here\n"
+    "> - a second quoted bullet, also long enough to fold at the widths swept"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_mis_mapped_quoted_continuation_still_measures_its_furniture() -> None:
+    """A row's furniture is judged from the FRAME, so a bad mapping cannot skew it.
+
+    ``align`` maps this list's first continuation row to the SECOND item,
+    because both begin with ``a``. Reading ``opens_line`` from the mapping alone
+    therefore called the continuation an opener and the real marker row a
+    continuation, measuring the marker row's furniture two cells short -- a new
+    format flip, the same wart as #395 one construct over.
+
+    Asserted on the painted furniture rather than only on the clipboard so the
+    cause is pinned: every row of this construct paints the same ``▌  `` bar and
+    indent, so their furniture widths must agree whatever the mapping says.
+    """
+    for width in (36, 44, 60):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(AMBIGUOUS_QUOTED_LIST)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            mapping = _copy_markdown.align(block._full_text, rows)
+            widths = {
+                index: block._furniture_width(rows, mapping, index)
+                for index, row in enumerate(rows)
+                if row.strip()
+            }
+            assert len(set(widths.values())) == 1, (
+                f"width {width}: rows of one quoted list disagree about their "
+                f"painted furniture, so the paste format flips: {widths}"
+            )
+
+            # And the gesture itself: a whole-row take must not leak the bar or
+            # the bullet, nor change answer with the drag's start cell.
+            for index, row in enumerate(rows):
+                if not row.strip():
+                    continue
+                answers = {}
+                for column in range(0, widths[index] + 1):
+                    selection = Selection.from_offsets(
+                        Offset(x=column, y=index), Offset(x=len(row.rstrip()), y=index)
+                    )
+                    copied = block.get_selection(selection)
+                    assert copied is not None
+                    answers[column] = copied[0]
+                    assert "▌" not in copied[0], f"leaked the quote bar: {copied[0]!r}"
+                    assert "•" not in copied[0], f"leaked the bullet: {copied[0]!r}"
+                assert (
+                    len(set(answers.values())) == 1
+                ), f"width {width} row {index}: format flips with start cell: {answers}"
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_items_continuation_row_does_not_flip_format() -> None:
+    """Issue #395: the D2-4 property, asserted on a CONTINUATION row.
+
+    ``opens_line`` was derived from the SELECTION rather than from the frame, so
+    a drag covering only a continuation row saw no preceding row, called the
+    continuation a marker row, and measured its furniture as 0. ``starts_full``
+    then answered differently either side of the painted indent: column 0 gave
+    the whole markdown item, column 1 gave that row's glyphs, and columns inside
+    the indent leaked it as leading spaces.
+
+    Swept across widths rather than pinned at the reported 44, because the flip
+    is a property of the indent and every width that folds this item has one.
+    """
+    for width in range(32, 64, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(WRAPPING_BULLET)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            if len(content) < 2:
+                continue  # too wide to fold: no continuation row to test
+
+            for index in content[1:]:
+                row = rows[index]
+                indent = len(row) - len(row.lstrip(" "))
+                answers: dict[int, str] = {}
+                for column in range(0, indent + 1):
+                    selection = Selection.from_offsets(
+                        Offset(x=column, y=index), Offset(x=len(row.rstrip()), y=index)
+                    )
+                    copied = block.get_selection(selection)
+                    assert copied is not None
+                    answers[column] = copied[0]
+                    # The leaked indent, the finding's second wart: a take that
+                    # began inside the painted furniture must not carry it.
+                    assert copied[0] == copied[0].lstrip(" "), (
+                        f"width {width} row {index} column {column} leaked the "
+                        f"continuation indent: {copied[0]!r}"
+                    )
+
+                assert len(set(answers.values())) == 1, (
+                    f"width {width} row {index}: the paste format flips with the "
+                    f"drag's start cell: {answers}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_table_rows_continuation_never_maps_to_the_next_row() -> None:
+    """Issue #399 at the unit it lives in, so the cause is pinned, not the symptom.
+
+    ``align`` matched a table row on ``word in line``, searching the WHOLE source
+    line. Table cells wrap, so a wrapped row leaves continuation rows carrying
+    the tail of a later cell, and any of those could match the NEXT table row on
+    a shared word -- at width 28 the ``alpha`` row's continuation ``row with``
+    was found inside the ``beta`` line and consumed it.
+
+    Asserted on the MAPPING rather than on the clipboard because the widget test
+    above would also pass if the copy path merely papered over a mis-mapping.
+    A continuation must map to its own row or to nothing; mapping it to a
+    following row is the substitution.
+
+    The expected first cells are spelled out as LITERALS below rather than
+    re-derived with the implementation's own parsing expression. An earlier
+    version of this test called ``_copy_markdown``'s helpers to compute them,
+    so a wrong parse produced the identical wrong expectation on both sides and
+    the test passed regardless -- it restated the implementation instead of
+    checking it (R1-3).
+    """
+    text = ORACLE_SUBSTITUTION_CORPUS["table_long_notes"]
+    # The corpus table's body rows, in source order, with the first cell each
+    # one paints. Independent of how production code parses a row.
+    expected_first_cells = {2: "alpha", 3: "beta"}
+    for width in range(28, 102, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            mapping = _copy_markdown.align(block._full_text, rows)
+            lines = block._full_text.split("\n")
+
+            for index, row in enumerate(rows):
+                source = mapping[index]
+                if not row.strip() or source is None:
+                    continue
+                # A row placed on a table body line must actually OPEN it: the
+                # first cell is what Rich paints at the row's start. Anything
+                # else placed there is a continuation wearing another row's
+                # identity.
+                if source not in expected_first_cells:
+                    continue
+                first_cell = expected_first_cells[source]
+                assert first_cell in row.lower(), (
+                    f"width {width} row {index}: a continuation row was mapped to "
+                    f"source line {source}, whose first cell {first_cell!r} it does "
+                    f"not paint.\n"
+                    f"  row  : {row.rstrip()!r}\n  line : {lines[source]!r}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_a_table_row_whose_first_cell_is_a_number_still_copies_as_markdown() -> None:
+    """R1-1: a numeric first column must still round-trip as markdown.
+
+    Pins the neighbour that #399's fix broke. ``_row_word`` deliberately skips a
+    leading bare number as an ordered-list marker, so for `` 1   the first step``
+    the row word is ``the`` while the first cell is ``1`` -- the first-cell
+    narrowing then matched nothing and left a genuine row-OPENING row unplaced,
+    and highlighting it pasted space-aligned glyphs instead of the markdown row.
+    Numeric first columns (ids, ranks, steps, years) are a common table shape, so
+    this pins the markdown answer at every swept width rather than at one.
+
+    Asserts the copy is the SOURCE row, not merely that a mapping exists, so it
+    fails on the user-visible symptom.
+    """
+    text = ORACLE_CORPUS["table_numeric_first_column"]
+    expected = {
+        "1": "| 1 | the first step which is long enough that it wraps at narrow widths |",
+        "2": "| 2 | the second step, also long enough to fold across several rows |",
+    }
+    checked = 0
+    for width in range(60, 102, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            for index, row in enumerate(_rendered_rows(block)):
+                stripped = row.strip()
+                # Only the rows that OPEN a numeric body row; a continuation is
+                # indented past the id column and carries no leading number.
+                head = stripped.split()[0] if stripped.split() else ""
+                if head not in expected or not row[:1].isspace():
+                    continue
+                selection = Selection.from_offsets(
+                    Offset(x=0, y=index), Offset(x=len(row.rstrip()), y=index)
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None and copied[0] == expected[head], (
+                    f"width {width} row {index}: a numeric-first-cell row lost its "
+                    f"markdown answer.\n  row     : {row.rstrip()!r}\n"
+                    f"  copied  : {(copied[0] if copied else None)!r}\n"
+                    f"  expected: {expected[head]!r}"
+                )
+                checked += 1
+    assert checked, "no numeric opener rows were exercised"
+
+
+def test_a_first_cell_is_parsed_with_the_markdown_pipe_escape_resolved() -> None:
+    """R1-2: ``\\|`` inside a cell is content, not a cell boundary.
+
+    Splitting a table line on the raw ``|`` reports the first cell of
+    ``| ps aux \\| grep x | note |`` as ``ps aux \\``, truncating it at the
+    escape. That was latent rather than active -- the rendered row starts with
+    ``ps aux`` so the truncated text still matched -- but the parse is wrong at
+    the source and the next change to the expression would make it live.
+
+    Expectations are written as literals: this is the independent oracle for the
+    expression the mapping test used to borrow (R1-3).
+    """
+    assert _copy_markdown._first_cell("| ps aux \\| grep x | note |") == "ps aux | grep x"
+    assert _copy_markdown._first_cell("| a \\| b \\| c | d |") == "a | b | c"
+    # Unescaped pipes still delimit, and an absent leading delimiter is fine.
+    assert _copy_markdown._first_cell("| alpha | 0.91 | note |") == "alpha"
+    assert _copy_markdown._first_cell("alpha | 0.91 |") == "alpha"
+    assert _copy_markdown._first_cell("|  spaced  | b |") == "spaced"
+    # R2-2: an escaped BACKSLASH does not shield the delimiter after it. A
+    # ``(?<!\\)`` lookbehind reads the second backslash and calls this pipe
+    # escaped, yielding ``\| b``; the cell is a lone backslash and ``b`` opens
+    # the second cell. One escape deeper than the case R1-2 fixed, same class.
+    assert _copy_markdown._first_cell("| \\\\| b |") == "\\"
+    assert _copy_markdown._first_cell("| a\\\\| b |") == "a\\"
+    # A trailing backslash with a REAL delimiter after it still parses, and an
+    # escaped pipe deeper in the same cell is still content.
+    assert _copy_markdown._first_cell("| c:\\ | note |") == "c:\\"
+    assert _copy_markdown._first_cell("| \\|\\|\\| | x |") == "|||"
+
+
+def test_a_rows_leading_number_places_a_row_only_with_positional_evidence() -> None:
+    """R2-1: the numeric path must judge POSITION, not just the number's value.
+
+    Exact value equality is not a sound opener test. A bare number carries no
+    evidence that a row OPENS anything -- ids, years and versions are routinely
+    repeated in the table's own prose -- so a wrapped row whose note cites a
+    LATER row's id folds that id to the start of a continuation, where equality
+    matched the later row exactly and a whole-row take copied a row the reader
+    never lit. That is #399's payload, reopened by the value-based read.
+
+    Rich left-aligns a table's rows on one column, so an opener paints its first
+    cell AT that column and a continuation is indented past it. Both checks are
+    required, and an unknown column REFUSES rather than guesses.
+    """
+    # Column 1 is where this table paints its first cell.
+    assert _copy_markdown._number_opens_row(" 2015  the later milestone", "2015", 1)
+    assert _copy_markdown._number_opens_row(" 1   the first detail", "1", 1)
+    # The R2-1 shape: a CONTINUATION whose leading number equals a later row's
+    # id. Value equality accepts it; the column says it is not an opener.
+    assert not _copy_markdown._number_opens_row("       2015 nu xi omicron pi", "2015", 1)
+    assert not _copy_markdown._number_opens_row("       2 explicitly and keeps", "2", 1)
+    # Value still has to name THIS row's cell, so the column alone is not enough.
+    assert not _copy_markdown._number_opens_row(" 1   the first detail", "2015", 1)
+    # No column learned yet: refuse rather than guess.
+    assert not _copy_markdown._number_opens_row(" 2015  the later milestone", "2015", None)
+    assert not _copy_markdown._number_opens_row(" 1   x", "", 1)
+
+    # Indented bare number: the ordered-marker shape ``_row_word`` skips.
+    assert _copy_markdown._row_number(" 1   the first detail") == "1"
+    assert _copy_markdown._row_number(" 2015  the later milestone") == "2015"
+    # Flush left is number-led CONTENT, already anchored by ``_row_word``.
+    assert _copy_markdown._row_number("2026 roadmap") == ""
+    # Not a bare digit run, so not a marker: a score cell, a date.
+    assert _copy_markdown._row_number(" 0.91 score") == ""
+    assert _copy_markdown._row_number(" 2026-01 note") == ""
+
+
+def test_the_numeric_read_is_offered_only_table_rows_not_prose_with_a_pipe() -> None:
+    """R2-4: a pipe in a sentence is not a table, so it gets no numeric read.
+
+    The branch guard ran the numeric route on ANY line containing a pipe,
+    including prose that merely mentions ``a | b``. Contained today only because
+    the match downstream almost never fires, which is a property of the data
+    rather than of the code; the shape check keeps the path off prose entirely.
+    """
+    assert _copy_markdown._is_table_row("| 1 | the first step |")
+    assert _copy_markdown._is_table_row("| --- | --- |")
+    assert _copy_markdown._is_table_row("alpha | 0.91 | note")
+    # Prose that merely contains a pipe is not a row.
+    assert not _copy_markdown._is_table_row("run a | b to filter the output")
+    assert not _copy_markdown._is_table_row("no pipe at all here")
+
+
 # -- the oracle sweep --------------------------------------------------------
 #: Ordinary assistant output, not a minimised repro. Three rounds of findings
 #: were each correct on the case the previous round named and wrong on a
@@ -3700,6 +4016,28 @@ ORACLE_CORPUS: dict[str, str] = {
         "| --- | --- | --- |\n"
         "| alpha | 0.91 | the first row with some longer note text here |\n"
         "| beta | 0.72 | the second row, also with a reasonably long note |"
+    ),
+    # A NUMERIC first column -- ids, ranks, steps, years. Its absence is why the
+    # suite stayed green while such rows silently stopped round-tripping as
+    # markdown (R1-1): ``_row_word`` reads a leading bare number as an ordered
+    # list MARKER and skips it, so the row word is ``the`` where the first cell
+    # is ``1``. ``years`` carries a shared numeric PREFIX (``1`` vs ``2015``) so
+    # a containment match on the number would be caught here rather than in
+    # review.
+    "table_numeric_first_column": (
+        "| id | step |\n| --- | --- |\n"
+        "| 1 | the first step which is long enough that it wraps at narrow widths |\n"
+        "| 2 | the second step, also long enough to fold across several rows |"
+    ),
+    "table_year_first_column": (
+        "| year | milestone |\n| --- | --- |\n"
+        "| 1 | the earliest milestone with a note long enough to wrap somewhere |\n"
+        "| 2015 | the later milestone whose note also wraps at the swept widths |"
+    ),
+    "table_escaped_pipe": (
+        "| command | note |\n| --- | --- |\n"
+        "| ps aux \\| grep ingest | the pipeline check that operators run first |\n"
+        "| journalctl -u ingest | the follow-up when the check above finds nothing |"
     ),
     "cjk": "这是一个中文段落，用于验证在终端宽度下折行之后复制粘贴不会插入多余的空格字符。",
     "cjk_ja": "これは日本語の段落です。この行は端末の幅で折り返されますので、コピーの境界を検証します。",
@@ -3950,36 +4288,97 @@ ORACLE_SUBSTITUTION_CORPUS: dict[str, str] = {
         "| alpha | 0.91 | the first row with some longer note text here that wraps |\n"
         "| beta | 0.72 | the second row, also with a reasonably long note here |"
     ),
+    # The numeric-first-column twin of ``table_long_notes``. R1-1's fix gives a
+    # bare-number row a SECOND way to be placed, so the substitution oracle has
+    # to sweep that path too: a wrapped numeric row's continuation must still be
+    # refused rather than claiming the next row on its number.
+    "table_numeric_long_notes": (
+        "| id | notes |\n| --- | --- |\n"
+        "| 1 | the first row with some longer note text here that wraps over rows |\n"
+        "| 2 | the second row, also with a reasonably long note that folds too |"
+    ),
+    # R2-1. The shape a value-based numeric read cannot survive: the FIRST row's
+    # note cites the SECOND row's id, so at some widths the fold lands ``2015``
+    # at the start of a continuation. Every table continuation is indented, so
+    # the row reached the numeric read and matched the later row's id EXACTLY --
+    # the continuation was placed on it and a whole-row take copied a row the
+    # reader never lit, which is #399's payload in a neighbouring shape. Its
+    # absence from this corpus is why 218 tests stayed green over a reopened
+    # #399, so it stays here permanently to cover the numeric path's soundness
+    # rather than only its recall.
+    "years_2015_in_note": (
+        "| year | milestone |\n| --- | --- |\n"
+        "| 2014 | alpha beta gamma delta epsilon zeta eta theta iota kappa lam "
+        "2015 nu xi omicron pi |\n"
+        "| 2015 | the later milestone whose note also wraps at the swept widths here |"
+    ),
+    # The same trap with small ids rather than years, which folds at different
+    # widths: a note naming ``row 2`` inside row 1.
+    "ids_2_in_note": (
+        "| id | notes |\n| --- | --- |\n"
+        "| 1 | first row whose note mentions row 2 explicitly and keeps going a while |\n"
+        "| 2 | the second row, also with a reasonably long note that folds too |"
+    ),
+    # R3-1, and the shape whose absence let it ship. Every entry above has a
+    # WORD-led header (``| name | score |``, ``| id | notes |``), so none of them
+    # exercises the case where the header's own row word is forced into lookahead
+    # -- and the substring match the word path used until R3-1 was therefore
+    # invisible to 221 green tests. ``_row_word`` reads a leading bare number as
+    # an ordered-list marker, so a numeric header takes its word from the SECOND
+    # cell (``10``), which matches NOTHING on its own line and can only match by
+    # looking ahead into a body row (``'10' in '100'``). The reader lit the
+    # header and was handed a body row. The numeric path cannot rescue this --
+    # ``table_column`` is still None on the first row, so ``_number_opens_row``
+    # correctly refuses -- which is precisely why the branch beside it has to be
+    # an OPENER test rather than a containment test.
+    #
+    # The cells are WIDE on purpose. This oracle skips any row lighting fewer
+    # than 12 characters, and a ``| 1 | 10 |`` header paints only 7 -- so the
+    # narrow form of this shape reproduces the defect in the mapping but is
+    # invisible HERE, which would make the corpus entry look like cover it does
+    # not provide. Sized so the header row clears the floor and the oracle
+    # actually sees the substitution.
+    "numeric_header_rank": (
+        "| 1024 | 20481 |\n| --- | --- |\n"
+        "| 204810 | the first ranked entry whose note is long enough to wrap at widths |\n"
+        "| 204811 | the second ranked entry, also with a note that folds across rows |"
+    ),
+    # The same numeric-header hole with a score-shaped table, which folds at
+    # different widths: the header word ``5001`` reaching into a body row's
+    # ``50010`` by containment.
+    "step_score_table": (
+        "| 10015 | 50017 |\n| --- | --- |\n"
+        "| 500170 | the first step whose note is long enough that it wraps at widths |\n"
+        "| 500171 | the second step, also with a note long enough to fold over rows |"
+    ),
+    # Prefix-SHARING first cells, the non-numeric half of R3-1. A continuation
+    # carrying the word ``at`` matched ``api-gateway`` by containment (via
+    # ``g-at-eway``) and copied that row entire; ``api`` is also a genuine prefix
+    # of ``api-gateway``, so this fixture pins BOTH failure directions -- the
+    # substring hit and any ungated prefix relaxation of the fix for it.
+    "service_table_shared_prefix": (
+        "| service | notes |\n| --- | --- |\n"
+        "| api | the gateway service whose note is long enough to wrap at narrow widths |\n"
+        "| api-gateway | the second service, also with a note that folds across rows |"
+    ),
+    # The same prefix-sharing trap on a longer stem (``mon`` inside
+    # ``monitoring``), which places the shared prefix at a different fold column.
+    "monitoring_table_shared_prefix": (
+        "| component | notes |\n| --- | --- |\n"
+        "| mon | the collector component whose note is long enough to wrap on narrow widths |\n"
+        "| monitoring | the dashboard component, also with a note that folds across rows |"
+    ),
 }
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            name,
-            marks=(
-                # PRE-EXISTING and unchanged by this PR -- identical at the merge
-                # base, at `6f72a29e` and here. ``align`` maps a wrapped table
-                # row's continuation rows to the NEXT table row, so a whole-row
-                # take copies the wrong row. That lives in ``align``'s table
-                # handling rather than in this copy path, so it is tracked as
-                # issue #399 rather than widened into this PR. Marked xfail
-                # rather than dropped from the corpus: the oracle keeps reporting
-                # it, and the marker fails loudly once #399 is fixed.
-                [
-                    pytest.mark.xfail(
-                        reason="pre-existing table mis-mapping, issue #399", strict=True
-                    )
-                ]
-                if name == "table_long_notes"
-                else []
-            ),
-        )
-        for name in sorted(ORACLE_SUBSTITUTION_CORPUS)
-    ],
-)
+# ``table_long_notes`` carried a strict xfail for issue #399 -- ``align`` matched
+# a table row's word against the WHOLE source line, so a wrapped row's
+# continuation was consumed by the NEXT table row and a whole-row take copied a
+# row the reader never lit. Fixed by matching the first cell only; the marker is
+# removed rather than relaxed, which is what makes this parametrisation the
+# acceptance check for that issue.
+@pytest.mark.parametrize("name", sorted(ORACLE_SUBSTITUTION_CORPUS))
 async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: str) -> None:
     """A take must contain the rows the reader LIT, not merely real source text.
 
@@ -4022,8 +4421,31 @@ async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: s
                     continue
                 # Compared with folds flattened: the markdown path may return the
                 # line unwrapped, which is a truthful answer to the same gesture.
-                haystack = " ".join(copied[0].split())
-                needle = " ".join(lit.split())[:12]
+                # Table PIPES are flattened for the same reason -- Rich paints a
+                # row's cells with the ``|`` dropped, so the markdown answer to a
+                # lit ``name   score  notes`` is ``| name | score | notes |``,
+                # correct and yet not a substring. Normalising both sides keeps
+                # the invariant SHARP rather than loosening it: verified that a
+                # take of the ``alpha`` row still fails this assertion when the
+                # ``beta`` row is substituted for it, which is issue #399's
+                # payload and the reason this parametrisation is its acceptance
+                # check.
+                flatten = str.maketrans({"|": " "})
+                haystack = " ".join(copied[0].translate(flatten).split())
+                needle = " ".join(lit.translate(flatten).split())[:12]
+                # A cell too wide for its column is painted TRUNCATED (``api-
+                # gate…``) while the markdown answer spells it whole, so the lit
+                # glyphs are a PREFIX of the correct answer and a plain substring
+                # test reports a substitution that did not happen -- the same
+                # measurement artifact the round-3 escape-aware re-measure found
+                # on ``table_escaped_pipe``. Cutting the needle at the ellipsis
+                # compares the part Rich actually painted in full. This does not
+                # blunt the invariant: the truncated stem still has to appear in
+                # the copy, so a genuinely substituted row fails exactly as
+                # before (verified by restoring the pre-fix predicate, where all
+                # four new fixtures fail).
+                if "…" in needle:
+                    needle = needle.split("…", 1)[0]
                 assert needle in haystack, (
                     f"{name} at width {width}, row {index}: the fully highlighted row is "
                     f"not in the copy -- a different line was substituted for it.\n"
