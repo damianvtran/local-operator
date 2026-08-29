@@ -1,0 +1,640 @@
+{
+  "d12_routes": {
+    "20.3MB": {
+      "source_bytes": 21275898,
+      "A_bytes_route": {
+        "buffer": "[Image #1, 1568x1467 \u2193] ",
+        "images": 1,
+        "attached_bytes": 1769216,
+        "toast": {
+          "message": "",
+          "display": false,
+          "region": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "deferred": null,
+          "virtual_size": [
+            98,
+            28
+          ],
+          "size": [
+            98,
+            28
+          ],
+          "vscrollbar": false,
+          "hscrollbar": false
+        },
+        "elapsed_s": 2.37
+      },
+      "B_fileurl_route": {
+        "buffer": "[Image #1, 1568x1467 \u2193] ",
+        "images": 1,
+        "attached_bytes": 1769216,
+        "toast": {
+          "message": "",
+          "display": false,
+          "region": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "deferred": null,
+          "virtual_size": [
+            98,
+            28
+          ],
+          "size": [
+            98,
+            28
+          ],
+          "vscrollbar": false,
+          "hscrollbar": false
+        },
+        "elapsed_s": 2.51
+      },
+      "C_pathtext_route": {
+        "buffer": "[Image #1, 1568x1467 \u2193] ",
+        "images": 1,
+        "toast": {
+          "message": "",
+          "display": false,
+          "region": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "deferred": null,
+          "virtual_size": [
+            98,
+            28
+          ],
+          "size": [
+            98,
+            28
+          ],
+          "vscrollbar": false,
+          "hscrollbar": false
+        }
+      },
+      "identical_marker_A_vs_B": true,
+      "marker_A": "[Image #1, 1568x1467 \u2193] ",
+      "marker_B": "[Image #1, 1568x1467 \u2193] ",
+      "marker_C": "[Image #1, 1568x1467 \u2193] ",
+      "payload_equal_A_B": true,
+      "payload_equal_B_C": true,
+      "mime_equal": true
+    },
+    "8.6MB": {
+      "source_bytes": 9018045,
+      "A_bytes_route": {
+        "buffer": "[Image #1, 1568x1352 \u2193] ",
+        "images": 1,
+        "attached_bytes": 1941460,
+        "toast": {
+          "message": "",
+          "display": false,
+          "region": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "deferred": null,
+          "virtual_size": [
+            98,
+            28
+          ],
+          "size": [
+            98,
+            28
+          ],
+          "vscrollbar": false,
+          "hscrollbar": false
+        },
+        "elapsed_s": 2.45
+      },
+      "B_fileurl_route": {
+        "buffer": "[Image #1, 1568x1352 \u2193] ",
+        "images": 1,
+        "attached_bytes": 1941460,
+        "toast": {
+          "message": "",
+          "display": false,
+          "region": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "deferred": null,
+          "virtual_size": [
+            98,
+            28
+          ],
+          "size": [
+            98,
+            28
+          ],
+          "vscrollbar": false,
+          "hscrollbar": false
+        },
+        "elapsed_s": 2.37
+      },
+      "C_pathtext_route": {
+        "buffer": "[Image #1, 1568x1352 \u2193] ",
+        "images": 1,
+        "toast": {
+          "message": "",
+          "display": false,
+          "region": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "deferred": null,
+          "virtual_size": [
+            98,
+            28
+          ],
+          "size": [
+            98,
+            28
+          ],
+          "vscrollbar": false,
+          "hscrollbar": false
+        }
+      },
+      "identical_marker_A_vs_B": true,
+      "marker_A": "[Image #1, 1568x1352 \u2193] ",
+      "marker_B": "[Image #1, 1568x1352 \u2193] ",
+      "marker_C": "[Image #1, 1568x1352 \u2193] ",
+      "payload_equal_A_B": true,
+      "payload_equal_B_C": true,
+      "mime_equal": true
+    }
+  },
+  "d12_copy": {
+    "non-image file": {
+      "message": "Couldn't attach that file. It may be too large, or not an image.",
+      "display": true,
+      "region": [
+        39,
+        1,
+        60,
+        2
+      ],
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false,
+      "buffer": "",
+      "images": 0
+    },
+    "HEIC": {
+      "message": "Couldn't attach that file. It may be too large, or not an image.",
+      "display": true,
+      "region": [
+        39,
+        1,
+        60,
+        2
+      ],
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false,
+      "buffer": "",
+      "images": 0
+    },
+    "mixed selection (png + txt)": {
+      "message": "Couldn't attach that file. It may be too large, or not an image.",
+      "display": true,
+      "region": [
+        39,
+        1,
+        60,
+        2
+      ],
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false,
+      "buffer": "",
+      "images": 0
+    },
+    "missing path": {
+      "message": "Couldn't attach that file. It may be too large, or not an image.",
+      "display": true,
+      "region": [
+        39,
+        1,
+        60,
+        2
+      ],
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false,
+      "buffer": "",
+      "images": 0
+    },
+    "over the 64MB ingest ceiling": {
+      "message": "Couldn't attach that file. It may be too large, or not an image.",
+      "display": true,
+      "region": [
+        39,
+        1,
+        60,
+        2
+      ],
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false,
+      "buffer": "",
+      "images": 0
+    }
+  },
+  "d12_copy_narrow": {
+    "60x24": {
+      "message": "Couldn't attach that file. It may be too large, or not an image.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        54,
+        2
+      ],
+      "deferred": null,
+      "virtual_size": [
+        58,
+        22
+      ],
+      "size": [
+        58,
+        22
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false
+    },
+    "30x18": {
+      "message": "Couldn't attach that file. It may be too large, or not an image.",
+      "display": true,
+      "region": [
+        5,
+        1,
+        24,
+        4
+      ],
+      "deferred": null,
+      "virtual_size": [
+        28,
+        16
+      ],
+      "size": [
+        28,
+        16
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false
+    }
+  },
+  "d13": {
+    "notice_showing": {
+      "message": "Couldn't attach an image from the clipboard.",
+      "display": true,
+      "region": [
+        53,
+        1,
+        46,
+        1
+      ],
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false
+    },
+    "after_attach": {
+      "message": "",
+      "display": false,
+      "region": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "deferred": null,
+      "virtual_size": [
+        98,
+        28
+      ],
+      "size": [
+        98,
+        28
+      ],
+      "vscrollbar": false,
+      "hscrollbar": false,
+      "buffer": "[Image #1, 1568x200] ",
+      "images": 1,
+      "elapsed_s": 1.845
+    }
+  },
+  "d3_d8": [
+    [
+      "1 mcp owns slot",
+      {
+        "message": "MCP server 'github' failed to start",
+        "display": true,
+        "region": [
+          62,
+          1,
+          37,
+          1
+        ],
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      }
+    ],
+    [
+      "2 empty paste defers",
+      {
+        "message": "MCP server 'github' failed to start",
+        "display": true,
+        "region": [
+          62,
+          1,
+          37,
+          1
+        ],
+        "deferred": [
+          "Couldn't attach an image from the clipboard.",
+          5000
+        ],
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      }
+    ],
+    [
+      "3 screenshot attaches",
+      {
+        "message": "MCP server 'github' failed to start",
+        "display": true,
+        "region": [
+          62,
+          1,
+          37,
+          1
+        ],
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false,
+        "buffer": "[Image #1, 1568x200] "
+      }
+    ],
+    [
+      "4 mcp expires",
+      {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false,
+        "buffer": "[Image #1, 1568x200] "
+      }
+    ]
+  ],
+  "invariants": {
+    "100x30": {
+      "buffer": "[Image #1, 1568x1352 \u2193] ",
+      "first": {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      },
+      "settled": {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "deferred": null,
+        "virtual_size": [
+          98,
+          28
+        ],
+        "size": [
+          98,
+          28
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      },
+      "reflow": false,
+      "overflow": false
+    },
+    "60x24": {
+      "buffer": "[Image #1, 1568x1352 \u2193] ",
+      "first": {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "deferred": null,
+        "virtual_size": [
+          58,
+          22
+        ],
+        "size": [
+          58,
+          22
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      },
+      "settled": {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "deferred": null,
+        "virtual_size": [
+          58,
+          22
+        ],
+        "size": [
+          58,
+          22
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      },
+      "reflow": false,
+      "overflow": false
+    },
+    "30x18": {
+      "buffer": "[Image #1, 1568x1352 \u2193] ",
+      "first": {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "deferred": null,
+        "virtual_size": [
+          28,
+          16
+        ],
+        "size": [
+          28,
+          16
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      },
+      "settled": {
+        "message": "",
+        "display": false,
+        "region": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "deferred": null,
+        "virtual_size": [
+          28,
+          16
+        ],
+        "size": [
+          28,
+          16
+        ],
+        "vscrollbar": false,
+        "hscrollbar": false
+      },
+      "reflow": false,
+      "overflow": false
+    }
+  },
+  "caps": {
+    "MAX_ATTACHMENT_BYTES": 4194304,
+    "MAX_CLIPBOARD_READ_BYTES": 67108864
+  }
+}
