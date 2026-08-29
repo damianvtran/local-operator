@@ -834,7 +834,9 @@ class Editor(TextArea):
         # Built BEFORE super().__init__: TextArea's constructor loads its
         # initial document, which funnels through load_text() and therefore
         # through _sync_picker().
-        self._picker = CommandPicker(self._apply_command, self._on_picker_highlight)
+        self._picker = CommandPicker(
+            self._apply_command, self._on_picker_highlight, self._on_picker_preview
+        )
         self._model_picker = ModelPicker(self._apply_model)
         # Which list-taking command the argument list is currently open for, or
         # None when the buffer is not in one. This is the transition edge the
@@ -3576,13 +3578,29 @@ class Editor(TextArea):
         list) is reported as a close — the preview must not outlive its list.
         """
         command = self._argument_command
-        # Arrowing the list moves the preview with it: the ghost describes the
-        # HIGHLIGHTED row, so a highlight change is one of the two ways its
-        # answer can change (the other is a keystroke, handled by
-        # :meth:`_sync_picker`). The name is passed in because the picker
-        # reports it before ``highlighted_name()`` would.
-        self._sync_ghost(name)
         self.post_message(ArgumentHighlightChanged(command or "", name if command else None))
+
+    def _on_picker_preview(self, name: str | None) -> None:
+        """Re-derive the ghost whenever the ACCEPT TARGET moves.
+
+        THE one place the ghost answers to the picker, and the reason it is a
+        separate channel from :meth:`_on_picker_highlight`: the ghost is a
+        prediction about Tab, not a report of what the eye is on. The picker
+        fires this from every site that can move the selection or take the rows
+        away — arrows, wheel, page/home/end, a refilled list, dismissal, close
+        — so "the ghost is re-derived only on keystrokes" stops being true.
+        Four separate defects (a stale row after an arrow, a hover-driven
+        preview, a ghost outliving Esc, and a preview that never came back)
+        were all that one gap (review round 1, U1-U3).
+
+        ``name`` is passed through because the picker reports it before
+        ``highlighted_name()`` would return it, and ``None`` means the list is
+        no longer offering anything — which clears the ghost.
+        """
+        if name is None:
+            self.suggestion = ""
+            return
+        self._sync_ghost(name)
 
     def _command_word(self) -> str | None:
         """The lower-cased command word of the slash token AT THE CARET.
@@ -3854,19 +3872,45 @@ class Editor(TextArea):
         # the same invariant from the other direction.
         width = self.content_size.width - self.gutter_width
         column = self.selection.end[1]
-        if width <= 0 or column + len(ghost) > width:
+        # ``>=``, not ``>``. Textual reserves the cell AT the caret for the
+        # caret itself, so a ghost ending exactly at the content edge still
+        # pushes the rendered strip one cell past the box — measured at w=19
+        # (`/analytic` + `s `) and w=13 (`/mc` + `p `), where the strip came
+        # back one wider than the same row with no ghost. The boundary case is
+        # the only one that matters here, and it was the one the original
+        # comparison admitted (review round 1, B2).
+        if width <= 0 or column + len(ghost) >= width:
             return ""
         return ghost
 
     def _sync_ghost(self, name: str | None = None) -> None:
         """Push the current ghost into Textual's ``suggestion`` reactive.
 
-        The whole write. Called from :meth:`_sync_picker` (which already
-        re-derives every list from the buffer on each keystroke) and from
-        :meth:`_on_picker_highlight` (so arrowing the list moves the preview
-        with it), which between them cover every way the answer can change.
+        The whole write, and the ONE place it happens. Its inputs are the
+        buffer, the picker's accept target, and the available width, so it is
+        driven from exactly the three things that can change those:
+        :meth:`_sync_picker` (a keystroke), :meth:`_on_picker_preview` (the
+        selection moved or the rows went away), and :meth:`_on_resize` (the
+        width gate's answer changed). Anything re-deriving the ghost from a
+        fourth place is a path waiting to go stale.
         """
         self.suggestion = self._ghost_completion(name)
+
+    def _on_resize(self, event: events.Resize) -> None:
+        """Re-check the width gate when the composer's width changes.
+
+        Gate 2's answer is a function of the terminal width, and nothing else
+        re-asked it: a ghost admitted at 100 columns stayed painted when the
+        terminal was narrowed to 13, where it overran and cropped the user's
+        own text (``/usage`` rendering as ``/usag``) — the exact failure the
+        gate exists to prevent. The inverse was equally wrong: a ghost
+        correctly withheld at 18 columns did not come back on widening until
+        the user typed another character (review round 1, U4).
+
+        Cheap and idempotent, so it needs no guard. The event is deliberately
+        not stopped — the base class re-wraps on it.
+        """
+        self._sync_ghost()
 
     def action_cursor_right(self, select: bool = False) -> None:
         """Move the caret one cell right. NEVER accept the ghost.

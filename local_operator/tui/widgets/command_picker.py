@@ -677,9 +677,25 @@ class CommandPicker(Static):
         self,
         on_choose: Callable[[str], None],
         on_highlight: Callable[[str | None], None] | None = None,
+        on_preview: Callable[[str | None], None] | None = None,
     ) -> None:
         super().__init__()
         self._on_choose = on_choose
+        #: Observer for the row an ACCEPT KEY would take — a SEPARATE question
+        #: from ``on_highlight``, and the reason this is its own channel rather
+        #: than another caller of that one. ``on_highlight`` answers "what is
+        #: the eye on", so it prefers the HOVER and only reports ARGUMENT rows;
+        #: both are right for a row preview and wrong for the composer's inline
+        #: ghost, which is a prediction about what Tab will insert. Reusing the
+        #: highlight channel left the ghost a row behind on every arrow press in
+        #: COMMAND mode (nothing reported there at all) and repainted it to the
+        #: hovered row while Tab still acted on the keyboard selection (review
+        #: round 1, U1/U2). Fired from the same state-change sites, so any way
+        #: the accept target moves reaches it.
+        self._on_preview = on_preview
+        #: Last name reported to ``_on_preview``, de-duplicated for the same
+        #: reason as ``_reported_highlight``.
+        self._reported_preview: str | None = None
         #: Observer for the row the user is CONSIDERING — the hover target when
         #: the mouse is over a row, else the keyboard highlight — called with
         #: ``None`` when an argument list stops showing rows. It exists for
@@ -1463,6 +1479,7 @@ class CommandPicker(Static):
         De-duplicated on the name: a mouse crossing five cells of one row and
         a repaint that reproduced the same set both say nothing new.
         """
+        self._report_preview()
         if self._on_highlight is None or self._suppress_report:
             return
         name: str | None = None
@@ -1473,6 +1490,31 @@ class CommandPicker(Static):
         if name != self._reported_highlight:
             self._reported_highlight = name
             self._on_highlight(name)
+
+    def _report_preview(self) -> None:
+        """Tell the observer which row an ACCEPT KEY would take right now.
+
+        Deliberately different from :meth:`_report_highlight` on both axes:
+
+        * **Both modes.** A command-word list has nothing to *preview* in the
+          ``/theme`` sense, but it certainly has an accept target — the ghost
+          in COMMAND mode is the feature's most common state.
+        * **Keyboard selection only, never the hover.** Tab acts on
+          ``_selected``, so a ghost following the pointer would promise a row
+          the key will not insert. Resting the pointer over the list while
+          reaching for Tab was enough to trigger it (U2).
+
+        Reports ``None`` when the list is not showing rows, which is what
+        retires the ghost on dismissal and on close (U3).
+        """
+        if self._on_preview is None or self._suppress_report:
+            return
+        name: str | None = None
+        if self._matches and self.display and 0 <= self._selected < len(self._matches):
+            name = self._matches[self._selected][0]
+        if name != self._reported_preview:
+            self._reported_preview = name
+            self._on_preview(name)
 
     def _reset_rows(self) -> None:
         """Drop every row and the state that pointed into them, but not the
