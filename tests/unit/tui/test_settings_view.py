@@ -13,6 +13,7 @@ developer's own settings.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -33,7 +34,7 @@ def _scratch_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _values(tmp_path: Path) -> dict:
+def _values(tmp_path: Path) -> dict[str, Any]:
     config = tmp_path / "config.yml"
     if not config.exists():
         return {}
@@ -283,7 +284,7 @@ async def test_cascade_add_reorder_and_remove(tmp_path: Path) -> None:
 
     settings_io.write_chains(ConfigManager(tmp_path), {"default": ["anthropic/a", "openrouter/b"]})
 
-    def chains() -> dict:
+    def chains() -> dict[str, Any]:
         # Re-read from DISK each time. A ConfigManager held across the page's
         # writes would answer from its own stale in-memory copy — the exact
         # trap `ConfigManager.reload` was added for.
@@ -585,7 +586,9 @@ def test_pane_width_matches_the_stylesheet() -> None:
         _Path(__file__).resolve().parents[3] / "local_operator/tui/local_operator.tcss"
     ).read_text()
     block = tcss.split(".settings-view-pane {")[1].split("}")[0]
-    declared = int(re.search(r"width:\s*(\d+)", block).group(1))
+    match = re.search(r"width:\s*(\d+)", block)
+    assert match is not None, "the .settings-view-pane rule must declare a width"
+    declared = int(match.group(1))
     assert declared == _PANE_WIDTH
 
 

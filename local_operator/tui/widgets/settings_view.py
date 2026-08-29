@@ -63,6 +63,12 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 #: `max-width` and `_card_width`.
 _PANE_WIDTH = 34
 
+#: One footer hint: the button, its trailing label, and whether a separator
+#: precedes it. A module-scope alias because a function-local assignment is not
+#: a valid type expression, and the literal labels otherwise infer as distinct
+#: `Literal` types that do not unify into the list `_paint_hints` builds.
+_Hint = tuple["HintButton", str, bool]
+
 #: Left indent of a setting row's label, so rows read as children of the
 #: section header above them rather than as siblings of it.
 _ROW_INDENT = 2
@@ -1216,10 +1222,12 @@ class SettingsView(Vertical):
         ("…back to conversatio"). ``esc`` is never shed — it is the only way
         out — and each rung is measured before it is committed.
         """
-        move = (self._move_hint, " move", False)
-        enter = (self._enter_hint, " change", True)
-        reset = (self._reset_hint, " default", True)
-        pane = (self._pane_hint, " panes", True)
+        # Annotated: without it each label infers as a distinct `Literal`, and
+        # the resulting union is not assignable to `rung`'s `str`/`bool` tuple.
+        move: _Hint = (self._move_hint, " move", False)
+        enter: _Hint = (self._enter_hint, " change", True)
+        reset: _Hint = (self._reset_hint, " default", True)
+        pane: _Hint = (self._pane_hint, " panes", True)
 
         def rung(
             leads: list[tuple[HintButton, str, bool]], esc_label: str
@@ -1231,7 +1239,9 @@ class SettingsView(Vertical):
         # The pane hint is only offered when there IS a pane. A lit hint whose
         # key does nothing is the "nothing happens when I click" bug one step
         # earlier — the same rule `HintButton.set_actionable` states.
-        leads = [move, enter, reset] + ([pane] if self._pane_fits() else [])
+        leads: list[_Hint] = [move, enter, reset]
+        if self._pane_fits():
+            leads.append(pane)
         rungs = [
             rung(leads, "back to conversation"),
             rung(leads, "back"),
