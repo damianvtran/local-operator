@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import reprlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
@@ -213,15 +214,34 @@ def _content_text(payload: Any) -> str:
     return "".join(parts)
 
 
-#: Characters of any single value the content fingerprint takes into account.
+#: Characters of any single value the content fingerprint takes from each end.
 #: Bounds the cost of the unstamped identity path, which runs once a second
 #: over a 500-event window against payloads that have no size limit (a tool
 #: result, a long error, a streamed delta). Generous enough that ordinary
 #: values are fingerprinted whole. See :func:`_digest`.
 _DIGEST_VALUE_CHARS = 512
 
+#: Characters taken from the END of an over-long value, in addition to its
+#: head. Small because it only has to break ties the head cannot: the
+#: distinguishing detail of a long agent error (the exception type, the
+#: offending field) sits at the end of a shared stack trace. See :func:`_digest`.
+_DIGEST_TAIL_CHARS = 64
+
 #: Total characters fed to the hash per event, across all of its fields.
 _DIGEST_TOTAL_CHARS = 4096
+
+#: Bounds the repr of a NON-string value. ``repr`` builds its whole result
+#: before anything can slice it, so a 20 KB payload nested inside ``message``
+#: or ``args`` was materialized in full on every fold even though only the
+#: first characters were ever hashed (review round 2, F5). ``reprlib`` stops
+#: building instead of building-then-cutting, and its own elision markers keep
+#: the result stable for equal inputs, which is all identity requires.
+_VALUE_REPR = reprlib.Repr()
+_VALUE_REPR.maxstring = _DIGEST_VALUE_CHARS
+_VALUE_REPR.maxother = _DIGEST_VALUE_CHARS
+_VALUE_REPR.maxlevel = 6
+for _name in ("maxdict", "maxlist", "maxtuple", "maxset", "maxfrozenset", "maxarray", "maxdeque"):
+    setattr(_VALUE_REPR, _name, 16)
 
 
 def _digest(event: Mapping[str, Any]) -> str:
@@ -232,21 +252,36 @@ def _digest(event: Mapping[str, Any]) -> str:
     visited in sorted order so two equal events fingerprint equally regardless
     of insertion order.
 
-    BOUNDED on purpose, and the bound has to be applied while BUILDING the
-    string rather than by slicing a finished one. This runs once a second over
-    a 500-event window and an event's payload has no size limit: a full window
-    of id-less notices carrying 20 KB each measured 133 ms per fold when the
-    whole event was serialized, against 22 ms before this identity scheme
-    existed. Serializing and then truncating does not help — it measured
-    *worse* (256 ms), because the cost is the serialization, not the hashing.
-    So each value contributes at most :data:`_DIGEST_VALUE_CHARS` and the walk
-    stops at :data:`_DIGEST_TOTAL_CHARS`, which never materializes the large
-    string at all.
+    BOUNDED, because this runs once a second over a 500-event window against
+    payloads with no size limit: fingerprinting whole events measured 133 ms
+    per fold on a window of 20 KB notices. The bound is applied while BUILDING
+    the hashed string — serializing and then truncating measured *worse*
+    (256 ms), since the cost is the serialization, not the hashing.
 
-    Truncation costs no correctness. Two events whose bounded projections
-    coincide share a fingerprint, and the occurrence ordinal in
-    :meth:`_Anchors.of` then separates them into distinct rows — precisely
-    what it already does for two events with genuinely identical content.
+    WHAT THE BOUND MUST NOT COST is identity. A head-only cut is not safe here,
+    and the failure is not theoretical: two different agent errors from one
+    deep stack, or one upstream 5xx differing only in request id, share
+    hundreds of leading characters and differ only at the END. Keying both to
+    one fingerprint made the page DROP the second error outright — notices
+    never supersede, so the later event collided with the surviving key and
+    was discarded, showing the reader one stale failure where two had happened
+    (review round 2, F4/D5). That is content loss in the opposite direction
+    from the duplicate rows this module exists to prevent, and strictly worse.
+
+    So a value contributes its LENGTH and its TAIL as well as its head. All
+    three are O(1) on a ``str`` — a slice of a string is a view, not a copy of
+    the payload — so the cost the bound bought is kept (measured 0.9 ms →
+    1.1 ms per fold on that same window) while events that differ anywhere in
+    length or in their last :data:`_DIGEST_TAIL_CHARS` are told apart.
+
+    Collision is REDUCED, not eliminated: any bounded fingerprint has inputs
+    that alias, and two values agreeing on length, head and tail while
+    differing in the middle still share a key. The residual is not a silent
+    row loss the way an unqualified head cut was, because the fields that vary
+    in real events (an exception line, a field path, a request id) vary at the
+    end or in length. Identity for anything a current engine relays comes from
+    :data:`TRAJECTORY_SEQ_KEY`, not from here; this path exists only for
+    events retained across an upgrade from a release that predates the stamp.
     """
     parts: list[str] = []
     budget = _DIGEST_TOTAL_CHARS
@@ -255,10 +290,18 @@ def _digest(event: Mapping[str, Any]) -> str:
             if budget <= 0:
                 break
             value = event[key]
-            # ``str`` of a string IS the string, so slicing a huge text field
-            # here is a cheap view rather than a copy of the whole payload.
-            rendered = value if isinstance(value, str) else repr(value)
-            chunk = f"{key}={rendered[: min(_DIGEST_VALUE_CHARS, budget)]}"
+            # ``str`` of a string IS the string, so the slices below are views
+            # rather than copies. Everything else goes through the bounded
+            # repr, which stops building rather than building then cutting.
+            rendered = value if isinstance(value, str) else _VALUE_REPR.repr(value)
+            head = min(_DIGEST_VALUE_CHARS, budget)
+            chunk = f"{key}={len(rendered)}:{rendered[:head]}"
+            if len(rendered) > head:
+                # Only when the head was actually cut: an untruncated value is
+                # already fully represented, and appending its own tail again
+                # would make the digest depend on how the budget happened to
+                # fall rather than on the content.
+                chunk += f"~{rendered[-_DIGEST_TAIL_CHARS:]}"
             budget -= len(chunk)
             parts.append(chunk)
         payload = "\x1f".join(parts)
