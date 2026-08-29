@@ -198,3 +198,82 @@ def test_number_markers_and_number_led_content_both_anchor(source: str) -> None:
     leaves a number-led paragraph flush left (``2026 roadmap``)."""
     copied = _full_slice(source, 40)
     assert copied.split() == source.strip().split()
+
+
+# -- agent review round 3 regression (R3-1) -----------------------------------
+@pytest.mark.parametrize("width", [28, 42, 60, 80, 100, 120])
+def test_a_table_row_is_placed_only_by_a_cell_it_opens(width: int) -> None:
+    """R3-1: the first-cell match is an OPENER test, never containment.
+
+    Round 1 narrowed the haystack from the whole source line to the first cell
+    but kept ``in``. A first cell is short, so a word from one cell is easily a
+    substring of a DIFFERENT row's cell — ``'at'`` inside ``api-gateway`` via
+    ``g-at-eway`` — and the row that matched was copied whole, which is issue
+    #399's payload arriving through the word path instead of the whole-line one.
+
+    Asserted as a MAPPING property rather than through a clipboard string
+    because that is what actually broke: a continuation carrying ``at narrow
+    widths`` must stay UNPLACED (the copy path reads ``None`` as "assume
+    nothing" and answers with the lit glyphs), and it must never be placed on
+    the ``api-gateway`` line two rows below it.
+    """
+    source = (
+        "| service | notes |\n| --- | --- |\n"
+        "| api | the gateway service whose note is long enough to wrap at narrow widths |\n"
+        "| api-gateway | the second service, also with a note that folds across rows |"
+    )
+    lines = source.split("\n")
+    api_line = lines.index(
+        "| api | the gateway service whose note is long enough " "to wrap at narrow widths |"
+    )
+    gateway_line = lines.index(
+        "| api-gateway | the second service, also with a note " "that folds across rows |"
+    )
+
+    rows = _rows(source, width)
+    mapping = align(source, rows)
+    for row, placed in zip(rows, mapping):
+        if placed != gateway_line:
+            continue
+        # Only a row that actually paints the ``api-gateway`` cell may claim it.
+        assert row.lstrip().startswith("api-gateway"), (
+            f"width {width}: row {row!r} was placed on the api-gateway line it "
+            f"does not open — a different row's markdown would be copied for it."
+        )
+    # The ``api`` row itself must still be placed; the fix must not refuse rows.
+    assert api_line in mapping, f"width {width}: the api row lost its source line"
+
+
+@pytest.mark.parametrize("width", [28, 42, 60, 80, 100, 120])
+def test_a_numeric_table_header_never_claims_a_body_row(width: int) -> None:
+    """R3-1: a numeric header cannot match its own line, and must match nothing.
+
+    ``_row_word`` reads a leading bare number as an ordered-list marker, so the
+    header of ``| 1 | 10 |`` takes its row word from the SECOND cell — ``10`` —
+    which matches no first cell on its own line. Under containment its only
+    possible match was a lookahead into a body row (``'10' in '100'``), so the
+    reader who lit the header was handed the first body row's markdown.
+
+    ``_number_opens_row`` cannot rescue this and correctly does not try:
+    ``table_column`` is still ``None`` on the first row of the table (R3-2), so
+    it refuses. Refusing is the safe answer; the branch beside it filling the
+    gap with a wrong row is not.
+    """
+    source = (
+        "| 1 | 10 |\n| --- | --- |\n"
+        "| 100 | the first ranked entry whose note is long enough to wrap at widths |\n"
+        "| 101 | the second ranked entry, also with a note that folds across rows |"
+    )
+    lines = source.split("\n")
+    body = [i for i, line in enumerate(lines) if line.startswith(("| 100 ", "| 101 "))]
+
+    rows = _rows(source, width)
+    mapping = align(source, rows)
+    for row, placed in zip(rows, mapping):
+        if placed not in body:
+            continue
+        head = lines[placed].split("|")[1].strip()
+        assert row.lstrip().startswith(head), (
+            f"width {width}: row {row!r} was placed on {lines[placed]!r}, a body row "
+            f"it does not open — the header would copy a body row's markdown."
+        )

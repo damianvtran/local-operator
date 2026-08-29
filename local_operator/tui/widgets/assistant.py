@@ -766,9 +766,7 @@ class AssistantBlock(TranscriptBlock):
                 # whether or not the reader's drag began on the ``▌`` cell, or
                 # the same gesture one cell left would fall to the glyph path
                 # and paste a different document (design round 1, D1).
-                starts_full = first_start <= self._furniture_width(
-                    rows, mapping, first_index, content
-                )
+                starts_full = first_start <= self._furniture_width(rows, mapping, first_index)
                 ends_full = last_end == -1 or last_end >= len(rows[last_index].rstrip())
                 sub_line = not (starts_full and ends_full)
 
@@ -789,7 +787,7 @@ class AssistantBlock(TranscriptBlock):
             # round 1, R1-1; design round 1, D1).
             glyphs = [
                 rows[index][
-                    max(start, self._furniture_width(rows, mapping, index, content)) : (
+                    max(start, self._furniture_width(rows, mapping, index)) : (
                         None if end == -1 else end
                     )
                 ]
@@ -970,14 +968,14 @@ class AssistantBlock(TranscriptBlock):
         if not indices:
             indices = [index for index, _ in content]
         first_offset = indices.index(content[0][0]) if content[0][0] in indices else 0
-        # Furniture is measured against the FULL row set, not the selection:
-        # ``opens_line`` asks whether the previous content row came from another
-        # source line, and answering that from the drag's rows would call a
-        # continuation row a marker row whenever the reader started mid-line.
-        span = [(index, (0, -1)) for index in indices]
+        # Furniture is measured from the FRAME rather than from any row subset:
+        # ``opens_line`` asks whether the previous painted row came from another
+        # source line, which is a property of what Rich painted and not of the
+        # reader's drag. Answering it from a selection called a continuation row
+        # a marker row whenever the reader started mid-line (issue #395), so
+        # :meth:`_furniture_width` now scans the mapping itself.
         full_rows = [
-            rows[index][self._furniture_width(rows, mapping, index, span) :].rstrip()
-            for index in indices
+            rows[index][self._furniture_width(rows, mapping, index) :].rstrip() for index in indices
         ]
         return full_rows, first_offset
 
@@ -1002,7 +1000,6 @@ class AssistantBlock(TranscriptBlock):
         rows: list[str],
         mapping: list[int | None],
         row: int,
-        content: list[tuple[int, tuple[int, int]]],
     ) -> int:
         """Painted-furniture columns on rendered row ``row``.
 
@@ -1014,13 +1011,32 @@ class AssistantBlock(TranscriptBlock):
         A row OPENS its source line when the previous content row came from a
         different one — which is what distinguishes a list item's marker row
         from its wrapped continuations, whose furniture is indent alone.
+
+        **``opens_line`` is read from the FRAME, not from ``content``.** Whether
+        a row carries a painted marker is a property of what Rich painted, so it
+        cannot depend on where the reader's drag happened to start. Deriving it
+        from the selection made the FIRST selected row always look like a marker
+        row: a drag over a wrapped list item's continuation row alone saw no
+        previous row, called the continuation an opener, and measured its
+        furniture as 0 instead of the painted indent. ``starts_full`` then
+        answered differently either side of that indent, so one cell of
+        difference in the drag start flipped the paste between the whole
+        markdown item and the row's glyphs, and columns inside the indent leaked
+        it as leading spaces (issue #395). Scanning the mapping instead keeps the
+        D2-4 property that a whole-row gesture gives the SAME answer wherever
+        inside the painted furniture it began — the furniture is now measured
+        identically for every start column, because it never consults the drag.
         """
         source = mapping[row] if row < len(mapping) else None
+        # The nearest preceding row that paints something, taken from the frame.
+        # Blank rows are skipped rather than treated as a different source line:
+        # a separator row between two constructs would otherwise make the row
+        # after it read as an opener regardless of what it actually carries.
         previous: int | None = None
-        for index, _ in content:
-            if index == row:
+        for index in range(row - 1, -1, -1):
+            if index < len(rows) and rows[index].strip():
+                previous = mapping[index] if index < len(mapping) else None
                 break
-            previous = mapping[index] if index < len(mapping) else None
         covered, _ = _copy_markdown.classify(self._full_text.split("\n"))
         return _copy_markdown.furniture_width(
             rows[row],
