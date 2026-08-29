@@ -19,6 +19,46 @@ suite expects:
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
 ```
 
+`tests/e2e` is a separate stage that drives the **assembled** application —
+boot, a real turn through a real tool, and `/resume` — and it is **deselected
+from the default run** (`-m "not e2e"` in `addopts`). Run it explicitly:
+
+```sh
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
+```
+
+It exists because the whole unit suite was green while the TUI was completely
+frozen (#401: a blocking `flock` in the MCP OAuth refresh lock deadlocked the
+event loop on `/resume`). Two things about it are load-bearing rather than
+stylistic, and both are documented at length in `tests/e2e/watchdog.py`:
+
+- **Its failure mode is a hang, not an assertion.** The deadlock parks two
+  threads inside syscalls, so `asyncio.wait_for`, thread watchdogs and
+  signal-based timeouts all fail to fire — verified, not assumed. Only
+  `faulthandler.dump_traceback_later(exit=True)` survives it, because it runs
+  in a C thread and needs no GIL. A tripped watchdog kills the process and
+  writes every thread's stack to a file; `python -m tests.e2e.watchdog` prints
+  it back.
+- **It is why the stage is deselected and runs `-n0`.** Under xdist a fired
+  watchdog would kill a worker carrying unrelated tests and report them as an
+  infrastructure error rather than as the freeze they are.
+
+It is fully headless (Textual's `run_test()` pilot, no window, no display, no
+TTY) and uses no API key, so its CI job carries **no fork gate** — unlike
+`cli-sanity`/`server-sanity`, whose live-LLM secrets force one. That is
+deliberate: the resume-liveness assertion is the regression guard, so it has to
+run on every PR including forks.
+
+**It runs on a `[ubuntu-latest, macos-latest]` matrix, and the macOS leg is the
+one that makes it a regression guard.** The deadlock is a macOS/BSD property —
+`close()` blocks there behind a sibling `flock()`, and on Linux it returns in
+microseconds. Measured, not assumed: the same probe reports `close_blocked=True`
+on darwin and `False` on linux, and the resume test run against the pre-fix tree
+(`80df237b^`) in `python:3.12-slim` reports `1 passed`. Linux still runs the
+stage because boot, the write-turn artifacts and the transcript replay are
+platform-neutral, but **do not drop the macOS leg** — without it this stage goes
+green against the exact commit it exists to catch.
+
 Gates, all of which must be clean before a PR. **Run them over the whole tree,
 exactly as CI does** — these are the commands from `.github/workflows/ci.yml`:
 
