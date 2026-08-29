@@ -26,6 +26,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "agents",
         "browser",
         "configuration",
+        "credentials",
         "extensions",
         "failover",
         "mcp",

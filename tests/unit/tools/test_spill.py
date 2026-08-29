@@ -691,3 +691,57 @@ def test_store_directory_honours_the_config_override(tmp_path: Path) -> None:
     meta = spill.get_store().write("x\ny", tool_name="bash", session_id="s")
     assert meta is not None
     assert (expected / f"{meta.digest}.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# credential scrubbing before disk
+# ---------------------------------------------------------------------------
+
+
+def test_spilled_output_is_scrubbed_in_the_file_on_disk(context: ToolContext) -> None:
+    """The spill file is a DURABLE copy, so scrubbing the model-visible preview
+    is not enough — the loop's hook redacts what it is handed and cannot reach
+    back into a file already written.
+
+    Bash was the only tool that scrubbed before spilling; ``eval``,
+    ``web_fetch``, ``agent``, ``team``, ``lsp``, ``wait`` and the MCP bridge
+    all wrote plaintext. Scrubbing inside ``spill_truncate`` closes all of them
+    at the shared funnel.
+    """
+    fake = "f" * 64
+    leak = f"wget: unrecognized option: password={fake}"
+    body = "\n".join([leak, *[f"filler {i}" for i in range(20000)]])
+    assert len(body) > builtin.TOOL_OUTPUT_LIMIT_CHARS
+
+    display, details = builtin.spill_truncate(body, "eval", context)
+
+    assert details is not None, "expected an actual spill"
+    assert fake not in display
+
+    store = spill.get_store()
+    handle = details["spill"]["handle"]
+    read = store.read_lines(handle, 1, 1)
+    assert read is not None
+    assert read[0] == ["wget: unrecognized option: password=«REDACTED:flag=password»"]
+
+    # And the raw file itself, not just the store's reader.
+    raw = "".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in Path(store.root).rglob("*")
+        if path.is_file()
+    )
+    assert fake not in raw
+
+
+def test_short_output_is_scrubbed_even_though_nothing_spills(context: ToolContext) -> None:
+    """The scrub runs before the length check: an under-threshold result
+    returns through the same funnel and must not carry the value onward."""
+    fake = "f" * 64
+
+    display, details = builtin.spill_truncate(
+        f"wget: unrecognized option: password={fake}", "eval", context
+    )
+
+    assert details is None
+    assert fake not in display
+    assert "«REDACTED:flag=password»" in display
