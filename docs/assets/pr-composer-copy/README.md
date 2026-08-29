@@ -31,6 +31,18 @@ out byte-identical to its dark twin.
 | `04-triple-click-ctrl-c` | …then Ctrl+C | `copied 32 characters`, draft intact |
 | `05-blank-line-double-click` | double-click the blank row between two paragraphs | a live range on the line break (D2) |
 | `06-blank-line-ctrl-c` | …then Ctrl+C | `copied 1 character`, **draft intact** — before the fix this frame is the empty composer and `draft cleared — ↑ to recover` |
+| `07-trailing-blank-double-click` | double-click the blank LAST row after two shift+enters | nothing painted — **deliberately identical** to the frame before the gesture (D2) |
+| `08-trailing-blank-ctrl-c` | …then Ctrl+C | the draft **still there**; on the parent this frame is the empty composer and `draft cleared — ↑ to recover` |
+
+**`07` and `08` are byte-identical to each other on this branch, and that is
+the evidence rather than a duplicate.** The last row genuinely has no line
+break to take, so the gesture paints nothing and the press that follows is
+absorbed: two frames that do not move is exactly what "the draft survived" looks
+like here. The pair that carries the finding is `before/08` against `after/08`,
+which differ — the parent's is an empty composer carrying `draft cleared — ↑ to
+recover` (design review round 2, D2). Contrast R1-7, which was about presenting
+two identical captures as two independent observations; these two are one
+observation, stated as one.
 
 `light-*` are the same six on the paper ramp. All twelve frames are distinct
 files with distinct contents; an earlier evidence set presented two

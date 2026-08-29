@@ -37,6 +37,16 @@ DRAFT = "summarise the ingest path please"
 #: the draft on the following Ctrl+C (design round 1, D2).
 PARAGRAPH_DRAFT = "first paragraph of my prompt\n\nsecond paragraph here"
 
+#: A paragraph followed by two shift+enters — the user sitting on a blank LAST
+#: row while they think of the next sentence. `_line_break_span` must stay
+#: collapsed there (there is no following row to take, which is also what keeps
+#: the empty composer correct, D7), so the gesture paints NOTHING and the frame
+#: is byte-identical to the one before it. That identical frame is the point:
+#: it is why the Ctrl+C which follows used to clear the draft, and why the
+#: remedy had to be on the gesture rather than on the range (design round 2,
+#: D2). The `07`/`08` pair is what shows the draft surviving that press.
+TRAILING_BLANK_DRAFT = "first paragraph of my prompt\n\n"
+
 
 async def _settle(pilot, editor: Editor, row: int) -> None:
     """Wait for the composer to stop moving before aiming a click at ``row``.
@@ -136,6 +146,30 @@ async def main() -> None:
             draft=PARAGRAPH_DRAFT,
             column=0,
             row=1,
+        )
+        # The blank LAST row (D2). The gesture paints nothing here by design,
+        # so `07` is deliberately identical to the resting composer — the value
+        # is in `08`, where the draft is STILL THERE after the press that used
+        # to scrap it.
+        await shot(
+            outdir,
+            f"{prefix}07-trailing-blank-double-click",
+            2,
+            False,
+            theme=theme,
+            draft=TRAILING_BLANK_DRAFT,
+            column=0,
+            row=2,
+        )
+        await shot(
+            outdir,
+            f"{prefix}08-trailing-blank-ctrl-c",
+            2,
+            True,
+            theme=theme,
+            draft=TRAILING_BLANK_DRAFT,
+            column=0,
+            row=2,
         )
     theme_mod.set_theme("dark")
 
