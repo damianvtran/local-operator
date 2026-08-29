@@ -132,6 +132,15 @@ class Setting:
     default: Any
     help: str
     choices: tuple[Choice, ...] = ()
+    #: Resolves the choices at CALL time instead of declaring them here, for a
+    #: value space that is a registry rather than a fixed list (``tui.theme``:
+    #: the themes are ~30 and a palette module adds more). Declaring them
+    #: statically would mean this file re-listing another module's registry,
+    #: which is the drift the anti-drift test exists to stop. The indirection
+    #: is a callable rather than an import so the import stays LAZY — the
+    #: registry lives under ``local_operator.tui`` and this module is imported
+    #: by the CLI, which must not pay for the TUI (see the module docstring).
+    choices_source: Callable[[], tuple[Choice, ...]] | None = None
     #: Inclusive bounds for INT/FLOAT. ``None`` on either side means unbounded.
     minimum: float | None = None
     maximum: float | None = None
@@ -141,6 +150,19 @@ class Setting:
     #: settings whose empty string is a real value (``searxng_endpoint``
     #: unset IS ""), on where empty means "no opinion" (``hosting``).
     empty_unsets: bool = False
+
+    @property
+    def resolved_choices(self) -> tuple[Choice, ...]:
+        """The choice list, with :attr:`choices_source` resolved if it is set.
+
+        Every consumer of an ENUM's value space must read THIS rather than
+        :attr:`choices`, or a dynamically-sourced setting reads as having no
+        choices at all: :func:`validate` would reject every value and the page
+        would expand an empty list.
+        """
+        if self.choices_source is not None:
+            return self.choices_source()
+        return self.choices
 
     @property
     def is_flat_dotted(self) -> bool:
@@ -225,6 +247,44 @@ SECTIONS: tuple[Section, ...] = (
 
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
     return (Choice(True, "on", on), Choice(False, "off", off))
+
+
+def _theme_choices() -> tuple[Choice, ...]:
+    """Every registered theme, as ENUM choices (review round 1, m1).
+
+    Read from ``tui.theme``'s registry rather than listed here, because the
+    registry is the only place that knows what is installed: the two brand
+    ramps plus every curated palette, ~30 today and open to more. A hardcoded
+    pair would be wrong the moment a palette is added, which is exactly the
+    kind of drift this file's anti-drift test exists to catch.
+
+    Imported function-locally, and an import failure yields an empty tuple
+    rather than raising: this module is imported by the CLI, which has no TUI,
+    and ``config list`` must still describe the key on a machine where the TUI
+    extra is not installed. An empty tuple makes ``validate`` refuse every
+    value, which fails CLOSED — refusing to write a theme is recoverable,
+    writing one nothing can render is the config-and-behaviour disagreement
+    this change is closing.
+    """
+    try:
+        from local_operator.tui.theme import available_themes, theme_spec
+    except Exception:  # pragma: no cover - TUI-less install; see the docstring
+        return ()
+    choices: list[Choice] = []
+    for name in available_themes():
+        spec = theme_spec(name)
+        # `label` is the NAME, not `spec.label`: in this registry the label is
+        # the token a user types (`display.nerd_icons` labels its None/True/
+        # False choices "auto"/"on"/"off"), and it is what `validate` lists
+        # back on a rejection. Offering "Operator Dark" as the answer to
+        # "expected one of" would name something `lop config edit` refuses.
+        #
+        # The description is `spec.description` ALONE. Prefixing it with
+        # `spec.label` cost the width that the description needs — the row is
+        # one line and the pane truncates — to restate what the name beside it
+        # already says ("monokai" -> "Monokai").
+        choices.append(Choice(name, name, spec.description))
+    return tuple(choices)
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -363,10 +423,24 @@ SETTINGS: tuple[Setting, ...] = (
         path=("tui", "theme"),
         section="appearance",
         label="Theme",
-        kind=Kind.TEXT,
-        default="",
+        # ENUM, not TEXT: the value space is closed (the theme registry), so a
+        # free-text field let the page accept a theme that does not exist and
+        # then display a value the app was not using — `app.py` catches the
+        # KeyError and falls back to the default, silently. Enum also gives the
+        # row the same expand-and-pick affordance every other closed value
+        # space here has (review round 1, m1).
+        kind=Kind.ENUM,
+        # "dark" restated rather than imported from `tui.theme.DEFAULT_THEME`,
+        # for the reason every default in this file is a literal: importing a
+        # consumer here would put it on the CLI's import path (`tui.theme`
+        # pulls in `rich.style`, ~90ms), and the module docstring's "keep it
+        # dependency-light" rule is what makes this registry shareable. The
+        # drift that costs is bought back by the anti-drift test, which
+        # compares this against DEFAULT_THEME itself and now fails loudly
+        # rather than skipping (review round 1, M1).
+        default="dark",
+        choices_source=_theme_choices,
         help="Colour ramp. /theme switches it live with an arrow-key preview.",
-        empty_unsets=True,
     ),
     # The five display flags below are the FLAT-DOTTED case: each `path` is a
     # single element containing a dot, because `tui/settings.py` reads
@@ -911,8 +985,12 @@ def validate(setting: Setting, value: Any) -> str | None:
     if setting.kind is Kind.READONLY:
         return "this setting is retired and cannot be changed"
     if setting.kind is Kind.ENUM:
-        if value not in [choice.value for choice in setting.choices]:
-            return f"expected one of: {', '.join(str(c.label) for c in setting.choices)}"
+        # `resolved_choices`, never `choices`: a registry-sourced value space
+        # (tui.theme) declares none statically, so reading the raw field would
+        # reject every value including the default.
+        choices = setting.resolved_choices
+        if value not in [choice.value for choice in choices]:
+            return f"expected one of: {', '.join(str(c.label) for c in choices)}"
         return None
     if setting.kind is Kind.LIST:
         if not isinstance(value, list):
@@ -992,7 +1070,40 @@ def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
     _invalidate_caches()
 
 
+def _reload_before_write(manager: "ConfigManager") -> None:
+    """Re-read config.yml so the write merges into what is on disk NOW.
+
+    THE reason this exists (review round 1, B1): ``set_config_value`` does not
+    write one key, it dumps the manager's WHOLE in-memory snapshot
+    (``vars(self.config)``). A manager that was constructed a while ago is
+    therefore a stale copy of the entire file, and writing one setting through
+    it silently reverts every key anything else changed in the meantime.
+
+    That is not a theoretical multi-session race. It fires inside ONE session,
+    because the writers here are deliberately short-lived while the readers are
+    not: ``OperatorApp._persist_theme`` builds a fresh ``ConfigManager`` per
+    call, and ``SettingsView`` holds one captured when the page opened. Open
+    ``/settings``, run ``/theme``, toggle any row, and the theme write is gone.
+
+    It is done HERE, at the two primitives every write funnels through, rather
+    than in ``write_setting``/``reset_setting``/``write_chains``: a facade-level
+    reload has to be repeated in each new entry point and is silently missing
+    from the next one added, whereas a primitive-level reload cannot be
+    forgotten because there is no way to write without passing through it.
+
+    Failure is swallowed on purpose. A config that has just become unreadable
+    (mid-edit by hand, a bad merge) must not make the page unable to write; the
+    manager then keeps the last good snapshot it had, which is the behaviour
+    that existed before this call and is strictly no worse.
+    """
+    try:
+        manager.reload()
+    except Exception:  # pragma: no cover - defensive; see the docstring
+        pass
+
+
 def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
+    _reload_before_write(manager)
     top = path[0]
     if len(path) == 1:
         manager.set_config_value(top, value)
@@ -1013,6 +1124,8 @@ def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
 
 
 def _delete(manager: "ConfigManager", path: Sequence[str]) -> None:
+    # Same staleness trap as `_store` — a delete also dumps the whole snapshot.
+    _reload_before_write(manager)
     top = path[0]
     values = manager.get_config().values
     if len(path) == 1:
@@ -1067,13 +1180,14 @@ def _invalidate_caches() -> None:
 
 
 def read_chains(manager: "ConfigManager") -> dict[str, list[str]]:
-    """The cascade as ``{key: ["provider/model", ...]}``.
+    """The cascade as ``{key: ["provider/model (effort)", ...]}``.
 
-    Structured hops are flattened to their selector for DISPLAY only; the page
-    never writes a hop it did not read, so an ``effort`` a user hand-wrote
-    survives untouched unless they edit that exact hop. Malformed entries are
-    dropped rather than rendered, mirroring ``_normalize_chains``: a chain the
-    failover layer will ignore must not be shown as if it were live.
+    Structured hops are flattened to a display LABEL that carries the effort,
+    so the page shows the routing decision rather than hiding it. The label is
+    also the identity :func:`write_chains` matches on to put the original
+    mapping back untouched — see there. Malformed entries are dropped rather
+    than rendered, mirroring ``_normalize_chains``: a chain the failover layer
+    will ignore must not be shown as if it were live.
     """
     raw = _walk(manager.get_config().values, ("retry", "fallbackChains"))
     if raw is _MISSING or not isinstance(raw, Mapping):
@@ -1105,16 +1219,69 @@ def _hop_label(entry: Any) -> str:
     return ""
 
 
+def _originals_by_label(manager: "ConfigManager") -> dict[str, dict[str, Any]]:
+    """``{chain key: {hop label: the entry exactly as stored}}``.
+
+    The lookup :func:`write_chains` needs to write a hop back in the shape it
+    was read in. Keyed by LABEL rather than by index because the page reorders,
+    inserts and deletes hops, so an index does not survive an edit while the
+    label travels with the hop it names. Two hops in one chain with the same
+    label are the same hop as far as every layer here is concerned — the label
+    carries provider, model and effort, which is the whole of what the failover
+    layer honours — so collapsing them loses nothing.
+    """
+    raw = _walk(manager.get_config().values, ("retry", "fallbackChains"))
+    if raw is _MISSING or not isinstance(raw, Mapping):
+        return {}
+    originals: dict[str, dict[str, Any]] = {}
+    for key, entries in raw.items():
+        if not isinstance(key, str) or isinstance(entries, str):
+            continue
+        if not isinstance(entries, Sequence):
+            continue
+        by_label: dict[str, Any] = {}
+        for entry in entries:
+            label = _hop_label(entry)
+            # First occurrence wins: a later duplicate is the same hop.
+            if label and label not in by_label:
+                by_label[label] = entry
+        originals[key] = by_label
+    return originals
+
+
 def write_chains(manager: "ConfigManager", chains: Mapping[str, Sequence[str]]) -> None:
     """Replace the cascade with ``chains``, dropping empty ones.
+
+    ``chains`` holds DISPLAY LABELS (what :func:`read_chains` returned, with
+    the user's edit applied to at most one of them). A hop whose label still
+    matches the entry it was read from is written back as THAT ENTRY, byte for
+    byte, rather than reconstructed from the label.
+
+    That is the whole point (review round 1, B2). The page edits one hop but
+    rewrites every chain, and un-labelling with ``hop.split(" (")[0]`` turned
+    every structured ``{provider, model, effort}`` entry in every OTHER chain
+    into a bare selector — so adding a hop to one chain silently stripped
+    ``effort`` from all the others. ``effort`` is a routing decision, not
+    decoration: ``providers/failover.py`` documents it as the "retry cheaper on
+    failure" form and warns that flattening it "would silently discard the one
+    key that makes the entry mean something different".
+
+    A hop whose label does NOT match anything stored is genuinely new text the
+    user typed, so it is stored as the bare selector it reads as. Retyping a
+    structured hop's model therefore does drop its effort — correctly: they
+    replaced the hop, and the page had no field in which to keep it.
 
     An empty chain is dropped rather than stored because ``_normalize_chains``
     already drops it on read: keeping it would put a row in the file that the
     page shows and the failover layer does not have, which is the config and
     the behaviour disagreeing again.
     """
+    # Before the originals are read, not after: `_store` reloads, and a lookup
+    # built from a stale snapshot would restore entries the file no longer has.
+    _reload_before_write(manager)
+    originals = _originals_by_label(manager)
     stored = {
-        key: [hop.split(" (")[0] for hop in hops]
+        key: [originals.get(key, {}).get(hop, hop.split(" (")[0]) for hop in hops]
         for key, hops in chains.items()
         if key.strip() and hops
     }

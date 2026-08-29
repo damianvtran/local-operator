@@ -422,6 +422,26 @@ class ConfigManager:
             if preserve_mode is not None:
                 os.chmod(temp_path, preserve_mode)
             os.replace(temp_path, self.config_file)
+            # The DIRECTORY, after the rename. Syncing the file's data (above)
+            # only guarantees the bytes; the rename that gives them the config's
+            # name lives in the parent directory's own metadata, so a crash
+            # between the two can still surface the OLD file on a filesystem
+            # that has not flushed the entry. Cheap here because config writes
+            # are user-paced, not a hot loop.
+            #
+            # Best-effort: some filesystems (and every Windows path) refuse
+            # O_RDONLY on a directory or its fsync. The replace has already
+            # succeeded at that point, so failing the write over an
+            # unavailable durability upgrade would turn a working save into an
+            # error for no gain.
+            try:
+                dir_fd = os.open(str(directory), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         except BaseException:
             # Leaving a stray .config.*.yml.tmp beside a config the user is
             # about to hand-edit is its own small confusion, and the failure

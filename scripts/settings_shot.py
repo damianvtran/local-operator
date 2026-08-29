@@ -27,6 +27,9 @@ STATE selects what the page is showing:
     teams      the read-only teams pane
     agents     the read-only agents pane
     retired    scrolled to the retired section
+    theme      the Theme row highlighted (OUT.svg) and activated (OUT.open.svg),
+               which is the affordance review round 1 m1 changed: TEXT opened a
+               free-text editor, ENUM expands the registry's themes as choices
     frames     TWO consecutive frames (OUT.svg and OUT.frame2.svg) to prove the
                opening layout settles rather than reflowing after paint
 """
@@ -151,6 +154,16 @@ async def main() -> None:
                 view.action_pane(1)
             await pilot.pause()
             app.save_screenshot(out)
+        elif state == "theme":
+            # TWO frames: the row at rest, then the row activated. The m1 fix
+            # changes what activation DOES (free-text editor -> choice
+            # expansion), so a still of the resting row alone would not show it.
+            _select(view, "tui.theme")
+            await pilot.pause()
+            app.save_screenshot(out)
+            view.action_activate()
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".open.svg"))
         elif state == "retired":
             for _ in range(len(view._rows)):
                 view.action_jump(1)

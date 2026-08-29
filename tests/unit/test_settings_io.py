@@ -43,12 +43,19 @@ def _consumer_defaults() -> dict[str, object]:
         CONNECTIVITY_MAX_RETRIES,
         RetrySettings,
     )
+    from local_operator.tui.theme import DEFAULT_THEME
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
 
     retry = RetrySettings()
     compaction = CompactionSettings()
     consumers: dict[str, object] = {
+        # The theme the TUI actually boots on. The registry restates "dark"
+        # rather than importing this (that import would put `rich` on the CLI's
+        # path), so THIS is what stops the two drifting — as they had: the
+        # registry said `""` while the app used `dark`, so the page reported a
+        # user explicitly on `dark` as having changed the setting (round 1, M1).
+        "tui.theme": DEFAULT_THEME,
         "retry.enabled": retry.enabled,
         "retry.maxRetries": retry.max_retries,
         "retry.baseDelayMs": retry.base_delay_ms,
@@ -73,12 +80,55 @@ def _consumer_defaults() -> dict[str, object]:
     return consumers
 
 
+#: Settings with no independent consumer constant to compare against, and WHY
+#: each one is exempt. An explicit list rather than a blanket
+#: ``if key not in consumers: skip`` (review round 1, M1): a skip makes the
+#: drift guard reward the thing it exists to catch, because adding a setting
+#: with no consumer entry buys a green test instead of a prompt to wire one up.
+#: With the list explicit, a NEW unmapped key fails here by name.
+#:
+#: Every ``display.*`` flag is exempt for a specific reason: ``tui/settings.py``
+#: DERIVES its defaults from this registry (``display_defaults()``), so it is
+#: not an independent second source and comparing them would be a tautology.
+#: ``test_display_defaults_matches_the_tui_reader`` pins that derivation, and
+#: the prose in ``_DEFAULT_NOTES`` is what documents the intent.
+_NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
+    "display.shimmer": "tui/settings.py derives its defaults from this registry",
+    "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
+    "display.terminal_title": "tui/settings.py derives its defaults from this registry",
+    "display.images": "tui/settings.py derives its defaults from this registry",
+    "display.notifications": "tui/settings.py derives its defaults from this registry",
+    "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
+    "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
+    "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
+}
+
+
+def test_the_drift_allow_list_is_not_stale() -> None:
+    """An allow-listed key that HAS gained a consumer must leave the list.
+
+    The allow-list is a standing exemption, so it needs its own guard: without
+    this, wiring a consumer up for an exempt key would leave the exemption in
+    place and the drift guard still not watching it.
+    """
+    consumers = _consumer_defaults()
+    now_mapped = sorted(set(_NO_SINGLE_VALUE_CONSUMER) & set(consumers))
+    assert not now_mapped, f"these now have a consumer; drop them from the allow-list: {now_mapped}"
+    unknown = sorted(set(_NO_SINGLE_VALUE_CONSUMER) - set(settings_io.BY_KEY))
+    assert not unknown, f"allow-list names settings that no longer exist: {unknown}"
+
+
 @pytest.mark.parametrize("setting", settings_io.SETTINGS, ids=lambda s: s.key)
 def test_every_default_matches_its_consumer(setting) -> None:
     """A registry default that disagrees with its consumer is a painted lie."""
     consumers = _consumer_defaults()
     if setting.key not in consumers:
-        pytest.skip(f"{setting.key} has no single-value consumer to compare against")
+        assert setting.key in _NO_SINGLE_VALUE_CONSUMER, (
+            f"{setting.key} has no consumer entry in _consumer_defaults(). Add one so its "
+            f"default is guarded, or add it to _NO_SINGLE_VALUE_CONSUMER with the reason "
+            f"it genuinely has no single-value consumer."
+        )
+        return
     assert setting.default == consumers[setting.key], (
         f"{setting.key}: registry says {setting.default!r}, "
         f"consumer defaults to {consumers[setting.key]!r}"
@@ -203,6 +253,124 @@ def test_retired_settings_cannot_be_written(manager: ConfigManager) -> None:
         settings_io.reset_setting(manager, setting)
 
 
+def test_a_write_does_not_revert_another_managers_change(tmp_path: Path) -> None:
+    """A page write must not clobber keys it never touched (round 1, B1).
+
+    ``set_config_value`` dumps the manager's WHOLE in-memory snapshot, and the
+    ``/settings`` page holds one manager for as long as it is open. Without a
+    reload before the write, toggling one unrelated row wrote back a stale copy
+    of the entire file — reverting the theme, the default model, everything
+    another writer had changed since the page opened. Silent, and with no undo.
+
+    Both writers here are real: ``SettingsView`` captures a manager at open,
+    and ``OperatorApp._persist_theme`` constructs a fresh one per call, so this
+    fires within a single session and not only across two.
+    """
+    page = ConfigManager(tmp_path)  # captured when /settings opened
+
+    # Something else writes while the page sits open: /theme, /model default,
+    # or another session entirely.
+    other = ConfigManager(tmp_path)
+    other.set_config_value("tui", {"theme": "gruvbox"})
+    other.set_config_value("model_name", "claude-opus-4")
+    retry = dict(other.get_config_value("retry", {}) or {})
+    retry["maxRetries"] = 42
+    other.set_config_value("retry", retry)
+
+    # The user toggles one unrelated row on the still-open page.
+    settings_io.write_setting(page, settings_io.BY_KEY["display.shimmer"], False)
+
+    disk = ConfigManager(tmp_path)
+    assert disk.get_config_value("tui", {}) == {"theme": "gruvbox"}
+    assert disk.get_config_value("model_name", None) == "claude-opus-4"
+    assert (disk.get_config_value("retry", {}) or {})["maxRetries"] == 42
+    # ...and the toggle itself still landed.
+    assert disk.get_config_value("display.shimmer", None) is False
+    # The page's own manager now agrees with the file, so the next repaint
+    # shows what is really there rather than the snapshot it opened with.
+    assert settings_io.read_setting(page, settings_io.BY_KEY["model_name"]) == "claude-opus-4"
+
+
+def test_a_reset_does_not_revert_another_managers_change(tmp_path: Path) -> None:
+    """The delete path carries the same staleness trap as the write path."""
+    page = ConfigManager(tmp_path)
+    page.set_config_value("model_name", "claude-opus-5")
+
+    other = ConfigManager(tmp_path)
+    other.set_config_value("tui", {"theme": "gruvbox"})
+
+    settings_io.reset_setting(page, settings_io.BY_KEY["model_name"])
+
+    disk = ConfigManager(tmp_path)
+    assert disk.get_config_value("tui", {}) == {"theme": "gruvbox"}
+    assert not disk.get_config_value("model_name", "")
+
+
+def test_editing_one_chain_preserves_effort_in_the_others(manager: ConfigManager) -> None:
+    """Structured hops keep their ``effort`` when another chain is edited.
+
+    Round 1, B2. The page rewrites EVERY chain on any edit, and un-labelling a
+    display string back to a bare selector silently dropped ``effort`` from
+    every structured hop in every untouched chain. ``failover.py`` calls that
+    "the one key that makes the entry mean something different" — it is the
+    "retry cheaper on failure" routing decision, not decoration.
+    """
+    manager.set_config_value(
+        "retry",
+        {
+            "fallbackChains": {
+                "primary": [
+                    {"provider": "openai", "model": "gpt-5", "effort": "high"},
+                    "anthropic/claude-opus-5",
+                ],
+                "backup": ["anthropic/claude-opus-5"],
+            }
+        },
+    )
+    # The effort is SHOWN, so the user can see the routing decision they have.
+    assert settings_io.read_chains(manager)["primary"][0] == "openai/gpt-5 (high)"
+
+    # The user adds a hop to the unrelated 'backup' chain; the page writes all.
+    chains = {key: list(hops) for key, hops in settings_io.read_chains(manager).items()}
+    chains["backup"].append("openrouter/qwen/qwen3-coder")
+    settings_io.write_chains(manager, chains)
+
+    stored = ConfigManager(manager.config_dir).get_config_value("retry")["fallbackChains"]
+    assert stored["primary"][0] == {"provider": "openai", "model": "gpt-5", "effort": "high"}
+    assert stored["primary"][1] == "anthropic/claude-opus-5"
+    assert stored["backup"] == ["anthropic/claude-opus-5", "openrouter/qwen/qwen3-coder"]
+
+    # And the failover layer still resolves the effort it was given.
+    from local_operator.providers.failover import RetrySettings
+
+    resolved = RetrySettings.from_settings(ConfigManager(manager.config_dir).get_config().values)
+    assert resolved.fallback_chains["primary"][0] == {
+        "provider": "openai",
+        "model": "gpt-5",
+        "effort": "high",
+    }
+
+
+def test_retyping_a_structured_hop_replaces_it(manager: ConfigManager) -> None:
+    """Editing a hop's text DOES drop its effort, and that is correct.
+
+    The preservation in ``write_chains`` is keyed on the label, so it must not
+    resurrect an effort onto a hop the user deliberately retyped: they replaced
+    that hop, and the page has no field in which to have kept it.
+    """
+    manager.set_config_value(
+        "retry",
+        {
+            "fallbackChains": {
+                "primary": [{"provider": "openai", "model": "gpt-5", "effort": "high"}]
+            }
+        },
+    )
+    settings_io.write_chains(manager, {"primary": ["openai/gpt-5-mini"]})
+    stored = ConfigManager(manager.config_dir).get_config_value("retry")["fallbackChains"]
+    assert stored["primary"] == ["openai/gpt-5-mini"]
+
+
 def test_coerce_parses_what_a_user_types() -> None:
     assert settings_io.coerce(settings_io.BY_KEY["retry.maxRetries"], " 7 ") == 7
     assert settings_io.coerce(settings_io.BY_KEY["display.shimmer"], "off") is False
@@ -234,6 +402,26 @@ def test_cascade_round_trips_and_survives_normalization(manager: ConfigManager) 
     assert list(resolved.fallback_chains["default"]) == [
         "anthropic/claude-opus-5",
         "openrouter/deepseek/deepseek-chat",
+    ]
+
+    # A STRUCTURED hop through the same round trip. Plain strings alone kept
+    # this test green while `effort` was being stripped (round 1, B2): the
+    # lossy step only exists for the mapping form.
+    manager.set_config_value(
+        "retry",
+        {
+            "fallbackChains": {
+                "default": [{"provider": "anthropic", "model": "claude-opus-5", "effort": "low"}]
+            }
+        },
+    )
+    read = settings_io.read_chains(manager)
+    assert read == {"default": ["anthropic/claude-opus-5 (low)"]}
+    settings_io.write_chains(manager, read)
+    assert settings_io.read_chains(manager) == read
+    resolved = RetrySettings.from_settings(manager.get_config().values)
+    assert resolved.fallback_chains["default"] == [
+        {"provider": "anthropic", "model": "claude-opus-5", "effort": "low"}
     ]
 
 
@@ -281,9 +469,39 @@ def test_enum_settings_declare_choices_including_their_default() -> None:
     """A default outside its own choice list cannot be selected back."""
     for setting in settings_io.SETTINGS:
         if setting.kind is Kind.ENUM:
-            values = [choice.value for choice in setting.choices]
+            # `resolved_choices`, which is what `validate` and the page read:
+            # a registry-sourced enum declares nothing in the static field.
+            values = [choice.value for choice in setting.resolved_choices]
             assert values, setting.key
             assert setting.default in values, setting.key
+
+
+def test_theme_is_an_enum_over_the_live_registry(manager: ConfigManager) -> None:
+    """``tui.theme`` offers the registry's themes and refuses anything else.
+
+    Round 1, m1. As free TEXT the page accepted a theme that does not exist and
+    then displayed a value the app was not using — ``app.py`` catches the
+    KeyError and quietly falls back to the default. Sourced from the registry
+    rather than a literal list because the palettes add ~30 of them.
+    """
+    from local_operator.tui.theme import DEFAULT_THEME, available_themes
+
+    setting = settings_io.BY_KEY["tui.theme"]
+    assert setting.kind is Kind.ENUM
+    offered = [choice.value for choice in setting.resolved_choices]
+    assert offered == available_themes()
+    assert len(offered) > 2, "the curated palettes are part of the value space"
+    assert DEFAULT_THEME in offered
+
+    with pytest.raises(ValueError):
+        settings_io.write_setting(manager, setting, "not-a-real-theme")
+    settings_io.write_setting(manager, setting, "gruvbox")
+    assert settings_io.read_setting(manager, setting) == "gruvbox"
+
+    # A user explicitly on the default is NOT reported as having changed it,
+    # which is what the `default=""` drift used to claim.
+    settings_io.write_setting(manager, setting, DEFAULT_THEME)
+    assert settings_io.is_default(manager, setting)
 
 
 def test_display_defaults_matches_the_tui_reader() -> None:
@@ -300,6 +518,60 @@ def test_write_is_atomic_and_leaves_no_temp_file(tmp_path: Path) -> None:
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["retry.maxRetries"], 3)
     assert [path.name for path in tmp_path.iterdir()] == ["config.yml"]
+
+
+def test_write_fsyncs_the_parent_directory_after_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rename is only durable once the parent directory is synced.
+
+    Round 1, m3. Syncing the file's data (which ``_write_config`` already did,
+    in the right order) guarantees the bytes; the directory entry that gives
+    them the config's name is separate metadata, so a crash in between can
+    still surface the old file.
+    """
+    import os
+
+    real_open, real_fsync = os.open, os.fsync
+    dir_fds: set[int] = set()
+    synced_dirs: list[int] = []
+
+    def spy_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        fd = real_open(path, flags, *args, **kwargs)
+        if os.path.isdir(path):
+            dir_fds.add(fd)
+        return fd
+
+    def spy_fsync(fd):  # type: ignore[no-untyped-def]
+        if fd in dir_fds:
+            synced_dirs.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+
+    ConfigManager(tmp_path).set_config_value("model_name", "claude-opus-5")
+
+    assert synced_dirs, "the parent directory was never fsynced after os.replace"
+
+
+def test_write_survives_a_filesystem_that_cannot_fsync_a_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused directory fsync must not fail a write that already landed."""
+    import os
+
+    real_fsync = os.fsync
+
+    def refuse_dir_fsync(fd):  # type: ignore[no-untyped-def]
+        if os.fstat(fd).st_mode & 0o040000:  # S_IFDIR
+            raise OSError("directory fsync unsupported")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refuse_dir_fsync)
+
+    ConfigManager(tmp_path).set_config_value("model_name", "claude-opus-5")
+    assert ConfigManager(tmp_path).get_config_value("model_name", None) == "claude-opus-5"
 
 
 def test_write_preserves_a_widened_file_mode(tmp_path: Path) -> None:

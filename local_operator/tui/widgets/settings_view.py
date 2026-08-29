@@ -160,9 +160,16 @@ class SettingsView(Vertical):
         super().__init__(classes="settings-view")
         #: The ConfigManager every read and write goes through. Held rather
         #: than re-derived per row: a fresh manager per read would re-parse
-        #: config.yml on every repaint, and two managers in one process is how
-        #: a write lands in one instance's memory and not the other's (the bug
-        #: ``ConfigManager.reload`` exists for).
+        #: config.yml on every repaint.
+        #:
+        #: Holding it is only safe because ``settings_io`` reloads the manager
+        #: before every write (``_reload_before_write``). This instance is
+        #: long-lived and ``set_config_value`` dumps the manager's whole
+        #: in-memory snapshot, so without that reload a single row toggle here
+        #: would write back a stale copy of the ENTIRE file and revert whatever
+        #: ``/theme`` or another session changed while the page sat open
+        #: (review round 1, B1). Do not add a write path that bypasses
+        #: ``settings_io``.
         self._manager = manager
         #: Rows are rebuilt from the registry on every repaint (cheap: it is a
         #: tuple walk) so a write is reflected without a second bookkeeping
@@ -282,7 +289,10 @@ class SettingsView(Vertical):
                 if setting.kind is Kind.CASCADE:
                     rows.extend(self._cascade_rows(setting))
                 elif self._expanded == setting.key:
-                    for choice in setting.choices:
+                    # `resolved_choices`: a registry-sourced enum (tui.theme)
+                    # declares no static choices, so `choices` would expand to
+                    # an empty group and read as the expansion having failed.
+                    for choice in setting.resolved_choices:
                         rows.append(_Row(kind="choice", setting=setting, choice=choice))
         return rows
 
