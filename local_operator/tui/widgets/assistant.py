@@ -896,7 +896,30 @@ class AssistantBlock(TranscriptBlock):
         highlighted, which is this path's already-accepted cost (design round 1,
         D3) and the only safe direction: a paste with an extra line is one the
         reader can see and trim, a silently missing or welded line is not.
+
+        GATED ON EVIDENCE THAT THERE IS SOMETHING TO RESCUE. Widening only helps
+        where the selection already yields a line and an unplaced EDGE row would
+        drop a neighbour. Where NO selected row is placed there is no such line:
+        the un-widened slice is ``""``, the caller already falls back to the
+        frame copy -- exactly the lit glyphs -- and widening pre-empts that
+        correct answer. Worse, because ``slice_markdown`` collects through the
+        mapping, widening over unplaced rows adds no line of its own; it drags
+        the window onto whichever line IS placed, so the copy becomes a
+        DIFFERENT line than the one highlighted. A reader who lit one shell
+        command then pastes another and runs it (review round 4, R4-1; design
+        round 4, D4-1) -- the same harm class as R3-2's weld, and nothing on the
+        clipboard signals the substitution. Rescuing a lit line needs evidence
+        that a line was there to rescue; with no placed row there is none, which
+        is the same guess-rather-than-know shape this path exists to refuse.
         """
+        placed = any(
+            mapping[row] is not None
+            for row in range(first_row, min(last_row, len(mapping) - 1) + 1)
+            if row < len(mapping)
+        )
+        if not placed:
+            return ""
+
         first, last = first_row, last_row
         while first > 0 and (first >= len(mapping) or mapping[first] is None):
             first -= 1

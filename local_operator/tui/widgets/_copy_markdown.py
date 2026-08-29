@@ -463,12 +463,20 @@ def _skip_inline_markup(source: str, i: int) -> int:
     return i
 
 
-def _skip_painted_nothing(source: str, i: int) -> tuple[int, bool]:
+def _skip_painted_nothing(source: str, i: int) -> tuple[int, str]:
     """Advance past everything at ``i`` that paints NO glyph.
 
-    Returns the new offset and whether any WHITESPACE was among what was
-    skipped -- at a fold that is the whole question, since the consumed space
-    is the character a rejoin has to put back.
+    Returns the new offset and the WHITESPACE that was among what was skipped --
+    at a fold that is the whole question, since the consumed whitespace is what
+    a rejoin has to put back.
+
+    The whitespace is returned VERBATIM rather than as a flag. Answering "was
+    there a space?" made the rejoin put back exactly one, so a fold landing on a
+    run of two or more spaces silently collapsed it: aligned columns in prose
+    lost their alignment and a double-spaced sentence lost a space the document
+    had (review round 4, R4-2). The walk knows what the run was, so reporting a
+    plausible single space instead of the real one is the same
+    guess-rather-than-know shape one level down from the refusals above.
 
     One definition of "paints as nothing" serves both places the walk needs it:
     the gap between two rows, and the tail after the last one. They were
@@ -478,17 +486,17 @@ def _skip_painted_nothing(source: str, i: int) -> tuple[int, bool]:
     mid-token fold on such a line gained a space that split a URL or a
     filesystem path (review round 3, R3-1; design round 3, D3-1).
     """
-    saw_space = False
+    skipped: list[str] = []
     while i < len(source):
         if source[i].isspace():
-            saw_space = True
+            skipped.append(source[i])
             i += 1
             continue
         nxt = _skip_inline_markup(source, i)
         if nxt == i:
             break
         i = nxt
-    return i, saw_space
+    return i, "".join(skipped)
 
 
 def _match_visible(source: str, start: int, text: str) -> int | None:
@@ -661,12 +669,16 @@ def _walk_folds(row_texts: list[str], source_line: str) -> list[str] | None:
                 separators.append("")
                 cursor = end
                 continue
-            gap, saw_space = _skip_painted_nothing(source_line, cursor)
+            gap, consumed = _skip_painted_nothing(source_line, cursor)
             end = _match_visible(source_line, gap, text)
             if end is None:
                 separators = []
                 break
-            separators.append(" " if saw_space else "")
+            # The consumed run VERBATIM, not a single space standing in for it
+            # (review round 4, R4-2). Newlines cannot appear here -- the walk
+            # runs within one source line -- so this only ever restores the
+            # spaces and tabs the fold ate.
+            separators.append(consumed)
             cursor = end
         else:
             # End-anchor on the VISIBLE residual. Markers that paint nothing are

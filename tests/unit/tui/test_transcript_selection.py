@@ -3384,6 +3384,20 @@ async def test_no_two_fenced_lines_are_ever_welded_into_one(name: str) -> None:
     Asserted against the source's own line boundaries rather than against a
     rendered row, because the harm is specifically that a line boundary the
     document has went missing.
+
+    The predicate is FRAGMENT-level, not whole-line. Requiring two COMPLETE
+    source body lines in one output line made the test narrower than the defect
+    it was written for: the user-visible harm is a command TAIL meeting the next
+    command's HEAD (``cd /srv/ingest psql -h``), and a fence whose lines are
+    longer than the pane -- the common case for shell and SQL -- never puts a
+    whole body line on one row. The whole-line form passed on all nine
+    ``fence_indent_*`` fixtures, the shape D3-2 actually lived in, and caught the
+    defect only by luck on ``fence_structural_body``, whose body lines are short
+    enough to appear whole (design round 4, D4-2). Anchoring on a chunk of each
+    line catches the weld wherever it lands.
+
+    Swept from width 28 and across start columns 0-2 for the same reason: the
+    control welds at widths and start columns the old range never visited.
     """
     text = ORACLE_FENCE_CORPUS[name]
     body = [
@@ -3391,8 +3405,26 @@ async def test_no_two_fenced_lines_are_ever_welded_into_one(name: str) -> None:
         for line in text.split("\n")
         if line.strip() and not line.strip().startswith("```")
     ]
+    # A weld joins the END of one body line to the START of another, so each
+    # line is probed by its own head and tail rather than by its whole text.
+    # Only DISCRIMINATING chunks count: two body lines may legitimately share a
+    # head or tail (``fence_structural_body``'s all end "must stay verbatim"),
+    # and a shared chunk cannot say which line a fragment came from, so counting
+    # it would report a weld on an honest single-line take.
+    chunk = 12
+    marks: list[tuple[str, list[str]]] = []
+    for line in body:
+        if len(line) < chunk:
+            continue
+        parts = sorted(
+            part
+            for part in {line[:chunk], line[-chunk:]}
+            if sum(part in other for other in body) == 1
+        )
+        if parts:
+            marks.append((line, parts))
 
-    for width in range(40, 76, 2):
+    for width in range(28, 76, 2):
         app = StyledTranscriptApp()
         async with app.run_test(size=(width, 120)) as pilot:
             block = AssistantBlock()
@@ -3414,22 +3446,266 @@ async def test_no_two_fenced_lines_are_ever_welded_into_one(name: str) -> None:
                     # the defect is live. That is precisely how three rounds of
                     # sampled tests stayed green.
                     ends = {len(rows[last].rstrip()), 20, 8}
-                    for end_column in sorted(e for e in ends if e > 0):
-                        selection = Selection.from_offsets(
-                            Offset(x=0, y=first), Offset(x=end_column, y=last)
-                        )
-                        copied = block.get_selection(selection)
-                        if copied is None:
-                            continue
-                        for line in copied[0].split("\n"):
-                            # Any output line containing two DISTINCT source body
-                            # lines is a weld: the boundary between them is gone.
-                            hits = [b for b in body if b and b in line and b != line.strip()]
-                            assert len(hits) < 2, (
-                                f"{name} at width {width}, rows {first}..{last}: welded "
-                                f"two source lines into one.\n  copied line: {line!r}\n"
-                                f"  welded    : {hits!r}"
+                    for start_column in (0, 1, 2):
+                        for end_column in sorted(e for e in ends if e > 0):
+                            selection = Selection.from_offsets(
+                                Offset(x=start_column, y=first),
+                                Offset(x=end_column, y=last),
                             )
+                            copied = block.get_selection(selection)
+                            if copied is None:
+                                continue
+                            for line in copied[0].split("\n"):
+                                # An output line carrying a fragment of two
+                                # DISTINCT source body lines is a weld: the
+                                # boundary between them is gone, and a shell
+                                # handed that line runs two commands.
+                                hits = [
+                                    src
+                                    for src, parts in marks
+                                    if src != line.strip() and any(part in line for part in parts)
+                                ]
+                                assert len(hits) < 2, (
+                                    f"{name} at width {width}, rows {first}..{last}, start "
+                                    f"column {start_column}: welded two source lines into "
+                                    f"one.\n  copied line: {line!r}\n  welded    : {hits!r}"
+                                )
+
+
+#: Constructs whose over-long lines leave continuation rows that ``align``
+#: cannot place. That is the shape where a copy can silently SUBSTITUTE one
+#: source line for another, so the substitution oracle sweeps them specifically.
+ORACLE_SUBSTITUTION_CORPUS: dict[str, str] = {
+    "fence_long_commands": (
+        "Run these in order:\n\n```sh\ncd /srv/ingest\n"
+        "psql -h db.internal -U ingest -c 'select count(*) from staging.rows where state = 1'\n"
+        "systemctl restart ingest-worker --now --no-block\n```\n\nThen check the dashboard.\n"
+    ),
+    "fence_sql_then_prose": (
+        "```sql\n"
+        "select a.id, a.name, b.value from alpha a join beta b on b.id = a.beta_id;\n"
+        "update alpha set flagged = true where created_at < now() - interval '30 days';\n"
+        "```\n\nTRAILING_ONE is a paragraph after the fence that was never highlighted.\n"
+    ),
+    "table_long_notes": (
+        "| name | score | notes |\n| --- | --- | --- |\n"
+        "| alpha | 0.91 | the first row with some longer note text here that wraps |\n"
+        "| beta | 0.72 | the second row, also with a reasonably long note here |"
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(
+            name,
+            marks=(
+                # PRE-EXISTING and unchanged by this PR -- identical at the merge
+                # base, at `6f72a29e` and here. ``align`` maps a wrapped table
+                # row's continuation rows to the NEXT table row, so a whole-row
+                # take copies the wrong row. That lives in ``align``'s table
+                # handling rather than in this copy path, so it is tracked as
+                # issue #399 rather than widened into this PR. Marked xfail
+                # rather than dropped from the corpus: the oracle keeps reporting
+                # it, and the marker fails loudly once #399 is fixed.
+                [
+                    pytest.mark.xfail(
+                        reason="pre-existing table mis-mapping, issue #399", strict=True
+                    )
+                ]
+                if name == "table_long_notes"
+                else []
+            ),
+        )
+        for name in sorted(ORACLE_SUBSTITUTION_CORPUS)
+    ],
+)
+async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: str) -> None:
+    """A take must contain the rows the reader LIT, not merely real source text.
+
+    The companion invariant to the contiguity oracle, and the hole that admitted
+    R4-1. Contiguity is a MEMBERSHIP test: it catches text this code invented and
+    text it welded, but a copy that hands back a different, genuine source line
+    is still perfectly contiguous and sails through. That is exactly what the
+    unplaced-edge widening did -- dragging the ``psql`` command copied the
+    ``systemctl`` command, so a reader pasting into a terminal ran a command they
+    never highlighted (review round 4, R4-1; design round 4, D4-1).
+
+    So this asserts the other half: every rendered row the drag covered in FULL
+    must be represented in the copy. A fully covered row is unambiguous about the
+    reader's intent in a way a partial one is not, which is what makes the
+    assertion safe to state without predicting which construct will break it.
+    """
+    text = ORACLE_SUBSTITUTION_CORPUS[name]
+
+    for width in range(28, 102, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            for index, row in enumerate(rows):
+                lit = row.strip()
+                # Short rows carry too little to identify; a fence marker row is
+                # furniture whose own text is legitimately re-emitted elsewhere.
+                if len(lit) < 12 or lit.startswith("```"):
+                    continue
+                selection = Selection.from_offsets(
+                    Offset(x=0, y=index), Offset(x=len(row.rstrip()), y=index)
+                )
+                copied = block.get_selection(selection)
+                if copied is None:
+                    continue
+                # Compared with folds flattened: the markdown path may return the
+                # line unwrapped, which is a truthful answer to the same gesture.
+                haystack = " ".join(copied[0].split())
+                needle = " ".join(lit.split())[:12]
+                assert needle in haystack, (
+                    f"{name} at width {width}, row {index}: the fully highlighted row is "
+                    f"not in the copy -- a different line was substituted for it.\n"
+                    f"  highlighted: {lit!r}\n  copied     : {copied[0]!r}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_widening_over_unplaced_rows_needs_a_placed_row_to_rescue() -> None:
+    """``_markdown_for_rows`` widens only where a lit line can be recovered.
+
+    Direct cover for the widening itself, which shipped in round 3 with no test
+    of its own -- and was therefore free to substitute one source line for
+    another. Both halves are asserted together because the finding is precisely
+    that the two cases have DIFFERENT right answers:
+
+    * with a placed row in the band, widening over an unplaced EDGE row rescues a
+      line ``slice_markdown`` would otherwise drop;
+    * with NO placed row there is nothing to rescue, the un-widened slice is
+      empty, and the caller's fallback to the frame copy is the correct minimal
+      answer. Widening there dragged the window onto whichever line happened to
+      be placed (review round 4, R4-1; design round 4, D4-1).
+    """
+    text = ORACLE_SUBSTITUTION_CORPUS["fence_sql_then_prose"]
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(76, 120)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        mapping = _copy_markdown.align(block._full_text, rows)
+        target = next(i for i, row in enumerate(rows) if "a.beta_id;" in row)
+        assert mapping[target] is None, "fixture no longer reproduces an unplaced row"
+
+        # No placed row in the band: refuse rather than widen onto a neighbour.
+        assert block._markdown_for_rows(mapping, target, target) == ""
+
+        # The reader sees the minimal answer, not the construct plus the
+        # paragraph below the closing fence that the band never touched.
+        selection = Selection.from_offsets(
+            Offset(x=0, y=target), Offset(x=len(rows[target].rstrip()), y=target)
+        )
+        copied = block.get_selection(selection)
+        assert copied is not None
+        assert copied[0].strip() == "a.beta_id;", copied[0]
+        assert "TRAILING_ONE" not in copied[0], copied[0]
+
+    # ...and the rescue itself still works. A band whose FIRST row is unplaced
+    # but which reaches a placed row: without widening, ``slice_markdown`` picks
+    # only the placed line and the lit `psql` command is dropped from the copy.
+    text = ORACLE_SUBSTITUTION_CORPUS["fence_long_commands"]
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(76, 120)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        mapping = _copy_markdown.align(block._full_text, rows)
+        first = next(i for i, row in enumerate(rows) if "psql" in row)
+        last = next(i for i in range(first + 1, len(mapping)) if mapping[i] is not None)
+        assert mapping[first] is None, "fixture no longer reproduces an unplaced edge row"
+
+        # The un-widened slice is what would ship without the rescue.
+        unwidened = _copy_markdown.slice_markdown(block._full_text, mapping, first, last)
+        assert "psql" not in unwidened, unwidened
+
+        widened = block._markdown_for_rows(mapping, first, last)
+        assert "psql -h db.internal" in widened, widened
+        # ...and the rescue does not weld the two commands onto one line.
+        assert not any(
+            "psql" in line and "systemctl" in line for line in widened.split("\n")
+        ), widened
+
+
+@pytest.mark.asyncio
+async def test_a_fold_at_a_double_space_puts_both_spaces_back() -> None:
+    """A rejoin restores the whitespace run VERBATIM, not one space (R4-2).
+
+    ``_skip_painted_nothing`` reported WHETHER it had skipped whitespace, so a
+    fold landing on a run of two or more spaces rejoined with exactly one and the
+    document lost a character it had. The walk placed these rows, so this is not
+    a refusal failure -- it is the same "a plausible character looks like an
+    answer" shape one level down, and the fix is to carry the count.
+    """
+    text = "A line ending in two spaces  and then continuing with more text to force a fold."
+
+    seen = 0
+    for width in range(24, 92, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            if len(content) < 2:
+                continue
+            for last in content[1:]:
+                selection = Selection.from_offsets(
+                    Offset(x=1, y=content[0]), Offset(x=len(rows[last].rstrip()), y=last)
+                )
+                copied = block.get_selection(selection)
+                if copied is None or "\n" in copied[0]:
+                    continue
+                stripped = copied[0].strip()
+                if not stripped:
+                    continue
+                seen += 1
+                # The single truthful answer for a rejoined sub-line take: it is
+                # a verbatim span of the source, double space included.
+                assert stripped in text, (
+                    f"width {width}: the rejoin did not reproduce the source's spacing.\n"
+                    f"  copied: {copied[0]!r}"
+                )
+
+    assert seen, "the sweep never reached a rejoined take"
+
+
+def test_skip_painted_nothing_reports_the_whitespace_it_consumed() -> None:
+    """The unit behind R4-2: the consumed run comes back, not a boolean.
+
+    Pinned at the function level as well as end-to-end, because the bool return
+    was locally plausible -- ``" " if saw_space else ""`` reads as correct until
+    the run is longer than one character.
+    """
+    assert _copy_markdown._skip_painted_nothing("a  b", 1) == (3, "  ")
+    assert _copy_markdown._skip_painted_nothing("a b", 1) == (2, " ")
+    assert _copy_markdown._skip_painted_nothing("a\tb", 1) == (2, "\t")
+    assert _copy_markdown._skip_painted_nothing("ab", 1) == (1, "")
+    # Markers that paint nothing are skipped without contributing whitespace.
+    assert _copy_markdown._skip_painted_nothing("a**  b", 1) == (5, "  ")
 
 
 def test_a_fence_marker_in_indented_code_reads_as_a_fence_on_purpose() -> None:
