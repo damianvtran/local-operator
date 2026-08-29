@@ -218,3 +218,50 @@ async def test_logout_rows_all_carry_the_alert_flag() -> None:
     rows = _logout_choices()
     assert rows, "the fixture must offer rows for this to mean anything"
     assert all(choice.alert for choice in rows), [c.name for c in rows if not c.alert]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verb,alert,expected",
+    [
+        ("remove", True, True),
+        ("logout", True, True),
+        ("reauth", True, True),
+        ("login", False, False),
+    ],
+)
+async def test_the_gate_is_armed_on_the_typed_path(verb: str, alert: bool, expected: bool) -> None:
+    """The gate must arm through REAL keystrokes, not just a seeded buffer.
+
+    ``_argument_is_destructive`` reads the highlighted row's flag, and a CLOSED
+    list has no highlighted row — so the gate silently answered False for every
+    ``/mcp`` row while the server slot was unreachable by typing (the refresh
+    key missed the verb→space transition). The alert flags and this gate were
+    both inert on the one path a user actually takes.
+
+    Every other test of this gate seeds the buffer through ``_set_editor_line``,
+    which calls ``_sync_picker()`` directly and therefore cannot observe a
+    missing message. This one types, which is why it would have caught it.
+
+    The rows are constructed here because ``/mcp remove`` and the ``reauth``
+    alert flag ship in the concurrent PR; the gate reads the flag off the row,
+    so rows of the right shape exercise it faithfully.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in f"/mcp {verb} ":
+            await pilot.press("space" if char == " " else char)
+            await _settle(pilot, 6)
+        editor.picker.set_choices(
+            [
+                ArgumentChoice(f"{verb} linear", "", alert=alert),
+                ArgumentChoice(f"{verb} notion", "", alert=alert),
+            ]
+        )
+        await _settle(pilot, 8)
+
+        assert editor.picker.is_open(), f"/mcp {verb} left the picker closed by typing"
+        assert editor._argument_is_destructive() is expected

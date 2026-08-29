@@ -615,9 +615,9 @@ async def test_a_notice_replacing_the_rows_retires_the_ghost() -> None:
             await _settle(pilot, 8)
 
             assert editor.picker.display is expect_display, notice
-            assert editor.suggestion == "", (
-                f"notice={notice!r}: the ghost outlived the rows it described"
-            )
+            assert (
+                editor.suggestion == ""
+            ), f"notice={notice!r}: the ghost outlived the rows it described"
             assert "login" not in editor.render_line(0).text
 
 
@@ -649,9 +649,7 @@ async def test_typing_into_the_mcp_server_slot_opens_its_rows(verb: str) -> None
         editor = app.query_one(Editor)
         editor.focus()
         with (
-            patch(
-                "local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})
-            ),
+            patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})),
             # `/mcp logout` offers only servers that actually hold a credential
             # (the `/logout` rule), so both have to be staged for the three
             # verbs to be comparable.
