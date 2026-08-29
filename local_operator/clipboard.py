@@ -1,30 +1,65 @@
-"""Reading an image (or a file URL) off the SYSTEM clipboard.
+"""Reading an image, a file URL, or text off the SYSTEM clipboard.
 
 The composer needs this because a terminal cannot give it to us. Textual's
 ``Paste`` event carries text and nothing else — there is no binary channel in
-the terminal protocol — so an image on the pasteboard reaches the app as an
-EMPTY bracketed paste and disappears (issue #372). ``Cmd+V`` after a native
-macOS screenshot (``Cmd+Shift+Ctrl+4``) was therefore a dead keystroke: the
-pasteboard held 20 KB of PNG, the terminal handed over ``""``, and the composer
-had no way to ask for the bytes. Reading the clipboard OURSELVES is the only
-terminal-independent route to them, which is why this module exists at all.
+the terminal protocol — so an image on the pasteboard can never reach the app
+as bytes (issue #372). ``Cmd+V`` after a native macOS screenshot
+(``Cmd+Shift+Ctrl+4``) was therefore a dead keystroke. Reading the clipboard
+OURSELVES is the only terminal-independent route to those bytes, which is why
+this module exists at all.
+
+**MEASURE WHAT THE TERMINAL ACTUALLY SENDS.** An earlier revision of this
+module said the pasteboard image reached the app "as an EMPTY bracketed
+paste", and the composer hung its whole fix off that claim. It is false, and
+nobody had checked. Captured with a raw-mode PTY probe on macOS 25.6 with a
+PNG on the pasteboard and bracketed paste enabled (``ESC[?2004h``):
+
+=============  ==================  =========  =================================
+terminal       clipboard           keystroke  bytes delivered on stdin
+=============  ==================  =========  =================================
+Terminal.app   text                Cmd+V      25 (``ESC[200~…ESC[201~``)
+Terminal.app   PNG screenshot      Cmd+V      **0** — and the terminal beeps
+Ghostty        PNG screenshot      Cmd+V      **0** — and the terminal beeps
+Terminal.app   PNG screenshot      Ctrl+V     1 (``\\x16``)
+Ghostty        PNG screenshot      Ctrl+V     1 (``\\x16``)
+=============  ==================  =========  =================================
+
+With an image-only pasteboard the terminal sends NOTHING AT ALL. No bytes
+means no ``Paste`` event, so a handler keyed on an empty paste is unreachable
+on exactly the terminals it was written for. ``Cmd+V`` cannot be hooked from
+inside a TUI: the terminal swallows it and there is no protocol by which we
+can ask for pasteboard bytes. ``Ctrl+V`` does arrive, on both terminals, which
+is why :meth:`~local_operator.tui.widgets.editor.Editor.action_system_paste`
+is bound to it and is the reachable caller of this module.
 
 The gap stayed invisible for a long time because it does not reproduce in the
 one place the code was developed. **cmux** watches the pasteboard and writes an
 image to ``$TMPDIR/clipboard-<stamp>-<hash>.png``, then bracket-pastes that
 filename — so inside cmux the composer's path-only ingestion sees a real path
-and works perfectly. Ghostty, Terminal.app, iTerm2 and every other emulator
-paste text only, so outside cmux the same gesture produced nothing. A design
-that is correct for one terminal's helper is not a clipboard implementation,
-and the docstrings in ``tui/widgets/editor.py`` used to credit Ghostty with
-cmux's behaviour.
+and works perfectly. Terminal.app and Ghostty paste text only (measured, in
+the table above); iTerm2 and other emulators are expected to behave the same
+way but have NOT been measured here. The scoping is deliberate: this module
+exists because #376 generalised from the one terminal it was developed in, so
+claiming coverage this project has not tested would repeat that mistake in the
+prose while the code corrects it (code round 1, F4). Outside cmux the same
+gesture produced nothing, and a design that is correct for one terminal's
+helper is not a clipboard implementation.
+
+TEXT is read alongside the two attachable shapes because ``Ctrl+V`` is now a
+SYSTEM paste, and a system paste that silently dropped the ordinary case would
+be a worse key than the one it replaced (Textual's own ``ctrl+v`` pastes
+``App.clipboard``, an internal buffer the system clipboard never fills). The
+caller decides what to do with each shape; this module only reports what was
+there.
 
 **All four platforms are peers here.** There is one dispatch
-(:func:`read_clipboard_image`) that picks a backend from ``sys.platform`` and
+(:func:`read_clipboard`) that picks a backend from ``sys.platform`` and
 the session's environment; each backend is an independent function with the
 same contract, and none of them is a fast path the others hang off. That
 matters for more than tidiness: the failure this module fixes was itself the
-result of a single-environment assumption baked into the ingest path.
+result of a single-environment assumption baked into the ingest path. The text
+shape obeys the same rule — a ``Ctrl+V`` that pasted text on macOS and dropped
+it on Linux would put that assumption straight back.
 
 Every backend obeys the same four rules, which is what makes them substitutable:
 
@@ -69,7 +104,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -113,6 +148,25 @@ CLIPBOARD_TIMEOUT_S = 2.0
 #: one. 64 MB reads that screenshot in ~0.6 s and still refuses a payload no
 #: screen capture could produce.
 MAX_CLIPBOARD_READ_BYTES = 64 * 1024 * 1024
+
+#: The ceiling on clipboard TEXT, which is a different budget from the image
+#: ingest ceiling above and deliberately far smaller.
+#:
+#: `MAX_CLIPBOARD_READ_BYTES` is generous because an image is about to be
+#: RESIZED: those bytes are transient and shrink by an order of magnitude
+#: before anything holds them. Text has no downstream resize - it goes straight
+#: into the composer's document at whatever size it arrived - so applying the
+#: image ceiling to it made the effective bound on one keystroke 64 MB.
+#: Measured on the synchronous insert: 1 MB took 1.2 s, **5 MB took 52 s** with
+#: the UI unresponsive throughout (code round 1, F3).
+#:
+#: 1 MB is far above any prose, code block or log excerpt a person pastes into
+#: a prompt, and far below the sizes that stall the event loop. Over it the
+#: read reports an empty clipboard, the same collapse every other "nothing
+#: usable here" case takes: a paste that silently TRUNCATED the user's text
+#: would be worse than one that declines it, because the damage would be
+#: invisible until they read back what they sent.
+MAX_CLIPBOARD_TEXT_BYTES = 1024 * 1024
 
 #: Environment variables that mean "this process is on the far end of an SSH
 #: connection". Any ONE of them is enough; they are set by different sshd
@@ -251,10 +305,22 @@ class _Deadline:
     ``expired`` is checked BEFORE each spawn so an exhausted deadline costs no
     further processes at all, rather than three more that are each handed a
     zero timeout and killed.
+
+    It also RECORDS that it was hit (:attr:`hit`). A backend returning ``None``
+    is ambiguous by design \u2014 "no image of that type on the clipboard" and "the
+    tool never answered" are the same value \u2014 and collapsing the two is what
+    told a user holding a screenshot that their clipboard was empty (ux round
+    1, U3). The deadline is the one object that spans every subprocess of one
+    read, so it is where the distinction can be observed without giving each
+    backend a second return channel.
     """
 
     def __init__(self, seconds: float) -> None:
         self._end = time.monotonic() + seconds
+        #: True once a spawn was refused or a read abandoned because the budget
+        #: ran out. Sticky: one wedged tool makes the whole operation a timeout,
+        #: even if a later cheap call would have succeeded.
+        self.hit = False
 
     @property
     def remaining(self) -> float:
@@ -264,7 +330,13 @@ class _Deadline:
     def expired(self) -> bool:
         # A read cannot usefully be given a zero or negative timeout, so the
         # floor is what "no time left" means rather than a bare `<= 0`.
-        return self.remaining <= _MIN_SPAWN_BUDGET_S
+        out_of_time = self.remaining <= _MIN_SPAWN_BUDGET_S
+        if out_of_time:
+            # Reading the property is what records the fact, so every existing
+            # `if deadline.expired` guard reports itself without a second call
+            # at each site. Idempotent, and only ever moves False -> True.
+            self.hit = True
+        return out_of_time
 
 
 def _run(
@@ -371,8 +443,24 @@ def _run(
                     # Killing the group is what ends the thread's read, and it
                     # is done in the `finally` below so the same path covers a
                     # timed-out wait.
+                    #
+                    # Recorded, because this is the shape the user actually
+                    # hits on a loaded machine: the tool was ALIVE and simply
+                    # too slow, which is not the same answer as "the clipboard
+                    # holds no image" (U3).
+                    deadline.hit = True
                     return None
                 returncode = process.wait(timeout=max(deadline.remaining, 0.0))
+                # The tool answered, but did it answer IN TIME? A spawn that
+                # overran the budget and still produced output is a timeout
+                # from the caller's side: the remaining backends are about to
+                # be skipped by the `expired` guard, so the operation as a
+                # whole is cut short. Without this the blown deadline is only
+                # noticed if a LATER spawn is attempted, and a single slow tool
+                # (the common shape - one `osascript` on a loaded machine)
+                # reported an empty clipboard instead of a timeout (U3).
+                if deadline.expired:
+                    deadline.hit = True
             finally:
                 # THE CONDITION IS THE READER, NOT THE CHILD. Gating this on
                 # `process.poll() is None` looks right and is the F4 bug: when
@@ -441,14 +529,26 @@ def _run(
 #: question separately doubled the cost of every miss — which is the common
 #: case, since a text clipboard reaches both (review round 2, U3/U7).
 #:
-#: The image wins when both are present: it is what the user copied in the
-#: reported gesture, and the file-URL branch is the Finder ``Cmd+C`` fallback
-#: that only matters when there are no image bytes at all.
+#: The image wins when several are present: it is what the user copied in the
+#: reported gesture. The file-URL branch is the Finder ``Cmd+C`` fallback, and
+#: it is asked BEFORE text for a measured reason — a Finder copy puts
+#: ``public.file-url`` AND the file's display name on the pasteboard together
+#: (verified against a real Finder-shaped copy: ``public.file-url``,
+#: ``NSFilenamesPboardType`` and an Apple URL flavor all present), so testing
+#: text first would type a filename instead of attaching the copied file.
 #:
-#: Output is a one-line verdict on stdout (``image`` or the NUL-separated
-#: paths); the image bytes go to a FILE, because ``osascript`` prints its
-#: result through a text coercion that mangles binary — the same trap the
-#: Windows backend documents.
+#: TEXT is last and is the ordinary case. It is read in this same script rather
+#: than by a second tool (``pbpaste``) so the single-spawn property survives:
+#: the spawn IS the latency, and a text clipboard is the most common thing
+#: ``Ctrl+V`` meets.
+#:
+#: Output is a one-line verdict on stdout (``image``, ``text``, or the
+#: NUL-separated paths); the image bytes AND the text go to a FILE, because
+#: ``osascript`` prints its result through a text coercion that mangles binary
+#: — the same trap the Windows backend documents. Text takes the file route
+#: too: the coercion normalises line endings, so a multi-line clipboard would
+#: come back altered, and its content would otherwise be indistinguishable
+#: from the one-word verdicts.
 #:
 #: TIFF is handled explicitly because it is not a rare case: several macOS apps
 #: (Preview's copy, some screenshot utilities) put ONLY ``public.tiff`` on the
@@ -487,28 +587,37 @@ on run argv
 \t\treturn "image"
 \tend if
 \tset urls to pb's readObjectsForClasses:{current application's NSURL} options:(missing value)
-\tif urls is missing value then return ""
 \tset out to ""
-\tset sep to (ASCII character 0)
-\trepeat with i from 0 to ((urls's |count|() as integer) - 1)
-\t\tset u to (urls's objectAtIndex:i)
-\t\tif (u's isFileURL()) as boolean then set out to out & ((u's |path|()) as text) & sep
-\tend repeat
-\treturn out
+\tif urls is not missing value then
+\t\tset sep to (ASCII character 0)
+\t\trepeat with i from 0 to ((urls's |count|() as integer) - 1)
+\t\t\tset u to (urls's objectAtIndex:i)
+\t\t\tif (u's isFileURL()) as boolean then set out to out & ((u's |path|()) as text) & sep
+\t\tend repeat
+\tend if
+\tif out is not "" then return out
+\tset str to pb's stringForType:"public.utf8-plain-text"
+\tif str is missing value then return ""
+\tset payload to str's dataUsingEncoding:(current application's NSUTF8StringEncoding)
+\tif payload is missing value then return ""
+\tpayload's writeToFile:dest atomically:true
+\treturn "text"
 end run
 """
 
 
 def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
-    """macOS: image bytes, or file URLs, from ONE ``osascript`` spawn.
+    """macOS: image bytes, file URLs, or text, from ONE ``osascript`` spawn.
 
-    Both shapes in one call because the spawn is the cost — see
+    All three shapes in one call because the spawn is the cost — see
     :data:`_MACOS_CLIPBOARD_SCRIPT`. Asking them separately doubled the latency
     of every clipboard miss, which is the case a text or empty clipboard hits
-    (round 2, U3/U7).
+    (round 2, U3/U7), and adding text as a second spawn would have undone that
+    fix on the shape that is now the most common one.
 
-    The image is collected from a temp FILE, which is the only lossless channel
-    out of ``osascript``; it is deleted before this returns.
+    The image and the text are both collected from a temp FILE, which is the
+    only lossless channel out of ``osascript``; it is deleted before this
+    returns.
     """
     if not shutil.which("osascript"):
         # Not reachable on a stock macOS, but this module must never assume a
@@ -534,6 +643,26 @@ def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
             # answer to "what did the user copy" was the image, and attaching
             # some unrelated file instead would be a different gesture.
             return ClipboardContents(image=image)
+        if verdict.strip() == "text":
+            # Bounded by the TEXT budget, not by the image ceiling `max_bytes`
+            # carries: this payload reaches the composer's document at the size
+            # it arrives, with no resize in between, so the generous ingest
+            # ceiling is not a bound on it at all (code round 1, F3). Over the
+            # bound reads as an empty clipboard rather than as an error - the
+            # same collapse every other "nothing usable here" case takes.
+            #
+            # The decode is the shared one so the platforms cannot disagree
+            # about the bound or about invalid UTF-8.
+            # Read at the IMAGE ceiling so an over-budget payload is still
+            # seen and can be reported; the text bound is then applied by the
+            # shared decode. Reading at the smaller bound would make an
+            # oversized clipboard look like an unreadable file (F7).
+            raw = _read_bounded(dest, max_bytes)
+            if raw is None:
+                return ClipboardContents()
+            oversized: list[bool] = []
+            text = _decode_clipboard_text(raw, oversized=oversized)
+            return ClipboardContents(text=text, text_too_large=bool(oversized))
     return ClipboardContents(paths=tuple(p for p in verdict.split("\x00") if p.strip()))
 
 
@@ -556,27 +685,37 @@ def _read_bounded(path: Path, max_bytes: int) -> bytes | None:
         return None
 
 
-def _read_wayland_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
-    """Wayland: ``wl-paste --list-types`` then ``wl-paste --type <mime>``.
+#: Text MIME types worth asking a Wayland compositor for, in preference order.
+#: ``text/plain;charset=utf-8`` is what most toolkits actually offer and is
+#: unambiguous about encoding; bare ``text/plain`` is the fallback, and the two
+#: X11 selection names appear because compositors commonly re-advertise them
+#: through XWayland. Only types the compositor LISTS are ever read \u2014 see
+#: :func:`_read_wayland`.
+TEXT_MIME_PREFERENCE = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING")
 
-    The type list is queried first because ``wl-paste --type image/png`` on a
-    clipboard that has no PNG both fails AND, on some compositors, blocks while
-    the offer is negotiated. Asking what is on offer costs one cheap call and
-    turns four speculative reads into at most one real one.
 
-    Then it tries every offered type in preference order, the same as X11.
-    Round 1 (F4) caught these two loops disagreeing: this one used to stop
-    after the first offered type on the theory that a second candidate is "the
-    same image again", which is a guess about the clipboard owner rather than a
-    fact — a compositor may well offer a huge PNG and a small JPEG of
-    different pictures. Both loops now do the same thing, and the total cost is
-    bounded by the shared deadline instead of by loop length.
+def _read_wayland(
+    max_bytes: int, deadline: _Deadline, oversized: list[bool] | None = None
+) -> tuple[ClipboardImage | None, str]:
+    """Wayland: ONE ``--list-types`` listing, then at most one real read.
+
+    Image types first, then text, and NEITHER is read speculatively: a type the
+    compositor did not list is never asked for. That discipline predates the
+    text shape and is kept for the reason it was introduced \u2014 ``wl-paste
+    --type X`` on a clipboard with no X both fails AND, on some compositors,
+    blocks while the offer is negotiated, so a speculative read is a stall
+    rather than a cheap miss.
+
+    One listing serves both questions, which is why this is a single function
+    and not an image reader beside a text reader: asking twice would double the
+    spawn count on the shape ``Ctrl+V`` meets most often, the same cost the
+    macOS backend collapses into one script (round 2, U3/U7).
     """
     if not shutil.which("wl-paste"):
-        return None
+        return None, ""
     listing = _run(["wl-paste", "--list-types"], deadline)
     if listing is None:
-        return None
+        return None, ""
     offered = {line.strip() for line in listing.decode("utf-8", "replace").splitlines()}
     for mime in IMAGE_MIME_PREFERENCE:
         if mime not in offered:
@@ -590,8 +729,86 @@ def _read_wayland_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage |
             max_bytes,
         )
         if image is not None:
-            return image
-    return None
+            return image, ""
+    for mime in TEXT_MIME_PREFERENCE:
+        if mime not in offered:
+            continue
+        # ``--no-newline`` matches the image reads and stops ``wl-paste``
+        # appending a newline the user never copied, which in a prompt buffer
+        # is a blank line they then have to delete.
+        text = _decode_clipboard_text(
+            _run(
+                ["wl-paste", "--no-newline", "--type", mime],
+                deadline,
+                max_bytes=max_bytes,
+            ),
+            max_bytes,
+            oversized,
+        )
+        if text or oversized:
+            # `oversized` ends the loop too: the compositor offered this type
+            # and it was too big, so trying the next spelling of "plain text"
+            # would read the same payload again and report the same refusal.
+            return None, text
+    return None, ""
+
+
+def _read_x11_text(max_bytes: int, deadline: _Deadline, oversized: list[bool] | None = None) -> str:
+    """X11: the clipboard's plain text, or ``""``.
+
+    ``-t UTF8_STRING`` rather than bare ``-o``: without a target ``xclip``
+    picks one itself and can hand back a non-text flavor on a clipboard that
+    offers several, which would reach the composer as mojibake.
+    """
+    if not shutil.which("xclip"):
+        return ""
+    return _decode_clipboard_text(
+        _run(
+            ["xclip", "-selection", "clipboard", "-t", "UTF8_STRING", "-o"],
+            deadline,
+            max_bytes=max_bytes,
+        ),
+        None,
+        oversized,
+    )
+
+
+def _decode_clipboard_text(
+    data: bytes | None,
+    max_bytes: int | None = None,
+    oversized: list[bool] | None = None,
+) -> str:
+    """Clipboard bytes as text, or ``""`` — the one decode every backend uses.
+
+    ``errors="replace"`` and never a raise: this runs on a keystroke, and a
+    clipboard holding bytes that are not valid UTF-8 is a paste that should
+    degrade, not an exception on the key that pasted. Shared so the platforms
+    cannot disagree about what a clipboard string is.
+
+    `MAX_CLIPBOARD_TEXT_BYTES` is applied HERE rather than at each call site,
+    so no backend can hand back a payload that would stall the composer on
+    insert (code round 1, F3). It is enforced in addition to any caller's
+    `max_bytes`, which is the image INGEST ceiling and far too large to bound
+    text - see the constant for the measurement.
+
+    ``oversized`` is a one-element list the caller passes in to LEARN THAT THE
+    BOUND FIRED. Returning ``""`` for over-budget text is indistinguishable
+    from an empty clipboard, so the composer reported "nothing on the
+    clipboard" to a user who had copied several megabytes (code round 2, F7).
+    An out-parameter rather than a richer return type because every one of the
+    four backends calls this and returns a plain ``str``; threading a tuple
+    through all of them to carry one bit would be a wider change than the
+    finding, and the flag is set in exactly one place.
+    """
+    if not data:
+        return ""
+    if max_bytes is not None and len(data) > max_bytes:
+        return ""
+    if len(data) > MAX_CLIPBOARD_TEXT_BYTES:
+        if oversized is not None:
+            oversized.append(True)
+        return ""
+    return data.decode("utf-8", errors="replace")
 
 
 def _read_x11_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
@@ -667,6 +884,71 @@ try {
 """
 
 
+#: Windows text, read through the same PowerShell the image backend picks.
+#:
+#: ``-Raw`` is what makes this correct rather than merely working:
+#: ``Get-Clipboard`` without it returns an ARRAY of lines, which PowerShell
+#: then joins with the host's line separator on the way to stdout, so a
+#: multi-line clipboard comes back re-terminated. ``-Raw`` hands over the
+#: string as the clipboard holds it.
+#:
+#: Stdout is safe here where it is not for the image, because this payload IS
+#: text: the output encoding that corrupts binary is exactly the right
+#: treatment for a string, and ``[Console]::OutputEncoding`` is pinned to UTF-8
+#: so the bytes this process decodes match what was copied.
+#:
+#: NOTE: unit-tested against mocked invocations only, like the image script —
+#: there is no Windows host in this project's development or CI environment.
+_WINDOWS_TEXT_SCRIPT = """\
+$ErrorActionPreference = 'Stop'
+try {
+  [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+  $text = Get-Clipboard -Raw
+  if ($null -eq $text) { exit 1 }
+  [Console]::Out.Write($text)
+} catch {
+  exit 1
+}
+"""
+
+
+def _read_windows_text(
+    max_bytes: int, deadline: _Deadline, oversized: list[bool] | None = None
+) -> str:
+    """Windows: the clipboard's text, or ``""``.
+
+    ``-STA`` for the same reason the image backend needs it: the Windows
+    clipboard API is single-threaded-apartment only.
+    """
+    shell = _windows_shell()
+    if shell is None:
+        return ""
+    with tempfile.TemporaryDirectory(prefix="lo-clip-") as tmp:
+        script = Path(tmp) / "read_text.ps1"
+        try:
+            script.write_text(_WINDOWS_TEXT_SCRIPT, encoding="utf-8")
+        except OSError:
+            return ""
+        return _decode_clipboard_text(
+            _run(
+                [
+                    shell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-STA",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                ],
+                deadline,
+                max_bytes=max_bytes,
+            ),
+            max_bytes,
+            oversized,
+        )
+
+
 def _windows_shell() -> str | None:
     """``pwsh`` if present, else Windows PowerShell, else nothing.
 
@@ -738,17 +1020,54 @@ class ClipboardContents:
     with the caller, which is where the attachment budget and the resize are;
     this type only reports what was on the clipboard.
 
-    Everything else stays collapsed: an empty clipboard, a text-only one, a
-    missing ``xclip`` and a wedged daemon are one answer, because a message
-    that guessed between them would be inventing a diagnosis.
+    Everything else stays collapsed: an empty clipboard, a missing ``xclip``
+    and a wedged daemon are one answer, because a message that guessed between
+    them would be inventing a diagnosis. A TEXT-only clipboard is no longer in
+    that collapse — it has its own field, because ``Ctrl+V`` has to insert it.
+
+    The three shapes are MUTUALLY EXCLUSIVE by construction, in the order
+    image, paths, text. That order is the user's intent, not a convenience: a
+    Finder copy puts a file URL and its display name on the pasteboard at once,
+    so a text field filled alongside paths would let one gesture both attach a
+    file and type its name. The backends resolve the precedence; the caller
+    reads whichever field is set.
     """
 
     image: ClipboardImage | None = None
     paths: tuple[str, ...] = ()
+    #: Plain text on the clipboard, when there was no image and no file URL.
+    #: Read for ``Ctrl+V``, which is a SYSTEM paste and therefore owes the user
+    #: the ordinary text case as well as the attachable ones — Textual's own
+    #: ``ctrl+v`` action pastes ``App.clipboard``, an internal buffer that a
+    #: copy made in another application never touches.
+    text: str = ""
     #: The read never happened: this session is remote, so the clipboard would
     #: be the server's. Not a failure to find an image, and must not be
     #: reported as one.
     refused_remote: bool = False
+    #: The clipboard held TEXT that was too large to paste, so this result
+    #: describes a payload that was declined, not a clipboard that was empty.
+    #:
+    #: Same discipline as ``timed_out`` and for the same reason: over-budget
+    #: text returned ``""``, which is indistinguishable from an empty
+    #: clipboard, so a user who copied a 5 MB log and pressed ctrl+v was told
+    #: there was nothing to paste (code round 2, F7). Declining the payload is
+    #: right — truncating it would be damage the user cannot see — but the
+    #: report has to name what happened, which is the wrong-diagnosis class
+    #: ``timed_out`` was added to eliminate.
+    text_too_large: bool = False
+    #: The budget ran out before the clipboard answered, so this result
+    #: describes a read that was CUT SHORT, not a clipboard that was empty.
+    #:
+    #: Carried for the same reason as ``refused_remote``: it is a state the
+    #: module knows with certainty and the user can act on. Without it a
+    #: timeout collapsed into "nothing on the clipboard", which told a user
+    #: holding a valid screenshot that they had nothing to paste \u2014 measured
+    #: under CPU load at 8 failures in 10 reads, every one reported as an empty
+    #: clipboard (ux round 1, U3). That is the wrong-diagnosis class the round-3
+    #: D12 correction exists to prevent, and a retry is the one move that helps,
+    #: so the notice has to be able to say so.
+    timed_out: bool = False
 
 
 def read_clipboard(
@@ -789,20 +1108,62 @@ def read_clipboard(
     if system == "darwin":
         # One spawn answers both shapes; see `_MACOS_CLIPBOARD_SCRIPT` for why
         # the spawn count is the latency here.
-        return _read_macos(max_bytes, deadline)
+        contents = _read_macos(max_bytes, deadline)
+        # A found payload is a SUCCESS even if the budget expired on the way
+        # out, so the flag is only attached to an empty-handed result. Reporting
+        # "the read timed out" beside an attached image would be a notice about
+        # a failure that did not happen.
+        if (
+            contents.image is None
+            and not contents.paths
+            and not contents.text
+            and not contents.text_too_large
+        ):
+            return replace(contents, timed_out=deadline.hit)
+        return contents
 
     image: ClipboardImage | None = None
+    text = ""
+    # Carries "the clipboard held text we refused as too large" back out of
+    # whichever backend ran, so an over-budget payload is reported as itself
+    # rather than as an empty clipboard (code round 2, F7).
+    oversized: list[bool] = []
     if system == "win32":
         image = _read_windows_image(max_bytes, deadline)
+        if image is None:
+            text = _read_windows_text(max_bytes, deadline, oversized)
     elif system.startswith("linux") or "bsd" in system:
         if source.get("WAYLAND_DISPLAY"):
-            image = _read_wayland_image(max_bytes, deadline)
+            # One call for both shapes: the compositor's type listing answers
+            # the image question and the text question together.
+            image, text = _read_wayland(max_bytes, deadline, oversized)
         elif source.get("DISPLAY"):
             image = _read_x11_image(max_bytes, deadline)
+            if image is None:
+                text = _read_x11_text(max_bytes, deadline, oversized)
         # A headless Linux box (a container, a bare tty) has no clipboard at
         # all, and shelling out to discover that costs a subprocess per paste.
+    # The text read is skipped when an image was found, so the common
+    # screenshot gesture does not pay for a second subprocess, and so the two
+    # fields keep the exclusivity `ClipboardContents` documents.
+    #
     # No file-URL shape off macOS: every other platform's file manager puts the
     # paths on the clipboard as text too, which the terminal already
     # bracket-pastes into the composer's existing path branch — a second route
-    # here would be a way for one copy to be attached twice.
-    return ClipboardContents(image=image)
+    # here would be a way for one copy to be attached twice. That text now
+    # arrives through the `text` field on Ctrl+V as well, where the composer's
+    # path branch parses it exactly as it parses a bracketed paste.
+    #
+    # `timed_out` only when the read came back EMPTY-HANDED: a wedged type read
+    # that still yielded an image is a success, and a notice claiming a timeout
+    # beside an attached image would describe a failure that did not happen.
+    empty_handed = image is None and not text
+    return ClipboardContents(
+        image=image,
+        text=text,
+        text_too_large=bool(oversized),
+        # `text_too_large` wins over `timed_out` when both are somehow set: the
+        # payload was found and named, which is a more specific answer than a
+        # budget that also expired.
+        timed_out=deadline.hit if empty_handed and not oversized else False,
+    )

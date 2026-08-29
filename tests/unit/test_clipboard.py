@@ -35,6 +35,7 @@ import pytest
 from local_operator import clipboard as clipboard_module
 from local_operator.clipboard import (
     CLIPBOARD_TIMEOUT_S,
+    MAX_CLIPBOARD_TEXT_BYTES,
     ClipboardImage,
     clipboard_reads_are_local,
     read_clipboard,
@@ -354,10 +355,37 @@ def test_wayland_lists_types_before_reading_one(monkeypatch, which_all) -> None:
     assert fake.calls[0][1] == "--list-types"
 
 
-def test_wayland_with_no_image_type_on_offer_reads_nothing(monkeypatch, which_all) -> None:
+def test_wayland_with_no_image_type_on_offer_reads_no_image(monkeypatch, which_all) -> None:
+    """No image type offered means no image, and no image read attempted.
+
+    The listing offers ``text/plain``, so exactly one FURTHER call is expected
+    and it is the text read that ``Ctrl+V`` needs \u2014 never a speculative
+    ``--type image/png`` for a type the compositor did not list. That
+    anti-speculation rule is the point of querying the listing at all, and it
+    is pinned on its own below for a clipboard offering nothing readable.
+    """
     fake = _install(monkeypatch, {"wl-paste": lambda argv, kwargs: b"text/plain\ntext/html\n"})
-    assert read_clipboard(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"}).image is None
-    assert len(fake.calls) == 1, "a listing with no image type must not be followed by a read"
+    contents = read_clipboard(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"})
+    assert contents.image is None
+    assert not any(
+        "image/" in " ".join(call) for call in fake.calls
+    ), "no image type was offered, so none may be requested"
+    assert [call for call in fake.calls[1:]] == [
+        ["wl-paste", "--no-newline", "--type", "text/plain"]
+    ], "the only follow-up read is for a type the compositor actually listed"
+
+
+def test_wayland_offering_nothing_readable_makes_exactly_one_call(monkeypatch, which_all) -> None:
+    """The whole reason the listing is queried first: a type that is not on
+    offer is never asked for, because ``wl-paste --type X`` on a clipboard with
+    no X both fails and, on some compositors, blocks while the offer is
+    negotiated. With neither an image nor a text type listed, the listing is
+    the only spawn.
+    """
+    fake = _install(monkeypatch, {"wl-paste": lambda argv, kwargs: b"application/x-thing\n"})
+    contents = read_clipboard(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"})
+    assert contents.image is None and contents.text == ""
+    assert len(fake.calls) == 1, "an unlisted type must never be read speculatively"
 
 
 def test_wayland_is_preferred_when_xwayland_also_sets_display(monkeypatch, which_all) -> None:
@@ -823,3 +851,303 @@ def test_a_descendant_holding_the_pipe_is_bounded_after_its_parent_exits() -> No
     time.sleep(0.3)
     leftover = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)
     assert leftover.stdout.strip() == "", f"descendant survived _run: {leftover.stdout!r}"
+
+
+# -- clipboard TEXT, on every platform ----------------------------------------
+#
+# Text is read because `Ctrl+V` is a SYSTEM paste: it is the reachable route
+# for issue #372 (the terminal sends nothing at all on Cmd+V with an image
+# pasteboard, so the composer's empty-paste branch never runs), and a system
+# paste that dropped the ordinary case would be a worse key than the one it
+# replaced. Every backend is driven through the same dispatch with an injected
+# platform, for the reason this file's docstring gives: the original bug was a
+# single-environment assumption, and a text shape that worked on macOS alone
+# would put one straight back.
+def test_macos_reads_clipboard_text_through_the_same_single_spawn(monkeypatch, which_all) -> None:
+    """One `osascript` spawn answers all three shapes. The spawn IS the
+    latency (2-4 s of wall time on a loaded machine), so asking text as a
+    second spawn would undo round 2's U3/U7 fix on the shape ctrl+v meets most
+    often."""
+
+    def osascript(argv, kwargs):
+        Path(argv[2]).write_bytes("hello clipboard".encode("utf-8"))
+        return b"text"
+
+    fake = _install(monkeypatch, {"osascript": osascript})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.text == "hello clipboard"
+    assert contents.image is None and contents.paths == ()
+    assert len(fake.calls) == 1, "text must not cost a second spawn"
+
+
+def test_macos_clipboard_text_survives_unicode_and_newlines(monkeypatch, which_all) -> None:
+    """Text goes through a FILE rather than osascript's stdout because the
+    result coercion normalises line endings and can re-encode. A multi-line
+    clipboard would otherwise come back altered — and would be
+    indistinguishable from the one-word verdicts the same channel carries."""
+    payload = "héllo — ünicode ✅\nline2\n\tindented"
+
+    def osascript(argv, kwargs):
+        Path(argv[2]).write_bytes(payload.encode("utf-8"))
+        return b"text"
+
+    _install(monkeypatch, {"osascript": osascript})
+    assert read_clipboard(BIG, platform="darwin", env={}).text == payload
+
+
+def test_an_image_wins_over_text_on_the_same_pasteboard(monkeypatch, which_all) -> None:
+    """The shapes are mutually exclusive, in the order image, paths, text.
+    A screenshot tool can leave both an image and a caption; the image is what
+    the user copied in the reported gesture."""
+
+    def osascript(argv, kwargs):
+        Path(argv[2]).write_bytes(PNG)
+        return b"image"
+
+    _install(monkeypatch, {"osascript": osascript})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.image == ClipboardImage(PNG, "image/png")
+    assert contents.text == "", "an image and text at once would attach AND type"
+
+
+def test_a_finder_copy_attaches_the_file_rather_than_typing_its_name(
+    monkeypatch, which_all
+) -> None:
+    """Finder's Cmd+C puts `public.file-url` AND the file's display name on the
+    pasteboard together, so a backend that asked for text before file URLs
+    would type a filename instead of attaching the file the user copied. The
+    script's own ordering is what prevents it."""
+    _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/a.png\x00"})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert list(contents.paths) == ["/tmp/a.png"]
+    assert contents.text == ""
+
+
+def test_x11_reads_clipboard_text(monkeypatch, which_all) -> None:
+    """`-t UTF8_STRING` rather than a bare `-o`: with no target xclip picks one
+    itself and can hand back a non-text flavor from a clipboard offering
+    several, which reaches the composer as mojibake."""
+    fake = _install(monkeypatch, {"xclip": lambda argv, kwargs: b"x11 text"})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text == "x11 text"
+    assert ["-t", "UTF8_STRING"] == fake.calls[-1][3:5]
+
+
+def test_x11_prefers_an_image_and_never_reads_text_after_finding_one(
+    monkeypatch, which_all
+) -> None:
+    """Skipping the text read when an image was found keeps the common
+    screenshot gesture at one subprocess and keeps the two fields exclusive."""
+    fake = _install(monkeypatch, {"xclip": lambda argv, kwargs: PNG})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.image is not None and contents.text == ""
+    assert not any("UTF8_STRING" in call for call in fake.calls)
+
+
+def test_wayland_reads_a_listed_text_type(monkeypatch, which_all) -> None:
+    """Only a type the compositor LISTED is read, text included."""
+
+    def wl_paste(argv, kwargs):
+        if "--list-types" in argv:
+            return b"text/plain;charset=utf-8\n"
+        return b"wayland text"
+
+    fake = _install(monkeypatch, {"wl-paste": wl_paste})
+    contents = read_clipboard(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"})
+    assert contents.text == "wayland text"
+    assert fake.calls[-1][-1] == "text/plain;charset=utf-8"
+
+
+def test_windows_reads_clipboard_text(monkeypatch, which_all) -> None:
+    """Stdout is safe for TEXT where it is not for image bytes: the output
+    encoding that corrupts binary is the right treatment for a string.
+
+    Windows is unit-tested only — there is no Windows host in this project's
+    environment — so this pins the invocation, not a real read."""
+    fake = _install(monkeypatch, {"pwsh": lambda argv, kwargs: b"windows text"})
+    contents = read_clipboard(BIG, platform="win32", env={})
+    assert contents.text == "windows text"
+    script = Path(fake.calls[-1][-1])
+    assert "-Raw" in clipboard_module._WINDOWS_TEXT_SCRIPT, (
+        "without -Raw, Get-Clipboard returns an ARRAY of lines that PowerShell "
+        "then re-joins with the host separator, altering a multi-line clipboard"
+    )
+    assert "-STA" in fake.calls[-1], "the Windows clipboard API is STA-only"
+    assert script.name.endswith(".ps1")
+
+
+def test_clipboard_text_that_is_not_valid_utf8_degrades_rather_than_raising(
+    monkeypatch, which_all
+) -> None:
+    """This runs on a keystroke. A clipboard holding bytes that are not valid
+    UTF-8 is a paste that should degrade, not an exception on the key that
+    pasted it."""
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: b"caf\xff\xfe"})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text.startswith("caf")
+
+
+def test_clipboard_text_over_the_ingest_ceiling_is_refused(monkeypatch, which_all) -> None:
+    """The clipboard is an untrusted-size source and this text is about to be
+    inserted into the composer's document. Over the bound reads as an empty
+    clipboard — the same collapse every other unusable case takes."""
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: b"x" * 64})
+    assert read_clipboard(16, platform="linux", env={"DISPLAY": ":0"}).text == ""
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_a_remote_session_reads_no_text_either(platform: str, monkeypatch, which_all) -> None:
+    """The SSH refusal is about confidentiality, and clipboard TEXT on the
+    server is exactly as much the user's private data as an image is."""
+    fake = _install(monkeypatch, {name: b"secret" for name in ("osascript", "xclip", "pwsh")})
+    contents = read_clipboard(
+        BIG, platform=platform, env={"SSH_CONNECTION": "1.2.3.4 22 5.6.7.8 22", "DISPLAY": ":0"}
+    )
+    assert contents.text == "" and contents.refused_remote is True
+    assert fake.calls == [], "a remote session must not spawn a clipboard tool at all"
+
+
+# -- a timeout is not an empty clipboard -------------------------------------
+def test_a_wedged_tool_reports_a_timeout_rather_than_an_empty_clipboard(
+    monkeypatch, which_all
+) -> None:
+    """The distinction the composer needs to word its notice honestly.
+
+    A backend returning `None` is ambiguous by design - "no image of that type"
+    and "the tool never answered" are the same value - and collapsing them told
+    a user holding a valid screenshot that their clipboard was empty. Measured
+    under CPU load at 8 failures in 10 reads (ux round 1, U3).
+    """
+
+    def wedged(argv, kwargs):
+        time.sleep(CLIPBOARD_TIMEOUT_S + 0.4)
+        return b""
+
+    _install(monkeypatch, {"osascript": wedged})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.image is None and contents.text == ""
+    assert contents.timed_out is True
+
+
+def test_a_clipboard_that_simply_has_nothing_is_not_reported_as_a_timeout(
+    monkeypatch, which_all
+) -> None:
+    """The other half: an empty clipboard answers promptly and truthfully, and
+    must not borrow the timeout's remedy ("try again") for a state a retry
+    cannot change."""
+    _install(monkeypatch, {"osascript": lambda argv, kwargs: b""})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.image is None and contents.text == ""
+    assert contents.timed_out is False
+
+
+def test_a_successful_read_is_never_flagged_as_timed_out(monkeypatch, which_all) -> None:
+    """A payload that arrived is a success even if a later cheap call expired.
+    A notice claiming a timeout beside an attached image would describe a
+    failure that did not happen."""
+
+    def osascript(argv, kwargs):
+        Path(argv[2]).write_bytes(PNG)
+        return b"image"
+
+    _install(monkeypatch, {"osascript": osascript})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.image is not None
+    assert contents.timed_out is False
+
+
+@pytest.mark.parametrize("platform,binary", [("linux", "xclip"), ("win32", "pwsh")])
+def test_the_timeout_flag_is_reported_off_macos_too(
+    platform: str, binary: str, monkeypatch, which_all
+) -> None:
+    """Every platform is a peer on this too: a timeout that only the macOS
+    backend could report would leave Linux and Windows users with the same
+    wrong diagnosis the flag exists to remove."""
+
+    def wedged(argv, kwargs):
+        time.sleep(CLIPBOARD_TIMEOUT_S + 0.4)
+        return b""
+
+    _install(monkeypatch, {binary: wedged})
+    contents = read_clipboard(BIG, platform=platform, env={"DISPLAY": ":0"})
+    assert contents.timed_out is True
+
+
+def test_over_budget_text_is_reported_as_too_large_not_as_an_empty_clipboard(
+    monkeypatch, which_all
+) -> None:
+    """Declining the payload is right; reporting it as an empty clipboard is not.
+
+    Over-budget text returned `""`, which is byte-identical to what an empty
+    clipboard returns, so a user who copied a 5 MB log and pressed ctrl+v was
+    told there was nothing to paste (code round 2, F7). That is the same
+    wrong-diagnosis class `timed_out` was added to eliminate, so it takes the
+    same shape: a flag the composer can word honestly.
+    """
+    oversized = b"x" * (MAX_CLIPBOARD_TEXT_BYTES + 1)
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: oversized})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text == "", "an over-budget payload must not reach the composer"
+    assert contents.text_too_large is True
+    assert contents.timed_out is False, "a refused payload is not a timeout"
+
+
+def test_a_genuinely_empty_clipboard_is_not_reported_as_too_large(monkeypatch, which_all) -> None:
+    """The other half: an empty clipboard must not borrow the oversized
+    remedy ("paste less"), which answers a problem it does not have."""
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: b""})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text == "" and contents.text_too_large is False
+
+
+@pytest.mark.parametrize(
+    "platform,env,binary",
+    [
+        ("darwin", {}, "osascript"),
+        ("linux", {"DISPLAY": ":0"}, "xclip"),
+        ("win32", {}, "pwsh"),
+    ],
+)
+def test_the_too_large_flag_is_reported_on_every_platform(
+    platform: str, env: dict[str, str], binary: str, monkeypatch, which_all, tmp_path
+) -> None:
+    """Every platform is a peer on this, the same as the timeout flag: a
+    refusal only one backend could report would leave the others with the
+    wrong diagnosis the flag exists to remove."""
+    oversized = b"y" * (MAX_CLIPBOARD_TEXT_BYTES + 1)
+
+    def answer(argv, kwargs):
+        if binary == "osascript":
+            # The macOS script writes its payload to the destination file and
+            # prints the verdict.
+            Path(argv[2]).write_bytes(oversized)
+            return b"text"
+        return oversized
+
+    _install(monkeypatch, {binary: answer})
+    contents = read_clipboard(BIG, platform=platform, env=env)
+    assert contents.text == ""
+    assert contents.text_too_large is True
+
+
+def test_clipboard_text_is_bounded_by_the_paste_budget_not_the_image_ceiling(
+    monkeypatch, which_all
+) -> None:
+    """Text has no downstream resize, so the 64 MB INGEST ceiling - which is
+    generous precisely because images get bounded later - is not a bound on
+    text at all.
+
+    Measured before the cap: a 5 MB text clipboard blocked the UI for 52 s on a
+    synchronous insert (code round 1, F3). The image ceiling stays where it is;
+    only text takes the smaller budget, because only text reaches the document
+    at its read size.
+    """
+    oversized = b"x" * (MAX_CLIPBOARD_TEXT_BYTES + 1)
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: oversized})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text == "", "text past the paste budget must not reach the composer"
+
+    at_limit = b"y" * MAX_CLIPBOARD_TEXT_BYTES
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: at_limit})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert len(contents.text) == MAX_CLIPBOARD_TEXT_BYTES, "the budget itself must fit"

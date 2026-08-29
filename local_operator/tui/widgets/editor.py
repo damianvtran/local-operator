@@ -97,6 +97,7 @@ import time
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from stat import S_ISREG
 from typing import Callable
@@ -141,6 +142,36 @@ from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 #: the refusal happens HERE, where it is one visible path in the composer the
 #: user can act on, rather than as a provider 400 mid-turn.
 MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+
+#: How long a clipboard read may run before the composer says it is working.
+#:
+#: Under this, the pause is short enough to read as key latency and a card
+#: would flicker through the shared notice slot on every paste. Over it, the
+#: composer is visibly unresponsive and owes the user an explanation: measured
+#: reads on a loaded machine are 1.3-2.0 s for an ordinary screenshot, against
+#: a 2.0 s hard ceiling (ux round 1, U3).
+#:
+#: 350 ms is above the ~100 ms threshold at which an interface stops feeling
+#: instant and below the fastest real read observed, so a healthy idle-machine
+#: paste (0.26 s) still says nothing at all.
+PASTE_READING_NOTICE_DELAY_S = 0.35
+
+#: How long the in-flight card stays up once raised, however fast the read then
+#: finishes.
+#:
+#: Without it a read landing just past the delay above shows the card for the
+#: few milliseconds between the timer firing and the read returning \u2014 measured
+#: at ~42 ms for reads near 400 ms (design round 2, D10). A card that appears
+#: and vanishes inside one frame reads as a glitch rather than as an
+#: explanation, which is worse than never showing it: the user cannot read it,
+#: but they do see something flicker.
+#:
+#: 400 ms is long enough for the card to be legible at a glance and short
+#: enough that it is gone before a user who pasted successfully looks away from
+#: their own text. It only ever DELAYS the retirement, never the paste itself:
+#: the marker or text lands the instant the read returns, and only the card
+#: lingers.
+PASTE_READING_NOTICE_MIN_S = 0.4
 
 #: A paste is treated as paths only if EVERY segment looks like one. Requiring
 #: a separator is what keeps prose out: "see screenshot.png" splits into two
@@ -476,6 +507,56 @@ class EditorCopyStale(Message):
         super().__init__()
 
 
+#: Name of the app hook the composer calls to raise and retire the in-flight
+#: read card. Looked up with ``getattr`` so a host without one (the widget
+#: tests, any embedder) simply has no progress card rather than an error.
+#:
+#: **THE TIMER MUST BE SET ON THIS WIDGET, AND THAT IS THE WHOLE POINT.**
+#: ``self.set_timer(...)`` here is load-bearing in a way the call site cannot
+#: show, so the mechanism is recorded here rather than left to be rediscovered.
+#:
+#: The first revision posted an ``EditorPasteReading`` message from the timer \u2014
+#: the idiom every other notice in this widget uses \u2014 and the card reached the
+#: screen 2-3 ms before the paste it was meant to narrate, at every read
+#: duration (2.018 s for a 2.0 s read, 5.020 s for a 5.0 s read; ux round 2,
+#: U3). Measured on this exact shape, with the read on a worker thread and the
+#: action awaiting it:
+#:
+#: =============================  ==========  ================================
+#: how the callback is scheduled  when it ran  against a 1.5 s read
+#: =============================  ==========  ================================
+#: ``self.set_timer``             0.153 s      DURING the read  <- what we use
+#: ``self.post_message``          1.510 s      after the read
+#: ``self.app.call_next``         1.510 s      after the read
+#: ``self.app.set_timer``         1.510 s      after the read
+#: =============================  ==========  ================================
+#:
+#: So it is NOT that "the Editor's pump is blocked and the App's is free", and
+#: it is NOT a direct call: ``MessagePump.set_timer`` wraps every callback in
+#: ``partial(self.call_next, callback)``, so this is a ``call_next`` on the
+#: EDITOR's pump. ``call_next`` queues onto ``_next_callbacks``, which is
+#: flushed by ``_flush_next_callbacks`` after each dispatched message rather
+#: than through the message queue \u2014 and the Editor is the pump whose flush
+#: still runs while this action is suspended. The App's does not, which is why
+#: ``self.app.set_timer`` and ``self.app.call_next`` both land late; a message
+#: posted to THIS widget is late too, because messages take the queue and the
+#: queue is what the awaited handler is holding.
+#:
+#: The practical consequence, stated plainly because it is the thing a future
+#: reader will get wrong: **"simplify" this to ``self.app.set_timer`` and U3
+#: returns exactly**, with every test still passing except
+#: ``test_the_reading_card_is_on_screen_while_the_read_is_still_running``. The
+#: event loop is fine throughout \u2014 timers keep firing \u2014 so the card is
+#: verifiably on screen at 0.4 s, 0.7 s and 1.0 s of a 1.3 s read.
+#:
+#: This rests on Textual internals (``set_timer`` \u2192 ``call_next``, and where
+#: ``_flush_next_callbacks`` is driven from) that are not part of its public
+#: contract, so it is pinned by a test that asserts VISIBILITY DURING the
+#: stall rather than delivery, and would fail if a future Textual changed the
+#: scheduling (code round 3, F8).
+PASTE_READING_HOOK = "show_clipboard_reading_notice"
+
+
 class EditorPasteAttached(Message):
     """Posted when a clipboard paste DID attach an image.
 
@@ -538,9 +619,43 @@ class EditorPasteEmpty(Message):
       rule) and so does the advice that would help (round 2, D10).
     * ``"remote"`` — the read was refused because the session is remote. Not a
       statement about the clipboard at all.
+    * ``"too_large"`` — the clipboard held TEXT past the paste budget. Declined
+      rather than truncated, because a silently shortened paste is damage the
+      user cannot see until they read back what they sent; named rather than
+      collapsed into ``"nothing"``, because the clipboard was not empty (code
+      round 2, F7).
+    * ``"timeout"`` — the clipboard did not answer inside
+      :data:`~local_operator.clipboard.CLIPBOARD_TIMEOUT_S`. Also not a
+      statement about what was on it. Split out of ``"nothing"`` because the
+      collapse was actively misleading on the shape users hit most: under CPU
+      load 8 of 10 reads timed out, and every one told a user holding a valid
+      screenshot that their clipboard was empty (ux round 1, U3). A retry is
+      the move that helps here and the move that cannot help there, so one
+      sentence could not serve both.
 
     The app owns the wording, the same way :class:`EditorCopyStale` leaves the
     card to the app; this only says which of the three happened.
+
+    THIS NOTICE IS NOT A DISCOVERY SURFACE, and an earlier revision's attempt
+    to make it one is recorded here because the reasoning looks right and is
+    not. It carried a ``suggest_system_paste`` flag that appended "Try
+    ctrl+v." on the empty-paste route only, on the argument that telling a user
+    who just pressed ``Ctrl+V`` to press ``Ctrl+V`` reads as the app missing
+    the key. The flag was unsalvageable in both directions (design/ux round 1,
+    D1/U1):
+
+    * The route it fired on requires a bare ``ESC[200~ ESC[201~``, which only
+      cmux and multiplexers send \u2014 and there ``Cmd+V`` already works, so the
+      hint reached exactly the users who did not need it.
+    * The route where a user IS stranded delivers zero bytes, so no ``Paste``
+      event exists and no notice of any kind can be raised.
+    * Even on the route it did fire on, ``reason="nothing"`` means the
+      clipboard held nothing attachable \u2014 so ``Ctrl+V`` would return the same
+      empty answer. The advice could not have helped even where it appeared.
+
+    ``ctrl+v`` is taught ambiently instead, by
+    :data:`~local_operator.tui.widgets.welcome.TIPS` and ``/help``, which do
+    not depend on an event the terminal never sends.
     """
 
     def __init__(self, reason: str = "nothing") -> None:
@@ -712,6 +827,38 @@ class ArgumentHighlightChanged(Message):
 #: view is open and has to be able to put this one back.
 DEFAULT_PLACEHOLDER = "Message Local Operator…"
 
+#: The resting placeholder with the paste key named, shown until the user has
+#: pasted something with it once.
+#:
+#: THE ONLY AFFORDANCE THAT REACHES THE STRANDED USER. The reported journey is
+#: mid-session: the user has been working, takes a screenshot, presses `Cmd+V`
+#: and gets a beep. The terminal delivers ZERO bytes for that gesture (see
+#: :mod:`local_operator.clipboard`), so no app code runs and no reactive notice
+#: is possible — the affordance has to be something already on screen. Every
+#: other surface fails that test:
+#:
+#: * ``welcome.TIPS`` — `WelcomeView.display` goes False on the first prompt,
+#:   so it is absent mid-session by construction. Measured on the splash it is
+#:   also weak: median 84 s to first sighting, P(seen within 30 s) = 0.18, and
+#:   0% for a user who types straight away. With animation disabled
+#:   `_sync_tip_timer` creates no timer at all and the row holds at `TIPS[0]`
+#:   forever, so those users never meet it (design/ux round 2, D9/U1).
+#: * ``welcome.HINTS`` — static, so it survives the animation gate, but still
+#:   splash-only AND a fourth row costs the splash a terminal row, which the
+#:   height ladder spends on the logo.
+#: * ``/help`` — a reference for someone who already suspects the key exists,
+#:   not a discovery path.
+#:
+#: The composer placeholder is visible in exactly the state a user is in when
+#: they reach for a paste: mid-session, composer empty, about to type. It costs
+#: no layout (the row is already painted) and no width tier.
+#:
+#: RETIRED ON FIRST USE, which is what keeps it from being nag copy. Once the
+#: user has pasted with `ctrl+v` the key is learned and the placeholder returns
+#: to :data:`DEFAULT_PLACEHOLDER` for the rest of the session. It teaches once
+#: and then gets out of the way.
+PASTE_HINT_PLACEHOLDER = "Message Local Operator…  ctrl+v pastes an image"
+
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
 #: being ignored is how to get a composer that accepts them.
@@ -768,11 +915,40 @@ class Editor(TextArea):
     #: because a ``Binding`` fires through the action system and never enters
     #: ``_on_key`` — which is exactly how a previous revision destroyed a typed
     #: slash command (code round 2 F5, ux round 2 U6). See that table.
+    #: ``ctrl+v`` is THE clipboard paste in this composer, and it OVERRIDES
+    #: ``TextArea``'s own ``ctrl+v`` → ``action_paste`` rather than sitting
+    #: beside it. Two separate facts make this binding the whole fix for
+    #: issue #372 outside cmux, and both were measured rather than assumed:
+    #:
+    #: 1. **``Cmd+V`` cannot be hooked.** With an image-only pasteboard,
+    #:    Terminal.app and Ghostty deliver ZERO bytes on ``Cmd+V`` and beep.
+    #:    Not an empty bracketed paste — nothing at all, captured with a
+    #:    raw-mode PTY probe. No bytes means no ``Paste`` event, so any
+    #:    handler keyed on the keystroke is unreachable. ``Ctrl+V`` delivers
+    #:    ``\x16`` on both terminals, so it is the only key a TUI can use for
+    #:    this. See :mod:`local_operator.clipboard` for the byte table.
+    #: 2. **Textual's ``ctrl+v`` pastes the WRONG buffer.**
+    #:    ``TextArea.action_paste`` inserts ``App.clipboard``, Textual's
+    #:    INTERNAL buffer, which a copy made in any other application never
+    #:    fills. Left in place it makes ``Ctrl+V`` a key that silently does
+    #:    nothing on exactly the gesture a user means by it.
+    #:
+    #: Overriding works because Textual RESOLVES A KEY TO THE MOST DERIVED
+    #: BINDING even though it merges the tables: verified against textual
+    #: 8.2.8 by inspecting the resolved binding map (``ctrl+v`` maps to this
+    #: action alone) and by pressing the key in a pilot (``action_paste`` does
+    #: not run). That is the opposite of the ``alt+left`` note above, where
+    #: merging was the point — same mechanism, different consequence, because
+    #: here the keys collide.
+    #:
+    #: ``show=False`` to match every other binding in this app; the key is
+    #: taught in ``/help`` and in the paste notice instead.
     BINDINGS = [
         Binding("alt+left", "cursor_word_left", "Cursor word left", show=False),
         Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", "Select word left", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", "Select word right", show=False),
+        Binding("ctrl+v", "system_paste", "Paste from the system clipboard", show=False),
     ]
 
     #: The CSI-modifier spelling of every vertical option chord, mapped to the
@@ -900,7 +1076,7 @@ class Editor(TextArea):
 
     def __init__(
         self,
-        placeholder: str = DEFAULT_PLACEHOLDER,
+        placeholder: str = PASTE_HINT_PLACEHOLDER,
         commands: list[SlashCommand] | None = None,
     ) -> None:
         # Built BEFORE super().__init__: TextArea's constructor loads its
@@ -1097,6 +1273,12 @@ class Editor(TextArea):
         #: the near-miss pair described in `_on_click`. Only ever read to decide
         #: whether two singles were one gesture; it never makes a selection.
         self._single_click_at: tuple[float, Offset] | None = None
+        #: Whether `ctrl+v` has successfully pasted in this session, which is
+        #: what retires the placeholder that teaches it. Set once and never
+        #: cleared: the key is learned, and re-teaching it after the composer
+        #: happens to pass through another mode would make a one-time
+        #: affordance into recurring nag copy. See `PASTE_HINT_PLACEHOLDER`.
+        self._paste_hint_used = False
         #: Bang-mode: Enter runs a local shell command instead of sending a
         #: prompt. Owned here because it is a property of the COMPOSER (the
         #: same way the slash picker is), not of the app: the key that enters
@@ -1566,7 +1748,7 @@ class Editor(TextArea):
         if self._shell_mode == active:
             return
         self._shell_mode = active
-        self.placeholder = SHELL_PLACEHOLDER if active else DEFAULT_PLACEHOLDER
+        self.placeholder = SHELL_PLACEHOLDER if active else self.resting_placeholder
         self.post_message(ShellModeChanged(active))
 
     def set_allows_shell(self, allowed: bool) -> None:
@@ -3466,6 +3648,20 @@ class Editor(TextArea):
         self._copied = True
         self.post_message(EditorCopied(text))
 
+    @property
+    def resting_placeholder(self) -> str:
+        """The placeholder for a composer in no special mode.
+
+        THE ONE AUTHORITY on that question, because there are now two answers.
+        Until the user has pasted with `ctrl+v` the resting copy names the key
+        (:data:`PASTE_HINT_PLACEHOLDER`); afterwards it is the plain
+        :data:`DEFAULT_PLACEHOLDER`. Every caller that returns the composer to
+        rest — leaving bang-mode, closing the aside, handing the composer back
+        from the subagent page — has to ask rather than assume, or it silently
+        retires a hint the user has not used yet.
+        """
+        return DEFAULT_PLACEHOLDER if self._paste_hint_used else PASTE_HINT_PLACEHOLDER
+
     def watch_selection(self, selection: Selection) -> None:
         """Retire the copy receipt's GESTURE claim when the highlight changes.
 
@@ -3547,18 +3743,25 @@ class Editor(TextArea):
         the gap below stayed invisible: cmux is where this code was developed,
         so ``Cmd+V`` on a screenshot appeared to work everywhere.
 
-        **An EMPTY paste, meaning the bytes are on the clipboard.** No other
-        emulator synthesises a path — Ghostty, Terminal.app and iTerm2 all
-        paste text only. So a native macOS screenshot
-        (``Cmd+Shift+Ctrl+4``) put PNG bytes on the pasteboard, the terminal
-        had no text to send, and this handler received ``Paste("")``: a
-        keystroke that inserted an empty string and was indistinguishable from
-        a dead key (issue #372). Textual delivers that event for real
-        (``XTermParser`` yields ``Paste(text='')`` for a bare
-        ``ESC[200~ ESC[201~``), so it is a usable hook, and
-        :meth:`_attach_clipboard_image` reads the clipboard itself. Finder's
-        ``Cmd+C`` arrives the same way — it puts only a ``public.file-url``
-        flavor on the pasteboard, with no text and no image bytes — and is
+        **An EMPTY paste.** Kept as belt and braces, NOT as the fix it was
+        once claimed to be. The original reasoning here — that a textless
+        pasteboard makes the terminal send a bare ``ESC[200~ ESC[201~``, which
+        Textual's ``XTermParser`` turns into ``Paste(text='')`` — is false
+        about the terminal, and the parser half of it is true but irrelevant.
+        MEASURED with a raw-mode PTY probe: with a PNG on the pasteboard,
+        Terminal.app and Ghostty deliver **zero bytes** on ``Cmd+V`` and beep.
+        No bytes, no ``Paste`` event, so this branch never ran on the emulators
+        it was written for and issue #372 stayed open. The reachable route is
+        ``Ctrl+V`` -> :meth:`action_system_paste`; see this class's
+        ``BINDINGS`` and :mod:`local_operator.clipboard` for the byte table.
+
+        This branch survives because a host that DOES synthesise an empty paste
+        (a multiplexer, a helper bracketing an empty selection) still reaches
+        the clipboard through it, it costs nothing when nothing sends one, and
+        deleting it would drop a working route on the strength of two
+        emulators' behaviour — the exact single-environment reasoning that
+        caused the original bug. Finder's ``Cmd+C`` is handled on both routes
+        alike: it puts a ``public.file-url`` flavor on the pasteboard and is
         routed back into the path branch.
 
         Anything that is not a readable image path is left alone: this returns
@@ -3631,15 +3834,32 @@ class Editor(TextArea):
         self.post_message(EditorPasteAttached())
         self.insert(attached)
 
-    async def _attach_clipboard_image(self) -> str | None:
-        """The empty-paste branch: read the clipboard and attach what is there.
+    async def _attach_clipboard_image(self, *, allow_text: bool = False) -> str | None:
+        """Read the clipboard and attach (or insert) whatever is on it.
 
-        Two shapes, tried in the order they are likely. IMAGE BYTES first, the
-        reported case — a screenshot on the pasteboard with no text for the
-        terminal to send. Then FILE URLS, which is Finder's ``Cmd+C``: also a
-        textless pasteboard, routed into :meth:`_attach_pasted_images` so a
+        Shared by both callers: the empty-paste branch above, and
+        :meth:`action_system_paste`, which is the one that actually fires
+        outside cmux. ONE implementation deliberately — the two routes must
+        produce byte for byte the same marker, the same bounds and the same
+        notices, and the original bug was precisely a second route behaving
+        differently from the one that got tested.
+
+        Shapes, tried in the order they are likely. IMAGE BYTES first, the
+        reported case — a screenshot on the pasteboard. Then FILE URLS, which
+        is Finder's ``Cmd+C``, routed into :meth:`_attach_pasted_images` so a
         copied file behaves exactly like the same file dragged in, down to the
         all-or-nothing rule for a multi-file selection.
+
+        ``allow_text`` is what separates the two callers, and the difference is
+        not cosmetic. The empty-paste branch is reached only for a payload the
+        TERMINAL sent, so inserting clipboard text there would type characters
+        the terminal never delivered. A ``Ctrl+V`` is the user asking for the
+        system clipboard by name, and text is the ordinary thing on it —
+        declining to insert it would leave the key silently useless in the
+        common case, which is the defect Textual's own ``ctrl+v`` already has
+        here (it pastes ``App.clipboard``, a buffer nothing outside the app
+        writes). Off by default so the narrower caller cannot acquire the
+        broader behaviour by accident.
 
         The read runs in a thread for the same reason the decode does: it
         shells out to ``osascript``/``wl-paste``/``xclip``/PowerShell, and this
@@ -3667,13 +3887,82 @@ class Editor(TextArea):
         carries the outcomes the app can honestly name \u2014 see
         :class:`EditorPasteEmpty`.
 
-        Reached ONLY for the terminal's genuinely empty payload. Whitespace the
-        user copied is handled by the caller and never gets here, so every
-        outcome below belongs to a keypress that would otherwise produce no
-        visible response at all \u2014 which is what makes a notice right here and
-        noise anywhere else.
+        Every outcome below belongs to a keypress that would otherwise produce
+        no visible response at all \u2014 an empty payload the terminal sent, or a
+        ``Ctrl+V`` that found nothing to insert \u2014 which is what makes a notice
+        right here and noise anywhere else. Whitespace the user copied is
+        handled by :meth:`_on_paste` and never reaches this method.
         """
-        contents = await asyncio.to_thread(read_clipboard)
+        # ACKNOWLEDGE A SLOW READ. The await below holds this widget's input
+        # until the clipboard answers, so a read that outlives
+        # `PASTE_READING_NOTICE_DELAY_S` gets a card explaining the pause
+        # rather than leaving the composer looking hung (ux round 1, U3).
+        #
+        # `self.set_timer` and NOT `self.app.set_timer`: the timer has to be
+        # set on THIS widget, whose `call_next` queue is still flushed while
+        # this action is suspended. The App's is not, and neither is a message
+        # posted to this widget. See `PASTE_READING_HOOK` for the measured
+        # table and why the obvious simplification reintroduces U3.
+        #
+        # A timer rather than an unconditional call, because the fast read is
+        # the common one and a card that appears and vanishes on every paste is
+        # worse than the pause it explains. `set_timer` is stopped in the
+        # `finally`, so a read that beats the delay never raises anything.
+        notice: Callable[[bool], None] | None = getattr(self.app, PASTE_READING_HOOK, None)
+        raised = False
+        raised_at = 0.0
+        reading_notice = None
+
+        def _raise_reading_notice(show: Callable[[bool], None]) -> None:
+            # Nonlocal rather than a return value: a timer callback's result
+            # goes nowhere, and the `finally` below has to know whether there
+            # is a card to retire. Retiring one that was never raised would
+            # withdraw whatever else happens to hold the shared slot.
+            nonlocal raised, raised_at
+            raised = True
+            raised_at = time.monotonic()
+            show(True)
+
+        if notice is not None:
+            # `notice` is bound as an argument rather than closed over, so the
+            # narrowing this branch establishes survives into the callback.
+            reading_notice = self.set_timer(
+                PASTE_READING_NOTICE_DELAY_S, partial(_raise_reading_notice, notice)
+            )
+        try:
+            contents = await asyncio.to_thread(read_clipboard)
+        finally:
+            if reading_notice is not None:
+                reading_notice.stop()
+            if raised and notice is not None:
+                # RETIRED HERE, on every outcome, rather than by each branch
+                # below. The text branch posts no `EditorPasteAttached` (it
+                # attaches nothing to falsify a failure claim) and so left the
+                # progress card sitting over a completed paste for its full 5 s
+                # on the most common ctrl+v shape there is (design round 2,
+                # D7). A progress card is retired by ANY outcome, not only by
+                # outcomes that contradict it, so the retirement belongs on the
+                # one path every outcome passes through.
+                #
+                # Held for `PASTE_READING_NOTICE_MIN_S` from when it was
+                # RAISED, so a read that finishes just past the delay does not
+                # flash the card for a few milliseconds (D10). Scheduled rather
+                # than slept: the paste must land now, and only the card waits.
+                #
+                # SAFE ONLY BECAUSE THE TWO CARDS HAVE DIFFERENT OWNERS. This
+                # retirement is a `Toast.withdraw`, which matches on owner and
+                # fires late by construction — after an outcome has already
+                # replaced the progress card with its own notice. While they
+                # shared an owner it destroyed that notice for reads landing in
+                # `[DELAY, DELAY + MIN)`, showing the failure card for 0 ms at a
+                # 0.74 s read: a keypress with a visible pause and no response,
+                # which is issue #372's own symptom (design round 3, D14).
+                # `self.set_timer` for the same pump reason as above.
+                shown_for = time.monotonic() - raised_at
+                if shown_for >= PASTE_READING_NOTICE_MIN_S:
+                    notice(False)
+                else:
+                    self.set_timer(PASTE_READING_NOTICE_MIN_S - shown_for, lambda: notice(False))
         if contents.image is not None:
             markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:
@@ -3705,10 +3994,105 @@ class Editor(TextArea):
             # this branch just tried (round 2, D10).
             self.post_message(EditorPasteEmpty(reason="unreadable"))
             return None
-        self.post_message(
-            EditorPasteEmpty(reason="remote" if contents.refused_remote else "nothing")
-        )
+        if allow_text and contents.text:
+            # Returned as the "attached" string so the caller inserts it the
+            # same way it inserts markers: one insertion point for every
+            # clipboard shape, rather than a second `insert` call that could
+            # drift on selection-replacement semantics.
+            #
+            # No `EditorPasteAttached` here. That message exists to retire a
+            # notice claiming an IMAGE could not be attached, and pasting text
+            # does not falsify such a claim \u2014 the image the user was told about
+            # is still unattached.
+            return contents.text
+        if contents.refused_remote:
+            reason = "remote"
+        elif contents.text_too_large:
+            # Checked before "nothing" for the same reason as the timeout: the
+            # clipboard was NOT empty, it held text the composer declined, and
+            # reporting an empty clipboard sent a user who had copied several
+            # megabytes looking for a clipboard problem they did not have
+            # (code round 2, F7).
+            reason = "too_large"
+        elif contents.timed_out:
+            # Checked BEFORE "nothing": a read that never finished cannot
+            # report what was on the clipboard, and saying it was empty is a
+            # claim about a question that was never answered (U3).
+            reason = "timeout"
+        else:
+            reason = "nothing"
+        self.post_message(EditorPasteEmpty(reason=reason))
         return None
+
+    async def action_system_paste(self) -> None:
+        """``Ctrl+V``: paste what is on the SYSTEM clipboard.
+
+        The reachable half of issue #372, and the reason this action exists
+        rather than the composer relying on ``Cmd+V``: the terminal swallows
+        ``Cmd+V`` and, with an image on the pasteboard, sends the app NOTHING
+        at all (measured \u2014 see this class's ``BINDINGS`` for the byte table).
+        ``Ctrl+V`` is the only paste keystroke a TUI can observe, so it is the
+        only place this can live. **Do not "simplify" this back onto the paste
+        event**; that is the shape that shipped broken.
+
+        It REPLACES ``TextArea.action_paste``, which inserts ``App.clipboard``
+        \u2014 Textual's internal buffer, written by this app's own copy gestures
+        and by nothing else. On the gesture a user means by ``Ctrl+V`` (copy in
+        a browser, paste here) the inherited action inserts nothing whatsoever,
+        so reading the system clipboard is strictly more correct for every
+        shape, text included.
+
+        The read is threaded and bounded by :meth:`_attach_clipboard_image`,
+        and so are the notices, so ``Ctrl+V`` and an empty bracketed paste
+        report an unusable clipboard identically.
+
+        ``read_only`` is honoured because the base action honours it: this is a
+        keyboard edit, and a read-only composer must not become writable just
+        because the key was rebound.
+
+        **A live selection is REPLACED, not inserted into.** "Select the thing
+        you want to swap out, then paste over it" is universal text-editing
+        behaviour; it is what `Cmd+V` does through ``TextArea._on_paste`` and
+        what stock ``TextArea.action_paste`` does. An earlier revision called
+        ``insert`` here on the argument that one insertion point for every
+        clipboard shape avoids drift on selection-replacement semantics — but
+        ``insert`` is the branch that does NOT replace, so that reasoning
+        picked the drift instead of avoiding it and shipped a paste that
+        corrupts the buffer: selecting `WORD` and pasting `NEW` gave
+        `keep WORDNEW keep` against `keep NEW keep` on every other route
+        (ux round 1, U2 — reproduced before fixing, both the text and the
+        image shape).
+
+        ``_replace_via_keyboard`` is the exact call the base class's own paste
+        makes, so this route now shares its semantics rather than approximating
+        them: an empty selection degenerates to an insert at the caret, which
+        is why one call serves both cases.
+        """
+        if self.read_only:
+            return
+        pasted = await self._attach_clipboard_image(allow_text=True)
+        if pasted is None:
+            # Nothing usable was found. `_attach_clipboard_image` has already
+            # posted the notice that says so, and inserting nothing is the
+            # honest outcome.
+            return
+        # `move_cursor` to the edit's end mirrors `TextArea._on_paste`: without
+        # it `maintain_selection_offset=False` leaves the caret where the
+        # replaced range began, so the next keystroke types BEFORE the text
+        # just pasted.
+        result = self._replace_via_keyboard(pasted, *self.selection)
+        if result is not None:
+            self.move_cursor(result.end_location)
+        # THE HINT HAS DONE ITS JOB. `PASTE_HINT_PLACEHOLDER` names this key
+        # because nothing else on screen can (the terminal swallows `Cmd+V`
+        # whole), and a user who has now pasted with it does not need telling
+        # again — leaving it up would turn a one-time affordance into standing
+        # nag copy. Only the RESTING placeholder is replaced: a mode that owns
+        # the composer (bang-mode, the aside, read-only) is showing its own
+        # voice and must not have it overwritten by this.
+        self._paste_hint_used = True
+        if self.placeholder == PASTE_HINT_PLACEHOLDER:
+            self.placeholder = self.resting_placeholder
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.
