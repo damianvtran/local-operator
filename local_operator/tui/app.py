@@ -14161,6 +14161,14 @@ class OperatorApp(App[None]):
                 f"/mcp {'|'.join(self.MCP_SUBCOMMANDS)} <name>",
                 style="warning",
             )
+        # Same fixed-arity refusal the local handler applies, kept in step so a
+        # follower and an owner answer one command identically.
+        if sub == "list" and len(parts) > 1:
+            return SlashResult(
+                kind="notice",
+                text=f"/mcp list takes no arguments — got {' '.join(parts[1:])!r}",
+                style="warning",
+            )
         if sub == "list":
             # Same canonical-local answer bare ``/mcp`` gets: the listing is
             # data the invoker renders from its own snapshot facade.
@@ -14177,6 +14185,12 @@ class OperatorApp(App[None]):
             return SlashResult(kind="notice", text=text, style=_slash_style(kind))
         if len(parts) < 2:
             return SlashResult(kind="notice", text=f"usage: /mcp {sub} <name>", style="warning")
+        if len(parts) > 2:
+            return SlashResult(
+                kind="notice",
+                text=f"/mcp {sub} takes one server name — got {' '.join(parts[1:])!r}",
+                style="warning",
+            )
         if sub == "remove":
             text, kind = self._mcp_remove_result(parts[1])
             return SlashResult(kind="notice", text=text, style=_slash_style(kind))
@@ -14498,6 +14512,17 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        # Trailing tokens are REFUSED rather than dropped, for every verb whose
+        # argument count is fixed. `add` does this already for a url with extra
+        # tokens; silently ignoring the tail elsewhere is the same class of
+        # mistake this command exists to avoid — acting on something other than
+        # what the user described. It matters most on `remove`, where the
+        # ignored token could be the name they actually meant to delete.
+        if sub == "list" and len(parts) > 1:
+            self._system_notice(
+                f"/mcp list takes no arguments — got {' '.join(parts[1:])!r}", "warning"
+            )
+            return
         if sub == "list":
             # An explicit alias for bare ``/mcp``, routed through the SAME
             # block builder rather than a second listing: two renderers for one
@@ -14513,6 +14538,12 @@ class OperatorApp(App[None]):
             return
         if len(parts) < 2:
             self._system_notice(f"usage: /mcp {sub} <name>", "warning")
+            return
+        if len(parts) > 2:
+            # login/logout/reauth/remove all take exactly one name.
+            self._system_notice(
+                f"/mcp {sub} takes one server name — got {' '.join(parts[1:])!r}", "warning"
+            )
             return
         if sub == "remove":
             self._cmd_mcp_remove(parts[1])
@@ -14573,7 +14604,12 @@ class OperatorApp(App[None]):
         grammar cannot be told apart from a command argument, and the CLI's
         explicit ``--env`` flag already covers it.
         """
-        from local_operator.mcp.config import MCPConfigWriteError, add_server
+        from local_operator.mcp.config import (
+            MCPConfigWriteError,
+            add_server,
+            load_all_mcp_configs,
+            owned_scope_for_source,
+        )
 
         if len(tokens) < 2:
             return (
@@ -14582,6 +14618,50 @@ class OperatorApp(App[None]):
             )
         name, target, *rest = tokens
         is_url = target.startswith(("http://", "https://"))
+        cwd = os.getcwd()
+        # ``remove`` refuses to touch a server it does not own; ``add`` is the
+        # mirror operation and has to answer the same question, or the two
+        # verbs disagree about one invariant. What the answer IS depends on
+        # priority, so the two cases are reported differently rather than
+        # collapsed into one refusal:
+        #
+        #   * The existing definition OUTRANKS the global file we write (a
+        #     project ``.local-operator/mcp.json`` or ``.mcp.json``). The write
+        #     lands and changes nothing the user can observe — they keep
+        #     getting the old server. Refused, because a success receipt for a
+        #     write with no effect is a receipt that lies, and that is worse
+        #     than the shadowing case below.
+        #   * The existing definition ranks BELOW it (an imported foreign
+        #     config). Our entry would win and silently repoint a server the
+        #     user still maintains in Claude Code or Cursor — exactly what
+        #     ``_mcp_remove_result`` refuses to cause from the other side.
+        #     Refused too, naming the file and the tool, so the user can
+        #     change it where it lives or pick another name.
+        try:
+            existing = load_all_mcp_configs(cwd)[1].get(name)
+        except Exception:  # noqa: BLE001 — an unreadable config is reported by the write
+            existing = None
+        if existing is not None:
+            # Priority FIRST: `<cwd>/.mcp.json` is both unowned and
+            # higher-priority, and "your write would not take effect" is the
+            # more useful thing to say about it than "you would shadow it" —
+            # which would also be false.
+            if _outranks_global_mcp_scope(existing, cwd):
+                return (
+                    f"{name!r} is already defined in {_home_relative(str(existing))}, "
+                    f"which takes priority over the global config /mcp add writes.\n"
+                    f"Adding it here would have no effect. Edit that file, or remove "
+                    f"the entry there first.",
+                    "warning",
+                )
+            if owned_scope_for_source(existing, cwd) is None:
+                return (
+                    f"{name!r} is already defined in {_home_relative(str(existing))} "
+                    f"({_foreign_config_origin(existing)}).\nAdding it here would "
+                    f"shadow that entry rather than update it. Change it there, or "
+                    f"pick another name.",
+                    "warning",
+                )
         try:
             if is_url:
                 if rest:
@@ -14601,10 +14681,20 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a failed write is a notice, not a crash
             return (f"could not add MCP server {name!r}: {exc}", "error")
         self._reconnect_mcp_after_config_change()
-        # An http server added without auth is the common half-done case: the
-        # user's next question is "why is it not connecting", and the answer is
-        # a verb they may not know applies here.
-        hint = f" — /mcp login {name} if it needs OAuth" if is_url else ""
+        # An http server added without auth is the common half-done case, so
+        # the receipt still points at the next step — but it must point at one
+        # that WORKS. `/mcp login` was wrong: this command deliberately writes
+        # no `auth` block, and `_resolve_mcp_server` refuses any server whose
+        # `auth.type` is not `oauth`, so the suggestion failed for every server
+        # this command can create. The CLI's `--oauth` flag is the only path
+        # that writes the block, so name that instead. Inferring OAuth from the
+        # URL remains ruled out: real configs carry non-OAuth http servers, and
+        # guessing would silently change how a server authenticates.
+        hint = (
+            f" — needs OAuth? re-add it with: lop mcp add {name} --url {target} --oauth"
+            if is_url
+            else ""
+        )
         return (f"added MCP server {name!r} to {_home_relative(str(path))}{hint}", "success")
 
     def _cmd_mcp_add(self, tokens: list[str]) -> None:
@@ -16924,6 +17014,33 @@ _FOREIGN_MCP_CONFIGS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+def _outranks_global_mcp_scope(source: str | os.PathLike[str], cwd: str) -> bool:
+    """Whether ``source`` beats the GLOBAL mcp.json in the merge order.
+
+    ``/mcp add`` always writes the global file, and ``load_all_mcp_configs``
+    resolves a name first-source-wins in a fixed priority order. Anything ahead
+    of the global file therefore keeps defining the server after our write, so
+    the add is a no-op the user cannot see. This answers "would the write be
+    observable", which is a different question from "do we own the file" — a
+    project ``.local-operator/mcp.json`` is ours to write AND outranks us.
+
+    Resolved paths on both sides, for the reason ``owned_scope_for_source``
+    resolves: a symlinked home or a ``/private/var`` prefix must not decide it.
+    """
+    from pathlib import Path
+
+    root = Path(cwd).expanduser()
+    ahead_of_global = (
+        root / ".local-operator" / "mcp.json",
+        root / ".mcp.json",
+    )
+    try:
+        resolved = Path(source).expanduser().resolve()
+        return any(candidate.expanduser().resolve() == resolved for candidate in ahead_of_global)
+    except OSError:
+        return False
+
+
 def _foreign_config_origin(source: str | None) -> str:
     """Name the tool that owns ``source``, for the ``/mcp remove`` refusal."""
     # Function-local import: this module keeps `pathlib` off its import path
@@ -16962,6 +17079,19 @@ def _home_relative(path: str) -> str:
     left absolute, because there is no shorter honest rendering of it.
     """
     home = os.path.expanduser("~")
-    if home in ("", "/") or not path.startswith(home + os.sep):
+    if home in ("", "/"):
         return path
-    return "~" + path[len(home) :]
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    # A path that came from `Path.resolve()` can disagree with `$HOME` purely
+    # by symlink — macOS hands out `/private/var/…` for a `/var/…` home — so a
+    # prefix test on the raw strings leaves an under-home path rendered in
+    # full. Retry against the resolved home before giving up; still absolute
+    # for anything genuinely outside the home tree.
+    try:
+        resolved_home = os.path.realpath(home)
+    except OSError:
+        return path
+    if resolved_home not in ("", "/") and path.startswith(resolved_home + os.sep):
+        return "~" + path[len(resolved_home) :]
+    return path

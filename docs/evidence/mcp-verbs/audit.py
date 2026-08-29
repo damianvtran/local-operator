@@ -95,9 +95,11 @@ async def main() -> None:
                     print(f"{verb:8} {'(no rows)':26} {'-':6} {'-':6} {'-':9} n/a")
                     continue
                 for idx, (name, choice) in enumerate(rows):
-                    editor.picker.highlight_index(idx) if hasattr(
-                        editor.picker, "highlight_index"
-                    ) else None
+                    (
+                        editor.picker.highlight_index(idx)
+                        if hasattr(editor.picker, "highlight_index")
+                        else None
+                    )
                     # Re-sync so the gate reads THIS row as highlighted.
                     _set_editor_line(editor, f"/mcp {verb} ")
                     for _ in range(4):

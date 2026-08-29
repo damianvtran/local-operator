@@ -90,6 +90,7 @@ async def main() -> None:
             print("buffer AFTER enter      :", repr(editor.text))
             print("credentials forgotten   :", forgotten)
             from tests.unit.tui.test_app_pilot import _transcript_text
+
             print("transcript tail         :", _transcript_text(app)[-300:].replace("\n", " | "))
 
     fired = forgotten or FIRED

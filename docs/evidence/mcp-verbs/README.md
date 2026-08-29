@@ -8,13 +8,19 @@ or written, and the synthetic configs contain no secrets or tokens.
 |---|---|
 | `cli_check.sh` / `cli_ab.txt` | `lop mcp list\|add\|remove` stderr text and exit codes are **byte-identical** to `origin/main` after the structured-result refactor. Run against both trees and diffed. |
 | `tui_check.py` / `tui_check.txt` | The real `OperatorApp` driven through `_type_command`: `/mcp list`, `add` for stdio and http, the duplicate/extra-token/usage refusals, `remove` succeeding on an owned server, `remove` REFUSING a Claude-imported one, and the unknown-verb error. Shows the resulting `mcp.json` after each step. |
+| `audit.py` / `audit.txt` | Every `/mcp` verb's rows checked against what the verb actually destroys, with the editor's real destructive-gate verdict per row. Run on head + PR #378 (the state this ships into): it FAILS on `reauth` before the round-1 fix and passes after. |
+| `reauth_repro.py` / `reauth_repro.txt` | The M2 key-path repro: `/mcp reauth lnr` + Enter used to FIRE and forget the grant of a server the user never spelled; it now fills. |
 | `gate_repro.py` / `gate_repro.txt` | The data-loss defect behind the xfail test: a fuzzy `/mcp remove fsy` + Enter **deleted `filesystem`** from `mcp.json`, because the editor's destructive gate matches the command WORD (`logout`) and never covers `mcp`. Fixed by PR 1. |
+
+`audit.py` and `reauth_repro.py` expect a worktree at `/tmp/lop-mcp-merged`
+holding this branch with PR #378 merged in (they assert the gate behaviour that
+only exists once both halves are present); the others run against this tree.
 
 Reproduce any of them with:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python .evidence/tui_check.py
-bash .evidence/cli_check.sh /path/to/worktree
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python docs/evidence/mcp-verbs/tui_check.py
+bash docs/evidence/mcp-verbs/cli_check.sh /path/to/worktree
 ```
 
 ## Rendered frames

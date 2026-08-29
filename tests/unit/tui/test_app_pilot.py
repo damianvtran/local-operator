@@ -5669,6 +5669,118 @@ async def test_a_fuzzy_mcp_remove_row_fills_rather_than_deleting_a_server(
 
 
 @pytest.mark.asyncio
+async def test_mcp_add_refuses_to_shadow_or_no_op_over_an_existing_definition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`add` honours the SAME ownership rule `remove` enforces, and reports the
+    two cases differently because their consequences differ.
+
+    A foreign, lower-priority definition (`~/.claude.json`): our write would
+    WIN and silently repoint a server the user still maintains in Claude Code —
+    the outcome `_mcp_remove_result` refuses to cause from the other side.
+
+    A higher-priority definition (`<cwd>/.mcp.json`): our write lands and
+    changes nothing observable, so an unqualified "added" would be a receipt
+    that LIES about an effect the user will never see. That is the worse half.
+    """
+    home = _mcp_home(tmp_path, monkeypatch)
+    project = home / "proj"
+    project.mkdir()
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"proj": {"type": "http", "url": "https://proj.example/mcp"}}})
+    )
+    monkeypatch.chdir(project)
+    manager = FakeMcpManager(["filesystem", "grafana", "notion", "proj"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    claude_before = (home / ".claude.json").read_text()
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+
+        await _type_command(pilot, app, "mcp add notion https://evil.example/mcp")
+        for _ in range(8):
+            await pilot.pause()
+        text = " ".join(_transcript_text(app).split())
+        assert "~/.claude.json" in text and "shadow" in text
+
+        marker = len(_transcript_text(app))
+        await _type_command(pilot, app, "mcp add proj https://mine.example/mcp")
+        for _ in range(8):
+            await pilot.pause()
+        # The transcript hard-wraps, so compare on collapsed whitespace.
+        second = " ".join(_transcript_text(app)[marker:].split())
+        assert "takes priority" in second and "no effect" in second
+        # The no-op case must NOT claim success.
+        assert "added MCP server" not in second
+
+    # Neither foreign file was touched, and no shadowing entry was written.
+    assert (home / ".claude.json").read_text() == claude_before
+    owned = json.loads((home / ".local-operator" / "mcp.json").read_text())["mcpServers"]
+    assert "notion" not in owned and "proj" not in owned
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_receipt_suggests_a_command_that_can_actually_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt used to end with `/mcp login <name>`, which was guaranteed
+    to fail for every server this command creates: `add` deliberately writes no
+    `auth` block and `_resolve_mcp_server` refuses any server whose `auth.type`
+    is not `oauth`. The hint now names the CLI flag that writes the block."""
+    _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        await _type_command(pilot, app, "mcp add gw https://gw.example/mcp")
+        for _ in range(8):
+            await pilot.pause()
+        text = _transcript_text(app)
+        assert "--oauth" in text
+        # The suggestion that cannot work must be gone.
+        assert "/mcp login gw" not in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_refuses_trailing_tokens_on_fixed_arity_verbs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silently dropping the tail is the same class of mistake this command
+    exists to avoid — acting on something other than what the user described.
+    It matters most on `remove`, where the ignored token could be the name they
+    actually meant to delete."""
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+
+        marker = len(_transcript_text(app))
+        await _type_command(pilot, app, "mcp list junk")
+        for _ in range(6):
+            await pilot.pause()
+        listing = " ".join(_transcript_text(app)[marker:].split())
+        assert "takes no arguments" in listing and "MCP servers" not in listing
+
+        marker = len(_transcript_text(app))
+        await _type_command(pilot, app, "mcp remove filesystem extra")
+        for _ in range(6):
+            await pilot.pause()
+        assert "takes one server name" in " ".join(_transcript_text(app)[marker:].split())
+
+    # The destructive verb refused, so the server is still configured.
+    servers = json.loads((home / ".local-operator" / "mcp.json").read_text())["mcpServers"]
+    assert "filesystem" in servers
+
+
+@pytest.mark.asyncio
 async def test_a_discovery_failure_keeps_an_alarm_in_the_band() -> None:
     """Discovery raising leaves no manager and no server list, so the band used
     to render exactly like a machine that never configured MCP — while the toast
