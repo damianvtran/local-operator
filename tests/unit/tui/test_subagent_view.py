@@ -41,7 +41,7 @@ from local_operator.session.transcript import (
     TranscriptPage,
 )
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
-from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.assistant import FALLBACK_WIDTH, AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.subagent_panel import (
     GLYPH_DONE,
@@ -2202,3 +2202,476 @@ async def test_the_scroll_caption_keeps_the_space_every_other_hint_has() -> None
         view = await _open(pilot, app, _job_with(TRAJECTORY))
         assert "↑↓ scroll" in view.rendered_rows()[-1]
         assert "↑↓scroll" not in view.rendered_rows()[-1]
+
+
+# -- streaming reconciliation -----------------------------------------------
+#
+# The page used to re-derive its whole transcript and REMOUNT the tail on every
+# refresh tick, where the main conversation mutates one long-lived block in
+# place. A growing message never compares equal to itself, so its block was
+# destroyed and rebuilt per tick: measured on the predecessor at 240 mounts and
+# 239 removes over 120 ticks, with a new WorkingBlock (and therefore a restarted
+# shimmer sweep and clock) every time. The tests below fail on that code.
+
+
+def _stream(mid: str, body: str) -> list[dict[str, Any]]:
+    """An assistant message still being streamed — start, then one delta."""
+    return [
+        {"type": "message_start", "message": {"role": "assistant", "id": mid}},
+        {"type": "message_update", "message": {"role": "assistant", "id": mid}, "delta": body},
+    ]
+
+
+class _MountCounter:
+    """Counts what a refresh actually costs the container."""
+
+    def __init__(self, view: SubagentView) -> None:
+        self.mounts = 0
+        self.removes = 0
+        body = view._body
+        append, remove = body.append_block, body.remove_block
+
+        def append_block(block: Any) -> Any:
+            self.mounts += 1
+            return append(block)
+
+        def remove_block(block: Any) -> Any:
+            self.removes += 1
+            return remove(block)
+
+        body.append_block = append_block  # type: ignore[method-assign]
+        body.remove_block = remove_block  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_message_keeps_one_block_across_refreshes() -> None:
+    """The row being streamed is UPDATED, not rebuilt.
+
+    Block identity is the assertion because it is what the user feels: a
+    rebuilt AssistantBlock is constructed unmounted (so it folds at the
+    fallback width for a frame, which reads as the message flashing narrow)
+    and it discards the incremental markdown cache, so the settling final
+    response is re-lexed in full on every tick.
+    """
+    # Seeded with its first token rather than empty so the row already EXISTS
+    # when the counter is installed. From an empty message the block's first
+    # appearance would land inside the loop and count as a mount, which is a
+    # legitimate one — and an assertion that has to tolerate it cannot tell a
+    # first mount from a duplicate row appended beside the streaming one.
+    text = "opening "
+    job = _job_with(_stream("m1", text), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        counter = _MountCounter(view)
+        identities: set[int] = set()
+        # Bound before the loop so the assertions below are reachable even if
+        # the body never runs: an empty loop would otherwise leave `block`
+        # unbound and turn a real failure into a NameError at the assert.
+        block: AssistantBlock | None = None
+        for index in range(12):
+            text += f"token{index} "
+            job.trajectory = _stream("m1", text)
+            app._refresh_subagent_view()
+            await pilot.pause()
+            block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+            identities.add(id(block))
+        assert len(identities) == 1, "the streaming block was rebuilt"
+        assert counter.removes == 0, f"{counter.removes} rows torn down while streaming"
+        # Identity alone would not catch a DUPLICATE row appended beside the
+        # streaming one — the set stays size 1 while the page grows a second
+        # copy of the message. The sibling settling test asserts this too.
+        assert counter.mounts == 0, f"{counter.mounts} rows remounted while streaming"
+        # The message on screen is the whole accumulated text, not a fragment.
+        assert block is not None
+        assert block.text().startswith("opening")
+        assert "token0 " in block.text() and block.text().endswith("token11")
+
+
+@pytest.mark.asyncio
+async def test_the_working_tail_survives_every_refresh() -> None:
+    """The tail line owns an animation and a clock, and both restart when the
+    widget does. It is pinned (`TranscriptView.pin_tail`, the same lever the
+    main conversation uses) so rows mount ABOVE it instead of replacing it."""
+    job = _job_with(_stream("m1", "opening"), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        identities: set[int] = set()
+        events = list(job.trajectory)
+        for index in range(6):
+            # Rows keep arriving UNDER the tail: each pass adds a settled tool,
+            # which is exactly the case that used to drag the tail down with it.
+            events.append(_call(f"c{index}", "read", path=f"f{index}.py"))
+            events.append(_result(f"c{index}", "read", "ok"))
+            job.trajectory = list(events)
+            app._refresh_subagent_view()
+            await pilot.pause()
+            tail = [b for b in view._body.blocks() if isinstance(b, WorkingBlock)]
+            assert len(tail) == 1, "the page grew a second working line"
+            identities.add(id(tail[0]))
+        assert len(identities) == 1, "the working line was rebuilt under the reader"
+        # It is still LAST: the whole point of pinning it.
+        assert isinstance(view._body.blocks()[-1], WorkingBlock)
+
+
+@pytest.mark.asyncio
+async def test_a_settling_mid_list_tool_does_not_rebuild_the_rows_beneath_it() -> None:
+    """One parallel batch settling oldest-first used to rebuild the whole
+    suffix under each result — 272 mounts for 16 pairs, quadratic in the rows
+    below the one that changed. Settling a card is now an update to that card."""
+    events: list[dict[str, Any]] = []
+    for index in range(4):
+        events.extend(_text(f"m{index}", f"step {index}"))
+        events.append(_call(f"c{index}", "bash", command=f"step {index}"))
+    job = _job_with(list(events), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        cards = {id(block) for block in view._body.blocks() if isinstance(block, ToolCard)}
+        assert len(cards) == 4
+        counter = _MountCounter(view)
+        for index in range(4):
+            events.append(_result(f"c{index}", "bash", "ok"))
+            job.trajectory = list(events)
+            app._refresh_subagent_view()
+            await pilot.pause()
+        assert counter.mounts == 0, f"{counter.mounts} rows remounted by settling tools"
+        assert counter.removes == 0, f"{counter.removes} rows torn down by settling tools"
+        # Same widgets, now carrying their outcome and the executor's duration.
+        settled = [block for block in view._body.blocks() if isinstance(block, ToolCard)]
+        assert {id(card) for card in settled} == cards
+        assert all(card.is_finalized() for card in settled)
+
+
+@pytest.mark.asyncio
+async def test_a_row_folds_at_the_body_width_it_is_mounted_into() -> None:
+    """No block is built at the 80-column fallback and re-folded a frame later.
+
+    That flash was visible on ANY mount path, not only the streaming one: a
+    block authors its own rows and PINS its height to the count of them, so a
+    fallback-width build pinned a fallback-width height until the resize
+    landed. On a 140-column terminal the block measurably built at 80 and
+    settled at 134.
+
+    The probe is installed BEFORE the page opens, which is the whole point.
+    Round 1 of review caught the predecessor of this test arming it after
+    `_open`, so every fold performed during the initial mount was invisible to
+    the assertion: the test passed while the page still built its first blocks
+    at 80 and re-folded them a frame later, painted (measured on 2 of 20 opens
+    at 140x34 — `on_mount` runs before the body has a region, so the width
+    every source could report is 0). The mount path is the one a reader
+    actually sees flash, so it is the one that has to be covered.
+
+    The page is opened and FILLED in one synchronous beat, which is the
+    ordering `_open_subagent_view` produces whenever its deferred fill wins the
+    race with layout. Left to the scheduler the race resolves the harmless way
+    on most runs (2 of 20 opens showed the flash), so driving the ordering is
+    what makes this a regression test rather than a coin toss.
+    """
+    prose = "a paragraph of the child's prose that folds differently at 80 columns. "
+    job = _job_with(_stream("m1", prose * 3) + _stream("m2", prose * 2), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+
+    # Every fold performed by ANY path, armed before the page exists. The
+    # predecessor of this test installed its probe AFTER the page was open, so
+    # the mount folds it names were invisible to it; it passed while the flash
+    # still happened. The streaming path is covered too: a rebuilt block is
+    # constructed with no parent to ask for a width, so it folded at 80 and
+    # re-folded once `on_resize` landed — a frame of narrow text per tick.
+    folds: list[int] = []
+    original = AssistantBlock._apply_rows
+
+    def record(self: AssistantBlock, text: Any) -> Any:
+        folds.append(self._flat_width())
+        return original(self, text)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(AssistantBlock, "_apply_rows", record)
+    try:
+        async with app.run_test(size=(140, 34)) as pilot:
+            for _ in range(80):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            app._append_block(UserBlock("audit the ingest path"))
+            app._refresh_band()
+            await pilot.pause()
+
+            app._open_subagent_view(str(job.id))
+            view = app.query_one(SubagentView)
+            # The condition under test: mounted, not yet laid out, so every
+            # width the page could read is 0 and a naive fold falls to 80.
+            assert view._body.scrollable_content_region.width == 0
+            app._refresh_subagent_view(str(job.id))
+            for _ in range(4):
+                await pilot.pause()
+
+            body_width = view._body.scrollable_content_region.width
+            assert body_width > 80, "the fixture needs a body wider than the fallback"
+            mount_folds = list(folds)
+
+            job.trajectory = _stream("m1", prose * 4) + _stream("m2", prose * 2)
+            app._refresh_subagent_view()
+            for _ in range(4):
+                await pilot.pause()
+
+            assert mount_folds, "the mount path performed no fold to check"
+            assert folds != mount_folds, "the streaming path performed no fold to check"
+            # Stated as the FALLBACK rather than as "== body_width" so the
+            # failure names the defect: a fold at 80 is the flash, whatever
+            # else the ladder may legitimately report mid-layout.
+            assert FALLBACK_WIDTH not in folds, folds
+            assert all(width == body_width for width in folds), folds
+            block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+            assert block._built_width == body_width
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_message_is_committed_in_the_block_it_streamed_into() -> None:
+    """Settling COMMITS the row rather than rebuilding it.
+
+    The streaming splice concatenates a frozen prefix with the volatile tail,
+    which cannot produce the blank row between two paragraphs until the whole
+    message is re-rendered once (`AssistantBlock.finalize_text`). The main
+    conversation does that at `message_end`; this page has no such event, so it
+    commits on the refresh that observes the job settle. Without it a finished
+    child kept its mid-stream fold forever — a paragraph break the same text
+    shows in the main transcript, missing here.
+    """
+    body = "First paragraph here.\n\nSecond paragraph here."
+    job = _job_with(_stream("m1", body), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(140, 34)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+        block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+        streaming = str(block.renderable)
+        assert not block.is_finalized()
+
+        # The child stops. Note the trajectory does NOT change: the settle is
+        # the job's status moving, which is the case a text-only diff misses.
+        job.status = "completed"
+        job.settled_at = job.start_time + 5
+        app._refresh_subagent_view()
+        await pilot.pause()
+
+        settled = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+        assert id(settled) == id(block), "the message was rebuilt to settle it"
+        assert settled.is_finalized()
+        rows = str(settled.renderable).split("\n")
+        assert any(not row.strip() for row in rows), rows
+        assert len(rows) == len(streaming.split("\n")) + 1
+
+
+@pytest.mark.asyncio
+async def test_a_finished_message_is_committed_while_the_child_is_still_working() -> None:
+    """Completeness is a property of the ROW, not of the job (review round 1, M1).
+
+    A running child's transcript is mostly finished messages — the prose it
+    writes between tool calls, each of which already had its `message_end`.
+    Deriving "may this be committed?" from the job status alone left every one
+    of them rendering with the streaming splice's concatenated fold, which
+    cannot produce the blank row between two paragraphs. Worse, `_apply_rows`
+    pins height to the row count, so those rows were pinned SHORT and grew
+    when the job eventually settled: measured 5 -> 6 and 2 -> 3 rows on this
+    exact fixture, a one-row content shift per message at settle, which is the
+    reflow class this page's in-place reconciliation exists to remove.
+
+    So the assertion is the pair: the paragraph break is present WHILE the
+    child works, and the row count does not move when it stops.
+    """
+    events = _text("m1", "Plan:\n\n- step one\n- step two\n\nNow running it.")
+    events += _text("m2", "That worked.\n\nMoving on to the next file.")
+    # A call the child is still running, so the job is unambiguously live
+    # while both messages above are complete.
+    events.append(_call("c0", "bash", command="pytest -q"))
+    job = _job_with(events, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(140, 34)) as pilot:
+        view = await _open(pilot, app, job)
+        for _ in range(4):
+            await pilot.pause()
+
+        live = [b for b in view._body.blocks() if isinstance(b, AssistantBlock)]
+        assert len(live) == 2, live
+        for block in live:
+            assert block.is_finalized(), "a finished message was left uncommitted"
+            rows = str(block.renderable).split("\n")
+            assert any(not row.strip() for row in rows), rows
+        live_rows = [len(str(block.renderable).split("\n")) for block in live]
+
+        # The child stops. The trajectory does not change — only the status —
+        # which is exactly the refresh that used to grow every one of these
+        # rows by one.
+        job.status = "completed"
+        job.settled_at = job.start_time + 5
+        app._refresh_subagent_view()
+        for _ in range(4):
+            await pilot.pause()
+
+        settled = [b for b in view._body.blocks() if isinstance(b, AssistantBlock)]
+        assert [id(b) for b in settled] == [id(b) for b in live], "rows were rebuilt at settle"
+        settled_rows = [len(str(block.renderable).split("\n")) for block in settled]
+        assert (
+            settled_rows == live_rows
+        ), f"content reflowed at settle: {live_rows} -> {settled_rows}"
+
+
+@pytest.mark.asyncio
+async def test_an_evicted_message_end_does_not_uncommit_a_settled_row() -> None:
+    """A fold that LOST the `message_end` must not un-finalize the row.
+
+    The trajectory is a rolling window, so `message_end` is as evictable as
+    any other event: a later fold of the same message can report it as still
+    streaming. Accepting that would un-finalize a committed block, and
+    `update_entry_block` answers a finalized block whose text moved with a
+    REMOUNT — so a row that had settled correctly would be torn down and
+    rebuilt under the reader. `_supersedes` refuses the downgrade for the same
+    reason it refuses a shorter text.
+    """
+    body = "First paragraph.\n\nSecond paragraph."
+    job = _job_with(_text("m1", body) + [_call("c0", "bash", command="go")], status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(140, 34)) as pilot:
+        view = await _open(pilot, app, job)
+        for _ in range(4):
+            await pilot.pause()
+        block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+        assert block.is_finalized()
+        rows = len(str(block.renderable).split("\n"))
+
+        # The window rolls: the same message is now reported WITHOUT its end.
+        job.trajectory = _stream("m1", body) + [_call("c0", "bash", command="go")]
+        app._refresh_subagent_view()
+        for _ in range(4):
+            await pilot.pause()
+
+        after = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
+        assert id(after) == id(block), "the settled row was rebuilt by a worse fold"
+        assert after.is_finalized(), "an evicted message_end un-committed the row"
+        assert len(str(after.renderable).split("\n")) == rows
+        # The page's own record, which is where the refusal happens: the block
+        # above stays finalized either way (a finalized block answers an
+        # unchanged text with agreement), so asserting only on the widget
+        # would pass with the guard removed.
+        assert view._known["m1"].complete, "the page forgot the row was complete"
+
+
+@pytest.mark.asyncio
+async def test_a_history_page_lands_below_the_truncation_note(tmp_path) -> None:
+    """The prepend index accounts for the head block (review round 1, N1).
+
+    `prefix` is counted over ENTRIES, which exclude the truncation note, but
+    `TranscriptView.insert_blocks` indexes the BODY's list, which holds that
+    note at 0 — `_sync_body` mounts it outside the diffed sequence and keeps it
+    out of `self._blocks` (measured: `view._blocks` 168 against a body of 169).
+    Both a truncated trajectory and a durable history page are needed at once
+    for the skew to show, which is why it went unnoticed; without the offset
+    the history page is inserted ABOVE the note that is supposed to head the
+    page.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    # Over the cap, so the page carries its truncation note as a head block.
+    events: list[dict[str, Any]] = []
+    while len(events) < TRAJECTORY_MAX_EVENTS + 10:
+        events.extend(_text(f"m{len(events)}", f"live {len(events)}"))
+    job = _job_with(events, status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert view._head_block is not None, "the fixture needs a truncated trajectory"
+        assert view._body.blocks()[0] is view._head_block
+
+        before = len(view._body.blocks())
+        view.action_home()
+        await _wait_history(pilot, view)
+        await _wait_geometry_settled(pilot, view._body)
+        assert len(view._body.blocks()) > before, "no history page was prepended"
+
+        # The note still heads the page, and nothing was inserted above it.
+        assert view._body.blocks()[0] is view._head_block, "a history page landed above the note"
+
+
+@pytest.mark.asyncio
+async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tmp_path) -> None:
+    """The prepend offset keys on the note's POSITION, not its existence.
+
+    `_head_block` is created lazily and appended at whatever length the body
+    has reached, so it heads the list only when the child was ALREADY
+    truncated when the page opened. A child that is under the cap at open and
+    crosses it while the reader watches mounts the note mid-list (measured:
+    index 5 of 257) — and correcting for a note that is not above the rows
+    pushes the prepended page one row too LOW, which reorders the durable
+    window (`durable 40` above `durable 0`).
+
+    That is the mirror image of round 1's N1 and it is the case `origin/main`
+    happened to get right, so it needs its own guard: the two scenarios are
+    disjoint and a fix conditioned on existence alone passes the other test
+    while breaking this one (review round 2, M3).
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    # UNDER the cap at open: no truncation note exists yet.
+    job = _job_with(_text("m0", "live 0"), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert view._head_block is None, "the fixture must start under the cap"
+
+        # Now cross the cap under the reader, which appends the note mid-list.
+        events: list[dict[str, Any]] = []
+        while len(events) < TRAJECTORY_MAX_EVENTS + 10:
+            events.extend(_text(f"m{len(events)}", f"live {len(events)}"))
+        job.trajectory = events
+        app._refresh_subagent_view()
+        for _ in range(4):
+            await pilot.pause()
+        assert view._head_block is not None, "the fixture needs to cross the cap"
+        assert (
+            view._body.blocks()[0] is not view._head_block
+        ), "this test only means anything while the note is NOT at index 0"
+
+        view.action_home()
+        await _wait_history(pilot, view)
+        await _wait_geometry_settled(pilot, view._body)
+
+        # The durable window stays in order: the page that was paged in must
+        # not be split around the row it belongs above.
+        durable = [row for row in view.rendered_rows() if row.strip().startswith("durable ")]
+        ordering = [int(row.strip().split()[1]) for row in durable]
+        assert ordering == sorted(ordering), f"the prepended page landed out of order: {ordering}"

@@ -1558,8 +1558,16 @@ class ToolCard(ExpandableActionBlock):
         pointer crossing a card's edge, each reflowed the entire screen to
         repaint one row.
         """
-        container = getattr(self, "container_size", None)
-        width = self.size.width or (container.width if container else 0)
+        # `fold_width(0)` walks size → container → the parent transcript's
+        # scrollable content region, and returns 0 only when none of the three
+        # can answer. That third rung is new and is what stops a card built
+        # before its first layout pass from fitting itself to the whole
+        # terminal (the console rung below) or to 80 columns: both are the
+        # wrong column for a block inside the transcript, and the row visibly
+        # re-fitted a frame later. The console rung is kept as the last resort
+        # BEFORE the fallback because reaching it is also how this method
+        # detects that there is no app to paint into at all.
+        width = self.fold_width(0)
         detached = False
         if width <= 0:
             try:
