@@ -6559,6 +6559,33 @@ def _seed_session(tmp_path: Path, session_id: str, prompt: str = "") -> None:
     (sess_dir / "transcript.jsonl").write_text(body)
 
 
+def _append_turn(tmp_path: Path, session_id: str, text: str) -> None:
+    """Add a later message to an existing seeded session.
+
+    The picker names a row by its FIRST user message, so anything appended here
+    lands in the searchable body without changing the visible name. That is the
+    distinction some fixtures need: on a real store an incidental keyword hit is
+    a word buried in a conversation, not the title of one.
+    """
+    line = (
+        json.dumps(
+            {
+                "id": "e2",
+                "ts": 1,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "user",
+                    "content": [{"text": text}],
+                },
+            }
+        )
+        + "\n"
+    )
+    with (tmp_path / "sessions" / session_id / "transcript.jsonl").open("a") as handle:
+        handle.write(line)
+
+
 @pytest.mark.asyncio
 async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monkeypatch) -> None:
     """A bare ``/resume`` opens the picker instead of printing ids.
@@ -8664,3 +8691,56 @@ async def test_route_independence_holds_on_a_real_store_shape(tmp_path, monkeypa
     )
     # And the cursor row specifically, since that is what Enter resumes.
     assert (forward or [None])[0] == (backspaced or [None])[0]
+
+
+@pytest.mark.asyncio
+async def test_a_typo_is_findable_despite_an_incidental_body_hit(tmp_path, monkeypatch) -> None:
+    """The recall regression that four rounds of guards did not catch (F15).
+
+    Gating the soft tier on "the exact tiers found nothing" reads as correct and
+    destroys typo search on a real store. The exact tier also admits BODY
+    substring hits, and almost every typed token appears incidentally somewhere
+    in a corpus of conversations — so one unrelated session mentioning the typo
+    in passing silenced the tier for the whole query, and the session the user
+    was actually looking for became unreachable.
+
+    The fixture encodes exactly that: `mispelled` appears as a body substring in
+    one unrelated session (the incidental hit) while the target session is
+    reachable only by edit distance. A gate that stops at "some exact hit
+    exists" returns the decoy and hides the target.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # The decoy: the typo appears in the BODY only, never in the row's name.
+    # That distinction is the whole point — the picker names a row by its first
+    # user message, so a one-line fixture would put the typo in the name and
+    # test a different gate than the one that fails on a real store, where the
+    # incidental hit is a word buried in a long conversation.
+    _seed_session(tmp_path, "dec00001", prompt="quarterly planning notes")
+    _append_turn(tmp_path, "dec00001", "a paragraph that mentions mispelled in passing")
+    # The target: contains the correct spelling only, reachable by soft match.
+    for index in range(5):
+        _seed_session(tmp_path, f"tgt{index:05d}", prompt=f"the misspelled word report {index}")
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        for key in "mispelled":
+            await pilot.press(key)
+            await pilot.pause()
+
+        shown = {row.id for row in picker.visible_rows}
+        targets = {f"tgt{index:05d}" for index in range(5)}
+        assert shown & targets, (
+            "a typo'd query returned only the incidental body hit; the session the "
+            f"user was looking for is unreachable. shown={sorted(shown)}"
+        )

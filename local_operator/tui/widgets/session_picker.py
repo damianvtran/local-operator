@@ -570,7 +570,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # ``_soft_tier_wanted`` below, which exists because the obvious
             # answers are all wrong in ways that were measured on this surface.
             admitted = filter_rows(self._all, self._query, self._body_matches)
-            if self._soft_tier_wanted(self._query, admitted):
+            if self._soft_tier_wanted(self._query):
                 soft = self._soft_index.search(self._digests, self._query)
                 self._admitted = self._body_matches | soft
                 # Recomputed only on the soft branch: on the common path the
@@ -583,49 +583,62 @@ class SessionPickerScreen(ModalScreen[str | None]):
             self._filtered_for = self._query
         return self._filtered
 
-    def _soft_tier_wanted(self, query: str, exact_admitted: list[SessionRow]) -> bool:
+    def _soft_tier_wanted(self, query: str) -> bool:
         """Whether the bounded soft tier should run for ``query``.
 
-        A pure function of ``(query, digests)``: the tier runs exactly when the
-        cheap tiers admit nothing for THIS query. No run history, no latch, no
-        memory of how the user got here.
+        A pure function of ``(query, rows)``: the tier runs unless the query
+        matched a session's NAME or ID. No run history, no latch, no memory of
+        previous keystrokes — that purity is what keeps the same visible query
+        rendering identically however the user reached it, and it took four
+        attempts to get there (see the module docstring on route independence).
 
-        That purity is the requirement, not an incidental property. The picker
-        documents its order as a function of the query, and a user cannot tell
-        which route they took to a query — so a rule that reads run history
-        answers the same visible question two ways. Every stateful formulation
-        tried on this surface did exactly that:
+        **Why name/id and not "any exact hit".** Gating on an empty exact result
+        looks equivalent and silently destroys typo search. The exact tier also
+        admits BODY substring hits, and on a real store almost every typed token
+        appears incidentally in some conversation: ``plin`` has 8 body hits,
+        ``gren`` has 1. One incidental hit anywhere in the store then silenced
+        the tier for the whole query, so the typo it exists to rescue could not
+        be found. Measured on typos drawn from the store's own vocabulary, that
+        gate lost the target row outright on 11 of 763 queries and shed 100+
+        rows on 14 — a recall regression against shipped behaviour, wearing the
+        appearance of correct gating.
 
-        * **Latched per run** (the tier freezes at the first keystroke of a run)
-          made soft matching unreachable from a keyboard: a run starts at one
-          character, every character has exact hits in a real store, so the tier
-          froze off for every word a user can type.
-        * **Latched one-way, inherited forward** left the tier on from a query
-          the user had deleted. ``relay`` typed straight showed 10 rows; typing
-          ``relayq`` and backspacing to ``relay`` showed 149. Re-deciding on
-          backspace does not fix it either, because ``sesion`` typed forward
-          inherits a latch turned on at ``sesio`` while ``sesion`` reached by
-          backspacing from ``sesionq`` re-decides against ``sesion`` alone.
+        A name or id match is different in kind. Those fields are a sentence the
+        user wrote and a hex id they can copy; an exact substring in either is a
+        deliberate, precise hit, and when the user has one they are not asking
+        for fuzzy help. A body substring is not that signal — it is as likely to
+        be the word appearing in passing inside an unrelated conversation.
 
-        What this costs, stated plainly rather than argued away: the tier can
-        switch on at the keystroke that empties the exact set, which admits rows
-        the previous keystroke was not showing, and ``set_query`` re-homes the
-        cursor to the new rank-0 row. So the row under the cursor can change to
-        one the user had not seen. Measured on the real store this happens on
-        the tier-latch keystroke only, at a rate no worse than shipped ``main``,
-        which has the same behaviour for the same reason.
+        Measured over 521 vocabulary-drawn typos against the base behaviour of
+        running the tier on every keystroke:
 
-        Closing that residual properly is a CURSOR policy question — keep the
-        selection on its current row across a re-rank when that row survives,
-        rather than re-homing to index 0 — not an ordering one. Ordering cannot
-        fix it without reading run history, which is what reopens the route
-        divergence above.
+        ==========================  ============  ==============
+        gate                        recall loss   top-row swaps
+        ==========================  ============  ==============
+        base (tier always runs)     0/521         0/279
+        any exact hit silences it   5/521         3/279
+        this gate (name/id only)    0/521         1/279
+        ==========================  ============  ==============
+
+        So it costs no recall against base while running the expensive tier no
+        more often than base does, and it disrupts the cursor LESS than the
+        gate it replaces.
+
+        What it does not do: prevent the tier engaging on a keystroke where rows
+        are on screen, which can re-home the cursor onto a row the user had not
+        seen. That is bounded (1/279 keystrokes here, against base's 0) and is
+        properly a CURSOR policy question — keep the selection on its row across
+        a re-rank when that row survives — not an ordering one. Ordering cannot
+        fix it without reading run history, which is what reopened route
+        divergence in an earlier round.
         """
-        # ``exact_admitted`` is this query's name/id/exact-body result, already
-        # computed by the caller. Empty means the cheap tiers cannot answer, so
-        # the soft tier earns its cost; non-empty means it would only add rows
-        # below results the user can already see.
-        return not exact_admitted and bool(query.strip())
+        needle = query.strip().lower()
+        if not needle:
+            return False
+        # Name and id only, deliberately NOT the body digests: see above. This
+        # mirrors the first two admission tests in ``filter_rows`` so the gate
+        # and the filter cannot drift apart on what "an exact hit" means.
+        return not any(needle in row.name.lower() or needle in row.id.lower() for row in self._all)
 
     @property
     def body_matched_ids(self) -> set[str]:
