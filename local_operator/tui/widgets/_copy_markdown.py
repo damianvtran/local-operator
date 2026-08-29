@@ -297,6 +297,82 @@ def _is_rule_like(text: str) -> bool:
     return bool(body) and set(body) <= {"-", "─", ":", " ", "=", "_"}
 
 
+#: The quote bar as Rich paints it, repeated once per nesting level. A quote's
+#: CONTINUATION rows carry it too, which is what makes it furniture on every row
+#: of the construct rather than a marker that identifies the first one.
+_RENDERED_QUOTE_PREFIX_RE = re.compile(r"^(?:▌ ?)+")
+
+#: A rendered list marker and the space after it, with its leading indent. Only
+#: the row that OPENS the item carries this; a continuation is indented to the
+#: same column with spaces, which ``str.lstrip`` handles instead.
+_RENDERED_LIST_PREFIX_RE = re.compile(r"^\s*(?:[•◦▪]|\d{1,9})\s+")
+
+
+def furniture_width(row: str, source_line: str | None, *, opens_line: bool, fenced: bool) -> int:
+    """Leading cells of ``row`` that Rich PAINTED rather than the model wrote.
+
+    The row-level answer to the question :meth:`TranscriptBlock.copy_gutter`
+    asks per block, and it has to live here because it is only answerable with
+    the alignment: the same ``▌`` is furniture on a quote row and content on a
+    row of a fenced diagram, and nothing about the glyph itself says which.
+    ``source_line`` is the line :func:`align` mapped the row to, so the decision
+    is made from what the model actually wrote.
+
+    Why not a glyph regex over the row alone — the approach
+    ``test_a_quote_dragged_from_column_zero_keeps_the_bar`` rejects: inside a
+    fence it turns ``  1 / 0`` into ``/ 0``, because a code line that starts
+    with a digit is indistinguishable from a rendered ordered marker by glyph
+    alone. Keying on the source line makes ``fenced`` an explicit refusal
+    instead of a coincidence, so code copies byte for byte.
+
+    ``opens_line`` separates an item's first rendered row from its wrapped
+    continuations. Rich paints `` • `` once and indents the rest to the same
+    column, so a continuation's furniture is pure indent — stripping a marker
+    pattern there would eat content that merely looks like one (a continuation
+    beginning ``2026 was the year`` is the reported shape of that bug).
+    """
+    if source_line is None or fenced:
+        # Unplaceable rows and code are returned verbatim: with no source line
+        # to attribute a prefix to, every glyph is content until proven
+        # otherwise, and that is the conservative direction for a clipboard.
+        return 0
+    if _QUOTE_RE.match(source_line):
+        match = _RENDERED_QUOTE_PREFIX_RE.match(row)
+        return match.end() if match else 0
+    if _LIST_RE.match(source_line):
+        if opens_line:
+            match = _RENDERED_LIST_PREFIX_RE.match(row)
+            return match.end() if match else 0
+        return len(row) - len(row.lstrip(" "))
+    return 0
+
+
+def wrap_separator(before: str, after: str, source_line: str | None) -> str:
+    """What the terminal CONSUMED at the fold between two rows of one source line.
+
+    A soft wrap is not always a space. Rich breaks at a space when it can and
+    consumes it, so rejoining needs one put back; but a token wider than the
+    render segment is broken MID-TOKEN and nothing is consumed, so putting a
+    space back would invent a character the user never had. Measured, both are
+    reachable in ordinary prose at ordinary widths: a bare URL or a long
+    identifier folds mid-token at 40 columns while the sentence around it folds
+    at spaces.
+
+    The discriminator is the source line itself, which is the only place that
+    records what was really between them: if the last token of ``before``
+    concatenated to the first token of ``after`` occurs in it, the fold split
+    one token and the rejoin takes nothing. Asking the source rather than
+    inferring from the row's fill level is what makes this exact rather than a
+    heuristic about padding.
+    """
+    if source_line is None:
+        return " "
+    tokens_before, tokens_after = before.split(), after.split()
+    if not tokens_before or not tokens_after:
+        return " "
+    return "" if (tokens_before[-1] + tokens_after[0]) in source_line else " "
+
+
 def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_row: int) -> str:
     """The markdown for rendered rows ``first_row..last_row`` inclusive.
 

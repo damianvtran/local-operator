@@ -650,16 +650,51 @@ class AssistantBlock(TranscriptBlock):
         painted as several rows, the same defect, and measured at width 60 a
         row-count gate still copied all 128 characters of it.
 
+        **The glyph path strips painted furniture per row**, via
+        :func:`_copy_markdown.furniture_width` rather than :meth:`copy_gutter`.
+        The inherited gutter is 0 and has to be: an assistant message has no
+        fixed one, because whether a leading ``▌`` is decoration or content
+        depends on the construct the row belongs to, and only the alignment
+        knows. Clamping to 0 stripped nothing, so a sub-line drag across a
+        wrapped quote's fold pasted the ``▌`` and a column-0 drag pasted the
+        ``•`` — furniture the markdown path never emitted, found independently
+        by review round 1 (R1-1) and design round 1 (D1). It also meant one
+        cell of difference in where a drag STARTED silently switched the paste
+        between markdown and rendered glyphs, which is why the full-coverage
+        predicate above measures against the same painted width.
+
+        **Rows of one source line rejoin with what the terminal consumed**, not
+        with a newline: the gate guarantees they share a source line, so each
+        break between them is a soft wrap at the current width rather than a
+        character in the document (design round 1, D2). A space is not always
+        right — a token wider than the render segment is folded mid-token and
+        nothing is consumed — so the separator is decided against the source
+        line by :func:`_copy_markdown.wrap_separator`.
+
         **The accepted cost**, stated so it is chosen rather than rediscovered:
         a drag from the middle of one bullet to the middle of the next copies
         both bullets WHOLE. The reader gets more than they highlighted. That is
         deliberate — trimming those ends needs the column mapping that does not
-        exist, and degrading any multi-row take to glyphs would put the ``▌``
-        and ``•`` furniture back into the paste this method exists to keep it
-        out of (which ``test_blockquote_copies_as_markdown_not_the_bar``
-        guards). A sub-line take also loses inline markers: dragging one bold
-        word yields ``frontend``, not ``**frontend**``. That is the base rule —
-        the clipboard is what the highlight covered.
+        exist, and the markdown path is the only one that can state a multi-line
+        take as valid markdown at all. Reviewed and accepted as shippable in
+        design round 1 (D3). A sub-line take also loses inline markers: dragging
+        one bold word yields ``frontend``, not ``**frontend**``. That is the
+        base rule — the clipboard is what the highlight covered — and it was
+        accepted in design round 1 (D4) for the reason that the reader pointed
+        at a frame with no asterisks anywhere on it.
+
+        A sub-line take across a TABLE row is the same rule and the one place
+        it costs something real: the rendered row has no ``|``, so the paste is
+        ``alpha  0.91`` and no longer reads as a table row (design round 1, D5).
+        It is left as the rule rather than special-cased because the whole-row
+        gesture — the one a reader makes to take a row AS a row — still covers
+        the row and still copies ``| alpha | 0.91 |`` from the source.
+
+        **A drag that lies entirely in a row's trailing pad copies nothing**,
+        deliberately: it selects no glyph, and Rich's pad is not content the
+        reader can see. ``_put_on_clipboard`` drops the empty payload, so there
+        is no write and no receipt — the same answer a zero-width click gets
+        (review round 1, R1-2).
         """
         visual = self._render()
         if not isinstance(visual, Content):
@@ -706,21 +741,59 @@ class AssistantBlock(TranscriptBlock):
                 # wrong. ``end`` also arrives three ways: -1 for end-of-row, a
                 # column inside the pad when the drag overran the last glyph, or
                 # a column short of it. Only the glyph count settles all three.
-                starts_full = first_start <= self.copy_gutter(first_index)
+                # The gutter is the row's PAINTED furniture, not the block's
+                # ``copy_gutter`` of 0: a full-content take must read as full
+                # whether or not the reader's drag began on the ``▌`` cell, or
+                # the same gesture one cell left would fall to the glyph path
+                # and paste a different document (design round 1, D1).
+                starts_full = first_start <= self._furniture_width(
+                    rows, mapping, first_index, content
+                )
                 ends_full = last_end == -1 or last_end >= len(rows[last_index].rstrip())
                 sub_line = not (starts_full and ends_full)
 
         if sub_line:
-            # Sliced exactly as ``TranscriptBlock.get_selection`` slices it
-            # (gutter-clamped start, ``-1`` meaning end of row), but over the
-            # content rows only: a blank row caught at the edge of the drag
-            # would otherwise contribute a line break the reader never
-            # highlighted, turning the receipt into ``copied 2 lines``.
+            # Sliced as ``TranscriptBlock.get_selection`` slices it (``-1``
+            # meaning end of row), but over the content rows only — a blank row
+            # caught at the edge of the drag would contribute a line break the
+            # reader never highlighted — and clamped past each row's PAINTED
+            # furniture rather than past ``copy_gutter``.
+            #
+            # ``copy_gutter`` is 0 on this block and cannot be anything else:
+            # an assistant message has no fixed gutter, because what is
+            # furniture depends on the construct the row belongs to. Clamping
+            # to it stripped nothing, so a sub-line take across a wrapped
+            # quote's fold put the ``▌`` on the clipboard and a column-0 drag
+            # picked up the ``•`` — furniture the base commit never copied, and
+            # the exact leak this method's docstring claims to prevent (review
+            # round 1, R1-1; design round 1, D1).
             glyphs = [
-                rows[index][max(start, self.copy_gutter(index)) : None if end == -1 else end]
+                rows[index][
+                    max(start, self._furniture_width(rows, mapping, index, content)) : (
+                        None if end == -1 else end
+                    )
+                ]
                 for index, (start, end) in content
             ]
-            return "\n".join(row.rstrip() for row in glyphs), "\n"
+            trimmed = [row.rstrip() for row in glyphs]
+
+            # Rejoined with what the TERMINAL consumed at each fold, not with a
+            # newline. The gate above guarantees these rows share one source
+            # line, so every break between them is a SOFT WRAP — an artifact of
+            # the current width, not a character in the document. Pasting it
+            # sent a phrase to Slack as two lines and turned the receipt into
+            # ``copied 2 lines`` for part of one sentence, the mirror of the
+            # composer bug ``_put_on_clipboard`` already fixed (design round 1,
+            # D2). Once rejoined the receipt falls into the character branch by
+            # itself, so the unit needs no separate fix.
+            source_line = self._source_line(mapping, content[0][0])
+            joined = trimmed[0]
+            for position, text in enumerate(trimmed[1:], start=1):
+                if not text:
+                    continue
+                separator = _copy_markdown.wrap_separator(joined, text, source_line)
+                joined = f"{joined}{separator}{text}" if joined else text
+            return joined, "\n"
 
         # Widened to whole source lines on purpose — see the accepted cost
         # above. The bounds come from ``selected`` rather than ``content`` so
@@ -731,3 +804,51 @@ class AssistantBlock(TranscriptBlock):
         if not copied:
             return super().get_selection(selection)
         return copied, "\n"
+
+    def _source_line(self, mapping: list[int | None], row: int) -> str | None:
+        """The source line rendered row ``row`` came from, or ``None``.
+
+        ``None`` for a row :func:`_copy_markdown.align` could not place, which
+        every caller treats as "assume nothing": the alignment is the only
+        evidence about what a painted glyph means, so without it the row is
+        returned verbatim rather than guessed at.
+        """
+        if row >= len(mapping):
+            return None
+        source = mapping[row]
+        if source is None:
+            return None
+        lines = self._full_text.split("\n")
+        return lines[source] if source < len(lines) else None
+
+    def _furniture_width(
+        self,
+        rows: list[str],
+        mapping: list[int | None],
+        row: int,
+        content: list[tuple[int, tuple[int, int]]],
+    ) -> int:
+        """Painted-furniture columns on rendered row ``row``.
+
+        The per-row gutter this block cannot express as a constant. See
+        :func:`_copy_markdown.furniture_width` for why the answer needs the
+        source line: the same glyph is decoration on a quote row and content
+        inside a fence.
+
+        A row OPENS its source line when the previous content row came from a
+        different one — which is what distinguishes a list item's marker row
+        from its wrapped continuations, whose furniture is indent alone.
+        """
+        source = mapping[row] if row < len(mapping) else None
+        previous: int | None = None
+        for index, _ in content:
+            if index == row:
+                break
+            previous = mapping[index] if index < len(mapping) else None
+        covered, _ = _copy_markdown.classify(self._full_text.split("\n"))
+        return _copy_markdown.furniture_width(
+            rows[row],
+            self._source_line(mapping, row),
+            opens_line=source != previous,
+            fenced=source is not None and source in covered,
+        )

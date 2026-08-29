@@ -517,6 +517,23 @@ WRAPPED = (
     "wrap across several rendered rows at a narrow terminal width.\n"
 )
 
+#: A blockquote long enough to WRAP, which the module had no fixture for — and
+#: that gap is why a green suite missed the furniture leak of review round 1
+#: (R1-1) and design round 1 (D1). It is the one wrapped construct whose
+#: continuation rows carry furniture: Rich repeats ``▌`` on every row of a
+#: quote, so a sub-line take over its fold is the case where a gutter of 0
+#: strips nothing.
+WRAPPED_QUOTE = (
+    "Here is a reply you can paste:\n\n"
+    "> This is a fairly long quoted sentence that will certainly wrap across "
+    "more than one rendered row at this width.\n"
+)
+
+#: A single source line holding a token wider than a narrow render segment.
+#: Rich folds it MID-TOKEN and consumes nothing, unlike a fold at a space —
+#: so a take across this fold must rejoin with no separator at all.
+LONG_TOKEN = "See supercalifragilisticexpialidociousandthensome_verylongtoken_here now.\n"
+
 
 def _rendered_rows(block: AssistantBlock) -> list[str]:
     """The frame's rows, as ``get_selection`` and the highlight both see them."""
@@ -595,7 +612,12 @@ async def test_a_phrase_across_a_wrap_boundary_copies_only_the_phrase() -> None:
         copied = block.get_selection(selection)
 
         assert copied is not None
-        assert copied[0] == "important paragraph that will\ncertainly wrap across several"
+        # Rejoined with the space the terminal consumed at the fold, not with
+        # the fold itself: the rows share one source line, so the break is an
+        # artifact of this width (design round 1, D2).
+        assert copied[0] == "important paragraph that will certainly wrap across several"
+        assert "\n" not in copied[0]
+        assert copied[0] in WRAPPED
         assert "This is a single" not in copied[0]
 
 
@@ -770,18 +792,23 @@ async def test_a_word_inside_a_blockquote_copies_without_the_bar() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_quote_dragged_from_column_zero_keeps_the_bar() -> None:
-    """The accepted wrinkle: a column-0 quote drag DOES copy the ``▌``.
+async def test_a_quote_dragged_from_column_zero_drops_the_bar() -> None:
+    """A column-0 quote drag copies the QUOTED TEXT, never the ``▌``.
 
-    ``AssistantBlock`` does not override ``copy_gutter``, so it inherits 0 —
-    and a drag that starts at column 0 genuinely crossed the bar's cell, so
-    returning it is a faithful report of the highlight. Pinned as a decision
-    rather than left to be discovered: the obvious "fix" is a regex stripping
-    leading furniture, and that CORRUPTS CODE — inside a fence it turns
-    ``  1 / 0`` into ``/ 0``, because a code line starting with a digit is
-    indistinguishable from a rendered ordered-list marker by glyph alone. The
-    safe alternative is a mapping-aware gutter, warranted only if this is ever
-    actually reported.
+    This pinned the opposite until review round 1 (R1-1) and design round 1
+    (D1) independently rejected it: the bar is painted decoration, it exists
+    nowhere in the user's document, and a paste carrying it shows a glyph they
+    cannot account for. It also made the paste FORMAT depend on one invisible
+    cell of drag start — column 0 gave rendered glyphs with the bar, column 1
+    gave clean text — which is the surprise the whole method exists to remove.
+
+    The rejected fix was a regex over the row, and rejecting it was right: it
+    CORRUPTS CODE, turning a fenced ``  1 / 0`` into ``/ 0`` because a code
+    line starting with a digit is indistinguishable from an ordered marker by
+    glyph alone. The mapping-aware gutter it named as the safe alternative is
+    what now runs — ``_copy_markdown.furniture_width`` asks which SOURCE LINE
+    the row came from, so a fence is refused explicitly rather than by luck
+    (pinned by ``test_a_column_zero_drag_inside_a_fence_keeps_the_code``).
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(80, 40)) as pilot:
@@ -797,7 +824,207 @@ async def test_a_quote_dragged_from_column_zero_keeps_the_bar() -> None:
         copied = block.get_selection(selection)
 
         assert copied is not None
-        assert copied[0] == "▌ Thanks for the"
+        assert copied[0] == "Thanks for the"
+        assert "▌" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_sub_line_take_across_a_wrapped_quote_never_copies_the_bar() -> None:
+    """The R1-1/D1 leak: a drag over a wrapped quote's fold must not paste ``▌``.
+
+    The regression both reviewers found independently, and the case the module
+    had no fixture for. A wrapped blockquote is ONE source line painted as
+    several rows, so it passes the source-line gate onto the glyph path — and
+    every one of those rows carries a ``▌``, because Rich repeats the bar on
+    continuations. With the block's inherited ``copy_gutter`` of 0 the clamp
+    stripped nothing and the bar reached the clipboard, which the markdown path
+    it replaced had never done.
+
+    Two assertions rather than one: no bar (the leak) and no newline (D2, since
+    this take also crosses a soft wrap), because the fold is where both defects
+    surface at once.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(WRAPPED_QUOTE)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        bars = [i for i, row in enumerate(rows) if row.startswith("▌")]
+        assert len(bars) >= 2, f"the quote must actually wrap, or this proves nothing: {rows!r}"
+
+        selection = Selection.from_offsets(Offset(x=10, y=bars[0]), Offset(x=12, y=bars[1]))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert "▌" not in copied[0]
+        assert "\n" not in copied[0]
+        assert copied[0] == "a fairly long quoted sentence that will certainly"
+
+
+@pytest.mark.asyncio
+async def test_a_column_zero_drag_inside_a_bullet_drops_the_marker() -> None:
+    """A column-0 bullet drag copies the item's text, never the ``•``.
+
+    The bullet half of D1, identical in mechanism to the quote bar and called
+    out in review round 1 (R1-3) as the case the documentation named nowhere.
+    Pinned separately because the two take different branches of
+    ``furniture_width``: a quote strips a repeated bar, a list strips a marker
+    on the row that opens the item.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "Transient")
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=36, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "Transient failures in the ingest"
+        assert "•" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_column_zero_drag_inside_a_fence_keeps_the_code() -> None:
+    """Furniture stripping must never touch code — the reason it is mapping-aware.
+
+    The hazard the rejected regex fix would have caused, pinned so the cheap
+    implementation cannot come back: a fenced line beginning with a digit looks
+    exactly like a rendered ordered-list marker, and a glyph-level strip turns
+    ``1 / 0`` into ``/ 0``. ``furniture_width`` refuses on the SOURCE line's
+    fence membership, so the code copies byte for byte including its indent.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text("```python\nif x:\n    1 / 0  # boom\n```\n")
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row = next(i for i, text in enumerate(rows) if "1 / 0" in text)
+        # Column 0 to just past the ``0``, stopping short of the comment: a
+        # column-0 start is what reaches the furniture clamp, and leaving the
+        # comment out is what keeps this on the sub-line path rather than
+        # widening to the whole fenced block.
+        end = rows[row].index("/ 0") + len("/ 0")
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        # The digit survives: a glyph-level strip would read `` 1 `` as an
+        # ordered-list marker and hand back ``/ 0``.
+        assert copied[0].strip() == "1 / 0"
+        assert "#" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_take_across_a_mid_token_fold_rejoins_with_no_space() -> None:
+    """A fold inside a long token consumed nothing, so the rejoin adds nothing.
+
+    The counterpart to the wrap-fold rejoin, and the case a blanket
+    ``" ".join`` would corrupt: Rich breaks a token wider than the render
+    segment mid-token, so putting a space back would invent a character the
+    document never had and silently break a pasted URL or identifier. Measured
+    reachable in ordinary prose at ordinary widths, which is why
+    ``wrap_separator`` asks the source line instead of assuming a space.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(34, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(LONG_TOKEN)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        content = [i for i, row in enumerate(rows) if row.strip()]
+        first = next(i for i in content if "supercal" in rows[i])
+        last = next(i for i in content if "here now." in rows[i])
+        assert first != last, "the token must actually fold, or this proves nothing"
+
+        selection = Selection.from_offsets(
+            Offset(x=rows[first].index("supercal"), y=first),
+            Offset(x=rows[last].index("here") + len("here"), y=last),
+        )
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "supercalifragilisticexpialidociousandthensome_verylongtoken_here"
+        assert copied[0] in LONG_TOKEN
+        assert "\n" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_whole_table_row_take_keeps_the_markdown_pipes() -> None:
+    """The escape hatch that makes D5 an accepted cost rather than a defect.
+
+    A sub-line take across a table row copies ``alpha  0.91`` without the
+    ``|``, which design round 1 (D5) flagged as the one construct where the
+    rendered form is less useful than the source. It stays the rule because the
+    WHOLE-row gesture still reaches the markdown path and still yields a
+    pasteable row. Pinned so a future widening of the sub-line gate cannot take
+    that fallback away silently.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Results:\n\n| Name | Score |\n|------|-------|\n| alpha | 0.91 |\n| beta | 0.87 |\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "alpha")
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=len(rows[row]), y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "| alpha | 0.91 |"
+
+
+@pytest.mark.asyncio
+async def test_a_drag_entirely_inside_the_trailing_pad_copies_nothing() -> None:
+    """A drag over Rich's pad selects no glyph, so nothing is written. Decided.
+
+    Review round 1 (R1-2) asked whether the silence is right. It is, and it is
+    pinned here rather than left implicit: the pad is not content the reader can
+    see, so there is nothing truthful to copy, and ``_put_on_clipboard`` drops
+    an empty payload without a receipt — the same answer a zero-width click
+    already gets. A toast here would announce a copy that did not happen.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "Transient")
+        visible_end = len(rows[row].rstrip())
+        assert visible_end < len(rows[row]), "the row must carry a pad, or this proves nothing"
+
+        selection = Selection.from_offsets(
+            Offset(x=visible_end + 5, y=row), Offset(x=visible_end + 20, y=row)
+        )
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == ""
 
 
 @pytest.mark.asyncio
