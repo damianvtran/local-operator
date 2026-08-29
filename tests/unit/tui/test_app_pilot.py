@@ -8601,3 +8601,66 @@ async def test_effective_model_change_repaints_the_band() -> None:
         )
         await pilot.pause()
         assert app._status._model_label == "test/model"
+
+
+@pytest.mark.asyncio
+async def test_route_independence_holds_on_a_real_store_shape(tmp_path, monkeypatch) -> None:
+    """Route independence, exercised against a store shaped like a real one.
+
+    D12's finding, taken seriously: the previous guards ran on 16- and 50-row
+    fixtures whose digests were two hand-written strings, and three consecutive
+    rounds shipped defects those fixtures could not express. This builds a store
+    with the properties that actually produce the bug — many sessions, digests
+    that share prefixes, and a query whose exact matches vanish partway through
+    so the soft tier engages mid-word.
+
+    Drives real keystrokes through `/resume` and compares two routes to the same
+    visible query. It fails on `bc55a183`, where ranking read run history.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # 120 sessions: 20 that match `watch` exactly and stop there, 100 that only
+    # a bounded edit-distance search can reach. Enough rows that the page window
+    # matters and the recency tie-break has something to order.
+    # `watch` and `watchl` both have exact hits, `watchlq` does not. So the two
+    # routes reach the final query having latched the soft tier at DIFFERENT
+    # points: typing straight to `watchl` never latches, while `watchlq` latches
+    # and then backspaces into `watchl` carrying that state. Any rule that reads
+    # run history diverges here; a rule that is a function of the query cannot.
+    # Getting this wrong is why the first version of this guard passed on the
+    # broken head — the fixture has to make the two routes actually differ.
+    for index in range(20):
+        _seed_session(tmp_path, f"aa{index:06d}", prompt=f"watchl the retention sweep {index}")
+    for index in range(100):
+        _seed_session(tmp_path, f"bb{index:06d}", prompt=f"wotchel batch rollup {index}")
+
+    async def route(extra: str | None) -> list[str]:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one(Editor).focus()
+            for key in "/resume":
+                await pilot.press(key)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            picker = app.screen
+            assert isinstance(picker, SessionPickerScreen)
+            for key in "watchl" if extra is None else "watchl" + extra:
+                await pilot.press(key)
+                await pilot.pause()
+            if extra is not None:
+                for _ in extra:
+                    await pilot.press("backspace")
+                    await pilot.pause()
+            return [row.id for row in picker.visible_rows]
+
+    forward = await route(None)
+    backspaced = await route("q")
+
+    assert forward == backspaced, (
+        "the same visible query rendered differently depending on the route: "
+        f"{forward[:5]} vs {backspaced[:5]}"
+    )
+    # And the cursor row specifically, since that is what Enter resumes.
+    assert (forward or [None])[0] == (backspaced or [None])[0]

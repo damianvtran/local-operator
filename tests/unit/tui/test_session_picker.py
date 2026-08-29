@@ -25,6 +25,7 @@ from local_operator.resume import (
     recent_session_rows,
     session_name,
 )
+from local_operator.session.search_index import search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     _MARKER_LEGEND,
@@ -1431,93 +1432,94 @@ async def test_the_result_list_never_grows_as_the_user_types() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_typing_run_never_swaps_the_row_under_the_cursor() -> None:
-    """The harm D6 named, asserted directly rather than via the row count.
+async def test_the_same_query_renders_identically_by_either_route() -> None:
+    """The property this surface actually guarantees: order is a function of the
+    QUERY, not of the route taken to it.
 
-    A user types, the row they want is on top, and they press enter by reflex.
-    If the last keystroke re-homed the cursor onto a different session they
-    resume the wrong one — the failure ``session_picker``'s ordering invariant
-    exists to prevent, and the same class of harm as the original bug.
+    A user cannot know which route they took, so a picker that answers the same
+    visible query two ways is one they cannot reason about at all. Reaching
+    `watchl` by typing it, and by typing `watchlq` then backspacing, must give
+    byte-identical rows in byte-identical order.
+
+    This replaces a test asserting that the cursor never lands on a row absent
+    one keystroke earlier. That property was real but could only be held by
+    ranking on run history, which is exactly what made the same query render
+    two ways (D11). The two are not both satisfiable by ordering; see
+    ``_soft_tier_wanted``. What remains of the displacement concern is recorded
+    honestly in that docstring rather than asserted here falsely.
     """
-    # The genuine matches are the OLDEST rows, so when soft neighbours flood in
-    # they outrank the real matches on recency and the top row changes identity.
-    # With the real matches newest, a flood is invisible at the cursor and the
-    # test would pass on a gate that evicts them — the trap this test exists to
-    # avoid being caught by.
     rows = [_row(f"s{i:03d}", f"session {i}", age_s=60.0 * (100 - i)) for i in range(50)]
-    digests = {}
-    for i, row in enumerate(rows):
-        digests[row.id] = "watch the retention sweep" if i >= 40 else "wotchel batch rollup"
-    app = _PickerHost(rows, digests)
-    async with app.run_test(size=(100, 30)) as pilot:
-        screen = await app.open_picker()
-        await pilot.pause()
+    digests = {
+        row.id: ("watch the retention sweep" if i >= 40 else "wotchel batch rollup")
+        for i, row in enumerate(rows)
+    }
 
-        tops: list[str | None] = []
-        # Typed, for the reason above: a per-run latch is invisible to a test
-        # that sets each whole query directly.
-        seen_ids: list[set[str]] = []
-        for key in "watchl":
-            await pilot.press(key)
+    async def route(extra: str | None) -> list[str]:
+        app = _PickerHost(rows, digests)
+        async with app.run_test(size=(100, 30)) as pilot:
+            screen = await app.open_picker()
             await pilot.pause()
-            visible = screen.visible_rows
-            tops.append(visible[0].id if visible else None)
-            seen_ids.append({row.id for row in visible})
+            for key in "watchl" if extra is None else "watchl" + extra:
+                await pilot.press(key)
+                await pilot.pause()
+            if extra is not None:
+                for _ in extra:
+                    await pilot.press("backspace")
+                    await pilot.pause()
+            return [row.id for row in screen.visible_rows]
 
-        # The cursor moving is not itself the harm: narrowing legitimately
-        # re-homes it to the best remaining match, and that row was already on
-        # screen. The harm is it landing on a session the previous keystroke was
-        # NOT showing, because then a reflexive enter resumes something the user
-        # never saw.
-        for index in range(1, len(tops)):
-            top = tops[index]
-            if top is not None and top not in seen_ids[index - 1]:
-                raise AssertionError(
-                    f"cursor landed on {top}, which was not on screen one "
-                    f"keystroke earlier: {tops}"
-                )
+    forward = await route(None)
+    backspaced = await route("q")
+    assert (
+        forward == backspaced
+    ), f"the same query rendered differently by route: {forward[:5]} vs {backspaced[:5]}"
 
 
 @pytest.mark.asyncio
-async def test_the_soft_tier_runs_only_when_the_exact_tiers_find_nothing() -> None:
-    """The gate itself, stated directly: any exact hit suppresses the soft tier,
-    and no exact hit runs it. Pins the condition the D1 monotonicity argument
-    rests on, so a future change to the threshold fails here rather than in a
-    user's typing run."""
-    rows = [_row("aaa1", "classifier work"), _row("bbb2", "unrelated")]
-    digests = {"aaa1": "improve adm classifier throughput"}
+async def test_the_soft_tier_runs_only_when_the_exact_tiers_are_empty() -> None:
+    """The one-line rule the gate implements, observed rather than reconstructed.
+
+    The soft tier runs ONLY for a query the cheap tiers cannot answer at all.
+    That is what bounds the disruption: with exact hits the user keeps exactly
+    those, and with none there is nothing on screen for an addition to displace.
+
+    Deliberately NOT asserting "the list never grows" or "no row appears that
+    was absent one keystroke earlier". Both were asserted in earlier rounds and
+    both are false on real data (`sesion` typed goes 83 to 129 rows with the
+    tier active on both sides). A guard stating a false invariant passes only
+    until someone measures it.
+    """
+    rows = [_row(f"s{i:03d}", f"session {i}", age_s=60.0 * (100 - i)) for i in range(50)]
+    digests = {
+        row.id: ("watch the retention sweep" if i >= 40 else "wotchel batch rollup")
+        for i, row in enumerate(rows)
+    }
     app = _PickerHost(rows, digests)
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
-        calls: list[str] = []
+
+        ran: list[str] = []
         real = screen._soft_index.search
 
         def counting(digests_arg, query):
-            calls.append(query)
+            ran.append(query)
             return real(digests_arg, query)
 
         screen._soft_index.search = counting  # type: ignore[method-assign]
 
-        # Typed, not set: the gate is decided across a typing RUN, so setting a
-        # whole query at once cannot observe it. That shape is what let a tier
-        # that never ran be validated as working (F10).
-        for key in "classifier":
+        typed = ""
+        for key in "watchl":
             await pilot.press(key)
             await pilot.pause()
-        assert len(screen.visible_rows) == 1
-        assert calls == [], "the soft tier ran while the exact tiers had a hit"
-
-        # Backspace to a shorter query, then type a typo: no exact hit anywhere,
-        # so the tier latches on and rescues it.
-        for _ in range(3):  # back to "classi"
-            await pilot.press("backspace")
-            await pilot.pause()
-        for key in "fer":
-            await pilot.press(key)
-            await pilot.pause()
-        assert [r.id for r in screen.visible_rows] == ["aaa1"]
-        assert calls, "the soft tier did not run for a typo"
+            typed += key
+            # Whether the cheap tiers answered THIS query, computed the way the
+            # widget computes it rather than re-derived from the fixture.
+            exact = filter_rows(rows, typed, search_digests(digests, typed))
+            if exact:
+                assert typed not in ran, f"soft tier ran at {typed!r} despite exact hits"
+            else:
+                assert typed in ran, f"soft tier did not run at {typed!r} with no exact hits"
 
 
 def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> None:
