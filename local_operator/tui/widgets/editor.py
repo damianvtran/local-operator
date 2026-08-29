@@ -142,6 +142,19 @@ from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 #: user can act on, rather than as a provider 400 mid-turn.
 MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
 
+#: How long a clipboard read may run before the composer says it is working.
+#:
+#: Under this, the pause is short enough to read as key latency and a card
+#: would flicker through the shared notice slot on every paste. Over it, the
+#: composer is visibly unresponsive and owes the user an explanation: measured
+#: reads on a loaded machine are 1.3-2.0 s for an ordinary screenshot, against
+#: a 2.0 s hard ceiling (ux round 1, U3).
+#:
+#: 350 ms is above the ~100 ms threshold at which an interface stops feeling
+#: instant and below the fastest real read observed, so a healthy idle-machine
+#: paste (0.26 s) still says nothing at all.
+PASTE_READING_NOTICE_DELAY_S = 0.35
+
 #: A paste is treated as paths only if EVERY segment looks like one. Requiring
 #: a separator is what keeps prose out: "see screenshot.png" splits into two
 #: segments, one of which has no `/`, so the whole paste stays text.
@@ -476,6 +489,31 @@ class EditorCopyStale(Message):
         super().__init__()
 
 
+class EditorPasteReading(Message):
+    """Posted when a clipboard read is taking long enough for the user to notice.
+
+    ``Ctrl+V`` is an awaited binding action, so the composer does not process
+    input again until the read returns. The read itself is threaded, but the
+    ACTION is not fire-and-forget, and on this machine an ordinary screenshot
+    measures 1.3-2.0 s (0.26 s on an idle box, 1.44 s for a full-screen
+    capture). For that window the composer simply stops with nothing on screen
+    saying why, which reads as a hung app rather than as a pause (ux round 1,
+    U3).
+
+    Posted only after :data:`PASTE_READING_NOTICE_DELAY_S`, so the common fast
+    read stays silent. A card that flashed up and vanished on every paste would
+    be worse than the pause it explains: the notice slot is shared, and a
+    routine gesture must not flicker through it (the same discipline
+    :class:`EditorPasteEmpty` follows in yielding to actionable notices).
+
+    Carries nothing. "A read is in flight" needs no payload, and the app owns
+    the wording the same way it owns every other card in this family.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
 class EditorPasteAttached(Message):
     """Posted when a clipboard paste DID attach an image.
 
@@ -538,25 +576,43 @@ class EditorPasteEmpty(Message):
       rule) and so does the advice that would help (round 2, D10).
     * ``"remote"`` — the read was refused because the session is remote. Not a
       statement about the clipboard at all.
+    * ``"timeout"`` — the clipboard did not answer inside
+      :data:`~local_operator.clipboard.CLIPBOARD_TIMEOUT_S`. Also not a
+      statement about what was on it. Split out of ``"nothing"`` because the
+      collapse was actively misleading on the shape users hit most: under CPU
+      load 8 of 10 reads timed out, and every one told a user holding a valid
+      screenshot that their clipboard was empty (ux round 1, U3). A retry is
+      the move that helps here and the move that cannot help there, so one
+      sentence could not serve both.
 
     The app owns the wording, the same way :class:`EditorCopyStale` leaves the
     card to the app; this only says which of the three happened.
 
-    ``suggest_system_paste`` is a ROUTE fact, not a clipboard one, and it is
-    what makes this notice teachable. A user whose ``Cmd+V`` produced a beep
-    and an empty paste has no way to discover that ``Ctrl+V`` is the key that
-    reads the clipboard \u2014 nothing on screen names it. A user who just PRESSED
-    ``Ctrl+V`` does not need to be told about ``Ctrl+V``, and would read the
-    advice as the app failing to notice what they did. The empty-paste branch
-    sets it; :meth:`Editor.action_system_paste` does not.
+    THIS NOTICE IS NOT A DISCOVERY SURFACE, and an earlier revision's attempt
+    to make it one is recorded here because the reasoning looks right and is
+    not. It carried a ``suggest_system_paste`` flag that appended "Try
+    ctrl+v." on the empty-paste route only, on the argument that telling a user
+    who just pressed ``Ctrl+V`` to press ``Ctrl+V`` reads as the app missing
+    the key. The flag was unsalvageable in both directions (design/ux round 1,
+    D1/U1):
+
+    * The route it fired on requires a bare ``ESC[200~ ESC[201~``, which only
+      cmux and multiplexers send \u2014 and there ``Cmd+V`` already works, so the
+      hint reached exactly the users who did not need it.
+    * The route where a user IS stranded delivers zero bytes, so no ``Paste``
+      event exists and no notice of any kind can be raised.
+    * Even on the route it did fire on, ``reason="nothing"`` means the
+      clipboard held nothing attachable \u2014 so ``Ctrl+V`` would return the same
+      empty answer. The advice could not have helped even where it appeared.
+
+    ``ctrl+v`` is taught ambiently instead, by
+    :data:`~local_operator.tui.widgets.welcome.TIPS` and ``/help``, which do
+    not depend on an event the terminal never sends.
     """
 
-    def __init__(self, reason: str = "nothing", *, suggest_system_paste: bool = False) -> None:
+    def __init__(self, reason: str = "nothing") -> None:
         super().__init__()
         self.reason = reason
-        #: Name ``ctrl+v`` in the notice, because this paste did not come from
-        #: it. See the class docstring.
-        self.suggest_system_paste = suggest_system_paste
 
 
 class EditorCopied(Message):
@@ -3737,7 +3793,23 @@ class Editor(TextArea):
         right here and noise anywhere else. Whitespace the user copied is
         handled by :meth:`_on_paste` and never reaches this method.
         """
-        contents = await asyncio.to_thread(read_clipboard)
+        # ACKNOWLEDGE A SLOW READ. The await below holds this widget's input
+        # until the clipboard answers, so a read that outlives
+        # `PASTE_READING_NOTICE_DELAY_S` gets a card explaining the pause
+        # rather than leaving the composer looking hung (ux round 1, U3).
+        #
+        # A timer rather than an unconditional post, because the fast read is
+        # the common one and a card that appears and vanishes on every paste is
+        # worse than the pause it describes. `set_timer` is cancelled in the
+        # `finally`, so a read that beats the delay never posts at all.
+        reading_notice = self.set_timer(
+            PASTE_READING_NOTICE_DELAY_S,
+            lambda: self.post_message(EditorPasteReading()),
+        )
+        try:
+            contents = await asyncio.to_thread(read_clipboard)
+        finally:
+            reading_notice.stop()
         if contents.image is not None:
             markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:
@@ -3780,16 +3852,16 @@ class Editor(TextArea):
             # does not falsify such a claim \u2014 the image the user was told about
             # is still unattached.
             return contents.text
-        self.post_message(
-            EditorPasteEmpty(
-                reason="remote" if contents.refused_remote else "nothing",
-                # `not allow_text` IS "this was not a Ctrl+V". Telling a user
-                # who just pressed Ctrl+V to press Ctrl+V reads as the app not
-                # noticing the key, so the advice goes only to the route that
-                # cannot have come from it.
-                suggest_system_paste=not allow_text,
-            )
-        )
+        if contents.refused_remote:
+            reason = "remote"
+        elif contents.timed_out:
+            # Checked BEFORE "nothing": a read that never finished cannot
+            # report what was on the clipboard, and saying it was empty is a
+            # claim about a question that was never answered (U3).
+            reason = "timeout"
+        else:
+            reason = "nothing"
+        self.post_message(EditorPasteEmpty(reason=reason))
         return None
 
     async def action_system_paste(self) -> None:
@@ -3817,6 +3889,24 @@ class Editor(TextArea):
         ``read_only`` is honoured because the base action honours it: this is a
         keyboard edit, and a read-only composer must not become writable just
         because the key was rebound.
+
+        **A live selection is REPLACED, not inserted into.** "Select the thing
+        you want to swap out, then paste over it" is universal text-editing
+        behaviour; it is what `Cmd+V` does through ``TextArea._on_paste`` and
+        what stock ``TextArea.action_paste`` does. An earlier revision called
+        ``insert`` here on the argument that one insertion point for every
+        clipboard shape avoids drift on selection-replacement semantics — but
+        ``insert`` is the branch that does NOT replace, so that reasoning
+        picked the drift instead of avoiding it and shipped a paste that
+        corrupts the buffer: selecting `WORD` and pasting `NEW` gave
+        `keep WORDNEW keep` against `keep NEW keep` on every other route
+        (ux round 1, U2 — reproduced before fixing, both the text and the
+        image shape).
+
+        ``_replace_via_keyboard`` is the exact call the base class's own paste
+        makes, so this route now shares its semantics rather than approximating
+        them: an empty selection degenerates to an insert at the caret, which
+        is why one call serves both cases.
         """
         if self.read_only:
             return
@@ -3826,7 +3916,13 @@ class Editor(TextArea):
             # posted the notice that says so, and inserting nothing is the
             # honest outcome.
             return
-        self.insert(pasted)
+        # `move_cursor` to the edit's end mirrors `TextArea._on_paste`: without
+        # it `maintain_selection_offset=False` leaves the caret where the
+        # replaced range began, so the next keystroke types BEFORE the text
+        # just pasted.
+        result = self._replace_via_keyboard(pasted, *self.selection)
+        if result is not None:
+            self.move_cursor(result.end_location)
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.

@@ -62,14 +62,36 @@ screenshot on the pasteboard, and `ctrl+v` pressed through System Events.
 `OperatorApp` (which declares `CSS_PATH`, so the stylesheet applies — the
 lightweight test hosts do not, and would not show a style change at all).
 
+`before-composer-empty.svg` is ONE shared before-frame, deliberately. Every
+before-state of this change is the same frame — an empty composer, because
+before the fix `ctrl+v` did nothing at all on every clipboard shape — and an
+earlier revision shipped that same frame three times under three names, which
+implied three distinct captured states (design round 1, D6).
+
 | state | before | after |
 |---|---|---|
-| image on clipboard, `ctrl+v` | `frames/before-image.svg` — composer empty | `frames/after-image.svg` — `[Image #1, 1568x200]` |
-| empty clipboard | `frames/before-empty.svg` | `frames/after-empty.svg` |
-| remote session | `frames/before-remote.svg` | `frames/after-remote.svg` |
-| text on clipboard | n/a (no text shape existed) | `frames/after-text.svg` |
+| image on clipboard, `ctrl+v` | `before-composer-empty.svg` | `after-image.svg` — `[Image #1, 1568x200]` |
+| empty clipboard | same | `after-empty.svg` — "Nothing on the clipboard to paste." |
+| remote session | same | `after-remote.svg` — one line, logo unclipped (D4) |
+| text on clipboard | same | `after-text.svg` |
+| read timed out | same | `after-timeout.svg` — "Clipboard read timed out. Try ctrl+v again." (U3) |
+| the ambient affordance | n/a | `after-tip-ctrlv.svg` — the splash tip that teaches the key (D1/U1) |
 
-The before-frames were captured before any file was edited, per AGENTS.md.
+The before-frame was captured before any file was edited, per AGENTS.md.
+
+## 6. Round 1 review fixes, verified in a real terminal
+
+Re-driven in Terminal.app against the fixed code, same method as section 3.
+
+| artifact | finding | result |
+|---|---|---|
+| `terminal-ctrlv-selection.png` | U2 + U3 | typed `keep WORD`, selected `WORD`, `ctrl+v` with `REPLACEMENT` on the clipboard → **`keep REPLACEMENT`** (was `keep REPLACEMENTWORD`). The same frame shows the **"Reading the clipboard…"** card acknowledging the slow read. |
+| `terminal-ctrlv-selection-image.png` | U2, image shape | same gesture with a PNG on the pasteboard → **`keep [Image #1, 900x600]`**; the selection is replaced, not inserted into. |
+
+`/help` was also driven live: the `ctrl+v` row now sits directly under the
+command table, on one line at 120 columns (71 cells against the 76-cell box at
+80 columns), out of the `lop config edit` toggle block it used to sit inside
+(D2).
 
 ## 5. Live clipboard reads, all four shapes
 

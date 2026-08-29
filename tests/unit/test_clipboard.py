@@ -35,6 +35,7 @@ import pytest
 from local_operator import clipboard as clipboard_module
 from local_operator.clipboard import (
     CLIPBOARD_TIMEOUT_S,
+    MAX_CLIPBOARD_TEXT_BYTES,
     ClipboardImage,
     clipboard_reads_are_local,
     read_clipboard,
@@ -1004,3 +1005,92 @@ def test_a_remote_session_reads_no_text_either(platform: str, monkeypatch, which
     )
     assert contents.text == "" and contents.refused_remote is True
     assert fake.calls == [], "a remote session must not spawn a clipboard tool at all"
+
+
+# -- a timeout is not an empty clipboard -------------------------------------
+def test_a_wedged_tool_reports_a_timeout_rather_than_an_empty_clipboard(
+    monkeypatch, which_all
+) -> None:
+    """The distinction the composer needs to word its notice honestly.
+
+    A backend returning `None` is ambiguous by design - "no image of that type"
+    and "the tool never answered" are the same value - and collapsing them told
+    a user holding a valid screenshot that their clipboard was empty. Measured
+    under CPU load at 8 failures in 10 reads (ux round 1, U3).
+    """
+
+    def wedged(argv, kwargs):
+        time.sleep(CLIPBOARD_TIMEOUT_S + 0.4)
+        return b""
+
+    _install(monkeypatch, {"osascript": wedged})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.image is None and contents.text == ""
+    assert contents.timed_out is True
+
+
+def test_a_clipboard_that_simply_has_nothing_is_not_reported_as_a_timeout(
+    monkeypatch, which_all
+) -> None:
+    """The other half: an empty clipboard answers promptly and truthfully, and
+    must not borrow the timeout's remedy ("try again") for a state a retry
+    cannot change."""
+    _install(monkeypatch, {"osascript": lambda argv, kwargs: b""})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.image is None and contents.text == ""
+    assert contents.timed_out is False
+
+
+def test_a_successful_read_is_never_flagged_as_timed_out(monkeypatch, which_all) -> None:
+    """A payload that arrived is a success even if a later cheap call expired.
+    A notice claiming a timeout beside an attached image would describe a
+    failure that did not happen."""
+
+    def osascript(argv, kwargs):
+        Path(argv[2]).write_bytes(PNG)
+        return b"image"
+
+    _install(monkeypatch, {"osascript": osascript})
+    contents = read_clipboard(BIG, platform="darwin", env={})
+    assert contents.image is not None
+    assert contents.timed_out is False
+
+
+@pytest.mark.parametrize("platform,binary", [("linux", "xclip"), ("win32", "pwsh")])
+def test_the_timeout_flag_is_reported_off_macos_too(
+    platform: str, binary: str, monkeypatch, which_all
+) -> None:
+    """Every platform is a peer on this too: a timeout that only the macOS
+    backend could report would leave Linux and Windows users with the same
+    wrong diagnosis the flag exists to remove."""
+
+    def wedged(argv, kwargs):
+        time.sleep(CLIPBOARD_TIMEOUT_S + 0.4)
+        return b""
+
+    _install(monkeypatch, {binary: wedged})
+    contents = read_clipboard(BIG, platform=platform, env={"DISPLAY": ":0"})
+    assert contents.timed_out is True
+
+
+def test_clipboard_text_is_bounded_by_the_paste_budget_not_the_image_ceiling(
+    monkeypatch, which_all
+) -> None:
+    """Text has no downstream resize, so the 64 MB INGEST ceiling - which is
+    generous precisely because images get bounded later - is not a bound on
+    text at all.
+
+    Measured before the cap: a 5 MB text clipboard blocked the UI for 52 s on a
+    synchronous insert (code round 1, F3). The image ceiling stays where it is;
+    only text takes the smaller budget, because only text reaches the document
+    at its read size.
+    """
+    oversized = b"x" * (MAX_CLIPBOARD_TEXT_BYTES + 1)
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: oversized})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text == "", "text past the paste budget must not reach the composer"
+
+    at_limit = b"y" * MAX_CLIPBOARD_TEXT_BYTES
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: at_limit})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert len(contents.text) == MAX_CLIPBOARD_TEXT_BYTES, "the budget itself must fit"

@@ -152,6 +152,7 @@ from local_operator.tui.widgets.editor import (
     EditorCopyStale,
     EditorPasteAttached,
     EditorPasteEmpty,
+    EditorPasteReading,
     EditorQuit,
     EditorSubmitted,
     InlineCommandRequested,
@@ -5109,6 +5110,31 @@ class OperatorApp(App[None]):
         """
         self.query_one(Toast).withdraw(COMPOSER_COPY)
 
+    def on_editor_paste_reading(self, message: EditorPasteReading) -> None:
+        """A clipboard read is taking long enough to need explaining.
+
+        The composer does not process input while `ctrl+v`'s read is in
+        flight, and on a loaded machine that is 1.3-2.0 s of apparent
+        unresponsiveness with nothing on screen saying why (ux round 1, U3).
+        This card is the acknowledgement.
+
+        A COURTESY, not a failure: the user just pressed a key and this is
+        news about their own gesture, so `yield_to_actionable` keeps it from
+        evicting an MCP error they have not read. It takes the same owner as
+        the paste notices, so whichever outcome lands next
+        (`EditorPasteAttached` or `EditorPasteEmpty`) replaces or withdraws it
+        rather than leaving "Reading the clipboard…" on screen behind a
+        finished paste.
+        """
+        from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS
+
+        self.query_one(Toast).show(
+            "Reading the clipboard…",
+            duration_ms=TOAST_DEFAULT_MS,
+            yield_to_actionable=True,
+            owner=COMPOSER_PASTE_NOTICE,
+        )
+
     def on_editor_paste_empty(self, message: EditorPasteEmpty) -> None:
         """A paste that could only have been an image attached nothing — say so.
 
@@ -5154,7 +5180,14 @@ class OperatorApp(App[None]):
         from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS, TOAST_FAILURE_MS
 
         if message.reason == "remote":
-            text = "Clipboard images aren't read over SSH. Paste a file path instead."
+            # 46 cells against the toast's 58-cell content box. The previous
+            # wording was 65 and wrapped to two lines at EVERY terminal width,
+            # and the second line lands on the ASCII logo behind the card -
+            # visible in this PR's own `after-remote.svg`, where the logo's top
+            # rows are clipped (design round 1, D4). Every other notice in this
+            # family is one line; this one now is too, and it keeps the remedy
+            # that makes it actionable.
+            text = "Clipboard isn't read over SSH. Paste a file path."
         elif message.reason == "unattachable":
             # No "paste its file path" here any more: the path route runs the
             # same bounding tail, so a refusal caused by the IMAGE cannot be
@@ -5172,30 +5205,34 @@ class OperatorApp(App[None]):
             # (round 3, D12). Same discipline as D2/U2: name what happened,
             # never guess why.
             text = "Couldn't attach that file. It may be too large, or not an image."
-        elif message.suggest_system_paste:
-            # THE DISCOVERABILITY CASE, and the only place the app can teach
-            # this key at the moment it is needed. Outside cmux, `Cmd+V` on an
-            # image pasteboard is swallowed by the terminal (Terminal.app and
-            # Ghostty send zero bytes and beep - measured), so a user who tried
-            # it has no way to learn that `ctrl+v` is the key that reads the
-            # clipboard: nothing they pressed produced a surface naming it.
-            # Only the route that cannot have BEEN `ctrl+v` says this; see
-            # `EditorPasteEmpty.suggest_system_paste`.
-            text = "Couldn't attach an image from the clipboard. Try ctrl+v."
+        elif message.reason == "timeout":
+            # NOT "nothing". The read was cut short, so this card cannot say
+            # what was on the clipboard, and the previous copy said it was
+            # empty: under CPU load 8 of 10 reads timed out and every one told
+            # a user holding a valid screenshot there was nothing to paste (ux
+            # round 1, U3). Naming the timeout is also what makes the remedy
+            # honest, because a retry is the move that works here and the move
+            # that cannot work for a genuinely empty clipboard.
+            text = "Clipboard read timed out. Try ctrl+v again."
         else:
-            text = "Couldn't attach an image from the clipboard."
-        # The vague variant takes the COURTESY duration, the two with a remedy
+            # STATES THE OUTCOME, NOT A SUBJECT. The previous copy said "an
+            # image" for a branch that fires whenever nothing ATTACHABLE was
+            # found - including a genuinely empty clipboard and a text-only one
+            # on the cmux route, where no image was ever involved (design round
+            # 1, D3). That is the same guess-free rule the `unreadable` branch
+            # above was corrected to follow in round 3 (D12), applied to the
+            # one branch that had kept asserting a subject.
+            text = "Nothing on the clipboard to paste."
+        # The vague variant takes the COURTESY duration, the ones with a remedy
         # take the failure one. `Toast` derives actionability from duration, so
         # 10 s on the vague card made it outrank a copy receipt for a gesture
         # the user performed afterwards — while naming nothing to act on, which
         # is exactly the test `toast.py` documents (round 2, D11).
-        # UNCHANGED by the ctrl+v hint, deliberately. `Toast` derives
-        # actionability from duration (round 2, D11), and the "nothing" variant
-        # stays a COURTESY even when it names the key: an empty paste is a
-        # routine gesture, and letting it outrank a copy receipt the user
-        # earned afterwards is exactly the defect D11 fixed. The hint rides
-        # along in the sentence without buying the card a longer life or a
-        # higher rank.
+        #
+        # `timeout` is actionable on that same test rather than by severity: it
+        # names a retry, which is a thing to do, and the user is holding
+        # content they expected to paste. `nothing` stays a courtesy because an
+        # empty clipboard names nothing to act on.
         actionable = message.reason != "nothing"
         self.query_one(Toast).show(
             text,
@@ -14216,6 +14253,37 @@ class OperatorApp(App[None]):
             line.append(names.ljust(name_width), style=muted)
             line.append(command.description, style=dim)
             lines.append(line)
+        # `ctrl+v` documented durably. It is not a slash command so it cannot
+        # appear in the table above, and this app shows no key reference in the
+        # footer - yet outside cmux it is the ONLY way to attach a clipboard
+        # image, because the terminal swallows `Cmd+V` and sends the app
+        # nothing at all. The splash tip is where a user MEETS the key; this is
+        # where they can look it up later.
+        #
+        # It sits directly under the command table and above the blank line
+        # that opens the config-toggle block, rather than inside that block.
+        # Placement is the finding: a keybinding filed between `window title`
+        # and `notifications` - two `lop config edit` toggles - reads as a
+        # settings footnote rather than a key reference (design round 1, D2).
+        #
+        # The copy is 51 cells so the composed row is 71 against the 76-cell
+        # content box at 80 columns. The previous wording was 77 and was the
+        # only note in the block that wrapped WITHOUT the `ljust(name_width)`
+        # continuation its neighbours use, so its second line hung at column 0
+        # (D2). Shortened rather than given a continuation line: one row is
+        # what a key reference wants, and the second line was carrying four
+        # words.
+        paste_note = Text()
+        paste_note.append("ctrl+v".ljust(name_width), style=muted)
+        paste_note.append(
+            "attaches an image or file from the system clipboard",
+            style=dim,
+        )
+        # The key reference joins the COMMAND TABLE directly, with no blank line
+        # between: it answers "what can I press", which is the question the
+        # rows above answer, and the trailing notes below are a different
+        # subject (see the placement note on `paste_note`).
+        lines.append(paste_note)
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
@@ -14228,19 +14296,6 @@ class OperatorApp(App[None]):
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
-        # The one place `ctrl+v` is documented durably. It is not a slash
-        # command so it cannot appear in the table above, and it is not in the
-        # footer (this app shows no key reference there) - yet outside cmux it
-        # is the ONLY way to attach a clipboard image, because the terminal
-        # swallows `Cmd+V` and sends the app nothing at all. A user who met the
-        # beep gets a one-shot hint on the paste notice; this is where it is
-        # still findable an hour later.
-        paste_note = Text()
-        paste_note.append("ctrl+v".ljust(name_width), style=muted)
-        paste_note.append(
-            "pastes the system clipboard, attaching a copied image or file",
-            style=dim,
-        )
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(
@@ -14275,7 +14330,6 @@ class OperatorApp(App[None]):
         )
         if not lines or lines[-1].plain:
             lines.append(Text())
-        lines.append(paste_note)
         lines.append(title_note)
         lines.append(title_note_more)
         lines.append(notify_note)

@@ -36,9 +36,14 @@ The gap stayed invisible for a long time because it does not reproduce in the
 one place the code was developed. **cmux** watches the pasteboard and writes an
 image to ``$TMPDIR/clipboard-<stamp>-<hash>.png``, then bracket-pastes that
 filename — so inside cmux the composer's path-only ingestion sees a real path
-and works perfectly. Ghostty, Terminal.app, iTerm2 and every other emulator
-paste text only, so outside cmux the same gesture produced nothing. A design
-that is correct for one terminal's helper is not a clipboard implementation.
+and works perfectly. Terminal.app and Ghostty paste text only (measured, in
+the table above); iTerm2 and other emulators are expected to behave the same
+way but have NOT been measured here. The scoping is deliberate: this module
+exists because #376 generalised from the one terminal it was developed in, so
+claiming coverage this project has not tested would repeat that mistake in the
+prose while the code corrects it (code round 1, F4). Outside cmux the same
+gesture produced nothing, and a design that is correct for one terminal's
+helper is not a clipboard implementation.
 
 TEXT is read alongside the two attachable shapes because ``Ctrl+V`` is now a
 SYSTEM paste, and a system paste that silently dropped the ordinary case would
@@ -99,7 +104,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -143,6 +148,25 @@ CLIPBOARD_TIMEOUT_S = 2.0
 #: one. 64 MB reads that screenshot in ~0.6 s and still refuses a payload no
 #: screen capture could produce.
 MAX_CLIPBOARD_READ_BYTES = 64 * 1024 * 1024
+
+#: The ceiling on clipboard TEXT, which is a different budget from the image
+#: ingest ceiling above and deliberately far smaller.
+#:
+#: `MAX_CLIPBOARD_READ_BYTES` is generous because an image is about to be
+#: RESIZED: those bytes are transient and shrink by an order of magnitude
+#: before anything holds them. Text has no downstream resize - it goes straight
+#: into the composer's document at whatever size it arrived - so applying the
+#: image ceiling to it made the effective bound on one keystroke 64 MB.
+#: Measured on the synchronous insert: 1 MB took 1.2 s, **5 MB took 52 s** with
+#: the UI unresponsive throughout (code round 1, F3).
+#:
+#: 1 MB is far above any prose, code block or log excerpt a person pastes into
+#: a prompt, and far below the sizes that stall the event loop. Over it the
+#: read reports an empty clipboard, the same collapse every other "nothing
+#: usable here" case takes: a paste that silently TRUNCATED the user's text
+#: would be worse than one that declines it, because the damage would be
+#: invisible until they read back what they sent.
+MAX_CLIPBOARD_TEXT_BYTES = 1024 * 1024
 
 #: Environment variables that mean "this process is on the far end of an SSH
 #: connection". Any ONE of them is enough; they are set by different sshd
@@ -281,10 +305,22 @@ class _Deadline:
     ``expired`` is checked BEFORE each spawn so an exhausted deadline costs no
     further processes at all, rather than three more that are each handed a
     zero timeout and killed.
+
+    It also RECORDS that it was hit (:attr:`hit`). A backend returning ``None``
+    is ambiguous by design \u2014 "no image of that type on the clipboard" and "the
+    tool never answered" are the same value \u2014 and collapsing the two is what
+    told a user holding a screenshot that their clipboard was empty (ux round
+    1, U3). The deadline is the one object that spans every subprocess of one
+    read, so it is where the distinction can be observed without giving each
+    backend a second return channel.
     """
 
     def __init__(self, seconds: float) -> None:
         self._end = time.monotonic() + seconds
+        #: True once a spawn was refused or a read abandoned because the budget
+        #: ran out. Sticky: one wedged tool makes the whole operation a timeout,
+        #: even if a later cheap call would have succeeded.
+        self.hit = False
 
     @property
     def remaining(self) -> float:
@@ -294,7 +330,13 @@ class _Deadline:
     def expired(self) -> bool:
         # A read cannot usefully be given a zero or negative timeout, so the
         # floor is what "no time left" means rather than a bare `<= 0`.
-        return self.remaining <= _MIN_SPAWN_BUDGET_S
+        out_of_time = self.remaining <= _MIN_SPAWN_BUDGET_S
+        if out_of_time:
+            # Reading the property is what records the fact, so every existing
+            # `if deadline.expired` guard reports itself without a second call
+            # at each site. Idempotent, and only ever moves False -> True.
+            self.hit = True
+        return out_of_time
 
 
 def _run(
@@ -401,8 +443,24 @@ def _run(
                     # Killing the group is what ends the thread's read, and it
                     # is done in the `finally` below so the same path covers a
                     # timed-out wait.
+                    #
+                    # Recorded, because this is the shape the user actually
+                    # hits on a loaded machine: the tool was ALIVE and simply
+                    # too slow, which is not the same answer as "the clipboard
+                    # holds no image" (U3).
+                    deadline.hit = True
                     return None
                 returncode = process.wait(timeout=max(deadline.remaining, 0.0))
+                # The tool answered, but did it answer IN TIME? A spawn that
+                # overran the budget and still produced output is a timeout
+                # from the caller's side: the remaining backends are about to
+                # be skipped by the `expired` guard, so the operation as a
+                # whole is cut short. Without this the blown deadline is only
+                # noticed if a LATER spawn is attempted, and a single slow tool
+                # (the common shape - one `osascript` on a loaded machine)
+                # reported an empty clipboard instead of a timeout (U3).
+                if deadline.expired:
+                    deadline.hit = True
             finally:
                 # THE CONDITION IS THE READER, NOT THE CHILD. Gating this on
                 # `process.poll() is None` looks right and is the F4 bug: when
@@ -586,15 +644,19 @@ def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
             # some unrelated file instead would be a different gesture.
             return ClipboardContents(image=image)
         if verdict.strip() == "text":
-            # Bounded by the same ceiling as the image, and for the same reason:
-            # the clipboard is an untrusted-size source, and this text is about
-            # to be inserted into the composer's document. Over the bound reads
-            # as an empty clipboard rather than as an error — the same collapse
-            # every other "nothing usable here" case takes.
-            raw = _read_bounded(dest, max_bytes)
+            # Bounded by the TEXT budget, not by the image ceiling `max_bytes`
+            # carries: this payload reaches the composer's document at the size
+            # it arrives, with no resize in between, so the generous ingest
+            # ceiling is not a bound on it at all (code round 1, F3). Over the
+            # bound reads as an empty clipboard rather than as an error - the
+            # same collapse every other "nothing usable here" case takes.
+            #
+            # The decode is the shared one so the platforms cannot disagree
+            # about the bound or about invalid UTF-8.
+            raw = _read_bounded(dest, min(max_bytes, MAX_CLIPBOARD_TEXT_BYTES))
             if raw is None:
                 return ClipboardContents()
-            return ClipboardContents(text=raw.decode("utf-8", errors="replace"))
+            return ClipboardContents(text=_decode_clipboard_text(raw))
     return ClipboardContents(paths=tuple(p for p in verdict.split("\x00") if p.strip()))
 
 
@@ -704,10 +766,18 @@ def _decode_clipboard_text(data: bytes | None, max_bytes: int | None = None) -> 
     clipboard holding bytes that are not valid UTF-8 is a paste that should
     degrade, not an exception on the key that pasted. Shared so the platforms
     cannot disagree about what a clipboard string is.
+
+    `MAX_CLIPBOARD_TEXT_BYTES` is applied HERE rather than at each call site,
+    so no backend can hand back a payload that would stall the composer on
+    insert (code round 1, F3). It is enforced in addition to any caller's
+    `max_bytes`, which is the image INGEST ceiling and far too large to bound
+    text - see the constant for the measurement.
     """
     if not data:
         return ""
     if max_bytes is not None and len(data) > max_bytes:
+        return ""
+    if len(data) > MAX_CLIPBOARD_TEXT_BYTES:
         return ""
     return data.decode("utf-8", errors="replace")
 
@@ -943,6 +1013,18 @@ class ClipboardContents:
     #: be the server's. Not a failure to find an image, and must not be
     #: reported as one.
     refused_remote: bool = False
+    #: The budget ran out before the clipboard answered, so this result
+    #: describes a read that was CUT SHORT, not a clipboard that was empty.
+    #:
+    #: Carried for the same reason as ``refused_remote``: it is a state the
+    #: module knows with certainty and the user can act on. Without it a
+    #: timeout collapsed into "nothing on the clipboard", which told a user
+    #: holding a valid screenshot that they had nothing to paste \u2014 measured
+    #: under CPU load at 8 failures in 10 reads, every one reported as an empty
+    #: clipboard (ux round 1, U3). That is the wrong-diagnosis class the round-3
+    #: D12 correction exists to prevent, and a retry is the one move that helps,
+    #: so the notice has to be able to say so.
+    timed_out: bool = False
 
 
 def read_clipboard(
@@ -983,7 +1065,14 @@ def read_clipboard(
     if system == "darwin":
         # One spawn answers both shapes; see `_MACOS_CLIPBOARD_SCRIPT` for why
         # the spawn count is the latency here.
-        return _read_macos(max_bytes, deadline)
+        contents = _read_macos(max_bytes, deadline)
+        # A found payload is a SUCCESS even if the budget expired on the way
+        # out, so the flag is only attached to an empty-handed result. Reporting
+        # "the read timed out" beside an attached image would be a notice about
+        # a failure that did not happen.
+        if contents.image is None and not contents.paths and not contents.text:
+            return replace(contents, timed_out=deadline.hit)
+        return contents
 
     image: ClipboardImage | None = None
     text = ""
@@ -1012,4 +1101,12 @@ def read_clipboard(
     # here would be a way for one copy to be attached twice. That text now
     # arrives through the `text` field on Ctrl+V as well, where the composer's
     # path branch parses it exactly as it parses a bracketed paste.
-    return ClipboardContents(image=image, text=text)
+    #
+    # `timed_out` only when the read came back EMPTY-HANDED: a wedged type read
+    # that still yielded an image is a success, and a notice claiming a timeout
+    # beside an attached image would describe a failure that did not happen.
+    return ClipboardContents(
+        image=image,
+        text=text,
+        timed_out=deadline.hit if image is None and not text else False,
+    )

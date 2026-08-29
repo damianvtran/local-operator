@@ -38,6 +38,7 @@ import pytest
 from PIL import Image
 from textual import events
 from textual.app import App, ComposeResult
+from textual.widgets.text_area import Selection
 
 from local_operator.clipboard import ClipboardContents, ClipboardImage
 from local_operator.tui.widgets import editor as editor_module
@@ -45,6 +46,7 @@ from local_operator.tui.widgets.editor import (
     Editor,
     EditorPasteAttached,
     EditorPasteEmpty,
+    EditorPasteReading,
 )
 
 
@@ -62,6 +64,7 @@ class Host(App[None]):
         super().__init__()
         self.empty_notices: list[EditorPasteEmpty] = []
         self.attached_notices: list[EditorPasteAttached] = []
+        self.reading_notices: list[EditorPasteReading] = []
 
     def compose(self) -> ComposeResult:
         yield Editor()
@@ -71,6 +74,9 @@ class Host(App[None]):
 
     def on_editor_paste_attached(self, message: EditorPasteAttached) -> None:
         self.attached_notices.append(message)
+
+    def on_editor_paste_reading(self, message: EditorPasteReading) -> None:
+        self.reading_notices.append(message)
 
 
 async def _paste(app: App[None], pilot, text: str) -> None:
@@ -1082,10 +1088,9 @@ async def test_ctrl_v_routes_file_urls_through_the_path_branch(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_ctrl_v_on_an_empty_clipboard_says_so_without_naming_itself(monkeypatch) -> None:
+async def test_ctrl_v_on_an_empty_clipboard_says_so(monkeypatch) -> None:
     """The notice still fires — a keystroke that produces nothing visible is
-    the original bug — but it must NOT advise ctrl+v to someone who just
-    pressed ctrl+v, which reads as the app failing to notice the key."""
+    the original bug."""
     _stub_clipboard(monkeypatch)
     app = Host()
     async with app.run_test() as pilot:
@@ -1096,23 +1101,143 @@ async def test_ctrl_v_on_an_empty_clipboard_says_so_without_naming_itself(monkey
 
         assert editor.text == ""
         assert [notice.reason for notice in app.empty_notices] == ["nothing"]
-        assert app.empty_notices[0].suggest_system_paste is False
 
 
 @pytest.mark.asyncio
-async def test_an_empty_paste_does_suggest_ctrl_v(monkeypatch) -> None:
-    """The discoverability half. A user whose Cmd+V produced a beep has no
-    surface naming ctrl+v, so the one route that cannot have BEEN ctrl+v is
-    where the key gets taught."""
-    _stub_clipboard(monkeypatch)
+async def test_the_paste_notice_is_not_a_discovery_surface(monkeypatch) -> None:
+    """No route appends "Try ctrl+v" to the empty-clipboard notice, and this
+    pins the reason rather than the wording.
+
+    An earlier revision hung discoverability on this card, gated to the
+    empty-`Paste` route. That route requires bytes the terminal never sends
+    outside cmux, so the hint reached only users whose `Cmd+V` already worked —
+    and even there `reason="nothing"` means the clipboard held nothing
+    attachable, so `ctrl+v` would return the same empty answer and the advice
+    could not have helped (design/ux round 1, D1/U1).
+
+    `ctrl+v` is taught ambiently instead (`welcome.TIPS`, `/help`), which does
+    not depend on an event that never arrives. Both routes are asserted to
+    report the identical reason, so neither can quietly grow a route-specific
+    hint again.
+    """
+    for use_ctrl_v in (True, False):
+        _stub_clipboard(monkeypatch)
+        app = Host()
+        async with app.run_test() as pilot:
+            app.query_one(Editor).focus()
+            await pilot.pause()
+            if use_ctrl_v:
+                await _ctrl_v(app, pilot)
+            else:
+                await _paste(app, pilot, "")
+
+            assert [notice.reason for notice in app.empty_notices] == ["nothing"]
+            assert not hasattr(app.empty_notices[0], "suggest_system_paste"), (
+                "the route-gated hint fired only where it could not help; "
+                "discoverability belongs on an ambient surface"
+            )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_replaces_a_live_selection_like_every_other_paste(monkeypatch) -> None:
+    """Select, then paste over it. Universal text-editing behaviour, what
+    `Cmd+V` does through `TextArea._on_paste`, and what stock
+    `TextArea.action_paste` does.
+
+    `ctrl+v` used to `insert` at the caret without removing the selection, so
+    selecting `WORD` and pasting `NEW` gave `keep WORDNEW keep` against
+    `keep NEW keep` everywhere else — a corrupted buffer the user then has to
+    repair by hand (ux round 1, U2). Both shapes are covered: the image route
+    had the same defect.
+    """
+    _stub_clipboard(monkeypatch, text="NEW")
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.insert("keep WORD keep")
+        editor.selection = Selection((0, 5), (0, 9))
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == "keep NEW keep"
+        # The caret lands AFTER the pasted text, so the next keystroke
+        # continues past it rather than typing in front of it.
+        editor.insert("!")
+        assert editor.text == "keep NEW! keep"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_replaces_a_live_selection_with_an_image_marker(monkeypatch) -> None:
+    """The image shape obeys the same rule as the text shape."""
+    _stub_clipboard(monkeypatch, image=ClipboardImage(_png_bytes(), "image/png"))
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.insert("keep WORD keep")
+        editor.selection = Selection((0, 5), (0, 9))
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == "keep [Image #1, 1568x200]  keep"
+        assert len(editor.referenced_images()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_is_reported_as_a_timeout_not_an_empty_clipboard(monkeypatch) -> None:
+    """A read that never finished cannot report what was on the clipboard.
+
+    Under CPU load 8 of 10 reads hit the 2 s ceiling, and every one told a user
+    holding a valid screenshot that their clipboard was empty — the same
+    wrong-diagnosis class the round-3 D12 correction exists to prevent (ux
+    round 1, U3). A retry is the move that helps here and the move that cannot
+    help for a genuinely empty clipboard, so the two cannot share a sentence.
+    """
+    monkeypatch.setattr(
+        editor_module,
+        "read_clipboard",
+        lambda *a, **k: ClipboardContents(timed_out=True),
+    )
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == ""
+        assert [notice.reason for notice in app.empty_notices] == ["timeout"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_read_says_it_is_working_and_a_fast_one_stays_silent(monkeypatch) -> None:
+    """The composer stops accepting input while the read is in flight, so a
+    read the user can perceive owes them an explanation — but the fast read is
+    the common one and a card flickering through the shared slot on every
+    paste is worse than the pause it describes (ux round 1, U3).
+    """
+    monkeypatch.setattr(editor_module, "PASTE_READING_NOTICE_DELAY_S", 0.05)
+
+    def slow(*args, **kwargs):
+        time.sleep(0.35)
+        return ClipboardContents(text="late")
+
+    monkeypatch.setattr(editor_module, "read_clipboard", slow)
     app = Host()
     async with app.run_test() as pilot:
         app.query_one(Editor).focus()
         await pilot.pause()
-        await _paste(app, pilot, "")
+        await _ctrl_v(app, pilot)
+        assert len(app.reading_notices) == 1, "a slow read must acknowledge itself"
 
-        assert [notice.reason for notice in app.empty_notices] == ["nothing"]
-        assert app.empty_notices[0].suggest_system_paste is True
+    _stub_clipboard(monkeypatch, text="quick")
+    app = Host()
+    async with app.run_test() as pilot:
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+        assert app.reading_notices == [], "a fast read must not flash a card"
 
 
 @pytest.mark.asyncio

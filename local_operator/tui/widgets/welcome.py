@@ -306,7 +306,23 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: the mid-draft user in the field report. Closing that gap means putting
 #: ctrl+c in `HINTS` or `/help`, which is a change to a different surface with
 #: its own width tiers and its own review, and this row is worth having either
-#: way. The first entry is the one
+#: way.
+#:
+#: The ctrl+v entry took the `/analytics` slot on exactly the argument the copy
+#: entry made, and it is the strongest case in the pool for that trade. A slash
+#: command is reachable a second way: type `/` and the picker lists it, or open
+#: `/help` and read the table. A KEY is not — and ctrl+v is worse off than
+#: ctrl+c was, because the gesture a user actually tries is not merely
+#: unadvertised but UNOBSERVABLE: `Cmd+V` on an image pasteboard makes
+#: Terminal.app and Ghostty deliver ZERO bytes and beep, so the app never runs
+#: a line of code and cannot teach the key at the moment it fails, however the
+#: notice is worded (measured; see :mod:`local_operator.clipboard`, and
+#: design/ux round 1, D1/U1, where a notice-based hint was found to fire only
+#: in cmux, where `Cmd+V` already works). An ambient surface is not the
+#: cheapest option here, it is the only one. `/analytics` gives up the least:
+#: `/usage` is one row above it and answers the same "what am I spending"
+#: question, so the capability keeps a row in the ring.
+#: The first entry is the one
 #: EVERY LAUNCH OPENS ON — the rotation is pinned to it and only then resumes at
 #: a random point in the ring (see :meth:`WelcomeView._sync_tip_timer`) — which
 #: is why it is resumption, the single question a returning user arrives with.
@@ -316,7 +332,7 @@ TIPS: tuple[str, ...] = (
     "Ask to create an agent with its own instruction set",
     "/model <provider>/<id> switches this session only",
     "/usage shows how much provider quota is left",
-    "/analytics shows token use across all sessions",
+    "ctrl+v attaches an image from the system clipboard",
     "/approvals <ask|auto> sets whether tools ask first",
     "ctrl+c copies what you highlight in the composer",
     "esc stops the agent without ending the session",
