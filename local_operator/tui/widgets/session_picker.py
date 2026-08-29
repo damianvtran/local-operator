@@ -223,6 +223,7 @@ def rank_rows(
     rows: Sequence[SessionRow],
     query: str,
     body_matches: AbstractSet[str] | None = None,
+    carried: AbstractSet[str] | None = None,
 ) -> list[SessionRow]:
     """``rows`` ordered by relevance to ``query``; recency order when empty.
 
@@ -253,20 +254,27 @@ def rank_rows(
     if not needle:
         return list(rows)
     body = body_matches or frozenset()
+    # Ids the previous keystroke was already showing. Used only to break the
+    # tie WITHIN a tier, so a keystroke that admits new rows cannot slide one of
+    # them above a row the user was reading (see ``visible_rows``). Empty for
+    # every caller that is not mid-typing-run, which keeps ranking a pure
+    # function of the query for a fixed query.
+    already_shown = carried or frozenset()
 
-    def tier(row: SessionRow) -> int:
+    def tier(row: SessionRow) -> tuple[int, int]:
+        seen_rank = 0 if row.id in already_shown else 1
         if needle in row.name.lower():
-            return _RANK_NAME
+            return _RANK_NAME, seen_rank
         if needle in row.id.lower():
-            return _RANK_ID
+            return _RANK_ID, seen_rank
         # Exact body hit outranks a soft-only hit: an exact substring in the
         # conversation is a stronger signal than a typo/prefix/word-order match.
         if row.id in body:
-            return _RANK_BODY
+            return _RANK_BODY, seen_rank
         # Admitted by the soft set (it is in the already-filtered ``rows`` yet
         # matched neither name, id, nor exact body), so it ranks below every
         # exact tier.
-        return _RANK_SOFT
+        return _RANK_SOFT, seen_rank
 
     # Stable sort on the tier alone: ``rows`` arrives newest-first, so equal
     # tiers keep recency order without a second sort key. Sorting the tier as
@@ -520,6 +528,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # re-decided. Paired with ``_soft_latched`` so the decision is made once
         # per run rather than once per keystroke.
         self._soft_run_start: str | None = None
+        # Ids shown by the previous keystroke, so newly-admitted rows sort below
+        # them and the cursor cannot be re-homed onto a row the user has not
+        # seen. Only populated while the soft tier is running.
+        self._carried: set[str] = set()
         # Filtering runs on every keystroke and again on every paint; the
         # result is cached against the query that produced it so a card with
         # several hundred sessions does not re-scan the list per repaint. The
@@ -572,64 +584,72 @@ class SessionPickerScreen(ModalScreen[str | None]):
             if self._soft_tier_wanted(self._query, admitted):
                 soft = self._soft_index.search(self._digests, self._query)
                 self._admitted = self._body_matches | soft
+                # Rows the PREVIOUS keystroke was showing keep their place ahead
+                # of rows this one newly admits. Without it, the keystroke that
+                # latches the soft tier on re-homes the cursor onto whichever
+                # newly-admitted row happens to be newest: both groups fall in
+                # the soft tier once the exact set empties, so recency alone
+                # decides and a row the user has never seen wins. A reflexive
+                # enter then resumes a session they were never shown. Carrying
+                # the previous set forward keeps additions strictly BELOW what
+                # was on screen, so the tier can add without displacing.
+                self._carried = {row.id for row in self._filtered}
                 # Recomputed only on the soft branch: on the common path the
                 # first pass is already the answer, so the uncapped row list is
                 # scanned once per query change rather than twice.
                 admitted = filter_rows(self._all, self._query, self._admitted)
             else:
                 self._admitted = set(self._body_matches)
-            self._filtered = rank_rows(admitted, self._query, self._body_matches)
+                self._carried = set()
+            self._filtered = rank_rows(
+                admitted, self._query, self._body_matches, carried=self._carried
+            )
             self._filtered_for = self._query
         return self._filtered
 
     def _soft_tier_wanted(self, query: str, exact_admitted: list[SessionRow]) -> bool:
         """Whether the bounded soft tier should run for ``query``.
 
-        LATCHED per typing run, and that is the whole point. Two simpler gates
-        were tried on this surface and both moved the row under the cursor:
+        The rule is a ONE-WAY latch: the tier turns on at the first keystroke
+        whose exact tiers return nothing, and stays on for the rest of the
+        typing run. It never turns off mid-run.
 
-        * **A count threshold** (soft when the exact tiers return under a page)
-          is crossed BY TYPING: narrowing past it switched the tier on and put
-          rows back. Measured 16 -> 10 -> 16 one keystroke apart.
-        * **Zero exact hits** looks monotonic and is not. On the operator's real
-          store, ``watch`` shows 10 genuine matches and ``watchl`` shows 46 —
-          the exact set empties, the tier fires, and 46 typo-neighbours replace
-          all 10 real matches. The top row changes identity mid-word, so a user
-          typing and pressing enter by reflex resumes a DIFFERENT session. The
-          old argument for that gate compared against the empty list the soft
-          tier starts from; the user compares against the PREVIOUS KEYSTROKE,
-          which is the only comparison that matters here.
+        Both halves are load-bearing, and each was learned by shipping the other
+        one wrong:
 
-        So the decision is made ONCE PER TYPING RUN and then frozen: whichever
-        tiers were active for the first query of a run stay active for every
-        extension of it, and the tier can only be re-decided by a query that is
-        not an extension of the last one (a fresh query, or backspacing below
-        where the run began).
+        * **Turning ON when the exact tiers come up empty** is what makes a typo
+          findable. Gates that only ever ran the tier at the START of a run made
+          it unreachable from a keyboard entirely: a run begins at one
+          character, every single character has exact hits somewhere in a real
+          store (all 36 of ``a-z0-9`` do), so the tier froze off and every later
+          character inherited that. Measured zero ``SoftSearchIndex.search``
+          calls across 25 typed runs, and ``classifer`` returning 0 rows where
+          shipped ``main`` returned 9 — a regression on the axis this surface
+          exists to serve.
+        * **Never turning OFF mid-run** is what keeps the cursor still. A gate
+          that could switch off (a count threshold, or re-deciding per
+          keystroke) withdrew rows the user had already been shown and swapped
+          the row under the cursor, so a reflexive enter resumed the wrong
+          session.
 
-        What that buys, stated no more strongly than it holds: within one run
-        the same tiers are active on both sides of every keystroke, and
-        ``filter_rows`` is a membership test against a needle that only grows,
-        so each result is a subset of the previous one. Verified on the real
-        store rather than argued from the code — across four typing runs, no
-        keystroke admitted a row that was absent from the keystroke before it.
-        Ranking can still reorder what remains, and the list can empty; neither
-        puts a row under the cursor that the user had not already been shown.
+        Those are separable failures and the fix has to hold both: results the
+        user was already shown are never withdrawn, and a typo still finds
+        something. Monotonicity of the ROW COUNT is deliberately not the
+        property being defended — once the tier is on it stays on, so a later
+        keystroke can only narrow what that tier already admitted. The
+        keystroke that switches it on may show more rows than the one before,
+        and that is correct: the alternative is the empty list this gate exists
+        to rescue, and rescuing an empty list cannot displace a row the user was
+        reading because there were none.
 
-        **The ordering invariant, per keystroke rather than from empty.** The
-        picker's rule (module docstring, and ``session_picker`` lines 20-26) is
-        that a row must not move under the cursor. Latching upholds it for the
-        comparison the user actually experiences: consecutive queries in one
-        run share the same tier configuration, so the second result is a subset
-        of the first, ranked by the same function, and a row can leave the list
-        but no row can be displaced by a newly admitted one. For a FIXED query
-        nothing changes across repaints either, because ``_soft_latched`` is
+        A run ends when a query stops extending the previous one — a fresh
+        query, or backspacing below where the run began — at which point the
+        tier is re-decided from scratch. Deleting characters is the user asking
+        for a broader answer, so re-deciding there is what keeps the surface
+        reversible rather than path-dependent.
+
+        For a FIXED query nothing changes across repaints, because the latch is
         only ever written on a query change, never on a paint.
-
-        Backspacing below the latch point turns the tier back off, which can
-        widen the list — correct, because deleting characters is the user asking
-        for a broader answer, and it restores the same result the shorter query
-        gave on the way in. That keeps the surface reversible rather than
-        path-dependent.
         """
         needle = query.strip()
         if not needle:
@@ -637,25 +657,24 @@ class SessionPickerScreen(ModalScreen[str | None]):
             self._soft_run_start = None
             return False
 
-        # Same typing run? A run is a query that extends the previous one, so
-        # this is the "user is still typing the same word" test.
+        # A run is a query that extends the previous one: "the user is still
+        # typing the same thing". Anything else starts a new run.
         extending = self._soft_run_start is not None and query.startswith(self._soft_run_start)
         if not extending:
-            # A fresh query (or a backspace below where the run began) starts a
-            # new run and re-decides the tier from scratch.
             self._soft_run_start = query
-            self._soft_latched = query if not exact_admitted else None
-            return self._soft_latched is not None
+            self._soft_latched = None
 
-        # Within a run the decision is FROZEN. Switching the tier on mid-word is
-        # what moved the cursor: on the real store ``watch`` has 10 genuine
-        # matches, ``watchl`` has none, and firing the tier there replaced all
-        # 10 with 46 typo-neighbours and changed the top row's identity. The
-        # keystroke that empties the exact set is exactly the keystroke where a
-        # user is about to press enter, so it is the worst possible moment to
-        # re-home the cursor. Extending a query narrows or empties the list; it
-        # never repopulates it from a different source.
-        return self._soft_latched is not None
+        # Already latched on for this run: stays on, whatever this keystroke's
+        # exact tiers say. This is the half that protects the cursor.
+        if self._soft_latched is not None:
+            return True
+
+        # Not yet latched: turn on the moment the cheap tiers cannot answer.
+        # This is the half that makes a typo reachable while typing.
+        if not exact_admitted:
+            self._soft_latched = query
+            return True
+        return False
 
     @property
     def body_matched_ids(self) -> set[str]:
@@ -1073,7 +1092,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # ``counter`` is set exactly when the list is longer than a page, so it
         # is already the "does this scroll" fact the shed order needs.
         for index, (key, what) in enumerate(
-            _footer_hints(width, has_marked=has_marked, scrolls=counter is not None)
+            _footer_hints(
+                width,
+                has_marked=has_marked,
+                scrolls=counter is not None,
+                empty=not rows and bool(self._query),
+            )
         ):
             if index:
                 out.append(" · ", style=faint)
@@ -1132,8 +1156,16 @@ _FOOTER_DROP_ORDER_MARKED = ("pgup/pgdn", "type", _MARKER_LEGEND[0], "↑↓")
 _FOOTER_DROP_ORDER_MARKED_SCROLLING = ("type", _MARKER_LEGEND[0], "pgup/pgdn", "↑↓")
 
 
+#: The footer for a filter that matched nothing. Movement, paging and `enter
+#: resume` all describe a list that is not there, so the only honest thing the
+#: row can say is how to get back to one. `backspace` is the key that widens
+#: the query, and it is the key a user in this state is already reaching for.
+#: Stated as a hint pair like every other so it sheds and renders identically.
+_EMPTY_HINT: tuple[str, str] = ("backspace", "to widen")
+
+
 def _footer_hints(
-    width: int, *, has_marked: bool = False, scrolls: bool = False
+    width: int, *, has_marked: bool = False, scrolls: bool = False, empty: bool = False
 ) -> list[tuple[str, str]]:
     """The key hints that fit in ``width`` cells, dropping the least needed.
 
@@ -1157,12 +1189,32 @@ def _footer_hints(
     fought — a list long enough to scroll is also long enough to contain a
     marked row, so the legend evicted the very hint the reader needed.
     """
+    if empty:
+        # Nothing to move through, page, or resume: offering those keys for an
+        # empty list advertises actions that do nothing, and the marker legend
+        # explains a glyph no row is drawing. `esc` stays because leaving is
+        # still available and is the other thing a user wants here.
+        return _shed_to_width([_EMPTY_HINT, ("esc", "cancel")], (_EMPTY_HINT[0],), width)
+
     hints = list(_FOOTER_HINTS)
     if has_marked:
         hints = [_MARKER_LEGEND, *hints]
         drop_order = _FOOTER_DROP_ORDER_MARKED_SCROLLING if scrolls else _FOOTER_DROP_ORDER_MARKED
     else:
         drop_order = _FOOTER_DROP_ORDER_SCROLLING if scrolls else _FOOTER_DROP_ORDER
+
+    return _shed_to_width(hints, drop_order, width)
+
+
+def _shed_to_width(
+    hints: list[tuple[str, str]], drop_order: Sequence[str], width: int
+) -> list[tuple[str, str]]:
+    """``hints`` reduced to fit ``width`` cells, dropping in ``drop_order``.
+
+    The last resort drops the LABELS and keeps the keys: two bare keys still say
+    which keys exist, which is more than a clipped row says. Shared by every
+    footer variant so a new one cannot quietly grow a second shed policy.
+    """
 
     def cells(pairs: list[tuple[str, str]]) -> int:
         return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(

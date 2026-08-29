@@ -6652,6 +6652,66 @@ async def test_the_picker_lists_a_store_far_larger_than_any_default_limit(
 
 
 @pytest.mark.asyncio
+async def test_typing_a_typo_reaches_the_soft_tier(tmp_path, monkeypatch) -> None:
+    """The soft tier must be REACHABLE from a keyboard, not merely harmless.
+
+    Two prior regression tests pinned the absence of harm (no row withdrawn, no
+    cursor swap) and passed with the soft tier replaced by ``return False`` —
+    deleting the feature satisfies them. Nothing asserted the tier ever runs.
+
+    It did not. A gate that decided once at the START of a typing run froze the
+    tier off for every word a user can type: a run begins at one character, and
+    every single character has exact hits in a real store, so the tier was
+    unreachable. Zero ``SoftSearchIndex.search`` calls across 25 typed runs.
+
+    Drives real ``pilot.press`` keystrokes, because ``set_query("classifer")``
+    jumps straight to the final query and cannot observe a per-run latch at
+    all — which is exactly how that bug was validated as working.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # One session whose body carries the correctly-spelled word, plus filler so
+    # the early keystrokes have exact hits and the run latches off under the
+    # old gate.
+    _seed_session(tmp_path, "aaaa0001", prompt="improve the adm classifier throughput")
+    for index in range(5):
+        _seed_session(tmp_path, f"bbbb{index:04d}", prompt="classroom scheduling notes")
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        calls: list[str] = []
+        real_search = picker._soft_index.search
+
+        def counting(digests, query):
+            calls.append(query)
+            return real_search(digests, query)
+
+        picker._soft_index.search = counting  # type: ignore[method-assign]
+
+        # `classifer` is a typo: no session contains it as a substring, so only
+        # the soft tier can find the `classifier` session.
+        for key in "classifer":
+            await pilot.press(key)
+            await pilot.pause()
+
+        assert calls, "the soft tier never ran while the user typed a typo"
+        assert "aaaa0001" in {
+            row.id for row in picker.visible_rows
+        }, "a typo'd query found nothing; soft matching is unreachable by keyboard"
+
+
+@pytest.mark.asyncio
 async def test_choosing_in_the_picker_resumes_that_session(tmp_path, monkeypatch) -> None:
     """Enter on a row is what actually resumes it — the picker's whole job."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
