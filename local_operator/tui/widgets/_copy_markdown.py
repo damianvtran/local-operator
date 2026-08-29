@@ -326,9 +326,29 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                 # with ``…``, so also match a truncated stem: the rendered word
                 # is the cell's prefix, not a substring of the full line (the F4
                 # review finding).
+                #
+                # Matched against the FIRST CELL ONLY, never the whole line.
+                # Table cells WRAP -- the ``no_wrap_now`` claim above is about a
+                # row never CONTINUING, not about its cells fitting -- so a
+                # wrapped row leaves continuation rows carrying the tail of some
+                # later cell. Searching the whole line let one of those match the
+                # NEXT table row on any shared word: at width 28 the ``alpha``
+                # row's continuation ``row with`` was found inside ``| beta |
+                # 0.72 | the second row, ... |`` and consumed it, so highlighting
+                # that continuation copied the ``beta`` row entire (issue #399).
+                # That is silent substitution -- the reader pastes a row they did
+                # not light -- the same harm class as R4-1.
+                #
+                # The first cell is what Rich paints at the row's START, so it is
+                # the only part of the line a row-opening rendered row can be
+                # identified by. A continuation matches no first cell and is
+                # therefore left UNPLACED, which is the honest answer: the copy
+                # path already treats ``None`` as "assume nothing" and falls back
+                # to the lit glyphs, rather than being handed a different row.
                 if "|" in line and word:
+                    first_cell = line.strip().strip("|").split("|")[0].strip().lower()
                     stem = word.rstrip("…")
-                    if word in line.lower() or (stem and stem in line.lower()):
+                    if first_cell and (word in first_cell or (stem and stem in first_cell)):
                         placed = look
                         break
             if placed is not None:
@@ -358,6 +378,46 @@ _RENDERED_QUOTE_PREFIX_RE = re.compile(r"^(?:▌ ?)+")
 #: the row that OPENS the item carries this; a continuation is indented to the
 #: same column with spaces, which ``str.lstrip`` handles instead.
 _RENDERED_LIST_PREFIX_RE = re.compile(r"^\s*(?:[•◦▪]|\d{1,9})\s+")
+
+#: A painted BULLET glyph opening a rendered row. Unambiguous evidence that the
+#: row opens its list item: Rich paints one only on an item's first row, and a
+#: continuation is indented to the same column with plain spaces. Deliberately
+#: EXCLUDES the ordered marker, which Rich paints as a bare number and which a
+#: continuation can therefore imitate (``2026 was the year`` is the reported
+#: shape) -- that ambiguity is what keeps the mapping in the decision below.
+_RENDERED_BULLET_RE = re.compile(r"^\s*[•◦▪]\s")
+
+
+def opens_list_row(row: str, *, mapping_opens: bool) -> bool:
+    """Does this rendered row OPEN its list item, judged from the FRAME first?
+
+    ``furniture_width``'s list branch needs to tell an item's marker row from
+    its wrapped continuations, and the mapping is not a reliable witness: a
+    continuation whose first word matches the NEXT list item's first word is
+    mis-anchored to that item by ``align``'s structural scan, which makes the
+    continuation look like an opener and the real marker row look like a
+    continuation. A quoted list whose second item begins ``a second ...`` behind
+    a continuation beginning ``a continuation ...`` reproduces it, and the
+    resulting furniture was measured two cells short, so a whole-row gesture
+    flipped format either side of the painted indent -- the exact wart issue
+    #395 is about, one construct over.
+
+    The frame answers directly where it can, and the two directions are not
+    symmetric:
+
+    * a painted BULLET is proof the row opens the item -- Rich paints it once;
+    * no marker-shaped prefix AT ALL is proof it does not -- an opening row
+      always carries one.
+
+    Only the ambiguous middle (a leading bare number, which is either an ordered
+    marker or a continuation that starts with a year) defers to the mapping,
+    which is the case the mapping actually gets right.
+    """
+    if _RENDERED_BULLET_RE.match(row):
+        return True
+    if not _RENDERED_LIST_PREFIX_RE.match(row):
+        return False
+    return mapping_opens
 
 
 def furniture_width(row: str, source_line: str | None, *, opens_line: bool, fenced: bool) -> int:
@@ -404,8 +464,14 @@ def furniture_width(row: str, source_line: str | None, *, opens_line: bool, fenc
         remainder = _QUOTE_RE.sub("", remainder, count=1)
 
     if _LIST_RE.match(remainder):
-        if opens_line:
-            match = _RENDERED_LIST_PREFIX_RE.match(row[width:])
+        # The quote bar is already consumed, so this asks the LIST question of
+        # the row's remainder. ``opens_line`` is the mapping's opinion and is
+        # only consulted where the frame is genuinely ambiguous -- see
+        # :func:`opens_list_row` for why a mis-anchored continuation otherwise
+        # measures its furniture short and flips the paste format (issue #395).
+        tail_row = row[width:]
+        if opens_list_row(tail_row, mapping_opens=opens_line):
+            match = _RENDERED_LIST_PREFIX_RE.match(tail_row)
             return width + (match.end() if match else 0)
         # A continuation is indented to the marker's column with plain spaces.
         tail = row[width:]

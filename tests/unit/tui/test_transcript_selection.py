@@ -3641,6 +3641,178 @@ async def test_a_bullet_inside_a_quote_leaks_neither_the_bar_nor_the_dot() -> No
         ), f"the paste format flips with the drag's start cell: {answers}"
 
 
+#: A wrapped list item, and the shape issue #395 was reported on. The
+#: CONTINUATION row is the subject: D2-4 fixed the format flip on the row that
+#: carries the marker, and the flip survived one row down.
+WRAPPING_BULLET = "- a plain bullet item that is long enough to wrap across two rendered rows here"
+
+#: A quoted list whose second item's first word is ALSO the first word of the
+#: previous item's continuation row (both ``a``). ``align``'s structural scan
+#: anchors on that shared word, so the continuation is mis-mapped to the second
+#: item. Found by the differential sweep for #395 rather than reported: fixing
+#: ``opens_line`` to read the mapping made this pre-existing mis-mapping visible
+#: as a NEW format flip, which is why the fix reads the FRAME first.
+AMBIGUOUS_QUOTED_LIST = (
+    "> - a quoted bullet that is long enough to wrap onto a continuation row here\n"
+    "> - a second quoted bullet, also long enough to fold at the widths swept"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_mis_mapped_quoted_continuation_still_measures_its_furniture() -> None:
+    """A row's furniture is judged from the FRAME, so a bad mapping cannot skew it.
+
+    ``align`` maps this list's first continuation row to the SECOND item,
+    because both begin with ``a``. Reading ``opens_line`` from the mapping alone
+    therefore called the continuation an opener and the real marker row a
+    continuation, measuring the marker row's furniture two cells short -- a new
+    format flip, the same wart as #395 one construct over.
+
+    Asserted on the painted furniture rather than only on the clipboard so the
+    cause is pinned: every row of this construct paints the same ``▌  `` bar and
+    indent, so their furniture widths must agree whatever the mapping says.
+    """
+    for width in (36, 44, 60):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(AMBIGUOUS_QUOTED_LIST)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            mapping = _copy_markdown.align(block._full_text, rows)
+            widths = {
+                index: block._furniture_width(rows, mapping, index)
+                for index, row in enumerate(rows)
+                if row.strip()
+            }
+            assert len(set(widths.values())) == 1, (
+                f"width {width}: rows of one quoted list disagree about their "
+                f"painted furniture, so the paste format flips: {widths}"
+            )
+
+            # And the gesture itself: a whole-row take must not leak the bar or
+            # the bullet, nor change answer with the drag's start cell.
+            for index, row in enumerate(rows):
+                if not row.strip():
+                    continue
+                answers = {}
+                for column in range(0, widths[index] + 1):
+                    selection = Selection.from_offsets(
+                        Offset(x=column, y=index), Offset(x=len(row.rstrip()), y=index)
+                    )
+                    copied = block.get_selection(selection)
+                    assert copied is not None
+                    answers[column] = copied[0]
+                    assert "▌" not in copied[0], f"leaked the quote bar: {copied[0]!r}"
+                    assert "•" not in copied[0], f"leaked the bullet: {copied[0]!r}"
+                assert (
+                    len(set(answers.values())) == 1
+                ), f"width {width} row {index}: format flips with start cell: {answers}"
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_items_continuation_row_does_not_flip_format() -> None:
+    """Issue #395: the D2-4 property, asserted on a CONTINUATION row.
+
+    ``opens_line`` was derived from the SELECTION rather than from the frame, so
+    a drag covering only a continuation row saw no preceding row, called the
+    continuation a marker row, and measured its furniture as 0. ``starts_full``
+    then answered differently either side of the painted indent: column 0 gave
+    the whole markdown item, column 1 gave that row's glyphs, and columns inside
+    the indent leaked it as leading spaces.
+
+    Swept across widths rather than pinned at the reported 44, because the flip
+    is a property of the indent and every width that folds this item has one.
+    """
+    for width in range(32, 64, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(WRAPPING_BULLET)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            if len(content) < 2:
+                continue  # too wide to fold: no continuation row to test
+
+            for index in content[1:]:
+                row = rows[index]
+                indent = len(row) - len(row.lstrip(" "))
+                answers: dict[int, str] = {}
+                for column in range(0, indent + 1):
+                    selection = Selection.from_offsets(
+                        Offset(x=column, y=index), Offset(x=len(row.rstrip()), y=index)
+                    )
+                    copied = block.get_selection(selection)
+                    assert copied is not None
+                    answers[column] = copied[0]
+                    # The leaked indent, the finding's second wart: a take that
+                    # began inside the painted furniture must not carry it.
+                    assert copied[0] == copied[0].lstrip(" "), (
+                        f"width {width} row {index} column {column} leaked the "
+                        f"continuation indent: {copied[0]!r}"
+                    )
+
+                assert len(set(answers.values())) == 1, (
+                    f"width {width} row {index}: the paste format flips with the "
+                    f"drag's start cell: {answers}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_table_rows_continuation_never_maps_to_the_next_row() -> None:
+    """Issue #399 at the unit it lives in, so the cause is pinned, not the symptom.
+
+    ``align`` matched a table row on ``word in line``, searching the WHOLE source
+    line. Table cells wrap, so a wrapped row leaves continuation rows carrying
+    the tail of a later cell, and any of those could match the NEXT table row on
+    a shared word -- at width 28 the ``alpha`` row's continuation ``row with``
+    was found inside the ``beta`` line and consumed it.
+
+    Asserted on the MAPPING rather than on the clipboard because the widget test
+    above would also pass if the copy path merely papered over a mis-mapping.
+    A continuation must map to its own row or to nothing; mapping it to a
+    following row is the substitution.
+    """
+    text = ORACLE_SUBSTITUTION_CORPUS["table_long_notes"]
+    for width in range(28, 102, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            mapping = _copy_markdown.align(block._full_text, rows)
+            lines = block._full_text.split("\n")
+
+            for index, row in enumerate(rows):
+                source = mapping[index]
+                if not row.strip() or source is None:
+                    continue
+                # A row placed on a table line must actually open it: the first
+                # cell's text is what Rich paints at the row's start. Anything
+                # else placed there is a continuation wearing another row's
+                # identity.
+                line = lines[source]
+                if "|" not in line or _copy_markdown._is_rule_like(line):
+                    continue
+                first_cell = line.strip().strip("|").split("|")[0].strip().lower()
+                assert first_cell and first_cell.split()[0] in row.lower(), (
+                    f"width {width} row {index}: a continuation row was mapped to "
+                    f"source line {source}, whose first cell it does not paint.\n"
+                    f"  row  : {row.rstrip()!r}\n  line : {line!r}"
+                )
+
+
 # -- the oracle sweep --------------------------------------------------------
 #: Ordinary assistant output, not a minimised repro. Three rounds of findings
 #: were each correct on the case the previous round named and wrong on a
@@ -3954,32 +4126,13 @@ ORACLE_SUBSTITUTION_CORPUS: dict[str, str] = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            name,
-            marks=(
-                # PRE-EXISTING and unchanged by this PR -- identical at the merge
-                # base, at `6f72a29e` and here. ``align`` maps a wrapped table
-                # row's continuation rows to the NEXT table row, so a whole-row
-                # take copies the wrong row. That lives in ``align``'s table
-                # handling rather than in this copy path, so it is tracked as
-                # issue #399 rather than widened into this PR. Marked xfail
-                # rather than dropped from the corpus: the oracle keeps reporting
-                # it, and the marker fails loudly once #399 is fixed.
-                [
-                    pytest.mark.xfail(
-                        reason="pre-existing table mis-mapping, issue #399", strict=True
-                    )
-                ]
-                if name == "table_long_notes"
-                else []
-            ),
-        )
-        for name in sorted(ORACLE_SUBSTITUTION_CORPUS)
-    ],
-)
+# ``table_long_notes`` carried a strict xfail for issue #399 -- ``align`` matched
+# a table row's word against the WHOLE source line, so a wrapped row's
+# continuation was consumed by the NEXT table row and a whole-row take copied a
+# row the reader never lit. Fixed by matching the first cell only; the marker is
+# removed rather than relaxed, which is what makes this parametrisation the
+# acceptance check for that issue.
+@pytest.mark.parametrize("name", sorted(ORACLE_SUBSTITUTION_CORPUS))
 async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: str) -> None:
     """A take must contain the rows the reader LIT, not merely real source text.
 
@@ -4022,8 +4175,18 @@ async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: s
                     continue
                 # Compared with folds flattened: the markdown path may return the
                 # line unwrapped, which is a truthful answer to the same gesture.
-                haystack = " ".join(copied[0].split())
-                needle = " ".join(lit.split())[:12]
+                # Table PIPES are flattened for the same reason -- Rich paints a
+                # row's cells with the ``|`` dropped, so the markdown answer to a
+                # lit ``name   score  notes`` is ``| name | score | notes |``,
+                # correct and yet not a substring. Normalising both sides keeps
+                # the invariant SHARP rather than loosening it: verified that a
+                # take of the ``alpha`` row still fails this assertion when the
+                # ``beta`` row is substituted for it, which is issue #399's
+                # payload and the reason this parametrisation is its acceptance
+                # check.
+                flatten = str.maketrans({"|": " "})
+                haystack = " ".join(copied[0].translate(flatten).split())
+                needle = " ".join(lit.translate(flatten).split())[:12]
                 assert needle in haystack, (
                     f"{name} at width {width}, row {index}: the fully highlighted row is "
                     f"not in the copy -- a different line was substituted for it.\n"
