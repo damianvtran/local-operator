@@ -93,6 +93,7 @@ import asyncio
 import base64
 import re
 import shlex
+import time
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -180,6 +181,30 @@ IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
 #: ``IMAGE_MARKER`` already matches it, since the tail is matched loosely for
 #: exactly this kind of later change.
 RESIZED_MARK = " ↓"
+
+
+#: How long a BARREN multi-click keeps the next Ctrl+C off the interrupt rung.
+#:
+#: The claim has to outlive the gesture by long enough for a hand to move from
+#: mouse to keyboard and no longer. Measured against the app's own reflex
+#: budget: `CLICK_CHAIN_TIME_THRESHOLD` is 0.9 s for a pair of CLICKS, and this
+#: is the same order of reaction for the press that follows them.
+#:
+#: The bound is the whole safety property. A permanent flag would be D17 again —
+#: the composer holding a stale claim, the interrupt silently diverted, and the
+#: exit ladder unreachable for a user who has forgotten they ever clicked. When
+#: it expires, Ctrl+C means exactly what it means on an untouched composer.
+BARREN_CLICK_WINDOW_S = 1.5
+
+
+#: How far a second click may drift and still read as ONE gesture.
+#:
+#: Textual's chain needs an EXACT cell match, so a fast pair one column apart is
+#: two singles (design round 2, D2-1). Two cells is the jitter of a hand on a
+#: trackpad, not a deliberate move to another word: at three or more the user is
+#: plausibly placing a second caret somewhere else, and this must not swallow
+#: that. It only suppresses one interrupt press; it never makes a selection.
+_NEAR_MISS_CELLS = 2
 
 
 def _was_downscaled(bounded: ImageInfo, source: ImageInfo) -> bool:
@@ -1029,6 +1054,27 @@ class Editor(TextArea):
         #: highlight" checkable — the same discipline `_copied_selection` uses,
         #: after three flag lifetimes in this widget each cost a lost draft.
         self._click_selection: Selection | None = None
+        #: When a multi-click last produced NO RANGE, as a monotonic timestamp.
+        #:
+        #: The narrowest fact that covers both remaining draft-loss paths: the
+        #: blank LAST row `_line_break_span` cannot give a range to without
+        #: breaking D7, and the near-miss pair Textual scores as two singles
+        #: (design round 2, D2 and D2-1). Both end the same way — a deliberate
+        #: gesture, a frame identical to the one before it, then Ctrl+C clears
+        #: the draft.
+        #:
+        #: A TIMESTAMP and not a flag, because the question the Ctrl+C rung asks
+        #: is "did a multi-click JUST happen and produce nothing?" — bounded,
+        #: recent and gesture-scoped. Gating on live selection STATE instead is
+        #: D17's lost-draft bug, where a highlight made minutes ago diverted the
+        #: key and the second reflexive tap exited the app. This claim expires
+        #: on its own (:data:`BARREN_CLICK_WINDOW_S`), so it cannot outlive the
+        #: gesture the way three earlier flag lifetimes each did.
+        self._barren_click_at: float | None = None
+        #: The last SINGLE click as `(monotonic, screen offset)`, for detecting
+        #: the near-miss pair described in `_on_click`. Only ever read to decide
+        #: whether two singles were one gesture; it never makes a selection.
+        self._single_click_at: tuple[float, Offset] | None = None
         #: Bang-mode: Enter runs a local shell command instead of sending a
         #: prompt. Owned here because it is a property of the COMPOSER (the
         #: same way the slash picker is), not of the app: the key that enters
@@ -1869,17 +1915,39 @@ class Editor(TextArea):
                     #
                     # A double-click is REFLEXIVE, and this change made it the
                     # gesture users reach for first. The range it leaves
-                    # persists until the caret moves, so Ctrl+C could never
-                    # interrupt a running turn at any number of presses:
-                    # measured 0 interrupts over 3 presses on this branch,
-                    # against 3 before the click chain selected anything (agent
-                    # review round 1, R1-2). Esc still stopped the agent, but
-                    # Ctrl+C is the first rung of the exit ladder and a user
-                    # reaching for it repeatedly got silence.
+                    # persists until the caret moves, so without this collapse
+                    # Ctrl+C could never interrupt a running turn at any number
+                    # of presses (agent review round 1, R1-2). Esc still stopped
+                    # the agent, but Ctrl+C is the first rung of the exit ladder
+                    # and a user reaching for it repeatedly got silence.
                     #
                     # So the accidental range gives the key back after one copy
                     # while the deliberate one keeps the documented behaviour.
                     # One press still copies exactly once either way.
+                    #
+                    # THE MEASURED LADDER, re-measured because round 1's own
+                    # figures did not reproduce and the corrected numbers are
+                    # what a future reader should trust (agent review round 2,
+                    # R2-2). Same harness, `session.running = True`, counting
+                    # interrupts after a double-click on a word:
+                    #
+                    #   press 1  copies, draft intact       interrupts 0
+                    #   press 2  clears the draft           interrupts 0
+                    #   press 3  interrupts                 interrupts 1
+                    #   press 4  interrupts and EXITS       interrupts 2
+                    #
+                    # An UNTOUCHED composer reaches its first interrupt on press
+                    # 2 and exits on press 3. The residual cost is therefore
+                    # ONE EXTRA TAP: a user mid-turn who reflexively
+                    # double-clicks needs three presses to interrupt where an
+                    # untouched composer needs two.
+                    #
+                    # That cost is ACCEPTED deliberately. The press it adds is
+                    # the copy the user actually asked for by double-clicking,
+                    # and the alternative — a copy that also interrupts — makes
+                    # one keystroke mean two things and is worse. The ladder
+                    # stays reachable and monotonic in every case, which is the
+                    # property that matters; it is one rung longer, not broken.
                     #
                     # To the END, not the start: that is where a caret lands
                     # after any other "act on this selection" edit, and it
@@ -2437,6 +2505,27 @@ class Editor(TextArea):
                 columns.add(span[0] - base)
         return columns
 
+    def _marker_edges(self, row: int) -> set[int]:
+        """Both edge columns of every ATOMIC marker on ``row``.
+
+        The same predicate the chip and the atomic-token gate use — only a
+        citation the app itself owns is protected, so a hand-typed lookalike
+        stays ordinary prose that a word span may cross (design round 18, D7).
+
+        Used to stop a word span straddling a marker; see :meth:`_word_span`.
+        """
+        line = self.document.get_line(row)
+        if "[" not in line:
+            # Same cheap guard as `_marker_span`: no bracket, no marker, and
+            # this runs on every multi-click.
+            return set()
+        chipped = self._first_citation_columns(row)
+        edges: set[int] = set()
+        for match in IMAGE_MARKER.finditer(line):
+            if match.start() in chipped:
+                edges.update(match.span())
+        return edges
+
     def _marker_cells(self, y: int) -> list[tuple[int, int, bool]]:
         """``(x_start, x_end, selected)`` for marker cells drawn on screen row ``y``.
 
@@ -2931,7 +3020,35 @@ class Editor(TextArea):
         if event.chain < 2:
             # A single click is a caret move, which the base class's mouse-down
             # has already done. Nothing to widen.
+            #
+            # But a NEAR-MISS PAIR arrives here as two chain-1 clicks, and it is
+            # the same user making the same gesture. Textual's chain needs an
+            # EXACT cell match as well as its time window (`App._on_event`
+            # compares `_click_chain_last_offset`), so a fast double-click that
+            # drifts ONE COLUMN is two singles: no range, then Ctrl+C, then the
+            # draft is gone (design round 2, D2-1). The jittery clicker and the
+            # slow clicker are the same person, and widening only the time
+            # window bought them half the protection.
+            #
+            # So a second click that lands within the chain WINDOW but off by a
+            # few cells still counts as a barren multi-click for the purpose of
+            # the next Ctrl+C. It deliberately does NOT select — guessing a
+            # range from a gesture Textual scored as two singles would paint a
+            # highlight the user did not ask for. It only declines to let the
+            # next press clear the draft.
+            now = time.monotonic()
+            previous = self._single_click_at
+            self._single_click_at = (now, event.screen_offset)
+            if previous is not None:
+                elapsed = now - previous[0]
+                drift = (event.screen_offset - previous[1]).clamped
+                if elapsed <= self.app.CLICK_CHAIN_TIME_THRESHOLD and max(drift) <= (
+                    _NEAR_MISS_CELLS
+                ):
+                    self._barren_click_at = now
             return
+        # A real chain supersedes the near-miss bookkeeping.
+        self._single_click_at = None
         row, column = self.get_target_document_location(event)
         try:
             line = self.document[row]
@@ -2945,14 +3062,40 @@ class Editor(TextArea):
             # always lands on a real row, which is not what makes this safe
             # (agent review round 1, R1-4).
             return
-        marker = self._marker_span(row, column, before=False) if event.chain == 2 else None
+        # CLAMPED ONCE, BEFORE THE GATE, so the marker predicate and the word
+        # span ask about the SAME column. The composer is wider than its text,
+        # so a click to the right of a line resolves to a column PAST its last
+        # character. `_word_span` clamps internally and `_marker_span` does not,
+        # and that disagreement reintroduced R1-1's exact data loss: on
+        # `look at [Image #1, 1568x200]` the gate answered `None` for raw column
+        # 28/33/68 while the word path clamped straight back INTO the marker and
+        # took the closing `]` as its own punctuation span. Typing over that
+        # bracket corrupts the token, `resolve_markers` drops it, and the image
+        # is silently not sent — reachable from a bare paste with no editing at
+        # all (agent review round 2, R2-1).
+        #
+        # The clamp is the word path's own rule (`min(column, len(line) - 1)`),
+        # lifted here so one column feeds both branches rather than each
+        # deciding separately where the line ends. `max(..., 0)` keeps an empty
+        # line at column 0, which is the row `_line_break_span` answers.
+        column = min(column, max(len(line) - 1, 0))
         if not line:
             self.selection = self._line_break_span(row)
-        elif marker is not None:
-            start, end = marker
-            self.selection = Selection((row, start), (row, end))
         elif event.chain == 2:
-            start, end = self._word_span(line, column)
+            # Computed INSIDE the chain-2 branch: chain 3 takes the whole line
+            # and the blank row takes its break, so neither can use a marker
+            # span, and evaluating one for them read as though they consulted it
+            # (agent review round 2, R2-6).
+            marker = self._marker_span(row, column, before=False)
+            if marker is not None:
+                start, end = marker
+            else:
+                # Not ON a marker, but a word span may still RUN INTO one: the
+                # bracket and the space beside it are both non-word characters,
+                # so `_word_pattern` merges them into a span that eats a
+                # marker's edge. The edges go in as barriers so the span stops
+                # at the token instead of straddling it (R2-1).
+                start, end = self._word_span(line, column, self._marker_edges(row))
             self.selection = Selection((row, start), (row, end))
         else:
             self.select_line(row)
@@ -2961,6 +3104,11 @@ class Editor(TextArea):
         # after the assignment because `watch_selection` clears it on every
         # change — including the one just made.
         self._click_selection = self.selection
+        # A multi-click that produced NO RANGE is a BARREN gesture, and the next
+        # Ctrl+C must not take the interrupt rung. See `barren_multi_click`.
+        self._barren_click_at = (
+            None if self.selection.start != self.selection.end else time.monotonic()
+        )
         # Consumed so the base class's screen-selection path never runs; see the
         # docstring on why its result is inert for a TextArea and actively
         # harmful to keep.
@@ -2997,12 +3145,29 @@ class Editor(TextArea):
             return Selection((row, 0), (row, 0))
         return Selection((row, 0), (row + 1, 0))
 
-    def _word_span(self, line: str, column: int) -> tuple[int, int]:
+    def _word_span(self, line: str, column: int, barriers: Iterable[int] = ()) -> tuple[int, int]:
         """The word around ``column``, as ``(start, end)`` columns of ``line``.
 
         Boundaries come from ``TextArea``'s own ``_word_pattern`` so a
         double-click selects exactly what ctrl+left/ctrl+right treat as a word;
         defining "word" a second time here is how the two would drift.
+
+        ``barriers`` are extra columns a span may not CROSS — the edges of the
+        app's own attachment markers. ``_word_pattern`` sees a line as
+        characters, so it happily runs one span across a marker edge: ``]`` and
+        the space after it are both non-word characters, so a bare paste's
+        ``[Image #1, 1568x200] `` gave the trailing space the span ``'] '``,
+        taking the closing bracket of an ATOMIC token with it. Typing over that
+        corrupts the marker, :func:`resolve_markers` drops it, and the image is
+        silently not sent — R1-1's data loss reached from the other side of the
+        token (agent review round 2, R2-1). The same run at the opening edge
+        gave ``' ['``.
+
+        Passing the edges as barriers keeps ONE definition of "word" rather than
+        adding a second: the boundaries are still ``_word_pattern``'s, with the
+        marker's own edges added to them. That is what atomicity already means
+        everywhere else in this widget — a marker is a single object, so a span
+        either takes it whole (the gate above does that) or does not touch it.
 
         A click on whitespace selects the whitespace run rather than jumping to
         a neighbouring word: the user pointed at a gap, and silently selecting
@@ -3035,8 +3200,17 @@ class Editor(TextArea):
         column = min(column, len(line) - 1)
         # Boundaries are the ZERO-WIDTH positions between a word and a non-word
         # character, which is what `_word_pattern` matches; bracketing them with
-        # the line's own ends turns them into spans.
-        bounds = [0, *(m.start() for m in self._word_pattern.finditer(line)), len(line)]
+        # the line's own ends turns them into spans. Marker edges join them as
+        # boundaries of the same kind, deduplicated and ordered so the pairwise
+        # walk below still sees ascending, non-overlapping spans.
+        bounds = sorted(
+            {
+                0,
+                len(line),
+                *(m.start() for m in self._word_pattern.finditer(line)),
+                *(edge for edge in barriers if 0 < edge < len(line)),
+            }
+        )
         for start, end in zip(bounds, bounds[1:]):
             if start <= column < end:
                 return (start, end)
@@ -3112,6 +3286,52 @@ class Editor(TextArea):
         """
         return self._selecting or self._copy_gesture
 
+    @property
+    def barren_multi_click(self) -> bool:
+        """Did a multi-click JUST happen and produce no range?
+
+        The predicate the app's Ctrl+C rung asks before clearing the draft,
+        named here for the same reason :attr:`copy_in_flight` is: the app must
+        not reach into this widget's privates and degrade silently to "no" — the
+        answer that costs a draft — if a field is ever renamed.
+
+        It covers the two remaining paths to the sentence this whole change
+        exists to eliminate, "my draft disappeared" (design round 2):
+
+        * **D2** — the blank LAST row. :meth:`_line_break_span` must stay
+          collapsed there (there is no following row to reach, and widening
+          backwards would take a character the user did not point at, which is
+          also what keeps the empty composer correct — D7). But shift+enter is
+          this composer's newline, so a user starting a second paragraph SITS on
+          a blank last row while they think. Double-clicking there painted a
+          byte-identical frame and the Ctrl+C that followed cleared the draft.
+        * **D2-1** — the near-miss pair. See :meth:`_on_click`.
+
+        Deliberately NOT "is some selection live". That is D17's lost-draft bug:
+        a selection is STATE that persists until the caret moves, so a highlight
+        made minutes ago diverted the interrupt, armed nothing, and the second
+        reflexive tap exited the app with the draft never filed. This is a
+        bounded, recent, GESTURE-scoped fact instead — it expires on its own
+        after :data:`BARREN_CLICK_WINDOW_S`, so the exit ladder is always at
+        most one stale window away and never permanently unreachable.
+
+        It suppresses exactly ONE press. The claim is retired by the rung that
+        reads it, so a user who genuinely wants to interrupt presses again and
+        gets the ordinary ladder.
+        """
+        at = self._barren_click_at
+        return at is not None and (time.monotonic() - at) < BARREN_CLICK_WINDOW_S
+
+    def retire_barren_click(self) -> None:
+        """Spend the barren claim, so it suppresses one press and no more.
+
+        Separate from reading it because the rung that declines to clear the
+        draft is also the moment the gesture is over: leaving the claim up would
+        make a SECOND press a no-op too, and two silent presses is the shape of
+        an unreachable exit ladder.
+        """
+        self._barren_click_at = None
+
     def action_copy(self) -> None:
         """Copy the live range. THE composer's copy gesture.
 
@@ -3186,7 +3406,13 @@ class Editor(TextArea):
         # describes ONE highlight, so it ends the moment that stops being the
         # highlight on screen. A bare flag would outlive its subject and hand
         # the exit ladder a range the user made some other way (R1-2).
-        if getattr(self, "_click_selection", None) not in (None, selection):
+        # Spelled as an explicit `!=` to match the `_copy_gesture` guard above:
+        # `not in (None, selection)` reads as a set-membership test on a field
+        # whose whole point is the identity of ONE specific range, and two
+        # spellings of one lifetime rule in adjacent lines is what this field's
+        # own docstring warns against (agent review round 2, R2-4).
+        claim = getattr(self, "_click_selection", None)
+        if claim is not None and claim != selection:
             self._click_selection = None
         # A caret move changes the ghost's answer: it renders AT the caret, so
         # one set while the caret sat at the end of `/mcp login` renders

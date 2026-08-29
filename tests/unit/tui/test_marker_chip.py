@@ -619,3 +619,86 @@ async def test_a_double_click_on_a_fragment_that_only_looks_like_a_marker(tmp_pa
         await _multi_click(pilot, editor, duplicate + 2, times=2)
 
         assert editor.selected_text == "Image"
+
+
+@pytest.mark.asyncio
+async def test_a_double_click_past_a_marker_line_keeps_the_attachment(tmp_path) -> None:
+    """Clicking in the EMPTY SPACE right of a marker must not eat its bracket.
+
+    Regression for agent review round 2, R2-1 — R1-1's exact failure mode,
+    reintroduced by R1-1's own fix. The composer is wider than its text, so a
+    click to the right of the line resolved to a column PAST the last
+    character. `_marker_span` answered `None` there while `_word_span` clamped
+    straight back into the line, and because `]` and the trailing space are
+    both non-word characters `_word_pattern` merged them into one span: the
+    gesture selected `'] '`, taking the closing bracket of an ATOMIC token.
+
+    Typing over that corrupts the marker, so it stops matching `IMAGE_MARKER`,
+    `resolve_markers` drops it, and THE IMAGE IS SILENTLY NOT SENT. Reachable
+    from a bare paste with no editing at all, which is why this is pinned on the
+    unedited draft rather than a constructed one.
+
+    Pins the attachment surviving type-over, which is the user-visible harm;
+    the span itself is pinned below.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("look at ")
+        await _paste(app, pilot, _png(tmp_path / "a.png"))
+        await pilot.pause()
+        assert editor.text == "look at [Image #1, 1568x200] "
+        assert len(editor.attachments()) == 1
+
+        # Well past the end of the text, in the composer's own empty width.
+        await _multi_click(pilot, editor, len(editor.text) + 6, times=2)
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert editor.attachments(), "the attachment was silently dropped"
+        assert "[Image #1, 1568x200]" in editor.text, "the marker was corrupted"
+
+
+@pytest.mark.asyncio
+async def test_no_click_column_ever_splits_a_marker(tmp_path) -> None:
+    """Sweep EVERY column, including past the line end, for a straddling span.
+
+    The R2-1 defect lived in the region between `len(line) - 1` and the
+    composer's right edge, which every earlier fixture missed because they all
+    click INSIDE the marker. Sampling named columns is what let the suite stay
+    green while the defect was live, so this asserts the invariant across the
+    whole width instead: a span either takes the marker WHOLE or does not touch
+    it, and never takes part of it.
+
+    Both edges are swept deliberately. The closing edge is the reported case
+    (`'] '`); the opening edge produced `' ['` by the same mechanism, one
+    character the user typed plus one the app wrote.
+    """
+    app = ChipHost()
+    async with app.run_test(size=(80, 6)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("look at ")
+        await _paste(app, pilot, _png(tmp_path / "a.png"))
+        editor.insert("here")
+        await pilot.pause()
+
+        line = editor.document[0]
+        marker_start = line.index("[Image #1")
+        marker_end = line.index("]", marker_start) + 1
+
+        for column in range(len(line) + 8):
+            clamped = min(column, max(len(line) - 1, 0))
+            span = editor._marker_span(0, clamped, before=False)
+            if span is None:
+                span = editor._word_span(line, clamped, editor._marker_edges(0))
+            start, end = span
+            overlaps = max(start, marker_start) < min(end, marker_end)
+            whole = start <= marker_start and end >= marker_end
+            assert not overlaps or whole, (
+                f"column {column} selected {line[start:end]!r}, which takes part "
+                "of the marker without taking all of it"
+            )
