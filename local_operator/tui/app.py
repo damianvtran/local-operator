@@ -5172,6 +5172,16 @@ class OperatorApp(App[None]):
             # (round 3, D12). Same discipline as D2/U2: name what happened,
             # never guess why.
             text = "Couldn't attach that file. It may be too large, or not an image."
+        elif message.suggest_system_paste:
+            # THE DISCOVERABILITY CASE, and the only place the app can teach
+            # this key at the moment it is needed. Outside cmux, `Cmd+V` on an
+            # image pasteboard is swallowed by the terminal (Terminal.app and
+            # Ghostty send zero bytes and beep - measured), so a user who tried
+            # it has no way to learn that `ctrl+v` is the key that reads the
+            # clipboard: nothing they pressed produced a surface naming it.
+            # Only the route that cannot have BEEN `ctrl+v` says this; see
+            # `EditorPasteEmpty.suggest_system_paste`.
+            text = "Couldn't attach an image from the clipboard. Try ctrl+v."
         else:
             text = "Couldn't attach an image from the clipboard."
         # The vague variant takes the COURTESY duration, the two with a remedy
@@ -5179,6 +5189,13 @@ class OperatorApp(App[None]):
         # 10 s on the vague card made it outrank a copy receipt for a gesture
         # the user performed afterwards — while naming nothing to act on, which
         # is exactly the test `toast.py` documents (round 2, D11).
+        # UNCHANGED by the ctrl+v hint, deliberately. `Toast` derives
+        # actionability from duration (round 2, D11), and the "nothing" variant
+        # stays a COURTESY even when it names the key: an empty paste is a
+        # routine gesture, and letting it outrank a copy receipt the user
+        # earned afterwards is exactly the defect D11 fixed. The hint rides
+        # along in the sentence without buying the card a longer life or a
+        # higher rank.
         actionable = message.reason != "nothing"
         self.query_one(Toast).show(
             text,
@@ -14211,6 +14228,19 @@ class OperatorApp(App[None]):
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
+        # The one place `ctrl+v` is documented durably. It is not a slash
+        # command so it cannot appear in the table above, and it is not in the
+        # footer (this app shows no key reference there) - yet outside cmux it
+        # is the ONLY way to attach a clipboard image, because the terminal
+        # swallows `Cmd+V` and sends the app nothing at all. A user who met the
+        # beep gets a one-shot hint on the paste notice; this is where it is
+        # still findable an hour later.
+        paste_note = Text()
+        paste_note.append("ctrl+v".ljust(name_width), style=muted)
+        paste_note.append(
+            "pastes the system clipboard, attaching a copied image or file",
+            style=dim,
+        )
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(
@@ -14245,6 +14275,7 @@ class OperatorApp(App[None]):
         )
         if not lines or lines[-1].plain:
             lines.append(Text())
+        lines.append(paste_note)
         lines.append(title_note)
         lines.append(title_note_more)
         lines.append(notify_note)

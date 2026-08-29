@@ -541,11 +541,22 @@ class EditorPasteEmpty(Message):
 
     The app owns the wording, the same way :class:`EditorCopyStale` leaves the
     card to the app; this only says which of the three happened.
+
+    ``suggest_system_paste`` is a ROUTE fact, not a clipboard one, and it is
+    what makes this notice teachable. A user whose ``Cmd+V`` produced a beep
+    and an empty paste has no way to discover that ``Ctrl+V`` is the key that
+    reads the clipboard \u2014 nothing on screen names it. A user who just PRESSED
+    ``Ctrl+V`` does not need to be told about ``Ctrl+V``, and would read the
+    advice as the app failing to notice what they did. The empty-paste branch
+    sets it; :meth:`Editor.action_system_paste` does not.
     """
 
-    def __init__(self, reason: str = "nothing") -> None:
+    def __init__(self, reason: str = "nothing", *, suggest_system_paste: bool = False) -> None:
         super().__init__()
         self.reason = reason
+        #: Name ``ctrl+v`` in the notice, because this paste did not come from
+        #: it. See the class docstring.
+        self.suggest_system_paste = suggest_system_paste
 
 
 class EditorCopied(Message):
@@ -768,11 +779,40 @@ class Editor(TextArea):
     #: because a ``Binding`` fires through the action system and never enters
     #: ``_on_key`` — which is exactly how a previous revision destroyed a typed
     #: slash command (code round 2 F5, ux round 2 U6). See that table.
+    #: ``ctrl+v`` is THE clipboard paste in this composer, and it OVERRIDES
+    #: ``TextArea``'s own ``ctrl+v`` → ``action_paste`` rather than sitting
+    #: beside it. Two separate facts make this binding the whole fix for
+    #: issue #372 outside cmux, and both were measured rather than assumed:
+    #:
+    #: 1. **``Cmd+V`` cannot be hooked.** With an image-only pasteboard,
+    #:    Terminal.app and Ghostty deliver ZERO bytes on ``Cmd+V`` and beep.
+    #:    Not an empty bracketed paste — nothing at all, captured with a
+    #:    raw-mode PTY probe. No bytes means no ``Paste`` event, so any
+    #:    handler keyed on the keystroke is unreachable. ``Ctrl+V`` delivers
+    #:    ``\x16`` on both terminals, so it is the only key a TUI can use for
+    #:    this. See :mod:`local_operator.clipboard` for the byte table.
+    #: 2. **Textual's ``ctrl+v`` pastes the WRONG buffer.**
+    #:    ``TextArea.action_paste`` inserts ``App.clipboard``, Textual's
+    #:    INTERNAL buffer, which a copy made in any other application never
+    #:    fills. Left in place it makes ``Ctrl+V`` a key that silently does
+    #:    nothing on exactly the gesture a user means by it.
+    #:
+    #: Overriding works because Textual RESOLVES A KEY TO THE MOST DERIVED
+    #: BINDING even though it merges the tables: verified against textual
+    #: 8.2.8 by inspecting the resolved binding map (``ctrl+v`` maps to this
+    #: action alone) and by pressing the key in a pilot (``action_paste`` does
+    #: not run). That is the opposite of the ``alt+left`` note above, where
+    #: merging was the point — same mechanism, different consequence, because
+    #: here the keys collide.
+    #:
+    #: ``show=False`` to match every other binding in this app; the key is
+    #: taught in ``/help`` and in the paste notice instead.
     BINDINGS = [
         Binding("alt+left", "cursor_word_left", "Cursor word left", show=False),
         Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", "Select word left", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", "Select word right", show=False),
+        Binding("ctrl+v", "system_paste", "Paste from the system clipboard", show=False),
     ]
 
     #: The CSI-modifier spelling of every vertical option chord, mapped to the
@@ -3547,18 +3587,25 @@ class Editor(TextArea):
         the gap below stayed invisible: cmux is where this code was developed,
         so ``Cmd+V`` on a screenshot appeared to work everywhere.
 
-        **An EMPTY paste, meaning the bytes are on the clipboard.** No other
-        emulator synthesises a path — Ghostty, Terminal.app and iTerm2 all
-        paste text only. So a native macOS screenshot
-        (``Cmd+Shift+Ctrl+4``) put PNG bytes on the pasteboard, the terminal
-        had no text to send, and this handler received ``Paste("")``: a
-        keystroke that inserted an empty string and was indistinguishable from
-        a dead key (issue #372). Textual delivers that event for real
-        (``XTermParser`` yields ``Paste(text='')`` for a bare
-        ``ESC[200~ ESC[201~``), so it is a usable hook, and
-        :meth:`_attach_clipboard_image` reads the clipboard itself. Finder's
-        ``Cmd+C`` arrives the same way — it puts only a ``public.file-url``
-        flavor on the pasteboard, with no text and no image bytes — and is
+        **An EMPTY paste.** Kept as belt and braces, NOT as the fix it was
+        once claimed to be. The original reasoning here — that a textless
+        pasteboard makes the terminal send a bare ``ESC[200~ ESC[201~``, which
+        Textual's ``XTermParser`` turns into ``Paste(text='')`` — is false
+        about the terminal, and the parser half of it is true but irrelevant.
+        MEASURED with a raw-mode PTY probe: with a PNG on the pasteboard,
+        Terminal.app and Ghostty deliver **zero bytes** on ``Cmd+V`` and beep.
+        No bytes, no ``Paste`` event, so this branch never ran on the emulators
+        it was written for and issue #372 stayed open. The reachable route is
+        ``Ctrl+V`` -> :meth:`action_system_paste`; see this class's
+        ``BINDINGS`` and :mod:`local_operator.clipboard` for the byte table.
+
+        This branch survives because a host that DOES synthesise an empty paste
+        (a multiplexer, a helper bracketing an empty selection) still reaches
+        the clipboard through it, it costs nothing when nothing sends one, and
+        deleting it would drop a working route on the strength of two
+        emulators' behaviour — the exact single-environment reasoning that
+        caused the original bug. Finder's ``Cmd+C`` is handled on both routes
+        alike: it puts a ``public.file-url`` flavor on the pasteboard and is
         routed back into the path branch.
 
         Anything that is not a readable image path is left alone: this returns
@@ -3631,15 +3678,32 @@ class Editor(TextArea):
         self.post_message(EditorPasteAttached())
         self.insert(attached)
 
-    async def _attach_clipboard_image(self) -> str | None:
-        """The empty-paste branch: read the clipboard and attach what is there.
+    async def _attach_clipboard_image(self, *, allow_text: bool = False) -> str | None:
+        """Read the clipboard and attach (or insert) whatever is on it.
 
-        Two shapes, tried in the order they are likely. IMAGE BYTES first, the
-        reported case — a screenshot on the pasteboard with no text for the
-        terminal to send. Then FILE URLS, which is Finder's ``Cmd+C``: also a
-        textless pasteboard, routed into :meth:`_attach_pasted_images` so a
+        Shared by both callers: the empty-paste branch above, and
+        :meth:`action_system_paste`, which is the one that actually fires
+        outside cmux. ONE implementation deliberately — the two routes must
+        produce byte for byte the same marker, the same bounds and the same
+        notices, and the original bug was precisely a second route behaving
+        differently from the one that got tested.
+
+        Shapes, tried in the order they are likely. IMAGE BYTES first, the
+        reported case — a screenshot on the pasteboard. Then FILE URLS, which
+        is Finder's ``Cmd+C``, routed into :meth:`_attach_pasted_images` so a
         copied file behaves exactly like the same file dragged in, down to the
         all-or-nothing rule for a multi-file selection.
+
+        ``allow_text`` is what separates the two callers, and the difference is
+        not cosmetic. The empty-paste branch is reached only for a payload the
+        TERMINAL sent, so inserting clipboard text there would type characters
+        the terminal never delivered. A ``Ctrl+V`` is the user asking for the
+        system clipboard by name, and text is the ordinary thing on it —
+        declining to insert it would leave the key silently useless in the
+        common case, which is the defect Textual's own ``ctrl+v`` already has
+        here (it pastes ``App.clipboard``, a buffer nothing outside the app
+        writes). Off by default so the narrower caller cannot acquire the
+        broader behaviour by accident.
 
         The read runs in a thread for the same reason the decode does: it
         shells out to ``osascript``/``wl-paste``/``xclip``/PowerShell, and this
@@ -3667,11 +3731,11 @@ class Editor(TextArea):
         carries the outcomes the app can honestly name \u2014 see
         :class:`EditorPasteEmpty`.
 
-        Reached ONLY for the terminal's genuinely empty payload. Whitespace the
-        user copied is handled by the caller and never gets here, so every
-        outcome below belongs to a keypress that would otherwise produce no
-        visible response at all \u2014 which is what makes a notice right here and
-        noise anywhere else.
+        Every outcome below belongs to a keypress that would otherwise produce
+        no visible response at all \u2014 an empty payload the terminal sent, or a
+        ``Ctrl+V`` that found nothing to insert \u2014 which is what makes a notice
+        right here and noise anywhere else. Whitespace the user copied is
+        handled by :meth:`_on_paste` and never reaches this method.
         """
         contents = await asyncio.to_thread(read_clipboard)
         if contents.image is not None:
@@ -3705,10 +3769,64 @@ class Editor(TextArea):
             # this branch just tried (round 2, D10).
             self.post_message(EditorPasteEmpty(reason="unreadable"))
             return None
+        if allow_text and contents.text:
+            # Returned as the "attached" string so the caller inserts it the
+            # same way it inserts markers: one insertion point for every
+            # clipboard shape, rather than a second `insert` call that could
+            # drift on selection-replacement semantics.
+            #
+            # No `EditorPasteAttached` here. That message exists to retire a
+            # notice claiming an IMAGE could not be attached, and pasting text
+            # does not falsify such a claim \u2014 the image the user was told about
+            # is still unattached.
+            return contents.text
         self.post_message(
-            EditorPasteEmpty(reason="remote" if contents.refused_remote else "nothing")
+            EditorPasteEmpty(
+                reason="remote" if contents.refused_remote else "nothing",
+                # `not allow_text` IS "this was not a Ctrl+V". Telling a user
+                # who just pressed Ctrl+V to press Ctrl+V reads as the app not
+                # noticing the key, so the advice goes only to the route that
+                # cannot have come from it.
+                suggest_system_paste=not allow_text,
+            )
         )
         return None
+
+    async def action_system_paste(self) -> None:
+        """``Ctrl+V``: paste what is on the SYSTEM clipboard.
+
+        The reachable half of issue #372, and the reason this action exists
+        rather than the composer relying on ``Cmd+V``: the terminal swallows
+        ``Cmd+V`` and, with an image on the pasteboard, sends the app NOTHING
+        at all (measured \u2014 see this class's ``BINDINGS`` for the byte table).
+        ``Ctrl+V`` is the only paste keystroke a TUI can observe, so it is the
+        only place this can live. **Do not "simplify" this back onto the paste
+        event**; that is the shape that shipped broken.
+
+        It REPLACES ``TextArea.action_paste``, which inserts ``App.clipboard``
+        \u2014 Textual's internal buffer, written by this app's own copy gestures
+        and by nothing else. On the gesture a user means by ``Ctrl+V`` (copy in
+        a browser, paste here) the inherited action inserts nothing whatsoever,
+        so reading the system clipboard is strictly more correct for every
+        shape, text included.
+
+        The read is threaded and bounded by :meth:`_attach_clipboard_image`,
+        and so are the notices, so ``Ctrl+V`` and an empty bracketed paste
+        report an unusable clipboard identically.
+
+        ``read_only`` is honoured because the base action honours it: this is a
+        keyboard edit, and a read-only composer must not become writable just
+        because the key was rebound.
+        """
+        if self.read_only:
+            return
+        pasted = await self._attach_clipboard_image(allow_text=True)
+        if pasted is None:
+            # Nothing usable was found. `_attach_clipboard_image` has already
+            # posted the notice that says so, and inserting nothing is the
+            # honest outcome.
+            return
+        self.insert(pasted)
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.

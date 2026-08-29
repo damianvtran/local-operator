@@ -79,7 +79,9 @@ async def _paste(app: App[None], pilot, text: str) -> None:
         await pilot.pause()
 
 
-def _stub_clipboard(monkeypatch, *, image=None, paths=None, refused_remote=False) -> dict[str, int]:
+def _stub_clipboard(
+    monkeypatch, *, image=None, paths=None, text="", refused_remote=False
+) -> dict[str, int]:
     """Replace the clipboard read; record the calls so routing is assertable."""
     counts = {"reads": 0}
 
@@ -88,6 +90,7 @@ def _stub_clipboard(monkeypatch, *, image=None, paths=None, refused_remote=False
         return ClipboardContents(
             image=image,
             paths=tuple(paths or ()),
+            text=text,
             refused_remote=refused_remote,
         )
 
@@ -938,3 +941,302 @@ async def test_the_file_notice_does_not_assert_a_format_problem(monkeypatch, tmp
             f"{message!r} names formats, but this branch cannot establish that "
             "the cause was the format"
         )
+
+
+# -- ctrl+v: THE route that actually fires outside cmux -----------------------
+#
+# Everything above this line exercises the EMPTY-PASTE branch, which is what
+# PR #376 shipped and what it tested. That branch is unreachable on the
+# terminals the bug was filed against: with an image-only pasteboard,
+# Terminal.app and Ghostty deliver ZERO bytes on Cmd+V and beep, so no `Paste`
+# event is ever synthesised (measured with a raw-mode PTY probe; the captures
+# are in the PR). `Ctrl+V` delivers `\x16` on both, so it is the only paste
+# keystroke a TUI can observe, and these tests cover it.
+#
+# They press the REAL KEY through the pilot rather than calling the action, so
+# the binding override is exercised on every one of them: `TextArea` already
+# binds ctrl+v to `action_paste` (which pastes Textual's internal buffer), and
+# a test that called `action_system_paste` directly would pass just as happily
+# with the wrong action wired to the key.
+async def _ctrl_v(app: App[None], pilot) -> None:
+    await pilot.press("ctrl+v")
+    for _ in range(20):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_attaches_the_image_on_the_system_clipboard(monkeypatch) -> None:
+    """The bug #376 did not fix: a screenshot on the pasteboard, and the only
+    keystroke the terminal actually delivers."""
+    counts = _stub_clipboard(monkeypatch, image=ClipboardImage(_png_bytes(), "image/png"))
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == "[Image #1, 1568x200] "
+        assert counts["reads"] == 1, "ctrl+v must read the SYSTEM clipboard"
+        images = editor.referenced_images()
+        assert len(images) == 1 and images[0].mime_type == "image/png"
+        assert base64.b64decode(images[0].data)[:8] == b"\x89PNG\r\n\x1a\n"
+        assert app.empty_notices == [], "an attachment must not also raise the notice"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_overrides_textareas_own_paste_binding(monkeypatch) -> None:
+    """``TextArea`` binds ctrl+v to ``action_paste``, which inserts
+    ``App.clipboard`` — Textual's INTERNAL buffer, which a copy made in another
+    application never fills. Left in place it makes ctrl+v a key that silently
+    does nothing on the gesture users mean by it.
+
+    Both halves are asserted: the resolved binding map names only this
+    widget's action, and pressing the key does not run the base one. The map
+    alone is not enough — Textual merges subclass BINDINGS with its bases', and
+    "merged" versus "overridden" for a COLLIDING key is exactly the detail this
+    fix depends on (verified against textual 8.2.8).
+    """
+    _stub_clipboard(monkeypatch, image=ClipboardImage(_png_bytes(), "image/png"))
+    base_paste_calls: list[int] = []
+    monkeypatch.setattr(
+        Editor, "action_paste", lambda self: base_paste_calls.append(1), raising=False
+    )
+
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        bound = editor._bindings.key_to_bindings.get("ctrl+v") or []
+        assert [binding.action for binding in bound] == ["system_paste"], (
+            "ctrl+v must resolve to the system paste alone; TextArea's "
+            "action_paste inserts a buffer the system clipboard never fills"
+        )
+
+        await _ctrl_v(app, pilot)
+        assert base_paste_calls == [], "TextArea.action_paste must not run"
+        assert editor.text == "[Image #1, 1568x200] "
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_inserts_clipboard_text(monkeypatch) -> None:
+    """Text is the ORDINARY thing on a clipboard, and ctrl+v is the user asking
+    for the system one by name. Dropping it would leave the key useless in the
+    common case — which is the defect the inherited binding already had."""
+    _stub_clipboard(monkeypatch, text="from the system clipboard")
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == "from the system clipboard"
+        assert editor.referenced_images() == []
+        assert app.empty_notices == [], "text was pasted, so nothing failed"
+        assert app.attached_notices == [], (
+            "EditorPasteAttached retires a notice claiming an IMAGE could not "
+            "be attached, and pasting text does not falsify that claim"
+        )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_text_lands_at_the_caret_inside_existing_text(monkeypatch) -> None:
+    """A paste is an insertion at the caret, not an append. Pinned because the
+    text shape returns through the same path the image MARKERS take, and a
+    marker is always issued at the caret too."""
+    _stub_clipboard(monkeypatch, text="MIDDLE")
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.insert("start end")
+        editor.move_cursor((0, 5))
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == "startMIDDLE end"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_routes_file_urls_through_the_path_branch(monkeypatch, tmp_path) -> None:
+    """Finder's Cmd+C puts a ``public.file-url`` flavor on the pasteboard. It
+    must attach exactly as the same file dragged in does, because from the
+    user's side it is one gesture."""
+    copied = tmp_path / "shot.png"
+    copied.write_bytes(_png_bytes(320, 200))
+    _stub_clipboard(monkeypatch, paths=(str(copied),))
+
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == "[Image #1, 320x200] "
+        assert len(editor.referenced_images()) == 1
+        assert len(app.attached_notices) == 1, "an attach must retire a held notice"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_on_an_empty_clipboard_says_so_without_naming_itself(monkeypatch) -> None:
+    """The notice still fires — a keystroke that produces nothing visible is
+    the original bug — but it must NOT advise ctrl+v to someone who just
+    pressed ctrl+v, which reads as the app failing to notice the key."""
+    _stub_clipboard(monkeypatch)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == ""
+        assert [notice.reason for notice in app.empty_notices] == ["nothing"]
+        assert app.empty_notices[0].suggest_system_paste is False
+
+
+@pytest.mark.asyncio
+async def test_an_empty_paste_does_suggest_ctrl_v(monkeypatch) -> None:
+    """The discoverability half. A user whose Cmd+V produced a beep has no
+    surface naming ctrl+v, so the one route that cannot have BEEN ctrl+v is
+    where the key gets taught."""
+    _stub_clipboard(monkeypatch)
+    app = Host()
+    async with app.run_test() as pilot:
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert [notice.reason for notice in app.empty_notices] == ["nothing"]
+        assert app.empty_notices[0].suggest_system_paste is True
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_over_ssh_refuses_the_read_and_reports_it(monkeypatch) -> None:
+    """The clipboard on the far end is the SERVER's. Reported as its own
+    outcome because "no image on the clipboard" would describe a clipboard
+    nobody looked at."""
+    _stub_clipboard(monkeypatch, refused_remote=True)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == ""
+        assert [notice.reason for notice in app.empty_notices] == ["remote"]
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_reports_an_image_it_cannot_attach(monkeypatch) -> None:
+    """An image WAS on the clipboard and could not be attached — a different
+    outcome from "no image", because the two lead to different moves."""
+    _stub_clipboard(
+        monkeypatch, image=ClipboardImage(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64, "image/png")
+    )
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == ""
+        assert [notice.reason for notice in app.empty_notices] == ["unattachable"]
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_refuses_an_image_too_large_even_after_bounding(monkeypatch) -> None:
+    """``MAX_ATTACHMENT_BYTES`` is applied AFTER the resize, which is the only
+    place it belongs — but an image that is still over it there must be
+    refused rather than sent."""
+    data = _png_bytes()
+    monkeypatch.setattr(
+        editor_module,
+        "bound_image_for_model",
+        lambda payload, info: (b"\x00" * (editor_module.MAX_ATTACHMENT_BYTES + 1), "image/png", ""),
+    )
+    _stub_clipboard(monkeypatch, image=ClipboardImage(data, "image/png"))
+
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == ""
+        assert editor.referenced_images() == []
+        assert [notice.reason for notice in app.empty_notices] == ["unattachable"]
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_reads_the_clipboard_off_the_event_loop(monkeypatch) -> None:
+    """The read shells out to osascript/wl-paste/xclip/PowerShell and this is a
+    keystroke handler; a 0.6 s Retina read inline is a visible freeze."""
+    reader_threads: list[int] = []
+
+    def read_clipboard(*args, **kwargs):
+        reader_threads.append(threading.get_ident())
+        time.sleep(0.05)
+        return ClipboardContents(image=ClipboardImage(_png_bytes(), "image/png"))
+
+    monkeypatch.setattr(editor_module, "read_clipboard", read_clipboard)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        loop_thread = threading.get_ident()
+        await _ctrl_v(app, pilot)
+
+        assert (
+            reader_threads and loop_thread not in reader_threads
+        ), "the clipboard read must not run on the event loop"
+        assert editor.text == "[Image #1, 1568x200] "
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_is_inert_on_a_read_only_composer(monkeypatch) -> None:
+    """The base action honours ``read_only``; rebinding the key must not be a
+    way to make a read-only composer writable."""
+    counts = _stub_clipboard(monkeypatch, image=ClipboardImage(_png_bytes(), "image/png"))
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.read_only = True
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == ""
+        assert counts["reads"] == 0, "a read-only composer must not even read the clipboard"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_and_the_empty_paste_produce_the_same_marker(monkeypatch) -> None:
+    """The two routes share ``_attach_clipboard_image`` precisely so they
+    cannot drift: same bound, same marker, same all-or-nothing rule. Two
+    implementations is how one route quietly starts attaching unbounded bytes.
+    """
+    data = _png_bytes(1200, 400)
+
+    async def marker_for(use_ctrl_v: bool) -> str:
+        _stub_clipboard(monkeypatch, image=ClipboardImage(data, "image/png"))
+        app = Host()
+        async with app.run_test() as pilot:
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.pause()
+            if use_ctrl_v:
+                await _ctrl_v(app, pilot)
+            else:
+                await _paste(app, pilot, "")
+            return editor.text
+
+    assert await marker_for(True) == await marker_for(False)

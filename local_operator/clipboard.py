@@ -1,13 +1,36 @@
-"""Reading an image (or a file URL) off the SYSTEM clipboard.
+"""Reading an image, a file URL, or text off the SYSTEM clipboard.
 
 The composer needs this because a terminal cannot give it to us. Textual's
 ``Paste`` event carries text and nothing else — there is no binary channel in
-the terminal protocol — so an image on the pasteboard reaches the app as an
-EMPTY bracketed paste and disappears (issue #372). ``Cmd+V`` after a native
-macOS screenshot (``Cmd+Shift+Ctrl+4``) was therefore a dead keystroke: the
-pasteboard held 20 KB of PNG, the terminal handed over ``""``, and the composer
-had no way to ask for the bytes. Reading the clipboard OURSELVES is the only
-terminal-independent route to them, which is why this module exists at all.
+the terminal protocol — so an image on the pasteboard can never reach the app
+as bytes (issue #372). ``Cmd+V`` after a native macOS screenshot
+(``Cmd+Shift+Ctrl+4``) was therefore a dead keystroke. Reading the clipboard
+OURSELVES is the only terminal-independent route to those bytes, which is why
+this module exists at all.
+
+**MEASURE WHAT THE TERMINAL ACTUALLY SENDS.** An earlier revision of this
+module said the pasteboard image reached the app "as an EMPTY bracketed
+paste", and the composer hung its whole fix off that claim. It is false, and
+nobody had checked. Captured with a raw-mode PTY probe on macOS 25.6 with a
+PNG on the pasteboard and bracketed paste enabled (``ESC[?2004h``):
+
+=============  ==================  =========  =================================
+terminal       clipboard           keystroke  bytes delivered on stdin
+=============  ==================  =========  =================================
+Terminal.app   text                Cmd+V      25 (``ESC[200~…ESC[201~``)
+Terminal.app   PNG screenshot      Cmd+V      **0** — and the terminal beeps
+Ghostty        PNG screenshot      Cmd+V      **0** — and the terminal beeps
+Terminal.app   PNG screenshot      Ctrl+V     1 (``\\x16``)
+Ghostty        PNG screenshot      Ctrl+V     1 (``\\x16``)
+=============  ==================  =========  =================================
+
+With an image-only pasteboard the terminal sends NOTHING AT ALL. No bytes
+means no ``Paste`` event, so a handler keyed on an empty paste is unreachable
+on exactly the terminals it was written for. ``Cmd+V`` cannot be hooked from
+inside a TUI: the terminal swallows it and there is no protocol by which we
+can ask for pasteboard bytes. ``Ctrl+V`` does arrive, on both terminals, which
+is why :meth:`~local_operator.tui.widgets.editor.Editor.action_system_paste`
+is bound to it and is the reachable caller of this module.
 
 The gap stayed invisible for a long time because it does not reproduce in the
 one place the code was developed. **cmux** watches the pasteboard and writes an
@@ -15,16 +38,23 @@ image to ``$TMPDIR/clipboard-<stamp>-<hash>.png``, then bracket-pastes that
 filename — so inside cmux the composer's path-only ingestion sees a real path
 and works perfectly. Ghostty, Terminal.app, iTerm2 and every other emulator
 paste text only, so outside cmux the same gesture produced nothing. A design
-that is correct for one terminal's helper is not a clipboard implementation,
-and the docstrings in ``tui/widgets/editor.py`` used to credit Ghostty with
-cmux's behaviour.
+that is correct for one terminal's helper is not a clipboard implementation.
+
+TEXT is read alongside the two attachable shapes because ``Ctrl+V`` is now a
+SYSTEM paste, and a system paste that silently dropped the ordinary case would
+be a worse key than the one it replaced (Textual's own ``ctrl+v`` pastes
+``App.clipboard``, an internal buffer the system clipboard never fills). The
+caller decides what to do with each shape; this module only reports what was
+there.
 
 **All four platforms are peers here.** There is one dispatch
-(:func:`read_clipboard_image`) that picks a backend from ``sys.platform`` and
+(:func:`read_clipboard`) that picks a backend from ``sys.platform`` and
 the session's environment; each backend is an independent function with the
 same contract, and none of them is a fast path the others hang off. That
 matters for more than tidiness: the failure this module fixes was itself the
-result of a single-environment assumption baked into the ingest path.
+result of a single-environment assumption baked into the ingest path. The text
+shape obeys the same rule — a ``Ctrl+V`` that pasted text on macOS and dropped
+it on Linux would put that assumption straight back.
 
 Every backend obeys the same four rules, which is what makes them substitutable:
 
@@ -441,14 +471,26 @@ def _run(
 #: question separately doubled the cost of every miss — which is the common
 #: case, since a text clipboard reaches both (review round 2, U3/U7).
 #:
-#: The image wins when both are present: it is what the user copied in the
-#: reported gesture, and the file-URL branch is the Finder ``Cmd+C`` fallback
-#: that only matters when there are no image bytes at all.
+#: The image wins when several are present: it is what the user copied in the
+#: reported gesture. The file-URL branch is the Finder ``Cmd+C`` fallback, and
+#: it is asked BEFORE text for a measured reason — a Finder copy puts
+#: ``public.file-url`` AND the file's display name on the pasteboard together
+#: (verified against a real Finder-shaped copy: ``public.file-url``,
+#: ``NSFilenamesPboardType`` and an Apple URL flavor all present), so testing
+#: text first would type a filename instead of attaching the copied file.
 #:
-#: Output is a one-line verdict on stdout (``image`` or the NUL-separated
-#: paths); the image bytes go to a FILE, because ``osascript`` prints its
-#: result through a text coercion that mangles binary — the same trap the
-#: Windows backend documents.
+#: TEXT is last and is the ordinary case. It is read in this same script rather
+#: than by a second tool (``pbpaste``) so the single-spawn property survives:
+#: the spawn IS the latency, and a text clipboard is the most common thing
+#: ``Ctrl+V`` meets.
+#:
+#: Output is a one-line verdict on stdout (``image``, ``text``, or the
+#: NUL-separated paths); the image bytes AND the text go to a FILE, because
+#: ``osascript`` prints its result through a text coercion that mangles binary
+#: — the same trap the Windows backend documents. Text takes the file route
+#: too: the coercion normalises line endings, so a multi-line clipboard would
+#: come back altered, and its content would otherwise be indistinguishable
+#: from the one-word verdicts.
 #:
 #: TIFF is handled explicitly because it is not a rare case: several macOS apps
 #: (Preview's copy, some screenshot utilities) put ONLY ``public.tiff`` on the
@@ -487,28 +529,37 @@ on run argv
 \t\treturn "image"
 \tend if
 \tset urls to pb's readObjectsForClasses:{current application's NSURL} options:(missing value)
-\tif urls is missing value then return ""
 \tset out to ""
-\tset sep to (ASCII character 0)
-\trepeat with i from 0 to ((urls's |count|() as integer) - 1)
-\t\tset u to (urls's objectAtIndex:i)
-\t\tif (u's isFileURL()) as boolean then set out to out & ((u's |path|()) as text) & sep
-\tend repeat
-\treturn out
+\tif urls is not missing value then
+\t\tset sep to (ASCII character 0)
+\t\trepeat with i from 0 to ((urls's |count|() as integer) - 1)
+\t\t\tset u to (urls's objectAtIndex:i)
+\t\t\tif (u's isFileURL()) as boolean then set out to out & ((u's |path|()) as text) & sep
+\t\tend repeat
+\tend if
+\tif out is not "" then return out
+\tset str to pb's stringForType:"public.utf8-plain-text"
+\tif str is missing value then return ""
+\tset payload to str's dataUsingEncoding:(current application's NSUTF8StringEncoding)
+\tif payload is missing value then return ""
+\tpayload's writeToFile:dest atomically:true
+\treturn "text"
 end run
 """
 
 
 def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
-    """macOS: image bytes, or file URLs, from ONE ``osascript`` spawn.
+    """macOS: image bytes, file URLs, or text, from ONE ``osascript`` spawn.
 
-    Both shapes in one call because the spawn is the cost — see
+    All three shapes in one call because the spawn is the cost — see
     :data:`_MACOS_CLIPBOARD_SCRIPT`. Asking them separately doubled the latency
     of every clipboard miss, which is the case a text or empty clipboard hits
-    (round 2, U3/U7).
+    (round 2, U3/U7), and adding text as a second spawn would have undone that
+    fix on the shape that is now the most common one.
 
-    The image is collected from a temp FILE, which is the only lossless channel
-    out of ``osascript``; it is deleted before this returns.
+    The image and the text are both collected from a temp FILE, which is the
+    only lossless channel out of ``osascript``; it is deleted before this
+    returns.
     """
     if not shutil.which("osascript"):
         # Not reachable on a stock macOS, but this module must never assume a
@@ -534,6 +585,16 @@ def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
             # answer to "what did the user copy" was the image, and attaching
             # some unrelated file instead would be a different gesture.
             return ClipboardContents(image=image)
+        if verdict.strip() == "text":
+            # Bounded by the same ceiling as the image, and for the same reason:
+            # the clipboard is an untrusted-size source, and this text is about
+            # to be inserted into the composer's document. Over the bound reads
+            # as an empty clipboard rather than as an error — the same collapse
+            # every other "nothing usable here" case takes.
+            raw = _read_bounded(dest, max_bytes)
+            if raw is None:
+                return ClipboardContents()
+            return ClipboardContents(text=raw.decode("utf-8", errors="replace"))
     return ClipboardContents(paths=tuple(p for p in verdict.split("\x00") if p.strip()))
 
 
@@ -556,27 +617,35 @@ def _read_bounded(path: Path, max_bytes: int) -> bytes | None:
         return None
 
 
-def _read_wayland_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
-    """Wayland: ``wl-paste --list-types`` then ``wl-paste --type <mime>``.
+#: Text MIME types worth asking a Wayland compositor for, in preference order.
+#: ``text/plain;charset=utf-8`` is what most toolkits actually offer and is
+#: unambiguous about encoding; bare ``text/plain`` is the fallback, and the two
+#: X11 selection names appear because compositors commonly re-advertise them
+#: through XWayland. Only types the compositor LISTS are ever read \u2014 see
+#: :func:`_read_wayland`.
+TEXT_MIME_PREFERENCE = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING")
 
-    The type list is queried first because ``wl-paste --type image/png`` on a
-    clipboard that has no PNG both fails AND, on some compositors, blocks while
-    the offer is negotiated. Asking what is on offer costs one cheap call and
-    turns four speculative reads into at most one real one.
 
-    Then it tries every offered type in preference order, the same as X11.
-    Round 1 (F4) caught these two loops disagreeing: this one used to stop
-    after the first offered type on the theory that a second candidate is "the
-    same image again", which is a guess about the clipboard owner rather than a
-    fact — a compositor may well offer a huge PNG and a small JPEG of
-    different pictures. Both loops now do the same thing, and the total cost is
-    bounded by the shared deadline instead of by loop length.
+def _read_wayland(max_bytes: int, deadline: _Deadline) -> tuple[ClipboardImage | None, str]:
+    """Wayland: ONE ``--list-types`` listing, then at most one real read.
+
+    Image types first, then text, and NEITHER is read speculatively: a type the
+    compositor did not list is never asked for. That discipline predates the
+    text shape and is kept for the reason it was introduced \u2014 ``wl-paste
+    --type X`` on a clipboard with no X both fails AND, on some compositors,
+    blocks while the offer is negotiated, so a speculative read is a stall
+    rather than a cheap miss.
+
+    One listing serves both questions, which is why this is a single function
+    and not an image reader beside a text reader: asking twice would double the
+    spawn count on the shape ``Ctrl+V`` meets most often, the same cost the
+    macOS backend collapses into one script (round 2, U3/U7).
     """
     if not shutil.which("wl-paste"):
-        return None
+        return None, ""
     listing = _run(["wl-paste", "--list-types"], deadline)
     if listing is None:
-        return None
+        return None, ""
     offered = {line.strip() for line in listing.decode("utf-8", "replace").splitlines()}
     for mime in IMAGE_MIME_PREFERENCE:
         if mime not in offered:
@@ -590,8 +659,57 @@ def _read_wayland_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage |
             max_bytes,
         )
         if image is not None:
-            return image
-    return None
+            return image, ""
+    for mime in TEXT_MIME_PREFERENCE:
+        if mime not in offered:
+            continue
+        # ``--no-newline`` matches the image reads and stops ``wl-paste``
+        # appending a newline the user never copied, which in a prompt buffer
+        # is a blank line they then have to delete.
+        text = _decode_clipboard_text(
+            _run(
+                ["wl-paste", "--no-newline", "--type", mime],
+                deadline,
+                max_bytes=max_bytes,
+            ),
+            max_bytes,
+        )
+        if text:
+            return None, text
+    return None, ""
+
+
+def _read_x11_text(max_bytes: int, deadline: _Deadline) -> str:
+    """X11: the clipboard's plain text, or ``""``.
+
+    ``-t UTF8_STRING`` rather than bare ``-o``: without a target ``xclip``
+    picks one itself and can hand back a non-text flavor on a clipboard that
+    offers several, which would reach the composer as mojibake.
+    """
+    if not shutil.which("xclip"):
+        return ""
+    return _decode_clipboard_text(
+        _run(
+            ["xclip", "-selection", "clipboard", "-t", "UTF8_STRING", "-o"],
+            deadline,
+            max_bytes=max_bytes,
+        )
+    )
+
+
+def _decode_clipboard_text(data: bytes | None, max_bytes: int | None = None) -> str:
+    """Clipboard bytes as text, or ``""`` — the one decode every backend uses.
+
+    ``errors="replace"`` and never a raise: this runs on a keystroke, and a
+    clipboard holding bytes that are not valid UTF-8 is a paste that should
+    degrade, not an exception on the key that pasted. Shared so the platforms
+    cannot disagree about what a clipboard string is.
+    """
+    if not data:
+        return ""
+    if max_bytes is not None and len(data) > max_bytes:
+        return ""
+    return data.decode("utf-8", errors="replace")
 
 
 def _read_x11_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
@@ -667,6 +785,68 @@ try {
 """
 
 
+#: Windows text, read through the same PowerShell the image backend picks.
+#:
+#: ``-Raw`` is what makes this correct rather than merely working:
+#: ``Get-Clipboard`` without it returns an ARRAY of lines, which PowerShell
+#: then joins with the host's line separator on the way to stdout, so a
+#: multi-line clipboard comes back re-terminated. ``-Raw`` hands over the
+#: string as the clipboard holds it.
+#:
+#: Stdout is safe here where it is not for the image, because this payload IS
+#: text: the output encoding that corrupts binary is exactly the right
+#: treatment for a string, and ``[Console]::OutputEncoding`` is pinned to UTF-8
+#: so the bytes this process decodes match what was copied.
+#:
+#: NOTE: unit-tested against mocked invocations only, like the image script —
+#: there is no Windows host in this project's development or CI environment.
+_WINDOWS_TEXT_SCRIPT = """\
+$ErrorActionPreference = 'Stop'
+try {
+  [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+  $text = Get-Clipboard -Raw
+  if ($null -eq $text) { exit 1 }
+  [Console]::Out.Write($text)
+} catch {
+  exit 1
+}
+"""
+
+
+def _read_windows_text(max_bytes: int, deadline: _Deadline) -> str:
+    """Windows: the clipboard's text, or ``""``.
+
+    ``-STA`` for the same reason the image backend needs it: the Windows
+    clipboard API is single-threaded-apartment only.
+    """
+    shell = _windows_shell()
+    if shell is None:
+        return ""
+    with tempfile.TemporaryDirectory(prefix="lo-clip-") as tmp:
+        script = Path(tmp) / "read_text.ps1"
+        try:
+            script.write_text(_WINDOWS_TEXT_SCRIPT, encoding="utf-8")
+        except OSError:
+            return ""
+        return _decode_clipboard_text(
+            _run(
+                [
+                    shell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-STA",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                ],
+                deadline,
+                max_bytes=max_bytes,
+            ),
+            max_bytes,
+        )
+
+
 def _windows_shell() -> str | None:
     """``pwsh`` if present, else Windows PowerShell, else nothing.
 
@@ -738,13 +918,27 @@ class ClipboardContents:
     with the caller, which is where the attachment budget and the resize are;
     this type only reports what was on the clipboard.
 
-    Everything else stays collapsed: an empty clipboard, a text-only one, a
-    missing ``xclip`` and a wedged daemon are one answer, because a message
-    that guessed between them would be inventing a diagnosis.
+    Everything else stays collapsed: an empty clipboard, a missing ``xclip``
+    and a wedged daemon are one answer, because a message that guessed between
+    them would be inventing a diagnosis. A TEXT-only clipboard is no longer in
+    that collapse — it has its own field, because ``Ctrl+V`` has to insert it.
+
+    The three shapes are MUTUALLY EXCLUSIVE by construction, in the order
+    image, paths, text. That order is the user's intent, not a convenience: a
+    Finder copy puts a file URL and its display name on the pasteboard at once,
+    so a text field filled alongside paths would let one gesture both attach a
+    file and type its name. The backends resolve the precedence; the caller
+    reads whichever field is set.
     """
 
     image: ClipboardImage | None = None
     paths: tuple[str, ...] = ()
+    #: Plain text on the clipboard, when there was no image and no file URL.
+    #: Read for ``Ctrl+V``, which is a SYSTEM paste and therefore owes the user
+    #: the ordinary text case as well as the attachable ones — Textual's own
+    #: ``ctrl+v`` action pastes ``App.clipboard``, an internal buffer that a
+    #: copy made in another application never touches.
+    text: str = ""
     #: The read never happened: this session is remote, so the clipboard would
     #: be the server's. Not a failure to find an image, and must not be
     #: reported as one.
@@ -792,17 +986,30 @@ def read_clipboard(
         return _read_macos(max_bytes, deadline)
 
     image: ClipboardImage | None = None
+    text = ""
     if system == "win32":
         image = _read_windows_image(max_bytes, deadline)
+        if image is None:
+            text = _read_windows_text(max_bytes, deadline)
     elif system.startswith("linux") or "bsd" in system:
         if source.get("WAYLAND_DISPLAY"):
-            image = _read_wayland_image(max_bytes, deadline)
+            # One call for both shapes: the compositor's type listing answers
+            # the image question and the text question together.
+            image, text = _read_wayland(max_bytes, deadline)
         elif source.get("DISPLAY"):
             image = _read_x11_image(max_bytes, deadline)
+            if image is None:
+                text = _read_x11_text(max_bytes, deadline)
         # A headless Linux box (a container, a bare tty) has no clipboard at
         # all, and shelling out to discover that costs a subprocess per paste.
+    # The text read is skipped when an image was found, so the common
+    # screenshot gesture does not pay for a second subprocess, and so the two
+    # fields keep the exclusivity `ClipboardContents` documents.
+    #
     # No file-URL shape off macOS: every other platform's file manager puts the
     # paths on the clipboard as text too, which the terminal already
     # bracket-pastes into the composer's existing path branch — a second route
-    # here would be a way for one copy to be attached twice.
-    return ClipboardContents(image=image)
+    # here would be a way for one copy to be attached twice. That text now
+    # arrives through the `text` field on Ctrl+V as well, where the composer's
+    # path branch parses it exactly as it parses a bracketed paste.
+    return ClipboardContents(image=image, text=text)

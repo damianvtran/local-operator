@@ -8799,3 +8799,36 @@ async def test_one_incidental_name_hit_does_not_silence_the_typo_tier(
             "one incidental name hit silenced the soft tier, so the sessions the "
             f"user meant are unreachable. shown={sorted(shown)}"
         )
+
+
+@pytest.mark.asyncio
+async def test_help_documents_the_system_clipboard_paste_key() -> None:
+    """``ctrl+v`` is the ONLY way to attach a clipboard image outside cmux, and
+    it has no other durable surface: it is not a slash command, so it cannot
+    appear in the command table, and this app shows no key reference in the
+    footer.
+
+    That matters because the gesture users try first is unhookable. With an
+    image on the pasteboard, Terminal.app and Ghostty deliver zero bytes on
+    Cmd+V and beep, so a user who tried it saw nothing at all and had no way to
+    discover the key that works. The paste notice teaches it once at the moment
+    of failure; ``/help`` is where it is still findable an hour later.
+    """
+    from rich.console import Group
+    from rich.padding import Padding
+    from rich.text import Text
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # `RichBlock` wraps its Group in a Padding, so the rows are one level
+        # in; read them rather than rendering to a frame, since what is under
+        # test is the CONTENT of the help, not its layout. Cast because the
+        # renderable chain is typed as the broad `RenderableType` union.
+        padding = cast(Padding, app._help_block().renderable)
+        group = cast(Group, padding.renderable)
+        text = "\n".join(cast(Text, row).plain for row in group.renderables)
+
+        assert "ctrl+v" in text, "/help must name the system clipboard paste key"
+        line = next(row for row in text.splitlines() if "ctrl+v" in row)
+        assert "clipboard" in line, f"{line!r} names the key without saying what it does"
