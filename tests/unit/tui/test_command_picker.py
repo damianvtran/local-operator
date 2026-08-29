@@ -831,8 +831,11 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
     [
         ("u", ["update", "usage"]),
         ("g", ["goal"]),
-        ("s", ["search", "skills"]),
-        ("c", ["clear", "context", "compact", "credential"]),
+        # `settings` and its `config` alias join these two prefixes; both are
+        # ranked ahead of their neighbours because a prefix match on a longer
+        # word still beats one that starts later in the name.
+        ("s", ["settings", "search", "skills"]),
+        ("c", ["clear", "config", "context", "compact", "credential"]),
         ("lo", ["loop", "login", "logout"]),
         ("mo", ["model"]),
     ],

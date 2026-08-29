@@ -57,6 +57,10 @@ ECHO_POLICY = {
     # in force, and the screen itself is wearing the change.
     "theme": False,
     "provider": False,
+    # The PAGE is the receipt (same rule as `/usage` and `/analytics`): it
+    # replaces the transcript region, so a user row printed behind it would
+    # only be readable after leaving. It takes no argument at all.
+    "settings": False,
     "search": False,
     "accounts": False,
     # The cascade tree IS the receipt, and there is no argument to restate.
@@ -110,6 +114,10 @@ PROMPT_POLICY = {
     "effort": False,
     "theme": False,
     "provider": False,
+    # The PAGE is the receipt (same rule as `/usage` and `/analytics`): it
+    # replaces the transcript region, so a user row printed behind it would
+    # only be readable after leaving. It takes no argument at all.
+    "settings": False,
     "search": False,
     "accounts": False,
     "failovers": False,
