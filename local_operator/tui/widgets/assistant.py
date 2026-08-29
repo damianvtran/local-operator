@@ -621,6 +621,45 @@ class AssistantBlock(TranscriptBlock):
         When the source cannot be aligned (an empty message, or a frame the
         walker cannot place), the method falls back to the base frame copy so a
         copy never comes back empty-handed.
+
+        **The one selection markdown cannot answer: a SUB-LINE take.** Reported
+        from the field — dragging the eight cells of one word out of a bullet
+        announced ``copied 115 characters`` and put the whole source line on the
+        clipboard. The cause was structural rather than an off-by-one: the row
+        walk kept only ``first_row``/``last_row`` and dropped the column pair
+        ``get_span`` returns, and ``slice_markdown`` is row-granular by
+        contract, so every partial row was widened to the source line under it.
+
+        Column-trimmed markdown source is not the missing third option — it is
+        **impossible**, not merely unimplemented, and that is what decides the
+        rule. A rendered column does not index a source column: measured on the
+        reported bullet, ``frontend`` sits at rendered column 56 and source
+        column 57, because ``- `` paints as `` • `` (+1) and the ``**`` around
+        the word vanishes (-2). The offset is content-dependent AND signed, and
+        :func:`_copy_markdown.align` deliberately maps rows to source *lines*,
+        never claiming a column correspondence. So for a partial row there are
+        exactly two truthful answers — the glyphs that were highlighted, or a
+        whole line the reader did not select — and the second is the bug.
+
+        Hence the boundary, drawn on SOURCE LINES rather than on rendered rows:
+        a selection that does not cover the full content of the rows it touches
+        **and** touches at most one source line copies the highlighted glyphs,
+        per :meth:`TranscriptBlock.copy_gutter`'s rule. Everything wider stays
+        markdown. Counting source lines rather than rows is also what covers a
+        phrase dragged across a wrapped paragraph's fold — one source line
+        painted as several rows, the same defect, and measured at width 60 a
+        row-count gate still copied all 128 characters of it.
+
+        **The accepted cost**, stated so it is chosen rather than rediscovered:
+        a drag from the middle of one bullet to the middle of the next copies
+        both bullets WHOLE. The reader gets more than they highlighted. That is
+        deliberate — trimming those ends needs the column mapping that does not
+        exist, and degrading any multi-row take to glyphs would put the ``▌``
+        and ``•`` furniture back into the paste this method exists to keep it
+        out of (which ``test_blockquote_copies_as_markdown_not_the_bar``
+        guards). A sub-line take also loses inline markers: dragging one bold
+        word yields ``frontend``, not ``**frontend**``. That is the base rule —
+        the clipboard is what the highlight covered.
         """
         visual = self._render()
         if not isinstance(visual, Content):
@@ -628,16 +667,66 @@ class AssistantBlock(TranscriptBlock):
         if not self._full_text.strip():
             return super().get_selection(selection)
         rows = visual.plain.split("\n")
-        first_row: int | None = None
-        last_row: int | None = None
-        for index in range(len(rows)):
-            if selection.get_span(index) is not None:
-                if first_row is None:
-                    first_row = index
-                last_row = index
-        if first_row is None or last_row is None:
-            return None
         mapping = _copy_markdown.align(self._full_text, rows)
+
+        # The same ``Selection.get_span`` the band paints with, chrome rows
+        # dropped, so the clipboard and the highlight cannot disagree.
+        selected: list[tuple[int, tuple[int, int]]] = []
+        for index in range(len(rows)):
+            span = selection.get_span(index)
+            if span is not None and not self.copy_row_is_chrome(index):
+                selected.append((index, span))
+        if not selected:
+            return None
+
+        # Blank rows carry no glyphs, so they neither prove nor disprove a
+        # sub-line take: a whole-message copy legitimately spans the blank
+        # separator rows between paragraphs, and letting one veto the markdown
+        # path would degrade every multi-paragraph copy to rendered text.
+        content = [(i, span) for i, span in selected if rows[i].strip()]
+
+        sub_line = False
+        if content:
+            # Source LINES, not rows: a paragraph that wraps is one line painted
+            # as several, and a phrase dragged across that fold is as much a
+            # sub-line take as one inside a single row. A row ``align`` cannot
+            # place contributes nothing, which leaves the conservative answer
+            # (glyphs are always truthful) if alignment itself ever regresses.
+            sources = {
+                mapping[i] for i, _ in content if i < len(mapping) and mapping[i] is not None
+            }
+            if len(sources) <= 1:
+                first_index, (first_start, _) = content[0]
+                last_index, (_, last_end) = content[-1]
+                # ``rstrip()`` is the only honest measure of the row's actual
+                # content here. Rich pads each row out to its RENDER SEGMENT's
+                # width, which is not the block's — measured, prose rows pad to
+                # 76 while table rows in the same message pad to 14 — so any
+                # predicate against the block width or raw ``len(row)`` is
+                # wrong. ``end`` also arrives three ways: -1 for end-of-row, a
+                # column inside the pad when the drag overran the last glyph, or
+                # a column short of it. Only the glyph count settles all three.
+                starts_full = first_start <= self.copy_gutter(first_index)
+                ends_full = last_end == -1 or last_end >= len(rows[last_index].rstrip())
+                sub_line = not (starts_full and ends_full)
+
+        if sub_line:
+            # Sliced exactly as ``TranscriptBlock.get_selection`` slices it
+            # (gutter-clamped start, ``-1`` meaning end of row), but over the
+            # content rows only: a blank row caught at the edge of the drag
+            # would otherwise contribute a line break the reader never
+            # highlighted, turning the receipt into ``copied 2 lines``.
+            glyphs = [
+                rows[index][max(start, self.copy_gutter(index)) : None if end == -1 else end]
+                for index, (start, end) in content
+            ]
+            return "\n".join(row.rstrip() for row in glyphs), "\n"
+
+        # Widened to whole source lines on purpose — see the accepted cost
+        # above. The bounds come from ``selected`` rather than ``content`` so
+        # the markdown path spans exactly the rows it has always spanned.
+        first_row = selected[0][0]
+        last_row = selected[-1][0]
         copied = _copy_markdown.slice_markdown(self._full_text, mapping, first_row, last_row)
         if not copied:
             return super().get_selection(selection)

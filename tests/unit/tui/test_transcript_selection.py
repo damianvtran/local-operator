@@ -482,6 +482,373 @@ async def test_a_drag_starting_inside_the_gutter_still_copies_from_the_prose() -
         assert block.get_selection(selection) == ("summarise", "\n")
 
 
+# -- a sub-line take copies what was highlighted -----------------------------
+#
+# Reported from the field: dragging the eight cells of one word inside a
+# rendered bullet announced ``copied 115 characters`` and put the WHOLE source
+# line on the clipboard. ``AssistantBlock.get_selection`` reduced the selection
+# to a first and last row and dropped the column pair ``get_span`` returns, and
+# ``slice_markdown`` is row-granular by contract, so every partial row was
+# widened to the source line beneath it.
+#
+# The rule that answers it, and the reason it is drawn where it is: there is no
+# third option between "the glyphs" and "the whole source line". Column-trimmed
+# markdown would need a rendered column to index a source column, and it does
+# not — ``frontend`` sits at rendered column 56 and source column 57 in the
+# fixture below, because ``- `` paints as `` • `` (+1) while the ``**`` vanishes
+# (-2), an offset that is content-dependent and signed. So a take that does not
+# cover the full content of its rows AND touches at most one source line copies
+# glyphs; everything wider stays markdown.
+#: The reported message: a bold word mid-bullet, plus a second bullet so a
+#: multi-line drag has somewhere to go. At width 150 the first bullet renders
+#: as one row, which is what makes the sub-row drag below the reported gesture.
+BULLETS = (
+    "Here is what I found:\n\n"
+    "- Transient failures in the ingest path never reach the **frontend** "
+    "without a retry, so the user sees a stale row.\n"
+    "- The second bullet exists so a multi-line drag has somewhere to go.\n"
+)
+
+#: One long source line, rendered at a width that folds it across rows. The
+#: wrap is the point: it is ONE source line painted as several, so a phrase
+#: dragged over the fold is the same defect as one inside a single row.
+WRAPPED = (
+    "This is a single but quite important paragraph that will certainly "
+    "wrap across several rendered rows at a narrow terminal width.\n"
+)
+
+
+def _rendered_rows(block: AssistantBlock) -> list[str]:
+    """The frame's rows, as ``get_selection`` and the highlight both see them."""
+    visual = block._render()
+    assert isinstance(visual, Content)
+    return visual.plain.split("\n")
+
+
+def _find(rows: list[str], word: str) -> tuple[int, int, int]:
+    """``(row, start, end)`` of ``word`` in the RENDERED frame.
+
+    Located rather than hard-coded because the whole point of these tests is
+    that rendered columns are not source columns: a literal column here would
+    encode the very assumption the fix exists to deny, and would drift with any
+    change to how the markdown theme paints a bullet.
+    """
+    for index, row in enumerate(rows):
+        if word in row:
+            start = row.index(word)
+            return index, start, start + len(word)
+    raise AssertionError(f"{word!r} is not on the frame: {rows!r}")
+
+
+@pytest.mark.asyncio
+async def test_a_word_dragged_out_of_a_bullet_copies_only_that_word() -> None:
+    """The reported bug: 8 cells highlighted must not copy 115 characters.
+
+    Pins that a sub-row take is no longer widened to its source line. The
+    negative assertion is the one that fails on the old code — the word alone
+    is a substring of the over-copy, so equality is what makes this a
+    regression test rather than a smoke test.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "frontend")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied == ("frontend", "\n")
+        # The rest of the source line, which the old code copied wholesale.
+        assert "Transient failures" not in copied[0]
+        # The receipt the user reads is a count of exactly this string.
+        assert len(copied[0]) == 8
+
+
+@pytest.mark.asyncio
+async def test_a_phrase_across_a_wrap_boundary_copies_only_the_phrase() -> None:
+    """A wrapped paragraph is ONE source line, so a drag over its fold is sub-line.
+
+    Pins that the gate counts SOURCE LINES and not rendered rows. A row-count
+    gate (``len(content) == 1``) fixes the reported case and leaves this one
+    live: measured at width 60 it still returned all 128 characters of the
+    paragraph for a two-row drag. Anyone narrowing the gate has to fail here.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(WRAPPED)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        first_row, start, _ = _find(rows, "important")
+        last_row, _, end = _find(rows, "several")
+        assert first_row != last_row, "the fixture must actually wrap, or this proves nothing"
+
+        selection = Selection.from_offsets(Offset(x=start, y=first_row), Offset(x=end, y=last_row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "important paragraph that will\ncertainly wrap across several"
+        assert "This is a single" not in copied[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["exact", "into-the-pad", "sentinel"])
+async def test_a_whole_row_still_copies_markdown_source(form: str) -> None:
+    """Full coverage keeps the markdown path, however the drag reported its end.
+
+    ``end`` arrives three ways — the exact glyph count, a column inside Rich's
+    trailing pad when the drag overran the last glyph, and ``-1`` for "to end of
+    row" — and all three mean the same thing to a reader. Pins the ``rstrip()``
+    predicate: Rich pads each row to its RENDER SEGMENT's width (measured 146
+    for this bullet against 112 glyphs), so a predicate against the block width
+    or raw ``len(row)`` would call the exact-end case partial and degrade a
+    whole-line copy to rendered text.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row, _, _ = _find(rows, "frontend")
+        ends = {"exact": len(rows[row].rstrip()), "into-the-pad": len(rows[row]), "sentinel": -1}
+        # Hand-built rather than via ``from_offsets``, which normalises a -1 x
+        # into the selection START and so cannot express the sentinel form.
+        selection = cast("Any", _SpanOnRow(row, (0, ends[form])))
+
+        copied = block.get_selection(selection)
+        assert copied is not None
+        assert copied[0] == (
+            "- Transient failures in the ingest path never reach the **frontend** "
+            "without a retry, so the user sees a stale row."
+        )
+
+
+class _SpanOnRow:
+    """A selection of one hand-set span on one row.
+
+    ``Selection.from_offsets`` normalises its offsets, which makes the ``-1``
+    end sentinel unreachable through the public constructor — it is a value
+    Textual's own ``get_span`` PRODUCES for the rows in the middle of a
+    multi-row drag, not one an offset pair can state. Only ``get_span`` is
+    called by ``get_selection``, so duck-typing it is enough and keeps the test
+    honest about which of the three end forms it is exercising.
+    """
+
+    def __init__(self, row: int, span: tuple[int, int]) -> None:
+        self._row = row
+        self._span = span
+
+    def get_span(self, y: int) -> tuple[int, int] | None:
+        return self._span if y == self._row else None
+
+
+@pytest.mark.asyncio
+async def test_a_sub_row_take_inside_a_fence_copies_the_code_not_the_fence() -> None:
+    """Part of a code line copies that code, unfenced.
+
+    Pins that the glyph path does not re-fence a partial take: ``slice_markdown``
+    would return a three-line fenced block for a four-cell drag, which is both
+    more than was highlighted and not the snippet the reader pointed at.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(64, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text("```python\ndef f(x):\n    return x + 1\n```")
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "f(x)")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+
+        assert block.get_selection(selection) == ("f(x)", "\n")
+
+
+@pytest.mark.asyncio
+async def test_a_partial_multi_line_selection_still_copies_markdown() -> None:
+    """Two bullets with partial ends copy BOTH bullets whole. Deliberately.
+
+    This is the accepted cost of the rule, pinned so it cannot be "fixed" into
+    a degrade-anywhere rule without confronting the choice. Trimming the ends
+    would need a rendered-to-source column mapping that does not exist, and
+    degrading the whole take to glyphs would put the ``•`` and ``▌`` furniture
+    back into the paste — which is exactly the report that
+    ``test_blockquote_copies_as_markdown_not_the_bar`` guards against.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        first_row, _, _ = _find(_rendered_rows(block), "frontend")
+        # Mid-way through the first bullet to mid-way through the second.
+        selection = Selection.from_offsets(Offset(x=10, y=first_row), Offset(x=20, y=first_row + 1))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0].splitlines() == [
+            "- Transient failures in the ingest path never reach the **frontend** "
+            "without a retry, so the user sees a stale row.",
+            "- The second bullet exists so a multi-line drag has somewhere to go.",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_word_inside_a_blockquote_copies_without_the_bar() -> None:
+    """A sub-row quote take is the word, not the ``▌`` and not the ``>`` line.
+
+    The counterpart to ``test_blockquote_copies_as_markdown_not_the_bar``: a
+    drag that starts PAST the bar never crosses that cell, so the bar is not
+    part of what was highlighted and is not part of the copy.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Here is a reply you can paste:\n\n"
+            "> Thanks for the report. I verified the **flagged** value in out/main/index.jsc:\n"
+            "> it's the public project API key (phc_...), publishable by design.\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "flagged")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied == ("flagged", "\n")
+        assert "▌" not in copied[0]
+        assert ">" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_quote_dragged_from_column_zero_keeps_the_bar() -> None:
+    """The accepted wrinkle: a column-0 quote drag DOES copy the ``▌``.
+
+    ``AssistantBlock`` does not override ``copy_gutter``, so it inherits 0 —
+    and a drag that starts at column 0 genuinely crossed the bar's cell, so
+    returning it is a faithful report of the highlight. Pinned as a decision
+    rather than left to be discovered: the obvious "fix" is a regex stripping
+    leading furniture, and that CORRUPTS CODE — inside a fence it turns
+    ``  1 / 0`` into ``/ 0``, because a code line starting with a digit is
+    indistinguishable from a rendered ordered-list marker by glyph alone. The
+    safe alternative is a mapping-aware gutter, warranted only if this is ever
+    actually reported.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text("Intro:\n\n> Thanks for the report, it is fixed now.\n")
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        row = next(i for i, text in enumerate(rows) if text.startswith("▌"))
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=16, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied is not None
+        assert copied[0] == "▌ Thanks for the"
+
+
+@pytest.mark.asyncio
+async def test_a_table_cell_copies_the_cell() -> None:
+    """One cell of a rendered table copies that cell, not the pipe row.
+
+    Pins that a sub-row take does not reintroduce markdown furniture the reader
+    cannot see: the frame draws no pipes, so a copy carrying ``| alpha | 0.91 |``
+    would contain characters no highlighted cell held.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Results:\n\n| Name | Score |\n|------|-------|\n| alpha | 0.91 |\n| beta | 0.87 |\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, end = _find(_rendered_rows(block), "alpha")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=end, y=row))
+        copied = block.get_selection(selection)
+
+        assert copied == ("alpha", "\n")
+        assert "|" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_zero_width_selection_copies_nothing() -> None:
+    """A click is not a drag: an empty span copies an empty string.
+
+    Pins the click case, which under the old row-only reduction returned the
+    whole source line — a plain click on an answer would have put 115
+    characters on the clipboard. ``_put_on_clipboard`` drops a falsy payload
+    before the OSC 52 write, so this is also what keeps a click from raising a
+    ``copied 0 characters`` receipt.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+
+        row, start, _ = _find(_rendered_rows(block), "frontend")
+        selection = Selection.from_offsets(Offset(x=start, y=row), Offset(x=start, y=row))
+
+        assert block.get_selection(selection) == ("", "\n")
+
+
+@pytest.mark.asyncio
+async def test_the_reported_drag_end_to_end_reports_a_small_count() -> None:
+    """The whole gesture through the real app: drag a word, read the receipt.
+
+    The unit assertions above pin ``get_selection``; this pins what the USER
+    sees, which is where the bug was reported from. It goes through the real
+    mouse events, the real ``TextSelected`` release, the real clipboard write
+    and the real toast, because the receipt is the only part of the copy the
+    reader can check — ``copied 115 characters`` for an 8-cell drag was the
+    report.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(150, 26)) as pilot:
+        await pilot.pause()
+        app._append_block(UserBlock("summarise the ingest path"))
+        block = AssistantBlock()
+        app._append_block(block)
+        await pilot.pause()
+        block.update_text(BULLETS)
+        block.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+        app._clipboard = ""
+
+        row, start, end = _find(_rendered_rows(block), "frontend")
+        y = block.region.y + row
+        await _drag(app, pilot, (block.region.x + start, y), (block.region.x + end, y))
+
+        assert app._clipboard == "frontend"
+        assert app.query_one(Toast).message == "copied 8 characters"
+
+
 # -- the flatten's own claims ------------------------------------------------
 @pytest.mark.parametrize("width", [40, 60, 80])
 @pytest.mark.parametrize(
