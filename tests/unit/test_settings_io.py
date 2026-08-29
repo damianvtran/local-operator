@@ -584,3 +584,168 @@ def test_write_preserves_a_widened_file_mode(tmp_path: Path) -> None:
     config_file.chmod(0o644)
     settings_io.write_setting(manager, settings_io.BY_KEY["retry.maxRetries"], 4)
     assert config_file.stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        pytest.param("\thosting: broken\n", id="tab-indented-line"),
+        pytest.param("values:\n  retry:\n    maxRetries: [1, 2\n", id="truncated-file"),
+        pytest.param("", id="zero-byte-file"),
+        pytest.param("- a\n- b\n", id="top-level-list"),
+    ],
+)
+@pytest.mark.parametrize("path", ["write", "reset"])
+def test_an_unreadable_config_aborts_the_write_instead_of_defaulting_over_it(
+    tmp_path: Path, corruption: str, path: str
+) -> None:
+    """A config that stopped parsing must not be REPLACED BY DEFAULTS.
+
+    The regression this pins is data loss, and it came from the fix for B1
+    (review round 2, B3). ``ConfigManager._load_config`` does not raise on a
+    malformed config.yml \u2014 it moves the file aside and returns a fresh default
+    config \u2014 so the reload before a write silently succeeded, the manager
+    became defaults, and the write dumped those defaults over the user's file.
+    The ``.bad`` backup then held only the broken edit, so the last good config
+    was recoverable from nowhere.
+
+    Asserts on the FILE'S BYTES rather than on parsed values: the property that
+    matters is that nothing was written at all, and a value-level assertion
+    would pass on a rewrite that happened to round-trip.
+    """
+    page = ConfigManager(tmp_path)  # holding a GOOD snapshot, as an open page does
+    page.set_config_value("model_name", "claude-opus-4")
+    page.set_config_value("retry", {"maxRetries": 42})
+
+    # The user hand-edits config.yml in another window and breaks it.
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(corruption)
+    before = config_file.read_bytes()
+
+    setting = settings_io.BY_KEY["display.shimmer"]
+    with pytest.raises(settings_io.ConfigUnreadableError):
+        if path == "write":
+            settings_io.write_setting(page, setting, True)
+        else:
+            settings_io.reset_setting(page, setting)
+
+    assert config_file.read_bytes() == before, "the broken file was overwritten"
+    # And nothing was moved aside, so the user still has the file to repair.
+    assert not list(tmp_path.glob("config.yml.bad*"))
+
+
+def test_a_missing_config_is_not_treated_as_unreadable(tmp_path: Path) -> None:
+    """A first run has no file and no prior config to destroy, so it writes."""
+    manager = ConfigManager(tmp_path)
+    (tmp_path / "config.yml").unlink(missing_ok=True)
+    settings_io.write_setting(manager, settings_io.BY_KEY["retry.maxRetries"], 7)
+    assert ConfigManager(tmp_path).get_config_value("retry", {})["maxRetries"] == 7
+
+
+def test_a_concurrent_chain_add_survives_a_page_write(tmp_path: Path) -> None:
+    """``write_chains`` merges the caller's own edit rather than replacing all.
+
+    Review round 2, M2. The page builds its chain list from an earlier
+    ``read_chains`` and edits one hop in it. Replacing ``retry.fallbackChains``
+    wholesale then deleted a chain another session had added in the meantime \u2014
+    reloading first read the fresh state and immediately discarded it.
+    """
+    page = ConfigManager(tmp_path)
+    settings_io.write_chains(page, {"primary": ["openai/gpt-5"]})
+    base = settings_io.read_chains(page)
+    working = {key: list(hops) for key, hops in base.items()}
+
+    other = ConfigManager(tmp_path)
+    other_chains = {key: list(hops) for key, hops in settings_io.read_chains(other).items()}
+    other_chains["newchain"] = ["anthropic/claude-opus-5"]
+    settings_io.write_chains(other, other_chains)
+
+    # The page adds a hop to ITS chain and saves.
+    working["primary"].append("groq/llama-3")
+    settings_io.write_chains(page, working, base=base)
+
+    stored = settings_io.read_chains(ConfigManager(tmp_path))
+    assert "newchain" in stored, "the concurrent chain was deleted"
+    assert stored["primary"] == ["openai/gpt-5", "groq/llama-3"], "our own edit was lost"
+
+
+def test_a_concurrent_effort_edit_is_not_flattened_by_a_page_write(tmp_path: Path) -> None:
+    """The sharper half of M2: a stale label missed the lookup and dropped effort.
+
+    The page's label for an untouched hop (``anthropic/claude (low)``) no longer
+    matched the freshly-reloaded entry once another session changed its effort,
+    so the originals lookup missed and the hop was rewritten as a BARE SELECTOR
+    \u2014 losing both the concurrent edit and the effort itself.
+    """
+    page = ConfigManager(tmp_path)
+    page.set_config_value(
+        "retry",
+        {
+            "fallbackChains": {
+                "primary": [{"provider": "openai", "model": "gpt-5", "effort": "high"}],
+                "backup": [{"provider": "anthropic", "model": "claude", "effort": "low"}],
+            }
+        },
+    )
+    page = ConfigManager(tmp_path)
+    base = settings_io.read_chains(page)
+    working = {key: list(hops) for key, hops in base.items()}
+
+    other = ConfigManager(tmp_path)
+    other.set_config_value(
+        "retry",
+        {
+            "fallbackChains": {
+                "primary": [{"provider": "openai", "model": "gpt-5", "effort": "high"}],
+                "backup": [{"provider": "anthropic", "model": "claude", "effort": "minimal"}],
+            }
+        },
+    )
+
+    # The page edits only `primary`.
+    working["primary"].append("groq/llama-3")
+    settings_io.write_chains(page, working, base=base)
+
+    stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+    assert stored["backup"] == [
+        {"provider": "anthropic", "model": "claude", "effort": "minimal"}
+    ], "the untouched chain was flattened to a bare selector"
+    assert stored["primary"][0] == {"provider": "openai", "model": "gpt-5", "effort": "high"}
+
+
+def test_a_page_delete_still_removes_the_chain_it_deleted(tmp_path: Path) -> None:
+    """The merge must not resurrect a chain the caller deliberately deleted."""
+    page = ConfigManager(tmp_path)
+    settings_io.write_chains(page, {"keep": ["openai/gpt-5"], "drop": ["anthropic/claude"]})
+    base = settings_io.read_chains(page)
+    working = {key: list(hops) for key, hops in base.items()}
+    del working["drop"]
+    settings_io.write_chains(page, working, base=base)
+    assert sorted(settings_io.read_chains(ConfigManager(tmp_path))) == ["keep"]
+
+
+def test_a_hop_typed_in_the_displayed_format_is_refused_rather_than_narrowed(
+    manager: ConfigManager,
+) -> None:
+    """n1: the page shows ``openai/gpt-5 (high)``, so copying it must not
+    silently store a hop without its effort."""
+    assert settings_io.validate_hop("anthropic/claude (low)") is not None
+    assert settings_io.validate_hop("anthropic/claude") is None
+
+
+def test_an_unresolvable_choice_list_says_so_rather_than_offering_nothing() -> None:
+    """m4: an empty value space is a broken host, not a rejected value."""
+    setting = settings_io.Setting(
+        key="scratch.enum",
+        path=("scratch",),
+        section="Appearance",
+        label="Scratch",
+        kind=settings_io.Kind.ENUM,
+        default="dark",
+        help="",
+        choices_source=lambda: (),
+    )
+    problem = settings_io.validate(setting, "dark")
+    assert problem is not None
+    assert "could not be read" in problem
+    assert not problem.endswith(": ")

@@ -24,8 +24,19 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 | `cascade-100x30.svg` | the failover cascade, one chain open with its ordered hops |
 | `cascade-80x24.svg` | the same cascade at a split-pane width |
 | `confirm-100x30.svg` | `d` on a chain row asking before it deletes the whole chain |
+| `confirm-80x24.svg` | the same ask at 80 columns, where the chain name sheds so `esc cancels` survives (D8) |
 | `teams-100x30.svg` | the read-only teams pane |
 | `agents-100x30.svg` | the read-only agents pane |
+| `agents-100x28.svg` | the pane one row below the band where the view's height steps down (D6) |
+| `agents-100x24.svg` | the shortest terminal the page is captured at, where the roster sheds to the caption (D6) |
+
+The two SHORT `agents` frames (`100x28`, `100x24`) exist for the same reason,
+from the other axis. The pane's height derivation tracks the real pane exactly
+down to 29 terminal rows and then the view's height steps down in one jump, and
+the round-1 evidence set stopped at 30 — so the pane painted eight lines into a
+seven-row pane with `read-only` the line that fell off, one size band below
+where the fix had been looked at (design round 2, D6). Height is a dimension
+this page fails at in bands, so it is captured in bands.
 
 The three `80x24` EXPANDED states are captured because the narrow width is
 where the expansions are most likely to break and the set previously carried

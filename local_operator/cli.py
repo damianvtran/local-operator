@@ -892,6 +892,19 @@ def config_edit_command(args: argparse.Namespace) -> int:
 
         print(f"Successfully updated {args.key} to {value}")
         return 0
+    except settings_io.ConfigUnreadableError as e:
+        # Distinct from the schema rejection below: the key and the value are
+        # both fine, the FILE is broken, and telling the user to check their
+        # value would send them to fix something that is not wrong. Say what is
+        # unparseable and that nothing was written, because the alternative to
+        # refusing is overwriting their config with defaults (round 2, B3).
+        print(paint(f"Error: {e}", ERROR, stream=sys.stderr), file=sys.stderr)
+        print(
+            "Nothing was written. Fix the file by hand, or move it aside and run "
+            "`local-operator config create`.",
+            file=sys.stderr,
+        )
+        return 1
     except ValueError as e:
         # A schema rejection is a typo, not a crash: state the rule that was
         # broken rather than wrapping it in "error updating configuration".

@@ -48,11 +48,26 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import functools
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Callable
 
+import yaml
+
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.config import ConfigManager
+
+
+class ConfigUnreadableError(Exception):
+    """config.yml cannot be parsed, so no write may be based on it.
+
+    Its own type rather than ``ValueError`` because the two mean opposite
+    things to a caller: a ``ValueError`` from this module is the SCHEMA
+    rejecting a value the user typed, which they fix by typing something else,
+    whereas this says the file underneath is broken and nothing the user types
+    into the page can be safely stored until it is repaired. Callers that print
+    a validation message next to an open editor must not print this one there.
+    """
 
 
 class Kind(enum.Enum):
@@ -249,6 +264,7 @@ def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
     return (Choice(True, "on", on), Choice(False, "off", off))
 
 
+@functools.cache
 def _theme_choices() -> tuple[Choice, ...]:
     """Every registered theme, as ENUM choices (review round 1, m1).
 
@@ -265,6 +281,14 @@ def _theme_choices() -> tuple[Choice, ...]:
     value, which fails CLOSED — refusing to write a theme is recoverable,
     writing one nothing can render is the config-and-behaviour disagreement
     this change is closing.
+
+    CACHED because ``_build_rows`` calls it on every repaint when the theme row
+    is expanded, and AGENTS.md forbids unbounded work on a paint path. The
+    registry is fixed for the life of the process (themes are declared, not
+    installed at runtime), so a stale cache is not reachable. Without this the
+    first call pays a ~95ms import of ``local_operator.tui.theme`` — never on a
+    real paint, since the TUI has already imported it, but the bound relied on
+    an invariant nothing stated (review round 2, m5).
     """
     try:
         from local_operator.tui.theme import available_themes, theme_spec
@@ -989,6 +1013,14 @@ def validate(setting: Setting, value: Any) -> str | None:
         # (tui.theme) declares none statically, so reading the raw field would
         # reject every value including the default.
         choices = setting.resolved_choices
+        if not choices:
+            # An empty value space is a BROKEN HOST, not a bad value: the
+            # message has to say so, because "expected one of: " lists nothing
+            # and tells the user their input is wrong while offering no way to
+            # be right (review round 2, m4). Only reachable when a
+            # `choices_source` cannot resolve — the TUI-less install the source
+            # fails closed for.
+            return "this setting's choices could not be read on this install"
         if value not in [choice.value for choice in choices]:
             return f"expected one of: {', '.join(str(c.label) for c in choices)}"
         return None
@@ -1091,15 +1123,70 @@ def _reload_before_write(manager: "ConfigManager") -> None:
     from the next one added, whereas a primitive-level reload cannot be
     forgotten because there is no way to write without passing through it.
 
-    Failure is swallowed on purpose. A config that has just become unreadable
-    (mid-edit by hand, a bad merge) must not make the page unable to write; the
-    manager then keeps the last good snapshot it had, which is the behaviour
-    that existed before this call and is strictly no worse.
+    A config that cannot be read ABORTS the write, and that is checked BEFORE
+    the reload rather than caught around it. The reason is the whole of review
+    round 2's B3: ``ConfigManager._load_config`` does not raise on a malformed
+    config.yml. It prints, moves the file aside to ``config.yml.bad.<stamp>``,
+    and returns ``_fresh_default_config()``. So ``reload()`` SUCCEEDS on a
+    hand-edit with a tab in it, the manager silently becomes defaults, and the
+    write that follows dumps those defaults over the user's file. The `.bad`
+    backup holds only the broken two-line edit, so the last good config is then
+    recoverable from nowhere — the write is the step that destroys it.
+
+    Degrading to defaults is defensible at STARTUP, where the alternative is a
+    lockout, and indefensible as the BASE OF A WRITE. Refusing is recoverable
+    in a way that overwriting is not: the user fixes their YAML and the write
+    works. Raising rather than swallowing is safe because every caller already
+    reports a failed write instead of crashing on it — ``SettingsView._write``
+    and the cascade commits hold the reason on the page, ``cli.config edit``
+    exits 1 with it.
     """
+    _require_readable_config(manager)
+    manager.reload()
+
+
+def _require_readable_config(manager: "ConfigManager") -> None:
+    """Raise :class:`ConfigUnreadableError` unless config.yml parses right now.
+
+    Parsed HERE rather than inferred from what ``reload()`` did, because by the
+    time ``_load_config`` has degraded to defaults it has already renamed the
+    file: there is no undo, and inspecting the manager afterwards cannot
+    distinguish "the file was broken" from "the user's config genuinely holds
+    default values". The check has to happen while the bytes are still there.
+
+    The three shapes that count as unreadable are exactly the three
+    ``_load_config`` degrades on, kept deliberately in step with it: a YAML
+    syntax error, a top level that is not a mapping, and an empty file. The
+    empty case matters because YAML parses "" to ``None`` and ``_load_config``
+    back-fills defaults WITHOUT renaming anything, so it degrades just as
+    silently while leaving no `.bad` backup at all.
+
+    A MISSING file is not unreadable — that is a first run, the reload
+    correctly yields defaults, and there is no prior config to destroy.
+    """
+    config_file = getattr(manager, "config_file", None)
+    if config_file is None:
+        return
     try:
-        manager.reload()
-    except Exception:  # pragma: no cover - defensive; see the docstring
-        pass
+        raw = config_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError:
+        # A permissions or I/O problem is not a corrupt config. Let the write
+        # proceed and fail on its own terms, so the caller reports the real
+        # errno rather than a misleading "unreadable config".
+        return
+    if not raw.strip():
+        raise ConfigUnreadableError(f"{config_file} is empty")
+    try:
+        loaded = yaml.safe_load(raw)
+    except yaml.YAMLError as error:
+        raise ConfigUnreadableError(f"{config_file} could not be parsed: {error}") from error
+    if loaded is not None and not isinstance(loaded, Mapping):
+        raise ConfigUnreadableError(
+            f"{config_file} is not a configuration mapping "
+            f"(top level is {type(loaded).__name__})"
+        )
 
 
 def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
@@ -1228,7 +1315,13 @@ def _originals_by_label(manager: "ConfigManager") -> dict[str, dict[str, Any]]:
     label travels with the hop it names. Two hops in one chain with the same
     label are the same hop as far as every layer here is concerned — the label
     carries provider, model and effort, which is the whole of what the failover
-    layer honours — so collapsing them loses nothing.
+    layer honours — so collapsing them loses nothing THE FAILOVER LAYER
+    HONOURS. It is not quite true of the FILE: two same-labelled hops carrying
+    different extra keys both come back as the first one's entry.
+    ``providers/failover.py`` accepts exactly ``provider``, ``model``,
+    ``model_id`` and ``effort`` and already logs anything else as ignored,
+    which is why that is a cosmetic loss rather than a routing change (review
+    round 2, m6).
     """
     raw = _walk(manager.get_config().values, ("retry", "fallbackChains"))
     if raw is _MISSING or not isinstance(raw, Mapping):
@@ -1249,8 +1342,37 @@ def _originals_by_label(manager: "ConfigManager") -> dict[str, dict[str, Any]]:
     return originals
 
 
-def write_chains(manager: "ConfigManager", chains: Mapping[str, Sequence[str]]) -> None:
-    """Replace the cascade with ``chains``, dropping empty ones.
+def write_chains(
+    manager: "ConfigManager",
+    chains: Mapping[str, Sequence[str]],
+    *,
+    base: Mapping[str, Sequence[str]] | None = None,
+) -> None:
+    """Apply ``chains`` to the cascade, dropping empty ones.
+
+    ``base`` is the snapshot the caller READ before it edited, and passing it
+    turns a wholesale replace into a MERGE of just the caller's own change.
+    Without it this function replaces ``retry.fallbackChains`` outright, which
+    is correct for a caller that means "the cascade is exactly this" (the CLI,
+    a test) and wrong for the page.
+
+    Why the page must pass it (review round 2, M2): the page builds ``chains``
+    from an earlier ``read_chains`` and edits one hop in it. Reloading the
+    manager before a wholesale replace reads the fresh on-disk state and then
+    discards it, so a chain another session added in the meantime is deleted,
+    and a hop another session re-effortted is written back as a BARE SELECTOR
+    — the page's stale label no longer matches the stored entry, the originals
+    lookup misses, and ``effort`` is dropped from a hop nobody touched. The
+    reload alone cannot fix that; only knowing which chains the caller actually
+    changed can.
+
+    With ``base``, a chain the caller did not touch is taken from DISK rather
+    than from the caller's stale copy, so a concurrent add survives and a
+    concurrent effort edit is left alone. A chain the caller did change is
+    written as the caller has it, because that is the edit they just made.
+    Concurrent edits to THE SAME chain still resolve last-writer-wins, which is
+    the one window that cannot be closed without a lock the config format has
+    no room for.
 
     ``chains`` holds DISPLAY LABELS (what :func:`read_chains` returned, with
     the user's edit applied to at most one of them). A hop whose label still
@@ -1278,11 +1400,39 @@ def write_chains(manager: "ConfigManager", chains: Mapping[str, Sequence[str]]) 
     """
     # Before the originals are read, not after: `_store` reloads, and a lookup
     # built from a stale snapshot would restore entries the file no longer has.
+    # This also raises if config.yml has become unreadable, so a cascade write
+    # aborts rather than dumping defaults over it (round 2, B3).
     _reload_before_write(manager)
     originals = _originals_by_label(manager)
+    on_disk = read_chains(manager)
+
+    if base is None:
+        # No snapshot: the caller means "the cascade is exactly this".
+        merged: dict[str, list[str]] = {key: list(hops) for key, hops in chains.items()}
+    else:
+        # Only the caller's OWN edits are applied over what is on disk now.
+        # Compared by value rather than tracked by a "which chain changed"
+        # flag, so the merge stays correct for a caller that edited several
+        # chains, and so no caller can forget to declare its edit.
+        touched = {
+            key
+            for key in set(base) | set(chains)
+            for before, after in [(list(base.get(key, [])), list(chains.get(key, [])))]
+            if before != after
+        }
+        merged = {key: list(hops) for key, hops in on_disk.items()}
+        for key in touched:
+            edited = list(chains.get(key, []))
+            if edited:
+                merged[key] = edited
+            else:
+                # The caller deleted it. Honour that even though it is still on
+                # disk, or a delete would be silently undone by the merge.
+                merged.pop(key, None)
+
     stored = {
         key: [originals.get(key, {}).get(hop, hop.split(" (")[0]) for hop in hops]
-        for key, hops in chains.items()
+        for key, hops in merged.items()
         if key.strip() and hops
     }
     _store(manager, ("retry", "fallbackChains"), stored)
@@ -1290,10 +1440,21 @@ def write_chains(manager: "ConfigManager", chains: Mapping[str, Sequence[str]]) 
 
 
 def validate_hop(text: str) -> str | None:
-    """``None`` when ``text`` is a usable ``provider/model`` selector."""
+    """``None`` when ``text`` is a usable ``provider/model`` selector.
+
+    A trailing ``(effort)`` is REJECTED rather than quietly dropped. The page
+    displays hops as ``openai/gpt-5 (high)``, so a user copying the format it
+    had just shown them typed something that was accepted, stored WITHOUT the
+    effort, and re-read without the ``(high)`` they typed — the parenthetical
+    vanished with nothing on screen saying so (review round 2, n1). Naming the
+    boundary is better than silently narrowing the value: the page has no field
+    for effort, so a hop carrying one is a hop this editor cannot express.
+    """
     candidate = text.strip()
     if not candidate:
         return "expected provider/model"
+    if candidate.endswith(")") and " (" in candidate:
+        return "effort is not editable here — type provider/model on its own"
     provider, sep, model = candidate.partition("/")
     if not sep or not provider.strip() or not model.strip():
         return "expected provider/model (e.g. openrouter/deepseek/deepseek-chat)"

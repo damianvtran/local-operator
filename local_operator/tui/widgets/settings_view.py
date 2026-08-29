@@ -63,6 +63,12 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 #: `max-width` and `_card_width`.
 _PANE_WIDTH = 34
 
+#: One line of the read-only pane, as its styled segments. A LIST of segments
+#: rather than one string plus one style, because a provider row carries two
+#: inks on one line (the id in `muted`, its state in `faint`) and the pane's
+#: fitting pass (`_fit_pane`) has to count lines before they are painted.
+_PaneLine = list[tuple[str, "Style"]]
+
 #: One footer hint: the button, its trailing label, and whether a separator
 #: precedes it. A module-scope alias because a function-local assignment is not
 #: a valid type expression, and the literal labels otherwise infer as distinct
@@ -210,6 +216,13 @@ class SettingsView(Vertical):
         self._editing: str | None = None
         self._buffer = ""
         self._error = ""
+        #: An INFORMATIONAL message for the detail row, kept apart from
+        #: `_error` so the two can be inked differently. Same clear-on-move
+        #: lifetime, because it answers a keypress and stops being true as soon
+        #: as the cursor is somewhere else — but painting it in the danger ink
+        #: said "you did something wrong" about a press the footer advertises
+        #: (UX round 2, U16).
+        self._notice = ""
         #: Caret position INSIDE the buffer. The editor owns left/right/home/end
         #: while it is open (UX round 1, U2): unhandled they fell through to the
         #: page bindings and switched the read-only side pane mid-typing, and
@@ -370,21 +383,52 @@ class SettingsView(Vertical):
         alternative (silently stopping) reads as a stuck key. Page and wheel
         clamp instead — see :meth:`action_section` and the scroll handlers.
         """
+        if not self._selectable():
+            return
+        # The row is remembered by IDENTITY and the list is re-derived AFTER
+        # the commit, never before it. `_leave_row` writes, and a write on an
+        # add row inserts rows above the cursor, so stepping from an index
+        # snapshotted beforehand lands on a row the user did not ask for —
+        # committing a chain with `down` put the cursor back on `+ add a chain`,
+        # which reads as the arrow key being dead (review round 2, U13).
+        # `_close_chain` already resolves its target this way for the same
+        # reason, and this is that pattern applied to movement.
+        anchor = self._current()
+        identity = anchor.identity if anchor is not None else None
+        if not self._leave_row():
+            return
         indices = self._selectable()
         if not indices:
             return
-        if self._selected in indices:
-            position = indices.index(self._selected)
-        else:
-            position = 0
-        if not self._leave_row():
-            return
+        position = self._position_of(identity, indices)
         self._selected = indices[(position + delta) % len(indices)]
         self._repaint()
         self._scroll_to_selection()
 
+    def _position_of(self, identity: "tuple[str, str, int] | None", indices: list[int]) -> int:
+        """Where the row with ``identity`` sits in the REBUILT selectable list.
+
+        Falls back to the current index, then to the top: a commit can make the
+        anchor row stop existing entirely (an empty chain is dropped on write),
+        and a movement that refused to move because its origin vanished would
+        be the same stuck key this exists to prevent.
+        """
+        if identity is not None:
+            for position, index in enumerate(indices):
+                if self._rows[index].identity == identity:
+                    return position
+        if self._selected in indices:
+            return indices.index(self._selected)
+        return 0
+
     def action_section(self, delta: int) -> None:
         """PgUp/PgDn jump to the next section header's first row, CLAMPED."""
+        # The section the cursor is in is resolved by the header ABOVE it, so
+        # it has to be captured before `_select_after` commits and rebuilds —
+        # a commit that inserts chain rows moves every header index below it,
+        # and paging then landed inside the chain just created rather than on
+        # the next section (review round 2, U13). The header's own section is
+        # the identity that survives the rebuild.
         headers = [index for index, row in enumerate(self._rows) if row.kind == "header"]
         if not headers:
             return
@@ -394,13 +438,27 @@ class SettingsView(Vertical):
         # not wrap to the first. A page gesture is travel, and travel that
         # teleports across the whole document is how a reader loses their place.
         target = min(max(position + delta, 0), len(headers) - 1)
-        self._select_after(headers[target])
+        wanted = self._rows[headers[target]].section
+        if not self._leave_row():
+            return
+        rebuilt = [index for index, row in enumerate(self._rows) if row.kind == "header"]
+        landing = next(
+            (index for index in rebuilt if self._rows[index].section is wanted),
+            rebuilt[min(target, len(rebuilt) - 1)] if rebuilt else None,
+        )
+        if landing is None:
+            return
+        self._select_after_index(landing)
 
     def action_jump(self, to_end: int) -> None:
-        indices = self._selectable()
-        if not indices:
+        if not self._selectable():
             return
         if not self._leave_row():
+            return
+        # Re-derived after the commit for the reason `action_move` records: the
+        # ends of the list move when a commit inserts or drops rows.
+        indices = self._selectable()
+        if not indices:
             return
         self._selected = indices[-1] if to_end else indices[0]
         self._repaint()
@@ -410,6 +468,14 @@ class SettingsView(Vertical):
         """Put the cursor on the first selectable row at or after a header."""
         if not self._leave_row():
             return
+        self._select_after_index(header_index)
+
+    def _select_after_index(self, header_index: int) -> None:
+        """Land on the first selectable row at or after an ALREADY-VALID index.
+
+        Split from :meth:`_select_after` so a caller that has re-resolved the
+        header itself after a commit does not commit a second time.
+        """
         for index in range(header_index, len(self._rows)):
             if self._rows[index].selectable:
                 self._selected = index
@@ -426,6 +492,9 @@ class SettingsView(Vertical):
         """
         if not self._pane_fits():
             return
+        # Disarms a pending delete for the reason `action_activate` records: a
+        # key the footer advertises that is not `d` or `esc` cancels the ask.
+        self._confirm_delete = None
         panes = [_PANE_TEAMS, _PANE_AGENTS]
         position = (panes.index(self._pane) + delta) % len(panes)
         self._pane = panes[position]
@@ -465,13 +534,40 @@ class SettingsView(Vertical):
         row = self._current()
         if row is None:
             return
+        # Any action that is not `d` or `esc` DISARMS a pending delete. The ask
+        # was cleared by a cursor move and by `esc`, but not by a key acting on
+        # the same row: `enter` toggled the chain open underneath a question
+        # about deleting that chain, and a later `d` — pressed to look inside
+        # before deciding — still deleted it (UX round 2, U18). The rule the
+        # ask's own wording implies is "answered by `d` or `esc`, cancelled by
+        # anything else".
+        self._confirm_delete = None
         if self._editing is not None:
             self._commit_edit()
             return
         if row.kind == "choice" and row.setting is not None and row.choice is not None:
+            # The cursor goes back to the SETTING row, not to the index the
+            # choice occupied. A choice row stops existing when the expansion
+            # collapses — the same hazard `_close_chain` documents for hops —
+            # so the index left behind names whatever the rebuild put there:
+            # picking the 34th theme left the cursor 34 rows away on an
+            # unrelated setting two sections down, with `r default` lit on it
+            # (UX round 2, U17). Harmless-looking on a 2-choice enum, which is
+            # why it went unnoticed until `tui.theme` grew 35 members.
+            owner = row.setting.key
             self._write(row.setting, row.choice.value)
             self._expanded = None
             self._repaint()
+            for index, candidate in enumerate(self._rows):
+                if (
+                    candidate.kind == "setting"
+                    and candidate.setting is not None
+                    and candidate.setting.key == owner
+                ):
+                    self._selected = index
+                    break
+            self._repaint()
+            self._scroll_to_selection()
             return
         if row.kind == "chain" and row.chain is not None:
             self._chain = None if self._chain == row.chain else row.chain
@@ -546,6 +642,8 @@ class SettingsView(Vertical):
         key rather than writing the default over it, so a config file carries
         only what its owner actually chose (see ``settings_io.reset_setting``).
         """
+        # Disarms a pending delete for the reason `action_activate` records.
+        self._confirm_delete = None
         row = self._current()
         if row is None or row.setting is None or row.kind != "setting":
             return
@@ -556,39 +654,59 @@ class SettingsView(Vertical):
             # because the footer advertises `r default` on this row and a lit
             # hint whose key does nothing is the "nothing happens when I click"
             # bug one step earlier (UX round 1, U5).
-            self._error = "r resets one setting; delete a chain with d on its row"
+            self._notice = "r resets one setting; delete a chain with d on its row"
             self._repaint()
             return
         if row.setting.kind is Kind.READONLY:
             return
-        try:
-            settings_io.reset_setting(self._manager, row.setting)
-        except ValueError as error:
-            self._error = str(error)
-            self._repaint()
+        setting = row.setting
+        if not self._save(lambda: settings_io.reset_setting(self._manager, setting)):
             return
-        self._error = ""
         self.post_message(
-            SettingsChanged(row.setting.key, settings_io.read_setting(self._manager, row.setting))
+            SettingsChanged(setting.key, settings_io.read_setting(self._manager, setting))
         )
         self._repaint()
 
-    def _write(self, setting: Setting, value: Any) -> None:
-        """Store ``value`` and report it, or hold the reason it was refused."""
+    def _save(self, action: Callable[[], None]) -> bool:
+        """Run one write, holding any failure on the page. True when it landed.
+
+        Every mutation funnels through here so the "reported, never raised"
+        rule holds at all of them rather than at the ones someone remembered:
+        a page that crashed on an unwritable config would take the whole TUI
+        down at the exact moment the user is trying to fix their configuration.
+        The cascade commits had no guard at all, which is how a broken
+        config.yml under an open page could reach the app as a traceback
+        (review round 2, B3).
+
+        The unreadable-config case is separated from a schema rejection because
+        the two ask the user for different things. A ``ValueError`` is "the
+        value you typed is wrong", fixable in the editor; ``ConfigUnreadable``
+        is "the file underneath is broken", fixable only outside the app — so
+        it names the file and says nothing was written, rather than sitting in
+        the editor's error slot implying the text is at fault.
+        """
         try:
-            settings_io.write_setting(self._manager, setting, value)
+            action()
+        except settings_io.ConfigUnreadableError as error:
+            self._error = f"config.yml is unreadable, nothing was written — {error}"
+            self._repaint()
+            return False
         except ValueError as error:
             self._error = str(error)
             self._repaint()
-            return
+            return False
         except Exception as error:  # noqa: BLE001 — a read-only config dir, a full disk
-            # Reported, never raised: a page that crashed on an unwritable
-            # config would take the whole TUI down at the exact moment the user
-            # is trying to fix their configuration.
             self._error = f"could not save: {error}"
             self._repaint()
-            return
+            return False
         self._error = ""
+        self._notice = ""
+        return True
+
+    def _write(self, setting: Setting, value: Any) -> None:
+        """Store ``value`` and report it, or hold the reason it was refused."""
+        if not self._save(lambda: settings_io.write_setting(self._manager, setting, value)):
+            return
         self.post_message(SettingsChanged(setting.key, value))
         self._repaint()
 
@@ -650,6 +768,9 @@ class SettingsView(Vertical):
         # never by drifting off the row: an ask that survived the cursor moving
         # away would fire on a row the user is no longer looking at.
         self._confirm_delete = None
+        # The notice answered a keypress on THIS row, so it stops being true
+        # the moment the cursor leaves it — the same lifetime `_error` has.
+        self._notice = ""
         if self._editing is None:
             self._error = ""
             return True
@@ -708,11 +829,7 @@ class SettingsView(Vertical):
             # the subagent tiers, "" and absent mean the same thing to their
             # consumers, and storing the empty string leaves a key in the file
             # that reads as a deliberate choice of nothing.
-            try:
-                settings_io.reset_setting(self._manager, setting)
-            except ValueError as error:
-                self._error = str(error)
-                self._repaint()
+            if not self._save(lambda: settings_io.reset_setting(self._manager, setting)):
                 return
             self._cancel_edit()
             self.post_message(SettingsChanged(setting.key, setting.default))
@@ -734,6 +851,22 @@ class SettingsView(Vertical):
             self._cancel_edit()
             self._repaint()
 
+    def _chain_edit(self) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """A working copy of the cascade and the BASE snapshot it was read from.
+
+        Two copies rather than one because ``write_chains`` needs to know which
+        chains this edit actually touched: it merges the caller's own change
+        over what is on disk NOW, and without the base it can only replace the
+        cascade wholesale — deleting a chain another session added and dropping
+        the effort from a hop another session edited (review round 2, M2).
+        The base is a separate deep copy so mutating the working copy cannot
+        change what it is compared against.
+        """
+        read = settings_io.read_chains(self._manager)
+        working = {key: list(hops) for key, hops in read.items()}
+        base = {key: list(hops) for key, hops in read.items()}
+        return working, base
+
     def _commit_hop(self, target: str) -> None:
         """Save an edited or newly-added cascade hop."""
         problem = settings_io.validate_hop(self._buffer)
@@ -741,9 +874,7 @@ class SettingsView(Vertical):
             self._error = problem
             self._repaint()
             return
-        chains: dict[str, list[str]] = {
-            key: list(hops) for key, hops in settings_io.read_chains(self._manager).items()
-        }
+        chains, base = self._chain_edit()
         _, chain_key, *rest = target.split(":")
         hops = chains.setdefault(chain_key, [])
         if target.startswith("hopadd:"):
@@ -752,7 +883,8 @@ class SettingsView(Vertical):
             index = int(rest[0])
             if 0 <= index < len(hops):
                 hops[index] = self._buffer.strip()
-        settings_io.write_chains(self._manager, chains)
+        if not self._save(lambda: settings_io.write_chains(self._manager, chains, base=base)):
+            return
         self._cancel_edit()
         self.post_message(SettingsChanged("retry.fallbackChains", chains))
         self._repaint()
@@ -776,12 +908,10 @@ class SettingsView(Vertical):
             self._error = f"chain needs a first hop — {problem}"
             self._repaint()
             return
-        chains: dict[str, list[str]] = {
-            existing: list(hops)
-            for existing, hops in settings_io.read_chains(self._manager).items()
-        }
+        chains, base = self._chain_edit()
         chains[key] = [first_hop.strip()]
-        settings_io.write_chains(self._manager, chains)
+        if not self._save(lambda: settings_io.write_chains(self._manager, chains, base=base)):
+            return
         self._chain = key
         self._cancel_edit()
         self.post_message(SettingsChanged("retry.fallbackChains", chains))
@@ -826,9 +956,7 @@ class SettingsView(Vertical):
             self._confirm_delete = row.chain
             self._repaint()
             return
-        chains: dict[str, list[str]] = {
-            key: list(hops) for key, hops in settings_io.read_chains(self._manager).items()
-        }
+        chains, base = self._chain_edit()
         if row.kind == "hop" and row.chain in chains:
             hops = chains[row.chain]
             if 0 <= row.hop_index < len(hops):
@@ -840,7 +968,8 @@ class SettingsView(Vertical):
             self._confirm_delete = None
             return
         self._confirm_delete = None
-        settings_io.write_chains(self._manager, chains)
+        if not self._save(lambda: settings_io.write_chains(self._manager, chains, base=base)):
+            return
         self.post_message(SettingsChanged("retry.fallbackChains", chains))
         self._repaint()
 
@@ -854,16 +983,15 @@ class SettingsView(Vertical):
         row = self._current()
         if row is None or row.kind != "hop" or row.chain is None:
             return
-        chains: dict[str, list[str]] = {
-            key: list(hops) for key, hops in settings_io.read_chains(self._manager).items()
-        }
+        chains, base = self._chain_edit()
         hops = chains.get(row.chain, [])
         index = row.hop_index
         target = index + delta
         if not (0 <= index < len(hops)) or not (0 <= target < len(hops)):
             return
         hops[index], hops[target] = hops[target], hops[index]
-        settings_io.write_chains(self._manager, chains)
+        if not self._save(lambda: settings_io.write_chains(self._manager, chains, base=base)):
+            return
         # Follow the moved hop with the cursor: a reorder that left the
         # highlight on the row number rather than on the row's content makes a
         # second press move a different hop than the user is looking at.
@@ -1006,9 +1134,24 @@ class SettingsView(Vertical):
         if index == self._selected:
             self.action_activate()
             return
+        # WHICH row was clicked is resolved before the commit and WHERE it
+        # ended up after it. A click carries an explicit target — the label the
+        # user could see under the pointer — so it is the one gesture that must
+        # not be re-derived from the y afterwards: `_leave_row` commits, a
+        # commit on an add row inserts rows above the click, and both the stale
+        # index and a re-read of the same y then name a row the user never
+        # aimed at. Clicking `Theme` landed on a hop three rows away (review
+        # round 2, U13). The identity travels with the row across the rebuild.
+        wanted = row.identity
         if not self._leave_row():
             return
-        self._selected = index
+        settled = next(
+            (index for index, candidate in enumerate(self._rows) if candidate.identity == wanted),
+            None,
+        )
+        if settled is None or not self._rows[settled].selectable:
+            return
+        self._selected = settled
         self._repaint()
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -1246,30 +1389,121 @@ class SettingsView(Vertical):
         # without that, left/right moved a position nothing on screen reported
         # and the keys read as dead.
         caret = max(0, min(self._caret, len(self._buffer)))
-        editor.append(self._buffer[:caret], style=fg)
+        before, after, elided = self._editor_window(caret)
+        if elided:
+            # A leading ellipsis says the buffer continues to the LEFT, so a
+            # window that has scrolled does not read as the value having been
+            # truncated at the front.
+            editor.append("…", style=faint)
+        editor.append(before, style=fg)
         editor.append("▏", style=accent)
-        editor.append(self._buffer[caret:], style=fg)
+        editor.append(after, style=fg)
         # The CONTRACT rides the row; the ERROR does not. The detail line below
         # already carries the rejection in full width, and printing it twice
         # read as two separate problems — the row's copy also had to compete
         # with the value column for space it does not have.
-        editor.append("  enter saves · esc cancels · clear to unset", style=faint)
+        #
+        # `↑↓` is named alongside `enter` because moving off the row SAVES, and
+        # a contract enumerating exactly two exits with `esc cancels` beside
+        # them implies every other key is one or the other. That is the
+        # opposite of most editors, so it has to be taught rather than
+        # discovered by losing a value to it (UX round 2, U14). The clause
+        # sheds first when the row is narrow: it is the least load-bearing of
+        # the three, and the other two are the keys a user needs to get out.
+        contract = "  enter or ↑↓ saves · esc cancels · clear to unset"
+        room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
+        if cell_len(contract) > room:
+            contract = "  enter or ↑↓ saves · esc cancels"
+        editor.append(contract, style=faint)
         return editor
 
-    def _confirm_text(self) -> str:
-        """The pending chain deletion's ask, or "" when nothing is pending.
+    def _editor_window(self, caret: int) -> tuple[str, str, bool]:
+        """The slice of the buffer to paint around ``caret``.
 
-        Names the chain AND what it costs. "Are you sure?" would make the user
-        answer a question about a row they would have to look away to identify,
-        and the hop count is the part that says why this one confirms when a
-        single hop does not.
+        Returns ``(before_caret, after_caret, scrolled)``.
+
+        The buffer is painted as a WINDOW rather than from index 0 because the
+        caret is the entire feedback for four keys — left, right, home, end —
+        and past roughly 26 cells at 100 columns it fell off the right edge
+        with the last characters typed. Between there and dragging it back the
+        keys moved a position nothing on screen reported, which is exactly the
+        failure the caret was added to prevent (UX round 2, U15).
+
+        Anchored on the caret rather than on the tail so the same window serves
+        typing at the end and editing in the middle. The window is only as wide
+        as the value column's remaining room, which is why it is derived from
+        `_list_width` here rather than assumed.
+        """
+        # Room for the value, minus three cells that are not the buffer's to
+        # spend: the caret glyph, the leading ellipsis a scrolled window shows,
+        # and one for the row's OWN overflow ellipsis. That last one is the
+        # subtle one — the contract text after the caret always overruns the
+        # row, so Rich truncates, and a window sized to exactly the remaining
+        # room had its final cell (the caret) replaced by that ellipsis. The
+        # caret was invisible for the same reason it was before, one cell later.
+        room = max(self._list_width() - _VALUE_COLUMN - 3, 8)
+        if len(self._buffer) <= room:
+            return (self._buffer[:caret], self._buffer[caret:], False)
+        # Keep the caret inside the window with a little context behind it, so
+        # a backspace at the window's left edge does not jump the whole view.
+        start = max(0, caret - room + 4)
+        start = min(start, max(0, len(self._buffer) - room))
+        return (self._buffer[start:caret], self._buffer[caret:], start > 0)
+
+    #: Leads the delete confirmation so an ASK is distinguishable from a
+    #: REPORT. Both occupy the detail row in the same danger ink, and a
+    #: question holding a destructive action that looks exactly like a
+    #: validation error gets read as "something was already rejected" and
+    #: dismissed — leaving the chain undeleted and the user believing it went
+    #: through (design round 2, D7). A marker plus a bold question clause is
+    #: the cheapest separation that stays inside the page's existing ink.
+    _CONFIRM_MARKER = "▸ "
+
+    def _confirm_parts(self) -> tuple[str, str]:
+        """The pending deletion as ``(question, key contract)``, or two "".
+
+        Split in two because the halves shed differently. The question names
+        the chain AND what it costs — "Are you sure?" would make the user
+        answer about a row they have to look away to identify — while the
+        contract states how to answer and how to back out. At 80 columns the
+        whole line ran past the frame with the ellipsis landing OUTSIDE it, so
+        `to confirm · esc cancels` disappeared with no visible mark that
+        anything had been cut, on the page's only destructive prompt (design
+        round 2, D8). The CHAIN NAME is what gives way instead: clipping the
+        least load-bearing segment is the rule ``_paint_pane`` already follows,
+        and inverted here it says keep the keys and clip the name.
         """
         chain = self._confirm_delete
         if chain is None:
-            return ""
+            return ("", "")
         hops = settings_io.read_chains(self._manager).get(chain, [])
         count = f"{len(hops)} hop{'' if len(hops) == 1 else 's'}"
-        return f"delete chain {chain} and its {count}? press d again to confirm · esc cancels"
+        width = self._list_width()
+
+        #: The key contract, longest first. It sheds to a terser form BEFORE
+        #: the chain name is clipped below readability, because a name cut to
+        #: three cells names nothing while `d confirms · esc cancels` still
+        #: carries the whole answer. Both rungs name the confirming key AND the
+        #: cancelling key: that pair is what must never be lost, since losing
+        #: it is the defect (design round 2, D8).
+        ladder = ("press d again to confirm · esc cancels", "d confirms · esc cancels")
+        #: Cells the name may take before the line overruns the row. The
+        #: two-space gap is the one `_paint_detail` paints between the question
+        #: and the contract, so the budget matches the frame.
+        for contract in ladder:
+            fixed = cell_len(f"{self._CONFIRM_MARKER}delete chain  and its {count}?  {contract}")
+            room = width - fixed
+            if room >= cell_len(chain) or contract is ladder[-1]:
+                return (
+                    f"delete chain {truncate_cells(chain, max(room, 8))} and its {count}?",
+                    contract,
+                )
+        raise AssertionError("the ladder's last rung always returns")
+
+    def _confirm_text(self) -> str:
+        """The pending ask as one plain string. Kept for the assertions."""
+        question, contract = self._confirm_parts()
+        return f"{question} · {contract}" if question else ""
 
     def _paint_detail(self) -> None:
         """The one-line explanation of the HIGHLIGHTED row.
@@ -1289,11 +1523,24 @@ class SettingsView(Vertical):
         error = Style(color=theme_mod.semantic_color("danger"))
         text = Text(no_wrap=True, overflow="ellipsis")
         row = self._current()
-        confirm = self._confirm_text()
-        if confirm:
+        question, contract = self._confirm_parts()
+        if question:
             # Above the error and above the help: an unanswered destructive
             # question is the only thing the user needs the row to say.
-            text.append(confirm, style=error)
+            #
+            # Shaped so an ASK does not read as a REPORT (design round 2, D7).
+            # The marker and the BOLD question clause are what a validation
+            # error never has, and the key contract stays unbolded so the row
+            # separates "what I am about to destroy" from "how to answer".
+            text.append(self._CONFIRM_MARKER, style=error + Style(bold=True))
+            text.append(question, style=error + Style(bold=True))
+            text.append(f"  {contract}", style=error)
+        elif self._notice:
+            # An informational message is NOT an error. It used to route
+            # through `self._error` and inherit the danger ink, so telling a
+            # user what a key they pressed does here looked like a report that
+            # they had done something wrong (UX round 2, U16).
+            text.append(self._notice, style=faint)
         elif self._error:
             text.append(self._error, style=error)
         elif row is None:
@@ -1382,42 +1629,56 @@ class SettingsView(Vertical):
         faint = Style(color=theme_mod.semantic_color("faint"))
         head = Style(color=theme_mod.semantic_color("fg"), bold=True)
         accent = Style(color=theme_mod.semantic_color("accent"))
-        text = Text(no_wrap=True, overflow="ellipsis")
 
         room = self._pane_width()
-        text.append("providers\n", style=head)
+        # Assembled as a LIST of lines rather than appended straight into a
+        # Text, so the whole block can be measured against the pane's height
+        # before it is painted. Appending directly is what let the pane paint
+        # eight lines into seven rows: nothing downstream could see the total
+        # (review round 2, D6).
+        # Each line is a LIST of styled segments, because a provider row is two
+        # inks on one line (the id in `muted`, its state in `faint`) and folding
+        # them into a single style loses the distinction the row is built on.
+        lines: list[_PaneLine] = [[("providers", head)]]
         if self._providers:
             for name, state in self._providers:
                 # Truncated per SEGMENT so the id survives and the state gives
                 # way: "anthropic" is what the row is about, and a clipped id
                 # is unreadable where a clipped state is merely terse.
-                text.append(f"  {truncate_cells(name, room)}", style=muted)
-                text.append(
-                    f"  {truncate_cells(state, max(room - cell_len(name) - 4, 3))}\n",
-                    style=faint,
+                width = max(room - cell_len(name) - 4, 3)
+                lines.append(
+                    [
+                        (f"  {truncate_cells(name, room - 2)}  ", muted),
+                        (truncate_cells(state, width), faint),
+                    ]
                 )
         else:
-            text.append(
-                f"  {truncate_cells('none logged in — /login <provider>', room)}\n", style=dim
+            # `room - 2` because the two-space indent is part of the painted
+            # line: budgeting the text against the full width and THEN adding
+            # the prefix overran the pane by exactly those two cells, which is
+            # the one line in the pane that got this wrong (design round 2, D10).
+            lines.append(
+                [(f"  {truncate_cells('none logged in — /login <provider>', room - 2)}", dim)]
             )
-        text.append("\n")
+        lines.append([("", dim)])
 
         # The tab row names BOTH panes and marks the live one, so ←/→ has a
         # visible target rather than being a key you have to already know about.
+        tabs = Text(no_wrap=True, overflow="ellipsis")
         for pane in (_PANE_TEAMS, _PANE_AGENTS):
-            style = accent if pane == self._pane else dim
-            text.append(f"{pane}  ", style=style)
-        text.append("(←→)\n", style=faint)
+            tabs.append(f"{pane}  ", style=accent if pane == self._pane else dim)
+        tabs.append("(←→)", style=faint)
 
         rows = self._teams if self._pane == _PANE_TEAMS else self._agents
+        body: list[_PaneLine] = []
         if not rows:
             # An HONEST empty state: name the thing that is missing and the
             # command that creates it. "No teams" alone leaves a user unable to
             # tell an empty registry from a broken page.
             verb = "/team" if self._pane == _PANE_TEAMS else "/agent"
-            text.append(f"  {truncate_cells(f'no {self._pane} configured', room)}\n", style=dim)
-            text.append(
-                f"  {truncate_cells(f'{verb} lists and attaches them', room)}\n", style=faint
+            body.append([(f"  {truncate_cells(f'no {self._pane} configured', room - 2)}", dim)])
+            body.append(
+                [(f"  {truncate_cells(f'{verb} lists and attaches them', room - 2)}", faint)]
             )
         else:
             # The ROSTER is what gives way, not the caption. `read-only` used to
@@ -1430,17 +1691,86 @@ class SettingsView(Vertical):
             # roster size (design round 1, D2). A clipped roster with an intact
             # boundary statement is the right trade, and the `+N more` line
             # makes the clipping visible rather than silent.
-            shown, hidden = self._budget_pane_rows(rows, used=len(text.plain.split("\n")) - 1)
+            #
+            # `used` counts the head block and the tab row, both of which are
+            # already decided above.
+            shown, hidden = self._budget_pane_rows(rows, used=len(lines) + 1)
             for name, facts, summary in shown:
-                text.append(f"  {truncate_cells(name, room - 2)}\n", style=muted)
-                text.append(f"    {truncate_cells(facts, room - 4)}\n", style=faint)
+                body.append([(f"  {truncate_cells(name, room - 2)}", muted)])
+                body.append([(f"    {truncate_cells(facts, room - 4)}", faint)])
                 if summary:
-                    text.append(f"    {truncate_cells(summary, room - 4)}\n", style=faint)
+                    body.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
             if hidden:
-                text.append(f"  + {hidden} more\n", style=dim)
-        text.append("\n  read-only", style=dim)
-        self._pane_text = text
-        self._pane_view.update(text)
+                # `+` dropped from the count. `+ add a hop` and `+ add a chain`
+                # are BUTTONS in the same frame and the same ink, so leading a
+                # statement of fact with the page's own "this row adds one"
+                # glyph made a count read as an affordance (design round 2, D9).
+                body.append([(f"  … {hidden} more", dim)])
+
+        self._pane_text = self._fit_pane(lines, tabs, body, dim)
+        self._pane_view.update(self._pane_text)
+
+    def _fit_pane(
+        self,
+        head_lines: list["_PaneLine"],
+        tabs: Text,
+        body: list["_PaneLine"],
+        dim: Style,
+    ) -> Text:
+        """Assemble the pane so the ``read-only`` caption is always the last row.
+
+        The caption is reserved OUTSIDE the competition rather than appended
+        after it, because it is the one line carrying the editable/not boundary
+        and it was the line that fell off. ``_budget_pane_rows`` gets the roster
+        right whenever its height derivation holds, but its ``room <= 0`` early
+        return handed back "show nothing, hide everything" while the caller went
+        on to paint a spill line AND the caption anyway — eight lines into a
+        seven-row pane, with `read-only` the row that vanished, which is D2's
+        symptom one size band below where D2 was tested (review round 2, D6).
+
+        So the fit is enforced HERE, on the assembled block, where the total is
+        knowable. Shedding runs least-load-bearing first: the roster and its
+        spill line, then the blank separator, then the provider detail rows.
+        The tab row and the caption survive to the last two rows, because a pane
+        that cannot say what it is or whether it is editable is worse than no
+        pane at all.
+        """
+        height = self._pane_height()
+        if height <= 1:
+            # One row to spend: it goes to the boundary statement, not to the
+            # `providers` header. A pane that shows a roster-ish line without
+            # saying it is read-only is the failure D2 and D6 are both about;
+            # a pane showing only `read-only` is merely small.
+            return Text("read-only", style=dim, no_wrap=True, overflow="ellipsis")
+        # Two rows for the caption block (its blank separator and the word),
+        # collapsing to one when the pane cannot afford the separator.
+        separator = height >= 3
+        available = height - (2 if separator else 1)
+        rendered: list[_PaneLine] = list(head_lines) + [[("", dim)]] + list(body)
+        # The tab row sits at the index the head block ends on; it is rebuilt
+        # below rather than carried as a string so its per-tab styling survives.
+        tab_index = len(head_lines)
+        while len(rendered) > available and len(rendered) > tab_index + 1:
+            # Drop from the END: the roster and the spill line first.
+            rendered.pop()
+        while len(rendered) > available and len(rendered) > 1:
+            # Still over: give up the blank separator and the provider details,
+            # oldest-first from index 1 so the `providers` header stays until
+            # there is nothing else left to take.
+            del rendered[1]
+            tab_index = max(tab_index - 1, 1)
+        text = Text(no_wrap=True, overflow="ellipsis")
+        for index, segments in enumerate(rendered):
+            if index == tab_index:
+                text.append_text(tabs)
+            else:
+                for chunk, style in segments:
+                    text.append(chunk, style=style)
+            text.append("\n")
+        if separator:
+            text.append("\n")
+        text.append("  read-only", style=dim)
+        return text
 
     def _budget_pane_rows(
         self, rows: Sequence[tuple[str, str, str]], *, used: int
@@ -1493,7 +1823,14 @@ class SettingsView(Vertical):
             height = 0
         if height <= 0:
             return 14
-        return max(height - _PANE_CHROME_ROWS, 4)
+        # Floored at 1, not at 4. A floor of 4 claimed rows the pane does not
+        # have on a very short terminal — at 16 rows the view is 7 tall and the
+        # pane is laid out 1 row high, so a budget of 4 overpainted it by three
+        # lines however carefully the caller then measured (review round 2, D6).
+        # Measured against the laid-out `_pane_view.size.height` at every height
+        # from 16 to 44: `view height - _PANE_CHROME_ROWS` matches it exactly
+        # once the floor stops interfering.
+        return max(height - _PANE_CHROME_ROWS, 1)
 
     def _paint_chrome(self) -> None:
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -1542,6 +1879,29 @@ class SettingsView(Vertical):
         reset: _Hint = (self._reset_hint, " default", True)
         pane: _Hint = (self._pane_hint, " panes", True)
 
+        # The footer states what the keys do RIGHT NOW, per state, because it
+        # is the row users scan for exactly that. Two states rewrite it:
+        #
+        # While a delete confirmation is pending, `esc` cancels the ask rather
+        # than leaving the page — the code was already correct (the ask consumes
+        # the key before the page-exit rung) but the footer advertised the other
+        # meaning while the detail row said `esc cancels`, so both were on
+        # screen at once disagreeing about one key (design round 2, D7).
+        #
+        # While an editor is open, MOVING SAVES. The page committed on move but
+        # taught only `enter saves · esc cancels`, and a two-exit contract with
+        # `esc` beside it implies that anything else is neither — which is how a
+        # user arrows away from a value expecting to abandon it and stores it
+        # instead (UX round 2, U14). Naming it on the move hint puts the rule on
+        # the key it applies to.
+        if self._confirm_delete is not None:
+            exit_label = "cancel"
+        else:
+            exit_label = "back to conversation"
+        if self._editing is not None:
+            move = (self._move_hint, " move · saves", False)
+            enter = (self._enter_hint, " save", True)
+
         def rung(
             leads: list[tuple[HintButton, str, bool]], esc_label: str
         ) -> tuple[list[tuple[HintButton, str, bool]], str]:
@@ -1555,13 +1915,17 @@ class SettingsView(Vertical):
         leads: list[_Hint] = [move, enter, reset]
         if self._pane_fits():
             leads.append(pane)
+        # The narrow rungs shed to a one-word `esc` label, except in the
+        # confirm state where `cancel` IS the one word and shedding it back to
+        # `back` would restore the very ambiguity D7 is about.
+        narrow = "cancel" if self._confirm_delete is not None else "back"
         rungs = [
-            rung(leads, "back to conversation"),
-            rung(leads, "back"),
-            rung([move, enter, reset], "back"),
-            rung([move, enter], "back"),
-            rung([move], "back"),
-            rung([], "back"),
+            rung(leads, exit_label),
+            rung(leads, narrow),
+            rung([move, enter, reset], narrow),
+            rung([move, enter], narrow),
+            rung([move], narrow),
+            rung([], narrow),
         ]
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
@@ -1601,6 +1965,22 @@ class SettingsView(Vertical):
         rows.append(self._detail_text.plain)
         return rows
 
+    def detail_spans(self) -> list[tuple[str, Style]]:
+        """The detail row as ``(text, style)`` pairs.
+
+        The styled form is exposed because the row's three meanings — a help
+        string, a validation ERROR and a destructive ASK — are distinguished by
+        ink and weight, not by text. A test asserting only on the plain string
+        cannot tell an ask from a report, which is the confusion design round 2
+        (D7) found in the frame itself.
+        """
+        from rich.console import Console
+
+        return [
+            (segment.text, segment.style or Style())
+            for segment in self._detail_text.render(Console())
+        ]
+
     def rendered_pane(self) -> str:
         """The read-only pane as plain text. Assertable, and "" when hidden."""
         return self._pane_text.plain
@@ -1636,6 +2016,16 @@ class SettingsView(Vertical):
     def error_text(self) -> str:
         """The inline validation error currently on screen ("" when none)."""
         return self._error
+
+    @property
+    def notice_text(self) -> str:
+        """The informational detail-row message ("" when none).
+
+        Separate from :attr:`error_text` because the two are inked differently
+        and a test that could not tell them apart is how an informational
+        message ended up in the danger colour (UX round 2, U16).
+        """
+        return self._notice
 
     # -- leaving ------------------------------------------------------------
     def _focus_self(self) -> None:
@@ -1697,6 +2087,24 @@ class _Row:
         section boundary cost an extra keypress to cross.
         """
         return self.kind not in ("header", "empty")
+
+    @property
+    def identity(self) -> tuple[str, str, int]:
+        """What this row IS, independent of where it currently sits.
+
+        Movement needs this because a commit can rebuild the row list under the
+        mover: committing a new chain inserts its chain row, its hops and an
+        ``+ add a hop`` row ABOVE the cursor, so an index resolved before the
+        commit points somewhere else after it, and the user who pressed ``down``
+        lands back where they started (review round 2, U13). An identity
+        survives the rebuild where an index does not.
+
+        Deliberately NOT the ``hop`` text: a hop row's identity is its position
+        in its chain, and the text is what an edit changes.
+        """
+        key = self.setting.key if self.setting is not None else ""
+        choice = str(getattr(self.choice, "value", "")) if self.choice is not None else ""
+        return (self.kind, f"{key}|{self.chain or ''}|{choice}", self.hop_index)
 
 
 def _render_value(value: Any) -> str:

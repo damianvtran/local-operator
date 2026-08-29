@@ -17,7 +17,10 @@ from typing import Any
 
 import pytest
 import yaml
+from rich.cells import cell_len
 
+from local_operator import settings_io
+from local_operator.config import ConfigManager
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.settings_view import SettingsView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -806,11 +809,60 @@ async def test_deleting_a_chain_asks_first_and_r_says_what_it_does(tmp_path: Pat
         assert chains() == {}
 
         # And `r` on the cascade row SAYS what it does rather than swallowing
-        # the press while the footer advertises the key.
+        # the press while the footer advertises the key. As a NOTICE, not an
+        # error: the press was reasonable and the page is answering it, so
+        # painting it in the danger ink reported a fault that did not happen
+        # (UX round 2, U16).
         _select(view, "retry.fallbackChains")
         await pilot.press("r")
         await pilot.pause()
-        assert "r" in view.error_text and "chain" in view.error_text
+        assert "r" in view.notice_text and "chain" in view.notice_text
+        assert view.error_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [24, 26, 28, 29, 30, 34, 40])
+@pytest.mark.parametrize("roster_size", [0, 3, 8, 40])
+async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_size: int) -> None:
+    """The pane's height invariant, across a BAND of sizes.
+
+    Parameterised because the round-1 version of this test asserted at 100x30
+    only and passed while the failure sat one size band away: below 29 rows the
+    view's height drops in one step, ``_budget_pane_rows`` took its ``room <= 0``
+    early return, and the caller painted the spill line AND the caption anyway
+    — eight lines into a seven-row pane, with ``read-only`` the row that fell
+    off (design round 2, D6). That is D2's exact symptom reached by a different
+    door, so the invariant is pinned rather than the one size.
+
+    Both halves matter: the block must FIT, and the boundary statement must
+    survive the fitting. A pane that fits because the caption was dropped is
+    the original defect.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        view.load(
+            agents=[
+                (f"agent-{n}", "role · effort hi", "a summary long enough to take its own row")
+                for n in range(roster_size)
+            ],
+            providers=[("anthropic", "signed in"), ("openrouter", "api key")],
+        )
+        view.action_pane(1)
+        await pilot.pause()
+        pane = view.rendered_pane()
+        lines = pane.split("\n")
+        painted = len(lines)
+        assert painted <= view._pane_view.size.height, (
+            f"{painted} lines into a {view._pane_view.size.height}-row pane at "
+            f"{height} rows with {roster_size} agents:\n{pane}"
+        )
+        assert any(
+            line.strip() == "read-only" for line in lines
+        ), f"the boundary caption was shed at {height} rows:\n{pane}"
 
 
 @pytest.mark.asyncio
@@ -842,6 +894,11 @@ async def test_the_read_only_caption_survives_a_long_roster() -> None:
         assert lines[-1].strip() == "read-only"
         assert len(lines) <= view._pane_view.size.height, pane
         assert "more" in pane, "the roster was not truncated, so nothing was reserved"
+        # The spill line is a FACT, not a button: `+` is what `+ add a hop` and
+        # `+ add a chain` use in the same frame, so a count that led with it
+        # read as an affordance (design round 2, D9).
+        spill = next(line for line in lines if "more" in line)
+        assert not spill.strip().startswith("+"), spill
 
 
 @pytest.mark.asyncio
@@ -941,3 +998,329 @@ def test_settings_is_a_frontend_local_slash() -> None:
     from local_operator.session.frontend_state import _FRONTEND_LOCAL_SLASHES
 
     assert "settings" in _FRONTEND_LOCAL_SLASHES
+
+
+def _row_id(view: SettingsView, index: int) -> str:
+    row = view._rows[index]
+    key = row.setting.key if row.setting is not None else ""
+    return f"{row.kind}:{key or row.chain or ''}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "wanted"),
+    [
+        # `down` and `ctrl+n` step off the add row onto the next SETTING; at
+        # 4344dbda both landed back on `chain_add`, which is the stuck key.
+        ("down", "setting:tui.theme"),
+        ("ctrl+n", "setting:tui.theme"),
+        # `up` steps into the chain the commit just created — its trailing
+        # `+ add a hop` row is the new neighbour above. At 4344dbda it skipped
+        # the inserted rows entirely and landed on the cascade's setting row,
+        # so it moved, but not to the row that is actually adjacent.
+        ("up", "hop_add:cheap"),
+    ],
+)
+async def test_a_commit_that_inserts_rows_does_not_strand_the_cursor(
+    tmp_path: Path, key: str, wanted: str
+) -> None:
+    """Movement resolves its target AFTER the commit, not before it.
+
+    UX round 2, U13. ``action_move`` snapshotted the selectable list and the
+    cursor's position in it, then called ``_leave_row()`` \u2014 which commits, and
+    a commit on ``+ add a chain`` inserts the chain row, its hops and an
+    ``+ add a hop`` row ABOVE the cursor. Stepping from the stale index landed
+    back on ``+ add a chain``: the user pressed an arrow and did not move,
+    which is the stuck-key failure ``action_move``'s own docstring says
+    wrapping exists to avoid.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        for index, row in enumerate(view._rows):
+            if row.kind == "chain_add":
+                view._selected = index
+                break
+        view._repaint()
+        await pilot.pause()
+        origin = _row_id(view, view._selected)
+
+        await pilot.press("enter")
+        for char in "cheap openrouter/qwen3-coder":
+            await pilot.press(char if char != " " else "space")
+        await pilot.pause()
+        await pilot.press(key)
+        await pilot.pause()
+
+        # The chain was committed by the move, which is U3's contract...
+        assert "cheap" in settings_io.read_chains(ConfigManager(tmp_path))
+        # ...and the cursor is on the row that is genuinely adjacent in the
+        # REBUILT list, not on one resolved from the list as it was before.
+        assert (
+            _row_id(view, view._selected) != origin
+        ), f"{key} left the cursor on {origin} after a commit that inserted rows"
+        assert _row_id(view, view._selected) == wanted
+
+
+@pytest.mark.asyncio
+async def test_a_click_lands_on_the_row_that_was_clicked(tmp_path: Path) -> None:
+    """The worst form of U13: a click carries an explicit target.
+
+    ``on_click`` resolved y-to-row before ``_leave_row()``, so a commit that
+    inserted rows moved the row out from under the index it had resolved. The
+    user clicked the label they could see and the cursor landed elsewhere.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        for index, row in enumerate(view._rows):
+            if row.kind == "chain_add":
+                view._selected = index
+                break
+        view._repaint()
+        await pilot.pause()
+
+        await pilot.press("enter")
+        for char in "cheap openrouter/qwen3-coder":
+            await pilot.press(char if char != " " else "space")
+        await pilot.pause()
+
+        # A setting row BELOW the cursor: the commit inserts rows above these,
+        # so a stale index is off by exactly the number inserted.
+        target = next(
+            index
+            for index in range(view._selected + 1, len(view._rows))
+            if view._rows[index].kind == "setting"
+        )
+        wanted = _row_id(view, target)
+        view._body.scroll_to(y=max(target - 3, 0), animate=False)
+        await pilot.pause()
+        offset = view._body.scroll_offset.y
+
+        class _Click:
+            button = 1
+            screen_x = view._body.region.x + 1
+            screen_y = view._body.region.y + target - offset
+
+            def stop(self) -> None:
+                pass
+
+        view.on_click(_Click())
+        await pilot.pause()
+        assert _row_id(view, view._selected) == wanted
+
+
+@pytest.mark.asyncio
+async def test_the_delete_ask_does_not_look_like_a_validation_error(tmp_path: Path) -> None:
+    """Design round 2, D7 \u2014 an ASK must be distinguishable from a REPORT.
+
+    Both occupy the detail row in the same danger ink. A question holding a
+    destructive action that looks exactly like "the thing you typed was
+    rejected" gets read as a report and dismissed, which leaves the chain
+    undeleted and the user believing something happened. The separation is a
+    marker plus a bold question clause, and the footer stops advertising the
+    wrong meaning for ``esc``.
+    """
+    settings_io.write_chains(ConfigManager(tmp_path), {"cheap": ["anthropic/a", "openrouter/b"]})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        for index, row in enumerate(view._rows):
+            if row.kind == "chain" and row.chain == "cheap":
+                view._selected = index
+                break
+        view._repaint()
+        await pilot.pause()
+
+        # Footer before the ask: `esc` leaves the page.
+        assert "back to conversation" in view.rendered_hints()
+
+        await pilot.press("d")
+        await pilot.pause()
+        detail = view.detail_spans()
+
+        # The ask leads with a marker no validation error has, and its question
+        # clause is BOLD where an error is not.
+        assert detail[0][0].startswith("\u25b8")
+        assert detail[0][1].bold, detail
+        # The key contract rides the same row, unbolded, so the frame separates
+        # "what I am about to destroy" from "how to answer".
+        assert any("esc cancels" in text and not style.bold for text, style in detail), detail
+
+        # And the footer now says what `esc` actually does here.
+        hints = view.rendered_hints()
+        assert "cancel" in hints, hints
+        assert "back to conversation" not in hints, hints
+
+        # A validation error is the contrast case: no marker, not bold.
+        await pilot.press("escape")
+        await pilot.pause()
+        _select(view, "retry.maxRetries")
+        await pilot.press("enter")
+        for char in "999999":
+            await pilot.press(char)
+        await pilot.press("enter")
+        await pilot.pause()
+        error = view.detail_spans()
+        assert error, "expected a rejection on the detail row"
+        assert not error[0][0].startswith("\u25b8"), error
+        assert not any(style.bold for _text, style in error), error
+
+
+@pytest.mark.asyncio
+async def test_the_delete_ask_keeps_its_key_contract_at_eighty_columns() -> None:
+    """Design round 2, D8 \u2014 the CHAIN NAME gives way, never the keys.
+
+    At 80 columns the line ran past the frame with the ellipsis landing outside
+    it, so ``to confirm \u00b7 esc cancels`` vanished with no visible mark that
+    anything had been cut \u2014 on the page's only destructive prompt. Clipping the
+    least load-bearing segment is what ``_paint_pane`` already does.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        view._confirm_delete = "production-failover-primary-chain"
+        view._repaint()
+        await pilot.pause()
+        question, contract = view._confirm_parts()
+        # Both keys survive at 80 columns. Which RUNG is chosen is a width
+        # decision — the terse form is the point of the ladder — so the
+        # assertion is that the answer is still statable, not that a
+        # particular wording was used.
+        assert "d" in contract and "esc cancels" in contract, contract
+        assert "\u2026" in question, "the chain name was not the segment that gave way"
+        line = view.render_lines_for_test()[-1]
+        assert "esc cancels" in line, line
+        assert cell_len(line) <= view._list_width(), (cell_len(line), line)
+
+
+@pytest.mark.asyncio
+async def test_the_editor_says_that_moving_saves() -> None:
+    """UX round 2, U14 \u2014 commit-on-move is right, but it has to be TAUGHT.
+
+    The contract enumerated exactly two exits, ``enter`` and ``esc``, and a user
+    reading it concludes anything else is neither. That is the opposite of most
+    editors, so a value gets stored by an arrow key the page never mentioned.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        _select(view, "retry.baseDelayMs")
+        await pilot.press("enter")
+        await pilot.press("1")
+        await pilot.pause()
+        row = next(line for line in view.render_lines_for_test() if "Base delay" in line)
+        assert "\u2191\u2193 saves" in row, row
+        # The footer says it too, on the key it applies to.
+        assert "saves" in view.rendered_hints(), view.rendered_hints()
+
+
+@pytest.mark.asyncio
+async def test_the_caret_stays_visible_in_a_long_value() -> None:
+    """UX round 2, U15 \u2014 four keys' entire feedback is the caret's position.
+
+    Past ~26 cells at 100 columns the caret fell off the right edge with the
+    characters just typed, so left/right/home/end moved a position nothing on
+    screen reported \u2014 the exact failure the caret was added to prevent. The
+    buffer is painted as a window around the caret instead of from index 0.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        _select(view, "web_search.searxng_endpoint")
+        await pilot.press("enter")
+        await pilot.pause()
+        for char in "https://searx.example.com/search":
+            await pilot.press(char if char != " " else "space")
+            await pilot.pause()
+            row = next(line for line in view.render_lines_for_test() if "SearXNG" in line)
+            assert "\u258f" in row, f"caret lost at {len(view._buffer)} chars: {row!r}"
+        # And while navigating back through it.
+        await pilot.press("home")
+        await pilot.pause()
+        for _ in range(len(view._buffer)):
+            await pilot.press("right")
+            await pilot.pause()
+            row = next(line for line in view.render_lines_for_test() if "SearXNG" in line)
+            assert "\u258f" in row, f"caret lost at index {view._caret}: {row!r}"
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_theme_leaves_the_cursor_on_the_theme_row() -> None:
+    """UX round 2, U17 \u2014 a choice row stops existing when the expansion closes.
+
+    ``action_activate`` left ``_selected`` at the index the choice occupied, so
+    picking the 34th theme put the cursor 34 rows away on an unrelated setting
+    two sections down with ``r default`` lit on it. Invisible on a 2-choice
+    enum, which is why it surfaced only once ``tui.theme`` grew 35 members.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        _select(view, "tui.theme")
+        await pilot.press("enter")
+        await pilot.pause()
+        choices = [index for index, row in enumerate(view._rows) if row.kind == "choice"]
+        assert len(choices) > 10, "expected the theme enum to be registry-sourced"
+        # Pick one a long way down the list.
+        view._selected = choices[10]
+        view._repaint()
+        await pilot.press("enter")
+        await pilot.pause()
+        landed = view._rows[view._selected]
+        assert landed.kind == "setting" and landed.setting is not None
+        assert landed.setting.key == "tui.theme", _row_id(view, view._selected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["enter", "space", "r", "right"])
+async def test_any_other_key_disarms_a_pending_delete(tmp_path: Path, key: str) -> None:
+    """UX round 2, U18 \u2014 the ask is answered by ``d`` or ``esc``, and anything
+    else cancels it. It was cleared by a cursor move and by ``esc`` but not by
+    a key acting on the SAME row: ``enter`` toggled the chain open underneath a
+    question about deleting it, and a later ``d`` still deleted it."""
+    settings_io.write_chains(ConfigManager(tmp_path), {"cheap": ["anthropic/a", "openrouter/b"]})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        for index, row in enumerate(view._rows):
+            if row.kind == "chain" and row.chain == "cheap":
+                view._selected = index
+                break
+        view._repaint()
+        await pilot.press("d")
+        await pilot.pause()
+        assert view._confirm_delete == "cheap"
+
+        await pilot.press(key)
+        await pilot.pause()
+        assert view._confirm_delete is None, f"{key} left the ask armed"
+
+        # And the next `d` therefore re-ASKS rather than deleting.
+        await pilot.press("d")
+        await pilot.pause()
+        assert "cheap" in settings_io.read_chains(ConfigManager(tmp_path))
