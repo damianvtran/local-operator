@@ -5398,6 +5398,178 @@ async def test_mcp_logout_list_offers_only_servers_holding_a_credential() -> Non
             assert [name for name, _ in editor.picker.suggestions()] == ["logout linear"]
 
 
+async def _type_into_editor(pilot, app, text: str) -> None:
+    """Type ``text`` one REAL keystroke at a time, leaving it in the buffer.
+
+    Deliberately NOT ``_set_editor_line``. That helper assigns ``editor.text``
+    and calls ``_sync_picker()`` directly, which BYPASSES the
+    ``RefreshArgumentChoices`` message the picker relies on to swap its rows
+    when a two-level command crosses into its second slot. A whole class of
+    wiring bug is therefore invisible to it: the `/mcp <verb> ` server rows
+    were unreachable by typing while six tests using that helper passed, and
+    the captured screenshots showed a state the UI never produced.
+
+    Unlike ``_type_command`` this does not press Enter, because the state under
+    test is the OPEN picker rather than the executed command.
+    """
+    editor = app.query_one(Editor)
+    editor.text = ""
+    editor.move_cursor(editor._end_of_buffer())
+    for _ in range(4):
+        await pilot.pause()
+    editor.focus()
+    for ch in text:
+        await pilot.press("space" if ch == " " else ch)
+    for _ in range(6):
+        await pilot.pause()
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Cross-PR dependency: the fix is one line in editor.py, PR #378's "
+        "surface (the /mcp refresh key at editor.py:2817 tracks the verb TOKEN, "
+        "so `remove` -> `remove ` posts no refresh and the server slot never "
+        "fills). Until #378 lands, typing a verb leaves the picker closed. "
+        "Flips to passing on rebase after #378 merges."
+    ),
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_mcp_server_rows_are_reachable_by_typing_not_just_by_setting_text() -> None:
+    """The rows must appear for a user at the KEYBOARD, not only when a test
+    assigns the buffer.
+
+    `/mcp` is two-level: the first argument slot holds a verb, and the space
+    after it opens the SERVER slot. The picker only refills when its tracked
+    sub-slot changes, so a tracker keyed on the verb TOKEN alone never fires on
+    that space — `remove` and `remove ` are the same token — and the stale verb
+    rows get filtered to nothing by the server query, closing the list.
+
+    Every other server-row test here uses `_set_editor_line`, which calls
+    `_sync_picker()` directly and cannot observe that message at all. This test
+    types, so it fails when the wiring is broken even though those pass.
+    """
+    from local_operator.mcp.config import (
+        MCPAuthConfig,
+        MCPHttpServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+        "filesystem": MCPStdioServerConfig(command="npx"),
+    }
+    sources = {"linear": "/tmp/x/.local-operator/mcp.json", "filesystem": "/tmp/x/.claude.json"}
+    manager = FakeMcpManager(["linear", "filesystem"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, sources),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            # The verb slot still works when typed.
+            await _type_into_editor(pilot, app, "/mcp ")
+            assert [n for n, _ in editor.picker.suggestions()] == list(OperatorApp.MCP_SUBCOMMANDS)
+
+            # Each verb -> server transition, reached by the space alone.
+            for typed, expected in (
+                ("/mcp remove ", ["remove linear", "remove filesystem"]),
+                ("/mcp login ", ["login linear"]),
+                ("/mcp logout ", ["logout linear"]),
+                ("/mcp reauth ", ["reauth linear"]),
+            ):
+                await _type_into_editor(pilot, app, typed)
+                rows = [n for n, _ in editor.picker.suggestions()]
+                assert sorted(rows) == sorted(expected), f"typing {typed!r} gave {rows}"
+                assert editor.picker.display, f"typing {typed!r} left the picker closed"
+
+            # And narrowing still works from the typed state.
+            await _type_into_editor(pilot, app, "/mcp remove fs")
+            assert [n for n, _ in editor.picker.suggestions()] == ["remove filesystem"]
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Cross-PR dependency: needs BOTH halves of #378 -- the alert-aware "
+        "_argument_is_destructive AND the editor.py:2817 refresh-key fix, "
+        "since a closed list has no highlighted row for the gate to read. "
+        "Flips to passing on rebase after #378 merges."
+    ),
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_the_destructive_gate_is_armed_on_the_TYPED_path() -> None:
+    """#378's fuzzy-Enter guard reads the highlighted row's ``alert`` flag, so
+    it is only as good as the list being open.
+
+    While the server rows were unreachable by typing there was no highlighted
+    choice, and the gate returned ``False`` for every `/mcp` row on the real
+    key path — the flag was set correctly and protected nothing. Asserted here
+    on TYPED input so the safety property is proven where a user meets it:
+    armed for the verbs that destroy, and off for `login`, which does not.
+    """
+    from local_operator.mcp.config import (
+        MCPAuthConfig,
+        MCPHttpServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+        "filesystem": MCPStdioServerConfig(command="npx"),
+    }
+    sources = {"linear": "/tmp/x/.local-operator/mcp.json", "filesystem": "/tmp/x/.claude.json"}
+    manager = FakeMcpManager(["linear", "filesystem"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, sources),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            for typed, destroys in (
+                ("/mcp remove fs", True),
+                ("/mcp logout lin", True),
+                # The fuzzy shape that motivated the gate: `lnr` spells nothing
+                # and still narrows to one row.
+                ("/mcp reauth lnr", True),
+                ("/mcp login lin", False),
+            ):
+                await _type_into_editor(pilot, app, typed)
+                assert editor.picker.suggestions(), f"typing {typed!r} opened no list"
+                assert editor._argument_is_destructive() is destroys, (
+                    f"typing {typed!r}: gate={editor._argument_is_destructive()}, "
+                    f"expected {destroys}"
+                )
+
+
 @pytest.mark.asyncio
 async def test_every_mcp_verb_that_destroys_something_flags_its_rows() -> None:
     """`alert` is the SAFETY bit, so the set it covers must match what the
