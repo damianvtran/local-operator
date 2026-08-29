@@ -478,12 +478,50 @@ def test_config_edit_rejects_unknown_key(tmp_home: Path, capsys) -> None:
     assert "hosting" in err  # the suggestion
 
 
-def test_config_edit_accepts_known_key(tmp_home: Path) -> None:
-    manager = MagicMock()
-    with patch("local_operator.cli.ConfigManager", return_value=manager):
-        args = argparse.Namespace(key="hosting", value="openai")
-        assert cli.config_edit_command(args) == 0
-    manager.update_config.assert_called_once()
+def test_config_edit_accepts_known_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Against a REAL config, not a mock: the claim is that the value lands in
+    the file, and a mock asserting which internal writer was called proves only
+    that the writer did not change."""
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    args = argparse.Namespace(key="hosting", value="openai")
+    assert cli.config_edit_command(args) == 0
+    assert yaml.safe_load((tmp_path / "config.yml").read_text())["values"]["hosting"] == "openai"
+
+
+def test_config_edit_accepts_a_dotted_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The user-facing lie this fixed: the TUI instructs users to run
+    `config edit display.terminal_title false`, and the validator rejected
+    every dotted key, so that command could only ever exit 1.
+
+    Both shapes are covered because they are stored differently: `display.*` is
+    a literal dotted TOP-LEVEL key, while `retry.maxRetries` is genuinely
+    nested and must not lose its siblings.
+    """
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert (
+        cli.config_edit_command(argparse.Namespace(key="display.terminal_title", value="false"))
+        == 0
+    )
+    assert cli.config_edit_command(argparse.Namespace(key="retry.maxRetries", value="4")) == 0
+
+    values = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert values["display.terminal_title"] is False
+    assert "display" not in values, "wrote a nested mapping nothing reads"
+    assert values["retry"]["maxRetries"] == 4
+    assert values["retry"]["fallbackChains"] == {}, "a sibling was destroyed"
+
+
+def test_config_edit_rejects_an_out_of_range_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Consumers clamp silently, so a stored 9999 the tool reads as 100 is the
+    config and the behaviour disagreeing with nothing admitting it."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert cli.config_edit_command(argparse.Namespace(key="retry.maxRetries", value="9999")) == 1
 
 
 def test_config_create_command(tmp_home: Path) -> None:

@@ -7083,7 +7083,10 @@ async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command(
         await pilot.pause()
         text = _transcript_text(app)
     assert _unwrapped("this session") in _unwrapped(text), text
-    assert _unwrapped("/model default") in _unwrapped(text), text
+    # #369 repointed the persist breadcrumb at the picker's `d` affordance, so
+    # the receipt names PERSIST_HINT rather than the old `/model default`
+    # spelling whose elided form no longer writes.
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(text), text
     # The access clause is unchanged by the new one sharing the line.
     assert _unwrapped("anthropic logged in") in _unwrapped(text), text
 
@@ -7119,16 +7122,21 @@ async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
 
 
 @pytest.mark.asyncio
-async def test_model_default_alone_persists_the_model_already_in_use(
+async def test_model_default_alone_confirms_and_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sentence a user has right after switching is "make THIS the default".
-    Answering it used to mean retyping the selector back at the app, which is the
-    transcription step that made the default feel like a separate, hidden system."""
-    import yaml
+    """#369. A bare `/model default` used to write the CURRENT model straight
+    into config.yml, replacing a default the user may have relied on, with no
+    undo and a receipt that arrived after the write. Two intentions shared one
+    spelling and the destructive one won.
 
+    The assertion that matters is that the FILE IS UNCHANGED — byte for byte,
+    not merely that a notice appeared. A confirmation that still wrote would
+    pass any check made against the transcript alone.
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    before = (tmp_path / "config.yml").read_bytes()
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -7139,9 +7147,111 @@ async def test_model_default_alone_persists_the_model_already_in_use(
         app._run_slash_command("/model default")
         await pilot.pause()
         text = _transcript_text(app)
+    assert (tmp_path / "config.yml").read_bytes() == before, "bare /model default wrote to config"
+    # It names the model it WOULD save, so the confirmation has a subject…
+    assert _unwrapped("anthropic/claude-opus-5") in _unwrapped(text), text
+    # …and both other readings, which is what removes the ambiguity rather
+    # than merely deferring it.
+    assert _unwrapped("/model saved") in _unwrapped(text), text
+    assert _unwrapped("/model default anthropic/claude-opus-5") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_saved_switches_to_the_configured_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#369's missing reading: "put me back on my configured default".
+
+    `/team` and `/agent` already have a detach verb; `/model` had none, so this
+    intention was inexpressible and users reached for `/model default`, which
+    did the opposite.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: anthropic\n  model_name: claude-opus-5\n"
+    )
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model openrouter/deepseek/deepseek-chat")
+        await pilot.pause()
+        app._run_slash_command("/model saved")
+        await pilot.pause()
+        label = session.model_label
+    assert label == "anthropic/claude-opus-5", label
+
+
+@pytest.mark.asyncio
+async def test_model_saved_says_so_when_no_default_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Doing nothing silently would read as the switch having happened."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: ''\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model saved")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert _unwrapped("no boot default saved yet") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_default_explicit_selector_still_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#369 changed the ELIDED form only. `/model default <p>/<id>` is
+    unambiguous — the user named the model — so it keeps writing immediately."""
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model default anthropic/claude-opus-5")
+        await pilot.pause()
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     assert (written["hosting"], written["model_name"]) == ("anthropic", "claude-opus-5"), written
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_picker_d_saves_the_highlighted_row_as_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#369's PRIMARY fix: the affordance that removes the need to type the
+    command, and with it the ambiguity. `d` saves; it deliberately does NOT
+    switch, because Enter already means switch and a key that did both would
+    make the two indistinguishable."""
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model")
+        await pilot.pause()
+        await pilot.pause()
+        picker = app.query_one(Editor).model_picker
+        row = picker.highlighted()
+        assert row is not None
+        before_label = session.model_label
+        app._persist_default_from_picker()
+        await pilot.pause()
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert (written["hosting"], written["model_name"]) == (row.provider, row.model_id), written
+    # The session was NOT switched: `d` and Enter must stay distinguishable.
+    assert session.model_label == before_label, session.model_label
 
 
 @pytest.mark.asyncio
@@ -7227,7 +7337,9 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     # keeps it to two wrapped lines at the widths this app supports. Folding the
     # timing into the scope parenthetical measured three.
     assert _unwrapped("(this session)") in text, text
-    assert _unwrapped("/model default") in text, text
+    # #369: the persist breadcrumb is PERSIST_HINT's `d` affordance now, not the
+    # old `/model default` spelling.
+    assert _unwrapped(PERSIST_HINT) in text, text
     # SAME INK as the receipt it qualifies (design review D3). At `note` the
     # subordinate row measured 8.62:1 against the receipt's 4.55:1 and the eye
     # landed on the qualifier first; the token is asserted rather than the

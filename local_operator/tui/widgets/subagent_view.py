@@ -1028,8 +1028,32 @@ class HintButton(Static):
         self.set_class(self._actionable, "actionable")
 
     def paint(self, label: str, *, lead: bool) -> None:
-        """Set this hint's label, and whether a ``·`` seam precedes it."""
+        """Set this hint's label, and whether a ``·`` seam precedes it.
+
+        Relays out when the painted CELL WIDTH changes, which is the same
+        distinction :meth:`set_key` already draws and for the same reason. This
+        widget is ``width: auto``, so its box is sized from the content Textual
+        last measured; the no-layout path in :meth:`_repaint` exists for hover,
+        where the plain text is invariant by construction, and reusing it for a
+        label that GREW pins the widget to its old width and clips the new text.
+
+        The settings page changes the label itself: opening an editor turns
+        ``move`` into ``move · saves``, 8 cells to 16, and the clause naming the
+        rule that an arrow key commits the value was clipped off on the frame
+        where that rule first applies. It self-corrected on whatever later event
+        forced a layout pass, so it presented as an intermittent flicker (2 runs
+        in 8) on exactly the affordance the clause exists to teach (design round
+        4, D16 / UX round 4, U21).
+
+        Width rather than string equality, because that is what the layout
+        actually depends on: relaying out for a same-width label change would
+        reintroduce the invalidation cost ``_repaint`` was written to avoid.
+        """
+        before = cell_len(self._text().plain)
         self._label, self._lead = label, lead
+        if cell_len(self._text().plain) != before:
+            self.update(self._text(), layout=True)
+            return
         self._repaint()
 
     def set_key(self, key: str) -> None:

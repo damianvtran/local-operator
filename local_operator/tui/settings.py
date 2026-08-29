@@ -1,17 +1,34 @@
-"""TUI display settings — a thin read-only view of ``config_dir()/config.yml``.
+"""TUI display flags — the cached fast-path reader for ``config.yml``.
 
 Display flags (``display.*`` keys in ``values``) are read lazily and cached
 per process; a missing or unreadable config never breaks the TUI — every
-lookup falls back to its default. Writes stay in the CLI's ``config edit``
-surface; the TUI only reads.
+lookup falls back to its default.
+
+This module READS. Writes go through ``local_operator.settings_io``, which the
+``/settings`` page and ``lop config edit`` both drive, and which calls
+:func:`settings_reload` afterwards — that is still the ONLY invalidator of the
+cache below, so a write that skipped it would leave the running TUI painting
+the old flag and the change would look lost until relaunch.
+
+The keys here are LITERAL dotted top-level keys: ``values["display.shimmer"]``,
+not ``values["display"]["shimmer"]``. See ``settings_io`` for why that
+distinction is load-bearing.
+
+Defaults are derived from the schema registry rather than restated, so the page
+and this reader cannot disagree about what "unset" means. The import is
+function-local: this module sits on the shimmer/glyph/image fast path and is
+imported during TUI paint, so it must stay cheap to import — pulling the
+registry in at module scope would put it on every startup.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-#: Display flags and their defaults. Tests may poke ``_cache`` directly.
-_DEFAULTS: dict[str, Any] = {
+#: Documentation of the flags this module serves, kept as prose beside the
+#: derivation below. The VALUES come from ``settings_io`` (see
+#: :func:`_defaults`); this dict is not consulted at runtime.
+_DEFAULT_NOTES: dict[str, Any] = {
     "display.shimmer": True,
     # Nerd Font glyphs on tool rows. Default is None = AUTO: unset means
     # `tui/glyphs.py` decides from the terminal-emulator env markers (a
@@ -45,6 +62,22 @@ _DEFAULTS: dict[str, Any] = {
 _cache: dict[str, Any] | None = None
 
 
+def _defaults() -> dict[str, Any]:
+    """The display-flag defaults, from the schema registry.
+
+    Falls back to :data:`_DEFAULT_NOTES` if the registry cannot be imported.
+    Not defensiveness for its own sake: this module is on the paint path and a
+    display flag failing to resolve would take down a frame, where reading a
+    stale-but-correct default merely means the TUI looks the way it shipped.
+    """
+    try:
+        from local_operator.settings_io import display_defaults
+
+        return display_defaults()
+    except Exception:  # pragma: no cover - the registry is a plain data module
+        return dict(_DEFAULT_NOTES)
+
+
 def _load() -> dict[str, Any]:
     """Read ``values`` once; any failure yields pure defaults."""
     values: dict[str, Any] = {}
@@ -56,7 +89,7 @@ def _load() -> dict[str, Any]:
         values = dict(manager.get_config().values)
     except Exception:
         values = {}
-    return {key: values.get(key, default) for key, default in _DEFAULTS.items()}
+    return {key: values.get(key, default) for key, default in _defaults().items()}
 
 
 def settings_get(key: str, default: Any = None) -> Any:

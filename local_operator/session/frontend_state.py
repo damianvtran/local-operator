@@ -68,6 +68,12 @@ _FRONTEND_LOCAL_SLASHES = {
     "update",
     "resume",
     "theme",
+    # The settings page reads and writes THIS machine's config.yml, exactly
+    # like `/theme` and `/search` above it. Routed to the owner it would open
+    # against the owner's config and persist a default governing a machine the
+    # user is not sitting at — the same rule `/model default` states explicitly
+    # when it refuses to run on a follower.
+    "settings",
     "provider",
     "search",
     "accounts",
