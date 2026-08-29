@@ -3817,12 +3817,14 @@ class Editor(TextArea):
 
         * The ROW flag is the PRECISION. A command word is the wrong
           granularity for a two-level command: under `/mcp`, `remove` and
-          `logout` destroy while `login` and `reauth` do not, so adding `mcp`
-          to the tuple would tax the harmless sibling — `/mcp login lin` +
-          Enter would fill instead of running. ``ArgumentChoice.alert`` is
-          already set on exactly the destructive rows, so this is per-slot
-          precision from machinery that already exists rather than a second
-          confirmation mechanism.
+          `logout` destroy outright and `reauth` forgets the stored credential
+          before re-authorizing (`_cmd_mcp` runs `_mcp_logout` first), while
+          `login` only ever adds a grant. Adding `mcp` to the tuple would tax
+          that one harmless sibling — `/mcp login lin` + Enter would fill
+          instead of running. ``ArgumentChoice.alert`` is set per row, so the
+          gate follows what a row actually does rather than what its command
+          word is called, using machinery that already exists rather than a
+          second confirmation mechanism.
 
         Without the row condition, `/mcp remove fsy` — three characters that
         spell nothing, narrowed by the fuzzy matcher to one survivor — deleted a
