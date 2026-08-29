@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.agent_profiles import resolve_profile
+from local_operator.agent_profiles import load_seed, resolve_profile
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness.types import ToolContext
 from local_operator.tools.agent_tool import build_agent_tool, execute_agent
@@ -370,7 +370,13 @@ async def test_an_unrestricted_role_is_not_shown_as_the_smallest_one(context) ->
     rows = {line.split()[1]: line for line in body.splitlines() if line.startswith("- ")}
     assert "all tools" in rows["coder"], rows["coder"]
     assert "all tools" in rows["designer"], rows["designer"]
-    assert "5 tools" in rows["scout"], rows["scout"]
+    # The COUNT tracks the seed's allowlist and is asserted from it rather than
+    # hard-coded: the read-only surface gained the network tools, and a literal
+    # here would have to be re-guessed on every such change while testing
+    # nothing about the badge.
+    scout = load_seed("scout")
+    assert scout is not None and scout.tools
+    assert f"{len(scout.tools)} tools" in rows["scout"], rows["scout"]
 
 
 @pytest.mark.asyncio
