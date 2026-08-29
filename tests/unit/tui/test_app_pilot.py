@@ -5424,16 +5424,6 @@ async def _type_into_editor(pilot, app, text: str) -> None:
         await pilot.pause()
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Cross-PR dependency: the fix is one line in editor.py, PR #378's "
-        "surface (the /mcp refresh key at editor.py:2817 tracks the verb TOKEN, "
-        "so `remove` -> `remove ` posts no refresh and the server slot never "
-        "fills). Until #378 lands, typing a verb leaves the picker closed. "
-        "Flips to passing on rebase after #378 merges."
-    ),
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_mcp_server_rows_are_reachable_by_typing_not_just_by_setting_text() -> None:
     """The rows must appear for a user at the KEYBOARD, not only when a test
@@ -5502,15 +5492,6 @@ async def test_mcp_server_rows_are_reachable_by_typing_not_just_by_setting_text(
             assert [n for n, _ in editor.picker.suggestions()] == ["remove filesystem"]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Cross-PR dependency: needs BOTH halves of #378 -- the alert-aware "
-        "_argument_is_destructive AND the editor.py:2817 refresh-key fix, "
-        "since a closed list has no highlighted row for the gate to read. "
-        "Flips to passing on rebase after #378 merges."
-    ),
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_the_destructive_gate_is_armed_on_the_TYPED_path() -> None:
     """#378's fuzzy-Enter guard reads the highlighted row's ``alert`` flag, so
@@ -5795,17 +5776,6 @@ async def test_mcp_list_is_an_alias_for_the_bare_listing(
         assert "filesystem" in text and "grafana" in text
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Cross-PR dependency: PR 1 (ghost text) teaches "
-        "Editor._argument_is_destructive to consult the highlighted "
-        "ArgumentChoice.alert flag. Until it lands, DESTRUCTIVE_COMMANDS "
-        "matches the command WORD ('logout') and never covers 'mcp', so a "
-        "fuzzy /mcp remove row FIRES on Enter and deletes the server. Flips "
-        "to passing on rebase after PR 1 merges."
-    ),
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_a_fuzzy_mcp_remove_row_fills_rather_than_deleting_a_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
