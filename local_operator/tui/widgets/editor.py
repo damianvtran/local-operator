@@ -94,10 +94,10 @@ import base64
 import re
 import shlex
 import time
-from functools import partial
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from stat import S_ISREG
 from typing import Callable
