@@ -4,6 +4,7 @@ Independent re-verification of the FINDINGS.md premise. Writes the captured
 bytes to the path given as argv[1] so each terminal/clipboard/key combination
 gets its own artifact.
 """
+
 import os
 import sys
 import termios
