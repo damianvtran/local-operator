@@ -45,9 +45,11 @@ import contextlib
 import logging
 import os
 import sys
+import threading
 import time
 import weakref
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
@@ -102,6 +104,23 @@ REFRESH_SKEW_S = 60.0
 #: the token POST). A slow authorization server must not park the connect —
 #: the startup gate defers us, and the breaker bounds retries.
 REFRESH_HTTP_TIMEOUT_S = 10.0
+
+#: Bound on ACQUIRING the cross-process refresh lock, derived from the honest
+#: budget of the critical section it guards: one token POST (capped at
+#: ``REFRESH_HTTP_TIMEOUT_S``) plus a couple of SQLite reads. A peer that holds
+#: the lock legitimately therefore clears it well inside this bound, and
+#: overrunning it means the holder is not working — a leaked lock from a killed
+#: process, or a peer wedged on something that is not our problem. Waiting
+#: longer than the work can possibly take buys nothing and costs a hung connect,
+#: so we give up and let the SDK's own refresh path handle it (see
+#: :func:`_oauth_refresh_lock`, which yields False rather than raising).
+LOCK_ACQUIRE_TIMEOUT_S = 15.0
+
+#: Gap between non-blocking lock attempts. Short enough that a released lock is
+#: picked up promptly and that a cancelled acquire abandons the retry loop
+#: within one tick, long enough that waiting out the full bound costs a few
+#: hundred cheap syscalls rather than a hot spin.
+_LOCK_RETRY_SLEEP_S = 0.05
 
 
 class McpAuthRequiredError(RuntimeError):
@@ -1328,34 +1347,84 @@ async def _discover_oauth_endpoints_uncached(
         return None
 
 
-def _lock_exclusive(fd: int) -> None:
+def _try_lock_exclusive(fd: int) -> bool:
+    """ONE non-blocking attempt at the exclusive lock. True when taken.
+
+    Deliberately non-blocking on BOTH platforms. A blocking acquire parks a
+    worker thread inside the kernel on a descriptor the calling coroutine may
+    be about to close, and on macOS/BSD ``os.close()`` of a descriptor with a
+    sibling thread parked in ``flock()`` blocks until that ``flock()`` returns —
+    which, with the lock held by another process, is never. Called from the
+    event-loop thread's ``finally`` that is exactly the whole TUI freezing:
+    no repaint, no input. See :func:`_oauth_refresh_lock` for the full story.
+    Retrying a non-blocking attempt is strictly weaker than blocking and is the
+    only shape that stays cancellable, so do not "simplify" this back into
+    ``fcntl.flock(fd, fcntl.LOCK_EX)``.
+
+    Contention is the expected outcome and returns False; anything else is a
+    real fault (EBADF, EINVAL, an unsupported filesystem) that retrying cannot
+    fix, so it is raised for the caller to degrade on.
+    """
     if os.name == "nt":  # pragma: no cover - platform specific
         import errno as _errno
         import msvcrt
-        import time as _time
 
-        # ``LK_LOCK`` blocks but gives up after ~10 s (it retries once per
-        # second, ten times, then raises OSError) — while a peer legitimately
-        # holds the lock for up to REFRESH_HTTP_TIMEOUT_S of network time.
-        # Retry in a loop to match the POSIX flock's indefinite-block
-        # semantics; the loop is bounded generously rather than forever so a
-        # leaked lock (killed process) cannot park a connect eternally.
-        # Contention surfaces as EDEADLOCK/EACCES; anything else (EBADF,
-        # EINVAL) is a real fault that retrying cannot fix — raising it
-        # immediately beats hot-spinning the worker thread for the bound.
-        deadline = _time.monotonic() + 60.0
-        while True:
-            try:
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                return
-            except OSError as lock_err:
-                contended = lock_err.errno in (_errno.EDEADLOCK, _errno.EACCES)
-                if not contended or _time.monotonic() >= deadline:
-                    raise
+        try:
+            # ``msvcrt.locking`` locks a byte RANGE, so the file needs at least
+            # one byte to lock — an empty lock file would fail with EINVAL
+            # forever. Mirrors ``session_lease``'s handling of the same API.
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as lock_err:
+            if lock_err.errno in (_errno.EDEADLOCK, _errno.EACCES, _errno.EAGAIN):
+                return False
+            raise
     else:
+        import errno as _errno
         import fcntl
 
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as lock_err:
+            if lock_err.errno in (_errno.EAGAIN, _errno.EACCES, _errno.EWOULDBLOCK):
+                return False
+            raise
+
+
+def _acquire_locked_fd(path: str, cancelled: threading.Event) -> int | None:
+    """Open ``path`` and take the exclusive lock on it, or give up. Worker-side.
+
+    Runs entirely on a worker thread and OWNS the descriptor for its whole life:
+    it opens the fd, retries the non-blocking acquire until the deadline, and on
+    any outcome other than success closes the fd ITSELF, in this same thread,
+    after the last lock syscall has returned. That ownership rule is the fix for
+    the deadlock — the event loop never closes a descriptor another thread might
+    still be inside a lock call on, because by construction no such moment
+    exists. Returns the locked fd on success (ownership passes to the caller,
+    which must unlock and close it) or ``None`` on timeout/cancellation.
+
+    ``cancelled`` is set by the coroutine when its await is cancelled, so an
+    abandoned acquire abandons the retry loop within one ``_LOCK_RETRY_SLEEP_S``
+    tick instead of holding a thread for the full bound.
+    """
+    deadline = time.monotonic() + LOCK_ACQUIRE_TIMEOUT_S
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        while True:
+            if _try_lock_exclusive(fd):
+                return fd
+            if cancelled.is_set() or time.monotonic() >= deadline:
+                break
+            time.sleep(_LOCK_RETRY_SLEEP_S)
+    except BaseException:
+        os.close(fd)
+        raise
+    os.close(fd)
+    return None
 
 
 def _unlock(fd: int) -> None:
@@ -1371,6 +1440,40 @@ def _unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _oauth_refresh_lock_path(server_url: str) -> Path:
+    """The lock file for ONE server's refresh exchange, in ``config_dir()``.
+
+    Keyed per server, because the race this lock exists to prevent is per
+    server: two processes spending the SAME server's rotating refresh token.
+    A single global lock file also serialised servers that can never race each
+    other, so one slow or unreachable provider parked every other server's
+    connect behind it — with six OAuth servers and several concurrent sessions
+    that is a queue nothing drains, and the observable symptom was two servers
+    connecting and the rest sitting on "connecting" forever.
+
+    The name is a SHA-256 digest of the URL rather than the URL itself: server
+    URLs contain ``/``, ``:`` and query strings that are not filename-safe, and
+    a digest is stable across runs and machines without any escaping scheme to
+    keep in step. Truncated to 16 hex chars — this namespaces a handful of
+    configured servers, not an adversarial keyspace.
+
+    The pre-fix global ``mcp_oauth_refresh.lock`` is deliberately left in place
+    and never cleaned up: another local-operator process running an older build
+    may still be using it, and deleting a file that a live peer holds an flock
+    on would silently drop that peer's mutual exclusion (its lock survives on
+    the unlinked inode while a new process creates a fresh file and takes an
+    uncontended lock). It is a zero-byte file; leaving it costs nothing.
+    """
+    import hashlib
+
+    from local_operator.paths import config_dir
+
+    lock_dir = config_dir()
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(server_url.encode("utf-8")).hexdigest()[:16]
+    return lock_dir / f"mcp_oauth_refresh_{digest}.lock"
+
+
 @contextlib.asynccontextmanager
 async def _oauth_refresh_lock(server_url: str):
     """Serialize the refresh exchange across processes for one server.
@@ -1380,23 +1483,86 @@ async def _oauth_refresh_lock(server_url: str):
     first process's brand-new token. Holding an exclusive file lock around the
     exchange, and RE-READING the stored token after acquiring it, guarantees
     exactly one process performs the refresh no matter how many sessions start
-    at once. The lock file lives next to ``auth.db`` and is only ever flocked,
-    never written.
-    """
-    from local_operator.paths import config_dir
+    at once. The lock file lives next to ``auth.db``, is per server (see
+    :func:`_oauth_refresh_lock_path`), and is only ever flocked, never written.
 
-    lock_dir = config_dir()
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "mcp_oauth_refresh.lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    Yields True when the lock was taken and False when the bounded acquire gave
+    up. A False body must still be SAFE to run: the guarantee degrades from
+    "exactly one process refreshes" to "we tried", which is the best-effort
+    contract :func:`ensure_mcp_oauth_fresh` already documents. Blocking the
+    connect instead would trade a rare double-spend for a guaranteed hang.
+
+    Two rules this function exists to enforce, both learned from a freeze that
+    took the whole TUI down:
+
+    1. **The acquire is bounded and non-blocking.** A bare
+       ``fcntl.flock(fd, LOCK_EX)`` waits forever, so a lock leaked by a killed
+       process parks a connect eternally.
+    2. **The event loop never closes a descriptor a thread may be parked on.**
+       The acquiring thread owns its fd end to end (:func:`_acquire_locked_fd`
+       closes it itself on every non-success path), and the fd only ever
+       reaches this coroutine once no lock syscall is outstanding on it. This
+       matters because cancellation is routine here — ``/resume`` disposes the
+       manager, which cancels in-flight connect tasks mid-acquire — and on
+       macOS/BSD ``os.close()`` of a descriptor with a sibling thread inside
+       ``flock()`` blocks until that ``flock()`` returns. Called from a
+       ``finally`` on the event-loop thread, that stops the loop dead: the
+       screen freezes and never repaints. Do not reintroduce a blocking acquire
+       or an event-loop-side close of a possibly-in-use fd.
+    """
+    lock_path = _oauth_refresh_lock_path(server_url)
+    # Signals the worker to abandon its retry loop when our await is cancelled,
+    # so a cancelled acquire never leaves a thread running to the full bound.
+    cancelled = threading.Event()
+    # Acquire off the event loop: a contended lock must not stall other
+    # servers' connects. The lock is on the fd, so it survives the await.
+    acquire = asyncio.create_task(asyncio.to_thread(_acquire_locked_fd, str(lock_path), cancelled))
     try:
-        # Acquire off the event loop: a contended lock must not stall other
-        # servers' connects. The lock is on the fd, so it survives the await.
-        await asyncio.to_thread(_lock_exclusive, fd)
-        yield
+        fd = await asyncio.shield(acquire)
+    except asyncio.CancelledError:
+        # Hand the fd's fate entirely to the worker: tell it to stop, and let
+        # the (shielded, so still-running) task close whatever it opened once
+        # its last lock syscall has returned. We return immediately — nothing
+        # here touches the descriptor, which is what keeps the loop alive.
+        cancelled.set()
+        acquire.add_done_callback(_close_abandoned_lock_fd)
+        raise
+    if fd is None:
+        logger.debug(
+            "MCP OAuth refresh lock not acquired within %.0fs for %s; proceeding unlocked",
+            LOCK_ACQUIRE_TIMEOUT_S,
+            server_url,
+        )
+        yield False
+        return
+    try:
+        yield True
     finally:
+        # Safe to close on this thread: the worker returned the fd only after
+        # its lock call completed, so no thread is parked on it.
         with contextlib.suppress(Exception):
             _unlock(fd)
+        os.close(fd)
+
+
+def _close_abandoned_lock_fd(task: asyncio.Task[int | None]) -> None:
+    """Close a lock fd whose waiter was cancelled before it could take it.
+
+    Runs on the event loop when the shielded acquire finally settles, which is
+    AFTER the worker thread's last lock syscall — so this close can never block
+    the loop. Without it a lock acquired just as its waiter was cancelled would
+    leak the descriptor and, worse, keep the lock held for the process's life.
+    """
+    if task.cancelled():
+        return
+    if task.exception() is not None:
+        return
+    fd = task.result()
+    if fd is None:
+        return
+    with contextlib.suppress(Exception):
+        _unlock(fd)
+    with contextlib.suppress(OSError):
         os.close(fd)
 
 
@@ -1639,7 +1805,15 @@ async def ensure_mcp_oauth_fresh(
     ):
         return endpoints
 
-    async with _oauth_refresh_lock(server_url):
+    async with _oauth_refresh_lock(server_url) as locked:
+        if not locked:
+            # The bounded acquire gave up, so we cannot claim exclusivity and
+            # must not spend the rotating refresh token on a guess. Skip the
+            # PROACTIVE refresh and connect anyway: the SDK's own in-flow
+            # refresh still runs on the first 401, and the coordinator wrapper
+            # re-reads the store before it does. A skipped optimisation costs a
+            # round trip; blocking the connect costs the whole session.
+            return endpoints
         # Re-read under the lock: another session may have refreshed while we
         # waited. Spending a rotated refresh token a second time is exactly the
         # race this lock exists to prevent.
@@ -1837,11 +2011,19 @@ def _make_refresh_coordinating_provider(
             if ctx.is_token_valid() or not ctx.can_refresh_token():
                 return
             try:
-                async with _oauth_refresh_lock(self._refresh_coord_server_url):
+                async with _oauth_refresh_lock(self._refresh_coord_server_url) as locked:
                     # Re-read under the lock: a sibling process may have rotated
                     # the token while we waited. Adopting its result is what
                     # turns a double-spend into a no-op.
                     await self._resync_from_store(ctx)
+                    if not locked:
+                        # No exclusivity, so we must not perform the exchange
+                        # ourselves. The re-read above still upholds the
+                        # invariant that matters most (the SDK never spends an
+                        # in-memory refresh token older than storage's), and the
+                        # SDK's own refresh then proceeds — the pre-coordination
+                        # behaviour, which is the correct degrade.
+                        return
                     if ctx.is_token_valid():
                         return  # a peer already refreshed; do not spend again
                     # The invariant this whole block exists to guarantee: the
@@ -1919,6 +2101,9 @@ def _make_refresh_coordinating_provider(
             """
             try:
                 async with _oauth_refresh_lock(self._refresh_coord_server_url):
+                    # Adopt regardless of whether the lock was taken: this is a
+                    # READ, and reading the freshest persisted token is strictly
+                    # better than keeping a staler in-memory one even unlocked.
                     await self._resync_from_store(ctx)
             except Exception:  # noqa: BLE001 — best-effort; never break the request
                 logger.debug(
@@ -2097,6 +2282,9 @@ def _make_refresh_coordinating_provider(
             """
             try:
                 async with _oauth_refresh_lock(self._refresh_coord_server_url):
+                    # Adoption only READS the store and rewrites our own header;
+                    # it never spends the refresh token, so an unlocked pass is
+                    # safe and still beats handing a 401 straight to the SDK.
                     stored = await self.context.storage.get_tokens()
                     if stored is None or not stored.access_token:
                         return None

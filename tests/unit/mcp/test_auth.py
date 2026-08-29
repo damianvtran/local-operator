@@ -10,6 +10,7 @@ through the real SQLite store.
 from __future__ import annotations
 
 import contextlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -2326,3 +2327,220 @@ class TestRefreshOAuthTokenLocked:
         assert ok is True
         assert seen["ua"]  # non-empty
         assert seen["ua"].startswith("local-operator")
+
+
+class TestOAuthRefreshLock:
+    """The cross-process refresh lock must never park or freeze the event loop.
+
+    The bug these guard: the acquire was a bare blocking ``fcntl.flock(LOCK_EX)``
+    on a worker thread, and the ``finally`` closed the fd from the EVENT LOOP.
+    On macOS/BSD ``os.close()`` of a descriptor with a sibling thread parked in
+    ``flock()`` blocks until that ``flock()`` returns, so cancelling a connect
+    mid-acquire (exactly what ``/resume`` does when it disposes the manager)
+    froze the whole TUI: no repaint, no input, forever.
+    """
+
+    URL_A = "https://mcp.example.com/a"
+    URL_B = "https://mcp.example.com/b"
+
+    #: Command for a FOREIGN process that takes the lock and holds it. It must be
+    #: another process: ``flock`` is per open-file-description, so a second
+    #: acquire from this same process would not contend and would prove nothing.
+    _HOLDER_SRC = (
+        "import fcntl,os,sys,time;"
+        "fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600);"
+        "fcntl.flock(fd,fcntl.LOCK_EX);"
+        "print('held',flush=True);"
+        "time.sleep(120)"
+    )
+
+    @contextlib.contextmanager
+    def _foreign_holder(self, path: Path) -> Any:
+        import subprocess
+        import sys as _sys
+
+        proc = subprocess.Popen(
+            [_sys.executable, "-c", self._HOLDER_SRC, str(path)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.stdout is not None
+            assert proc.stdout.readline().strip() == "held"
+            yield proc
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    @pytest.fixture
+    def _cfg_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """An isolated config dir, so a test never contends with the developer's
+        own running sessions (several ``lop`` processes share the real one)."""
+        from local_operator.paths import CONFIG_DIR_ENV
+
+        monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+        return tmp_path
+
+    def test_each_server_gets_its_own_lock_file(self, _cfg_dir: Path) -> None:
+        """A global lock made every OAuth server queue behind the slowest one, so
+        one unreachable provider left the rest stuck on "connecting" forever."""
+        from local_operator.mcp import auth as auth_mod
+
+        path_a = auth_mod._oauth_refresh_lock_path(self.URL_A)
+        path_b = auth_mod._oauth_refresh_lock_path(self.URL_B)
+
+        assert path_a != path_b
+        assert path_a.parent == _cfg_dir
+        # Stable across calls, or two processes would pick different files for
+        # the same server and never actually exclude each other.
+        assert path_a == auth_mod._oauth_refresh_lock_path(self.URL_A)
+
+    #: The cancel-mid-acquire dance, run in a CHILD process on purpose. Against
+    #: the pre-fix code the event loop is genuinely dead (the ``os.close`` in the
+    #: ``finally`` blocks it), so an in-process version of this test would hang
+    #: the whole suite instead of failing — ``asyncio.wait_for`` cannot fire on a
+    #: loop that is not running. A child with a hard timeout turns that hang into
+    #: a deterministic assertion failure.
+    _CANCEL_PROBE_SRC = """
+import asyncio, os, sys
+sys.path.insert(0, os.environ["LO_REPO"])
+from local_operator.mcp import auth as auth_mod
+
+URL = sys.argv[1]
+
+async def main() -> None:
+    entered = asyncio.Event()
+
+    async def acquire() -> None:
+        entered.set()
+        async with auth_mod._oauth_refresh_lock(URL):
+            pass
+
+    ticks = 0
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    hb = asyncio.create_task(heartbeat())
+    task = asyncio.create_task(acquire())
+    await entered.wait()
+    await asyncio.sleep(0.2)
+    before = ticks
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=10.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    await asyncio.sleep(0.1)
+    hb.cancel()
+    # Printed ONLY if the loop was still scheduling throughout the unwind.
+    print("UNWOUND", ticks > before, flush=True)
+
+asyncio.run(main())
+"""
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX flock semantics")
+    @pytest.mark.asyncio
+    async def test_cancelling_mid_acquire_unwinds_without_blocking_the_loop(
+        self, _cfg_dir: Path
+    ) -> None:
+        """THE regression guard for the ``/resume`` freeze.
+
+        With a foreign process holding the lock, cancel a task inside the
+        acquire (what disposing the MCP manager does to in-flight connects) and
+        require the unwind to finish promptly with the event loop still
+        scheduling. Pre-fix, the child never prints and this fails on timeout.
+        """
+        import subprocess
+        import sys as _sys
+
+        from local_operator.mcp import auth as auth_mod
+
+        # Hold BOTH the per-server file and the legacy global one, so the probe
+        # is genuinely contended whichever naming the code under test uses.
+        held = {_cfg_dir / "mcp_oauth_refresh.lock"}
+        path_fn = getattr(auth_mod, "_oauth_refresh_lock_path", None)
+        if path_fn is not None:
+            held.add(path_fn(self.URL_A))
+
+        with contextlib.ExitStack() as stack:
+            for path in sorted(held):
+                stack.enter_context(self._foreign_holder(path))
+
+            env = dict(os.environ)
+            env["LO_REPO"] = str(Path(__file__).resolve().parents[3])
+            env["LOCAL_OPERATOR_CONFIG_DIR"] = str(_cfg_dir)
+            proc = subprocess.run(
+                [_sys.executable, "-c", self._CANCEL_PROBE_SRC, self.URL_A],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                env=env,
+            )
+
+        assert "UNWOUND True" in proc.stdout, (
+            "cancellation did not unwind with the loop alive; "
+            f"stdout={proc.stdout!r} stderr={proc.stderr[-2000:]!r}"
+        )
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX flock semantics")
+    @pytest.mark.asyncio
+    async def test_a_held_lock_is_abandoned_at_the_deadline_not_waited_on_forever(
+        self, _cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A leaked lock (killed process) must not park a connect eternally: the
+        acquire gives up at the bound and yields False so the caller degrades to
+        the SDK's own refresh instead of hanging."""
+        import asyncio
+        import time as _time
+
+        from local_operator.mcp import auth as auth_mod
+
+        # Shrink the bound so the test costs a moment, not the real budget.
+        monkeypatch.setattr(auth_mod, "LOCK_ACQUIRE_TIMEOUT_S", 0.5)
+        lock_path = auth_mod._oauth_refresh_lock_path(self.URL_A)
+
+        with self._foreign_holder(lock_path):
+            started = _time.monotonic()
+            async with asyncio.timeout(20):
+                async with auth_mod._oauth_refresh_lock(self.URL_A) as locked:
+                    elapsed = _time.monotonic() - started
+                    # Degraded, but the body RAN: the connect proceeds.
+                    assert locked is False
+            assert elapsed < 10.0
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX flock semantics")
+    @pytest.mark.asyncio
+    async def test_one_servers_held_lock_does_not_delay_another_server(
+        self, _cfg_dir: Path
+    ) -> None:
+        """The contention this bug manufactured: with a shared lock file, a stuck
+        server B blocked server A's connect even though they can never race."""
+        import asyncio
+        import time as _time
+
+        from local_operator.mcp import auth as auth_mod
+
+        held = auth_mod._oauth_refresh_lock_path(self.URL_B)
+
+        with self._foreign_holder(held):
+            started = _time.monotonic()
+            async with asyncio.timeout(20):
+                async with auth_mod._oauth_refresh_lock(self.URL_A) as locked:
+                    assert locked is True  # uncontended
+            assert _time.monotonic() - started < 5.0
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX flock semantics")
+    @pytest.mark.asyncio
+    async def test_the_lock_is_released_for_the_next_waiter(self, _cfg_dir: Path) -> None:
+        """Normal release still works: a second acquire after a clean exit gets
+        the lock rather than timing out against our own leaked descriptor."""
+        from local_operator.mcp import auth as auth_mod
+
+        async with auth_mod._oauth_refresh_lock(self.URL_A) as first:
+            assert first is True
+        async with auth_mod._oauth_refresh_lock(self.URL_A) as second:
+            assert second is True
