@@ -452,7 +452,29 @@ Editor .text-area--cursor {
     background: $lo-fg;
 }
 
+/* The composer's selection band.
+ *
+ * The INK is pinned, not merely the ground. Setting only `background` left the
+ * selected run on Textual's own built-in default, a near-white that is a
+ * dark-theme assumption masquerading as a neutral: on the light ramp it landed
+ * at 1.003:1 against this band, so selected text did not highlight, it ERASED
+ * — a triple-click made the whole draft look deleted, which is the one
+ * sentence the multi-click gesture exists to stop a user saying (design round
+ * 1, D1). Naming `$lo-fg` keeps the selected run in the ramp's own prose ink,
+ * so the band changes the GROUND and never the legibility of the text on it.
+ *
+ * Checked across all 35 registered themes, not just the two brand ramps, since
+ * this rule is shared by every one of them: the weakest is `one-dark` at
+ * 6.02:1 and the light ramp reads 12.63:1, all clear of AA.
+ *
+ * The ground stays `edge` deliberately. It is the ramp's documented "selected
+ * prose" ground, and the attachment chip's colours are calibrated AGAINST it —
+ * the resting chip is iso-luminant with `edge` so it never outranks a real
+ * selection, and the selected chip sits a further step above it (see
+ * `.text-area--image-marker` below). Swapping the band for another tint would
+ * silently retune that relationship. */
 Editor .text-area--selection {
+    color: $lo-fg;
     background: $lo-edge;
 }
 
