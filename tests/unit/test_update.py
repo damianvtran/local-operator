@@ -156,6 +156,36 @@ def test_force_bypasses_ttl_and_rewrites(tmp_path: Path) -> None:
     assert written["payload"]["version"] == "0.28.0"
 
 
+class _MetadataDist:
+    """Distribution stand-in exposing only the ``read_text`` the module calls.
+
+    ``object()`` is enough for the layout probes, which answer before any
+    metadata is read. The ``INSTALLER`` path needs a real file body, and
+    ``None`` — what ``read_text`` returns for an absent file — is the case
+    that must stay ``UNKNOWN``.
+    """
+
+    def __init__(self, installer: str | None = None) -> None:
+        self._installer = installer
+
+    def read_text(self, name: str) -> str | None:
+        return self._installer if name == "INSTALLER" else None
+
+
+@contextmanager
+def _base_interpreter(prefix: Path):
+    """``sys.prefix == sys.base_prefix``: the mise/pyenv/asdf layout of #396.
+
+    Patched rather than constructed because ``_is_ordinary_pip`` reads the
+    live ``sys``; the seam keeps the running process untouched.
+    """
+    with (
+        patch.object(update_mod.sys, "prefix", str(prefix)),
+        patch.object(update_mod.sys, "base_prefix", str(prefix)),
+    ):
+        yield
+
+
 def test_install_kind_uv_receipt(tmp_path: Path) -> None:
     prefix = tmp_path / "uv" / "tools" / "local-operator"
     prefix.mkdir(parents=True)
@@ -214,14 +244,106 @@ def test_install_kind_no_distribution(tmp_path: Path) -> None:
 
 
 def test_install_kind_unknown(tmp_path: Path) -> None:
+    """Genuinely unidentifiable: base prefix, no ``pyvenv.cfg``, no ``INSTALLER``.
+
+    Before #396 this asserted the bug — the same layout with a pip-written
+    ``INSTALLER`` was called UNKNOWN too. Refusing still has to be possible,
+    so the case is kept and stripped of the one signal that identifies it.
+    """
     with (
         patch.object(update_mod, "distribution") as dist,
         patch.object(update_mod, "_is_editable_direct_url", return_value=False),
-        patch.object(update_mod.sys, "prefix", str(tmp_path)),
-        patch.object(update_mod.sys, "base_prefix", str(tmp_path)),
+        _base_interpreter(tmp_path),
     ):
-        dist.return_value = object()
+        dist.return_value = _MetadataDist(installer=None)
         assert install_kind(prefix=tmp_path) is InstallKind.UNKNOWN
+
+
+@pytest.mark.parametrize("installer", ["uv", "pipx", "pipenv", "conda"])
+def test_install_kind_unknown_for_unrecognised_installer(tmp_path: Path, installer: str) -> None:
+    """Refuse-don't-guess: a foreign installer is not silently upgraded with pip.
+
+    The values are chosen to be EXECUTABLE versions of the probe's own
+    argument, not merely foreign names. ``uv`` is the one the docstring
+    reasons about — ``uv pip install --system`` writes it into a base
+    prefix, where ``uv tool upgrade`` is the wrong command — so accepting it
+    here would be exactly the guess the module refuses. ``pipx`` and
+    ``pipenv`` are the substring traps: a probe written as ``"pip" in
+    installer`` rather than ``== "pip"`` passes a ``conda``-only test and
+    fails these.
+    """
+    with (
+        patch.object(update_mod, "distribution") as dist,
+        patch.object(update_mod, "_is_editable_direct_url", return_value=False),
+        _base_interpreter(tmp_path),
+    ):
+        dist.return_value = _MetadataDist(installer=installer)
+        assert install_kind(prefix=tmp_path) is InstallKind.UNKNOWN
+
+
+def test_install_kind_pip_on_base_interpreter(tmp_path: Path) -> None:
+    """#396: ``pip install`` under mise/pyenv/asdf is PIP, not UNKNOWN.
+
+    The reporter's prefix equalled ``base_prefix`` and carried no
+    ``pyvenv.cfg``, so both layout probes declined and ``/update`` refused an
+    upgrade ``pip install -U`` would have made. ``INSTALLER`` says ``pip``.
+    """
+    with (
+        patch.object(update_mod, "distribution") as dist,
+        patch.object(update_mod, "_is_editable_direct_url", return_value=False),
+        _base_interpreter(tmp_path),
+    ):
+        dist.return_value = _MetadataDist(installer="pip\n")
+        assert not (tmp_path / "pyvenv.cfg").exists()
+        assert install_kind(prefix=tmp_path) is InstallKind.PIP
+
+
+def test_install_kind_uv_tool_not_downgraded_to_pip(tmp_path: Path) -> None:
+    """A uv tool env whose ``INSTALLER`` reads ``uv`` still upgrades with uv."""
+    prefix = tmp_path / "uv" / "tools" / "local-operator"
+    prefix.mkdir(parents=True)
+    (prefix / "uv-receipt.toml").write_text("[tool]\n", encoding="utf-8")
+    with (
+        patch.object(update_mod, "distribution") as dist,
+        patch.object(update_mod, "_is_editable_direct_url", return_value=False),
+        _base_interpreter(prefix),
+    ):
+        dist.return_value = _MetadataDist(installer="uv")
+        assert install_kind(prefix=prefix) is InstallKind.UV_TOOL
+
+
+def test_install_kind_pipx_not_downgraded_to_pip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pipx vendors pip inside its venv, so its ``INSTALLER`` can read ``pip``."""
+    home = tmp_path / "pipx-home"
+    prefix = home / "venvs" / "local-operator"
+    prefix.mkdir(parents=True)
+    monkeypatch.setenv("PIPX_HOME", str(home))
+    with (
+        patch.object(update_mod, "distribution") as dist,
+        patch.object(update_mod, "_is_editable_direct_url", return_value=False),
+        _base_interpreter(prefix),
+    ):
+        dist.return_value = _MetadataDist(installer="pip")
+        assert install_kind(prefix=prefix) is InstallKind.PIPX
+
+
+def test_install_kind_editable_outranks_pip_installer(tmp_path: Path) -> None:
+    """The editable guard runs first: ``INSTALLER`` names the tool, not the safety.
+
+    A contributor's checkout is installed with ``pip install -e``, so its
+    ``INSTALLER`` reads ``pip`` exactly like the #396 repro. Letting that
+    signal reach ``_is_ordinary_pip`` would point ``pip install -U`` at the
+    repo ``.venv`` and smash the editable link.
+    """
+    with (
+        patch.object(update_mod, "distribution") as dist,
+        patch.object(update_mod, "_is_editable_direct_url", return_value=True),
+        _base_interpreter(tmp_path),
+    ):
+        dist.return_value = _MetadataDist(installer="pip")
+        assert install_kind(prefix=tmp_path) is InstallKind.EDITABLE
 
 
 def test_perform_upgrade_runs_detected_argv() -> None:
