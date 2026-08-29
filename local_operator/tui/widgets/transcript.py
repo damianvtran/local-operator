@@ -1170,6 +1170,62 @@ class NoticeBlock(TranscriptBlock):
         finally:
             self._finalized = was_finalized
 
+    def _rows(self, body: int) -> list[str]:
+        """The notice's text rows at ``body`` cells, glyph field not yet applied.
+
+        Authored newlines are rows, not characters. Handing the whole string to
+        ``wrap_cells`` — which splits on ``" "`` only — made every ``\\n`` an
+        ordinary character INSIDE a word, so it was measured into that word's
+        width and then printed literally mid-row. ``/update``'s
+        :func:`~local_operator.update.unknown_refusal` is six authored lines and
+        came out as ``s.prefix:``, ``orted upgrades:``, ``px upgrade``,
+        ``thon -m pip`` — issue #397. Three to four characters off the front of
+        every line the author had indented, because the same helper rebuilds
+        rows with a single separator and a LEADING run of spaces is dropped
+        (the empty words never re-add their separator while ``current`` is
+        still falsy). So the indent is lifted out before wrapping and put back
+        on every row the line produces, which is what keeps ``  uv tool upgrade
+        local-operator`` reading as one of three offered commands rather than as
+        prose.
+
+        This is :meth:`UserBlock._rows`'s discipline, arriving here for the
+        reason that comment did not foresee: it fixed the split in the caller on
+        the premise that notices "have no authored indentation to keep", and
+        ``unknown_refusal`` authors both newlines and indentation. ``wrap_cells``
+        itself still must not change — it also lays out tool rows, whose single
+        space-joined strings would gain a newline-splitting branch none of them
+        can reach.
+
+        An authored break lands on the HANGING indent, exactly like a wrapped
+        one. The glyph field is a gutter of fixed width, not a first-row prefix:
+        :meth:`copy_gutter` returns :attr:`GLYPH_COLS` for every index, so a row
+        that started at column 0 would have four cells of its own text stripped
+        off a copy. Returning the author's line to the spine would also put it
+        under the glyph rather than under the sentence, which reads as a second
+        notice — the same "several statements instead of one" the hanging indent
+        exists to prevent. The author's own indent then sits ON TOP of that
+        gutter, so relative shape survives while the block stays one column.
+
+        Blank rows are trimmed at the ENDS for the reason the split creates
+        them: before this, a leading ``\\n`` was just a character, and now it is
+        a row — one that would carry the kind glyph beside no text at all, with
+        the sentence it marks on the row below. A trailing one is pinned height
+        spent on nothing. Interior blanks stay: there a blank row is the
+        paragraph break the author typed. At least one row always survives, so
+        an empty notice is still a block with a height.
+        """
+        rows: list[str] = []
+        for line in self._text.split("\n"):
+            stripped = line.lstrip(" ")
+            indent = " " * min(len(line) - len(stripped), max(body - 1, 0))
+            room = max(body - len(indent), 1)
+            rows.extend(indent + row if row else "" for row in wrap_cells(stripped, room))
+        while len(rows) > 1 and not rows[0]:
+            rows.pop(0)
+        while len(rows) > 1 and not rows[-1]:
+            rows.pop()
+        return rows
+
     def _build(self) -> RenderableType:
         """Glyph + text on the spine, WRAPPED with a hanging indent.
 
@@ -1193,14 +1249,16 @@ class NoticeBlock(TranscriptBlock):
         stylesheet re-wrap would also reflow the hanging indent it cannot see.
         Every wrapped row is centred on its own width, so a notice that folds to
         two or three lines still reads as one centred block rather than a centred
-        first line with ragged continuations.
+        first line with ragged continuations — and a row is a row whether the
+        break was the wrap's or the author's, so :meth:`_rows` feeds this loop
+        the same list either way.
         """
         style = Style(color=theme_mod.semantic_color(self._token))
         indent = " " * SPINE_INDENT
         hanging = " " * (SPINE_INDENT + 2)
         width = max((self.size.width or 80) - 2, 12)
         body = max(width - cell_len(hanging), 8)
-        rows = wrap_cells(self._text, body)
+        rows = self._rows(body)
         centred = self.has_class(BOOT_COLUMN_CLASS)
         line = Text(no_wrap=True, overflow="ellipsis")
         for index, row in enumerate(rows):
