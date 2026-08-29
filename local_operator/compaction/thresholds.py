@@ -35,6 +35,7 @@ __all__ = [
     "cleared_headroom",
     "compaction_context_tokens",
     "effective_reserve_tokens",
+    "resolve_advisor_floor_tokens",
     "resolve_strategy",
     "resolve_threshold_cap_tokens",
     "resolve_threshold_percent",
@@ -110,6 +111,83 @@ class CompactionSettings(BaseModel):
     )
     mid_turn_enabled: bool = Field(
         default=True, description="Allow threshold compaction at safe tool-loop boundaries."
+    )
+
+    # --- Speculative compaction advisor (BETA, off by default) -------------
+    #
+    # Every field below is optional with an inert default, so a config written
+    # before this feature validates unchanged AND resolves to byte-identical
+    # behaviour: with ``advisor_enabled`` false nothing reads the rest.
+    #
+    # The advisor exists because the shipped trigger is a SIZE trigger and the
+    # thing that actually hurts is a cut landing inside a live task. The
+    # operator has explicitly asked to retain capacity up to the 600k ceiling
+    # when genuinely needed, so the fix is NOT a lower default threshold; it is
+    # a semantic second opinion that may only pull the trigger earlier, and
+    # only down to ``advisor_floor_tokens``.
+    advisor_enabled: bool = Field(
+        default=False,
+        description=(
+            "BETA. Ask the model, off the turn's critical path, whether the"
+            " context is at a natural task boundary and worth compacting early."
+            " The advice can only make a pass fire EARLIER, never later, and"
+            " never below advisor_floor_tokens."
+        ),
+    )
+    advisor_every_n_turns: int = Field(
+        default=20,
+        description=(
+            "Turns between advisor calls. The advisor reads the whole context,"
+            " so it is cheap only as a prompt-cache READ; asking every turn"
+            " would multiply that by the turn count for advice that changes"
+            " slowly."
+        ),
+    )
+    advisor_floor_tokens: int = Field(
+        default=200_000,
+        description=(
+            "Hard floor on the advisor-lowered trigger. The advisor may pull"
+            " the trigger down to this and no further, so a confidently wrong"
+            " hint costs an early pass, never a compaction treadmill."
+        ),
+    )
+    advisor_trigger_tokens: int = Field(
+        default=300_000,
+        description=(
+            "Context size below which the advisor is not consulted at all."
+            " Under it there is no problem to solve and the call would be pure"
+            " cost."
+        ),
+    )
+    advisor_min_confidence: float = Field(
+        default=0.6,
+        description="Hints below this self-reported confidence are discarded, not repaired.",
+    )
+    advisor_timeout_s: float = Field(
+        default=30.0,
+        description=(
+            "Total budget for one advisor call. Nothing awaits the call, so"
+            " this bounds the background task rather than a turn."
+        ),
+    )
+    advisor_max_calls: int = Field(
+        default=200,
+        description=(
+            "Ceiling on advisor calls per session, so a very long run cannot"
+            " drift. 0 means NO CALLS (the advisor is off), not 'unlimited' —"
+            " deliberately unlike the sibling knobs, where 0 disables a"
+            " restriction. This one IS the restriction, so the fail-closed"
+            " reading is the safe one: a config that zeroes a spend ceiling"
+            " must not thereby remove it."
+        ),
+    )
+    advisor_cooldown_turns: int = Field(
+        default=60,
+        description=(
+            "Turns the advisor is suppressed for after an advisor-triggered"
+            " pass. Anti-thrash: the pass just moved the boundary it would be"
+            " asked to judge."
+        ),
     )
 
     @model_validator(mode="before")
@@ -260,15 +338,68 @@ def resolve_threshold_tokens(window_tokens: int, settings: CompactionSettings) -
     return max(1, min(trigger, window_tokens - 1))
 
 
-def should_compact(context_tokens: int, window_tokens: int, settings: CompactionSettings) -> bool:
+def resolve_advisor_floor_tokens(window_tokens: int, settings: CompactionSettings) -> int:
+    """Lowest trigger the compaction advisor is allowed to ask for.
+
+    Lives beside :func:`resolve_threshold_tokens` because it is the same kind
+    of number and must be derived in the same one place. It is a FLOOR, not a
+    trigger: :func:`should_compact` takes ``min(threshold, this)``, so the
+    advisor moves the trigger down to it and can never move it up.
+
+    Clamped into ``[1, resolve_threshold_tokens(...)]``. The upper clamp is
+    what guarantees the "earlier only" posture even when a config sets
+    ``advisor_floor_tokens`` above the ordinary trigger (which would otherwise
+    read as "compact later when the advisor is on" — a second, competing
+    trigger). A non-positive floor is meaningless and falls back to the
+    ordinary trigger, i.e. the advisor changes nothing.
+    """
+    threshold = resolve_threshold_tokens(window_tokens, settings)
+    floor = int(getattr(settings, "advisor_floor_tokens", 0) or 0)
+    if floor <= 0:
+        return threshold
+    return max(1, min(floor, threshold))
+
+
+def should_compact(
+    context_tokens: int,
+    window_tokens: int,
+    settings: CompactionSettings,
+    *,
+    advisory_ok: bool = False,
+) -> bool:
     """Whether the current context exceeds the compaction threshold.
 
     Strictly greater-than so a context exactly on the threshold is stable;
     ``window_tokens <= 0`` (unknown window) never triggers.
+
+    ``advisory_ok`` is the compaction advisor's ONLY entry point into the
+    trigger, and it is deliberately a parameter of THIS function rather than a
+    second predicate beside it. The advisor answers "is now a good moment?";
+    it does not answer "should we compact?", and a separate
+    ``advisor_should_compact()`` would be exactly the trigger drift this
+    module's docstring forbids — two functions free to disagree about when a
+    pass is due, which is how a 1M-context session ended up firing at 23% of
+    its window.
+
+    So an accepted hint lowers the threshold to
+    ``min(threshold, resolve_advisor_floor_tokens(...))`` and nothing else.
+    That is the same posture an explicit ``reserve_tokens`` already has in
+    :func:`resolve_threshold_tokens`: an additional input that can only pull
+    the trigger EARLIER, never later, and never past a floor. Every other
+    property of the trigger — monotonicity in ``context_tokens`` (which the
+    session's cheap upper-bound pre-gate depends on), the strict inequality,
+    the disabled/off short-circuit — is untouched, so a future reader citing
+    this as precedent should carry those constraints too.
+
+    With ``advisory_ok`` false (its default, and what every caller but the
+    plan gate passes) the function is byte-identical to its previous form.
     """
     if not settings.enabled or settings.strategy == "off" or window_tokens <= 0:
         return False
-    return context_tokens > resolve_threshold_tokens(window_tokens, settings)
+    threshold = resolve_threshold_tokens(window_tokens, settings)
+    if advisory_ok and getattr(settings, "advisor_enabled", False):
+        threshold = min(threshold, resolve_advisor_floor_tokens(window_tokens, settings))
+    return context_tokens > threshold
 
 
 def compaction_context_tokens(provider_reported: int | None, local_estimate: int) -> int:

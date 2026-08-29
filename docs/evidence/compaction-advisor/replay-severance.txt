@@ -1,0 +1,17 @@
+transcript: /Users/damian/.local-operator/sessions/bda7b76d34e0/transcript.jsonl
+entries: 8,005   user turns: 70   continuations: 19
+active-task span at each pass (600,000 recency): 32.3k, 0.9k, 101.5k, 63.1k
+  p50 47.7k   max 101.5k   vs keep_recent_tokens 20k
+
+  trigger  rule        passes  severed  sever%  cont-sever%  replay Mtok  vs 600k
+---------------------------------------------------------------------------------
+  300,000  recency          9        5     56%           0%        1,296    42.4%
+  300,000  task-aware      10        1     10%           0%        1,373    39.0%
+  400,000  recency          6        3     50%           0%        1,704    24.2%
+  400,000  task-aware       7        1     14%           0%        1,700    24.4%
+  600,000  recency          4        3     75%         100%        2,249     0.0%
+  600,000  task-aware       4        0      0%           0%        2,428    -7.9%
+
+severance = passes whose cut lands inside the task in flight.
+cont-sever% = the same, restricted to passes during a CONTINUATION turn,
+which is where a purely local rule is weakest.

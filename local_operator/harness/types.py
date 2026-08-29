@@ -1180,6 +1180,13 @@ class CompactionEndEvent(AgentEvent[Literal["compaction_end"]]):
     strategy: str = ""
     tokens_before: int = 0
     tokens_after: int = 0
+    #: Optional one-clause explanation appended to the receipt, for a pass
+    #: whose timing the numbers alone do not explain. The compaction advisor
+    #: (BETA) sets it when it pulled the trigger below the configured
+    #: threshold: without it an early pass reads as the trigger misfiring.
+    #: Optional and defaulting to ``None`` so a host that predates it (and
+    #: every ordinary size-triggered pass) is unchanged.
+    detail: str | None = None
 
 
 class RetryStartEvent(AgentEvent[Literal["retry_start"]]):

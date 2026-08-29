@@ -288,6 +288,7 @@ class CompactionEnded(Message):
         strategy: str = "",
         tokens_before: int = 0,
         tokens_after: int = 0,
+        detail: str | None = None,
     ) -> None:
         super().__init__()
         self.reason = reason
@@ -295,6 +296,9 @@ class CompactionEnded(Message):
         self.strategy = strategy
         self.tokens_before = tokens_before
         self.tokens_after = tokens_after
+        #: Optional clause explaining a pass whose timing the numbers do not
+        #: explain (the compaction advisor firing below the threshold).
+        self.detail = detail
 
 
 class RetryStarted(Message):
@@ -675,6 +679,9 @@ class EventController:
                 event.strategy,
                 event.tokens_before,
                 event.tokens_after,
+                # getattr: a host or session predating the field emits an
+                # event without it, same tolerance the token pair had.
+                getattr(event, "detail", None),
             )
         )
 
