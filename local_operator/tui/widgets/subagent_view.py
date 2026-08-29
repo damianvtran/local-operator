@@ -48,6 +48,8 @@ down.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -64,7 +66,7 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
-from local_operator.harness.jobs import CANCELLED_BEFORE_START
+from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
@@ -212,6 +214,66 @@ def _content_text(payload: Any) -> str:
     return "".join(parts)
 
 
+def _digest(event: Mapping[str, Any]) -> str:
+    """A short, stable fingerprint of one event's CONTENT.
+
+    Used only for events with no :data:`TRAJECTORY_SEQ_KEY` stamp, where the
+    content is the only intrinsic thing left to identify a row by. Sorted keys
+    so two equal dicts fingerprint equally regardless of insertion order, and
+    ``default=str`` because a trajectory handed over by a future engine may
+    hold a value ``json`` cannot encode — a degraded fingerprint is fine here,
+    a raised exception inside the 1 Hz refresh is not.
+    """
+    try:
+        payload = json.dumps(event, sort_keys=True, default=str)
+    except Exception:  # pragma: no cover - exotic producer data only
+        payload = repr(event)
+    return hashlib.blake2s(payload.encode("utf-8", "replace"), digest_size=8).hexdigest()
+
+
+class _Anchors:
+    """Eviction-proof identities for the rows that have no id of their own.
+
+    THE CONSTRAINT, and the reason this exists: ``AsyncJob.trajectory`` evicts
+    from the FRONT (``harness/subagent._make_relay``), so an event's offset in
+    the folded window drops by one on every later append. The view accumulates
+    rows by key and never removes them (:meth:`SubagentView.show`), so any key
+    derived from that offset re-spells itself as the child works and mounts a
+    NEW identical row each refresh — one error notice became a dozen stacked
+    copies of itself. An identity here must come from something intrinsic to
+    the event, never from where it currently sits.
+
+    Preferred source is the writer's monotonic stamp, assigned at append time
+    and the one property eviction cannot touch. Absent it — events retained by
+    an older release, or a hand-built fixture — the content fingerprint stands
+    in, qualified by how many identical events precede it so two genuinely
+    distinct notices with the same wording still occupy two rows. That ordinal
+    counts over CONTENT, not over offsets, so appending cannot renumber it.
+
+    Resolved LAZILY, per event, because the fold runs once a second over a
+    500-event window and the overwhelming majority of those events carry a
+    message id or a ``tool_call_id`` and never ask for an anchor at all.
+    Fingerprinting the whole window up front measured ~11 ms per fold on a full
+    window of id-less events, spent almost entirely on rows that then discarded
+    it; the ordinal still has to be counted in window order, which is why this
+    is a small stateful object rather than a plain function.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, int] = {}
+
+    def of(self, event: Mapping[str, Any]) -> str:
+        stamp = event.get(TRAJECTORY_SEQ_KEY)
+        # ``bool`` is an ``int`` in Python and would alias seq 0 and 1; a
+        # producer that ever writes one is malformed, not authoritative.
+        if isinstance(stamp, int) and not isinstance(stamp, bool):
+            return f"s{stamp}"
+        fingerprint = _digest(event)
+        ordinal = self._seen.get(fingerprint, 0)
+        self._seen[fingerprint] = ordinal + 1
+        return f"d{fingerprint}.{ordinal}"
+
+
 def _first_line(text: str) -> str:
     """First non-empty line — what a failed tool card shows as its error."""
     for line in text.splitlines():
@@ -239,11 +301,18 @@ class SubagentEntry:
     """One row of the folded child transcript.
 
     A value, not a widget. ``key`` is the row's IDENTITY across folds — the
-    child's message id, its ``tool_call_id``, or the event's position for a
-    notice — and everything else is the row's current content. The view merges
-    successive folds by key and diffs by value, so a row has to be able to
-    answer both "am I the same row" and "have I changed" without consulting
+    child's message id, its ``tool_call_id``, or an eviction-proof anchor
+    (:func:`_stable_anchors`) for a notice and for anything the child sent
+    without an id — and everything else is the row's current content. The view
+    merges successive folds by key and diffs by value, so a row has to be able
+    to answer both "am I the same row" and "have I changed" without consulting
     the DOM.
+
+    The key may NOT be derived from the event's position in the retained
+    window. That window slides as the engine evicts from its front, so a
+    positional key renames a surviving row on every refresh, and because the
+    view only ever adds rows, each new spelling mounted another copy of the
+    same notice.
     """
 
     key: str
@@ -479,6 +548,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     finished: set[str] = set()
     tools: dict[str, SubagentEntry] = {}
     notices: dict[str, SubagentEntry] = {}
+    anchors = _Anchors()
 
     def remember(kind: str, key: str) -> None:
         identity = (kind, key)
@@ -486,9 +556,12 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             remembered.add(identity)
             ordered.append(identity)
 
-    def note(index: int, text: str, kind: NoticeKind) -> None:
-        notices[f"n{index}"] = _notice(f"n{index}", text, kind)
-        remember("notice", f"n{index}")
+    def note(event: Mapping[str, Any], text: str, kind: NoticeKind) -> None:
+        # Keyed by the event's own anchor, never by its position: a notice is
+        # the row this whole mechanism exists for (see :class:`_Anchors`).
+        key = f"n{anchors.of(event)}"
+        notices[key] = _notice(key, text, kind)
+        remember("notice", key)
 
     try:
         raw_events = list(events)
@@ -501,14 +574,16 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     # N are the ones that still exist; slicing from the front would freeze the
     # page at event 500 the moment the two caps ever diverge — while the note
     # above it claims to be showing the latest.
-    for index, raw in enumerate(raw_events[-TRAJECTORY_MAX_EVENTS:]):
+    for raw in raw_events[-TRAJECTORY_MAX_EVENTS:]:
         event = _as_dict(raw)
         etype = event.get("type")
         if etype in ("message_start", "message_update", "message_end"):
             message = event.get("message")
             if not isinstance(message, Mapping) or message.get("role") != "assistant":
                 continue
-            message_id = str(message.get("id") or f"m{index}")
+            # ``or`` short-circuits, so the anchor is only resolved for a
+            # message the child sent without an id — the uncommon case.
+            message_id = str(message.get("id") or f"m{anchors.of(event)}")
             if etype == "message_start":
                 streams[message_id] = ""
                 remember("text", message_id)
@@ -531,7 +606,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             # reads. An id-less call still cannot be correlated with its end —
             # its card stays unsettled by design, which is a degraded row
             # rather than a wrong one.
-            call_id = str(event.get("tool_call_id") or f"t{index}")
+            call_id = str(event.get("tool_call_id") or f"t{anchors.of(event)}")
             args = event.get("args")
             intent = event.get("intent")
             tools[call_id] = SubagentEntry(
@@ -569,16 +644,16 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
         elif etype == "notice":
             kind = str(event.get("kind") or "info")
             note(
-                index,
+                event,
                 str(event.get("text") or ""),
                 kind if kind in ("info", "note", "success", "warning", "error") else "info",
             )
         elif etype == "compaction_start":
-            note(index, "compacting context…", "info")
+            note(event, "compacting context…", "info")
         elif etype == "compaction_end":
             done = bool(event.get("success"))
             note(
-                index,
+                event,
                 "context compacted" if done else "compaction failed",
                 "info" if done else "warning",
             )
@@ -586,7 +661,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             body = f"retry {event.get('attempt', 1)}: {event.get('error', '')}".strip()
             if event.get("fallback_model"):
                 body += f" → falling back to {event.get('fallback_model')}"
-            note(index, body, "warning")
+            note(event, body, "warning")
         elif etype == "model_change":
             # Route notices narrate the edge once; this event only keeps model
             # labels and context limits truthful elsewhere in the subagent UI.
@@ -598,9 +673,9 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             # the parent's. Without it a failed subagent's page simply stopped,
             # and the reason lived only on the band row the reader had left.
             if event.get("error"):
-                note(index, str(event.get("error")), "error")
+                note(event, str(event.get("error")), "error")
             elif event.get("aborted"):
-                note(index, "interrupted", "warning")
+                note(event, "interrupted", "warning")
 
     rows: list[SubagentEntry] = []
     for kind, key in ordered:
