@@ -141,7 +141,6 @@ from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
-    DEFAULT_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
@@ -1148,6 +1147,32 @@ COMPOSER_COPY = object()
 #: holding `[Image #1, 1568x200]`, several seconds later, with no keypress to
 #: explain it.
 COMPOSER_PASTE_NOTICE = object()
+
+#: Owner tag for the IN-FLIGHT read card, deliberately distinct from
+#: :data:`COMPOSER_PASTE_NOTICE`.
+#:
+#: The two cards share a slot but not a lifetime, and conflating their owners
+#: was a real regression. The minimum-display floor (D10) defers the reading
+#: card's retirement, and that deferred `withdraw` fired AFTER an outcome had
+#: already replaced the card with a failure notice — pulling down a card it was
+#: never meant to touch, because `withdraw` matches on owner and both carried
+#: the same one. For reads landing in `[DELAY, DELAY + MIN)` the failure notice
+#: was destroyed, at 0.74 s showing for **0 ms**: the user pressed ctrl+v,
+#: waited through a visible pause and was told nothing, which is issue #372's
+#: original symptom restored (design round 3, D14).
+#:
+#: Separate owners make that unrepresentable rather than merely fixed: the
+#: retirement can only ever reach the progress card, whatever the timing. The
+#: failure notices keep `COMPOSER_PASTE_NOTICE` so `EditorPasteAttached` still
+#: retires a held one through the machinery it already used.
+COMPOSER_READING_NOTICE = object()
+
+#: What the composer says while a clipboard read is in flight. 22 cells, so it
+#: fits the toast's 58-cell content box at every width (design round 2, D4's
+#: measurement). Named here rather than inlined because the tests assert the
+#: user-visible string, and a card whose copy only exists inside a method body
+#: can drift from what the test pins.
+CLIPBOARD_READING_NOTICE = "Reading the clipboard…"
 
 
 class Chrome(Static):
@@ -5109,6 +5134,64 @@ class OperatorApp(App[None]):
         """
         self.query_one(Toast).withdraw(COMPOSER_COPY)
 
+    def show_clipboard_reading_notice(self, reading: bool) -> None:
+        """Raise or retire the in-flight clipboard-read card.
+
+        **Called DIRECTLY by the composer, not driven by a message, and the
+        difference is the whole fix.** `ctrl+v` is an awaited binding action on
+        the Editor's own message pump, so a message posted while that action is
+        suspended cannot be delivered until it returns: the card was measured
+        arriving 2-3 ms before the paste it was meant to narrate, at every read
+        duration (ux round 2, U3). The event loop is not blocked, so a timer
+        callback that calls this method runs on time and the card is on screen
+        while the read is still in flight. See `Editor.PASTE_READING_HOOK`.
+
+        `reading=False` retires it, and the composer calls that on EVERY
+        outcome rather than leaving each branch to clean up. The text branch
+        raises no `EditorPasteAttached` — it attaches nothing, so there is no
+        failure claim to falsify — and so used to leave this card sitting over
+        a completed paste for its full duration on the commonest ctrl+v shape
+        (design round 2, D7).
+
+        A COURTESY, not a failure: the user just pressed a key and this is news
+        about their own gesture, so `yield_to_actionable` keeps it from
+        evicting an MCP error they have not read. It takes the paste notices'
+        owner, so a later outcome replaces or withdraws it through the
+        machinery those notices already use.
+        """
+        from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS
+
+        # UNGUARDED `query_one`, deliberately, and the invariant is named
+        # rather than assumed (code round 3, F9). `compose` mounts the Toast
+        # once inside `#toast-host` and never removes it ("mounted once and
+        # kept", so showing a message never awaits a mount), and this method is
+        # reachable only from `Editor.action_system_paste` — a binding on a
+        # focused, mounted composer, which cannot exist before compose has run.
+        #
+        # A `NoMatches` guard here would therefore be unreachable code that
+        # silently swallows a broken layout. The one site in this file that
+        # DOES guard (`_splash_notice`) runs from a startup path that can fire
+        # before compose, which is the distinction.
+        toast = self.query_one(Toast)
+        if not reading:
+            # `withdraw` refuses any card that is not ours, so an MCP failure
+            # that took the slot while the read ran is never pulled out from
+            # under the user — and, since this owner is the READING card's
+            # alone, neither is the paste outcome's own notice. That separation
+            # is what makes the deferred retirement safe (see
+            # `COMPOSER_READING_NOTICE`): by the time a delayed withdrawal
+            # fires, the slot may already belong to the failure card that
+            # replaced this one, and owner matching is the only thing standing
+            # between that card and a `dismiss_toast` (D14).
+            toast.withdraw(COMPOSER_READING_NOTICE)
+            return
+        toast.show(
+            CLIPBOARD_READING_NOTICE,
+            duration_ms=TOAST_DEFAULT_MS,
+            yield_to_actionable=True,
+            owner=COMPOSER_READING_NOTICE,
+        )
+
     def on_editor_paste_empty(self, message: EditorPasteEmpty) -> None:
         """A paste that could only have been an image attached nothing — say so.
 
@@ -5154,13 +5237,28 @@ class OperatorApp(App[None]):
         from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS, TOAST_FAILURE_MS
 
         if message.reason == "remote":
-            text = "Clipboard images aren't read over SSH. Paste a file path instead."
+            # 46 cells against the toast's 58-cell content box. The previous
+            # wording was 65 and wrapped to two lines at EVERY terminal width,
+            # and the second line lands on the ASCII logo behind the card -
+            # visible in this PR's own `after-remote.svg`, where the logo's top
+            # rows are clipped (design round 1, D4). Every other notice in this
+            # family is one line; this one now is too, and it keeps the remedy
+            # that makes it actionable.
+            text = "Clipboard isn't read over SSH. Paste a file path."
         elif message.reason == "unattachable":
             # No "paste its file path" here any more: the path route runs the
             # same bounding tail, so a refusal caused by the IMAGE cannot be
             # cured by changing how it is delivered, and the retry fails
             # silently because the path branch raises no notice (round 2, D10).
-            text = "Couldn't attach that image. It may be too large or corrupt."
+            # 45 cells. The previous copy was 59 against the toast's 58-cell
+            # content box, so it wrapped to two lines and clipped the logo -
+            # the identical defect D4 was raised for on the SSH notice. It was
+            # left alone in round 1 as untouched copy; the reachability is what
+            # changed, and this PR is what changed it (design round 2, D8): on
+            # base this branch was reachable only from the zero-byte paste path
+            # that never fires outside cmux, and ctrl+v now reaches it for
+            # every user.
+            text = "Couldn't attach that image. Too large or corrupt."
         elif message.reason == "unreadable":
             # States the outcome, not a cause. This one branch is reached by
             # five different failures — a non-image file, a HEIC, an
@@ -5171,14 +5269,44 @@ class OperatorApp(App[None]):
             # PNG, the only remedy it suggests is converting a PNG to a PNG
             # (round 3, D12). Same discipline as D2/U2: name what happened,
             # never guess why.
-            text = "Couldn't attach that file. It may be too large, or not an image."
+            # 48 cells, down from 64 and the widest of the family. Same D8
+            # reasoning as the branch above, and it keeps the two causes the
+            # branch can honestly name without asserting which one applies.
+            text = "Couldn't attach that file. Too large, or not an image."
+        elif message.reason == "too_large":
+            # Names the payload, not the clipboard. The bound is deliberate -
+            # truncating a paste is invisible damage - so the honest report is
+            # what was declined and why, which is also what tells the user the
+            # retry that works (paste less, or use a file).
+            text = "That clipboard text is too large to paste."
+        elif message.reason == "timeout":
+            # NOT "nothing". The read was cut short, so this card cannot say
+            # what was on the clipboard, and the previous copy said it was
+            # empty: under CPU load 8 of 10 reads timed out and every one told
+            # a user holding a valid screenshot there was nothing to paste (ux
+            # round 1, U3). Naming the timeout is also what makes the remedy
+            # honest, because a retry is the move that works here and the move
+            # that cannot work for a genuinely empty clipboard.
+            text = "Clipboard read timed out. Try ctrl+v again."
         else:
-            text = "Couldn't attach an image from the clipboard."
-        # The vague variant takes the COURTESY duration, the two with a remedy
+            # STATES THE OUTCOME, NOT A SUBJECT. The previous copy said "an
+            # image" for a branch that fires whenever nothing ATTACHABLE was
+            # found - including a genuinely empty clipboard and a text-only one
+            # on the cmux route, where no image was ever involved (design round
+            # 1, D3). That is the same guess-free rule the `unreadable` branch
+            # above was corrected to follow in round 3 (D12), applied to the
+            # one branch that had kept asserting a subject.
+            text = "Nothing on the clipboard to paste."
+        # The vague variant takes the COURTESY duration, the ones with a remedy
         # take the failure one. `Toast` derives actionability from duration, so
         # 10 s on the vague card made it outrank a copy receipt for a gesture
         # the user performed afterwards — while naming nothing to act on, which
         # is exactly the test `toast.py` documents (round 2, D11).
+        #
+        # `timeout` is actionable on that same test rather than by severity: it
+        # names a retry, which is a thing to do, and the user is holding
+        # content they expected to paste. `nothing` stays a courtesy because an
+        # empty clipboard names nothing to act on.
         actionable = message.reason != "nothing"
         self.query_one(Toast).show(
             text,
@@ -9841,7 +9969,10 @@ class OperatorApp(App[None]):
         elif editor.shell_mode:
             editor.placeholder = SHELL_PLACEHOLDER
         else:
-            editor.placeholder = DEFAULT_PLACEHOLDER
+            # ASKED, not assumed: the resting copy still names `ctrl+v` until
+            # the user has pasted with it once, and hardcoding the plain
+            # placeholder here would retire that hint on an unrelated mode exit.
+            editor.placeholder = editor.resting_placeholder
         # Not focusable while inert: a caret in a field that refuses every key
         # is the most misleading thing this mode could paint, and ↑↓ have to
         # reach the transcript that the hint says they scroll. The caret is
@@ -13127,7 +13258,7 @@ class OperatorApp(App[None]):
         # the common case (the aside was opened from the resting composer) —
         # and then the aside's own placeholder would stay on screen. The mode
         # decides the voice either way.
-        editor.placeholder = SHELL_PLACEHOLDER if editor.shell_mode else DEFAULT_PLACEHOLDER
+        editor.placeholder = SHELL_PLACEHOLDER if editor.shell_mode else editor.resting_placeholder
         editor.load_text(draft or "")
         # AFTER `load_text`: adoption re-keys onto the markers now in the
         # buffer, so the text has to be there first.
@@ -14199,6 +14330,37 @@ class OperatorApp(App[None]):
             line.append(names.ljust(name_width), style=muted)
             line.append(command.description, style=dim)
             lines.append(line)
+        # `ctrl+v` documented durably. It is not a slash command so it cannot
+        # appear in the table above, and this app shows no key reference in the
+        # footer - yet outside cmux it is the ONLY way to attach a clipboard
+        # image, because the terminal swallows `Cmd+V` and sends the app
+        # nothing at all. The splash tip is where a user MEETS the key; this is
+        # where they can look it up later.
+        #
+        # It sits directly under the command table and above the blank line
+        # that opens the config-toggle block, rather than inside that block.
+        # Placement is the finding: a keybinding filed between `window title`
+        # and `notifications` - two `lop config edit` toggles - reads as a
+        # settings footnote rather than a key reference (design round 1, D2).
+        #
+        # The copy is 51 cells so the composed row is 71 against the 76-cell
+        # content box at 80 columns. The previous wording was 77 and was the
+        # only note in the block that wrapped WITHOUT the `ljust(name_width)`
+        # continuation its neighbours use, so its second line hung at column 0
+        # (D2). Shortened rather than given a continuation line: one row is
+        # what a key reference wants, and the second line was carrying four
+        # words.
+        paste_note = Text()
+        paste_note.append("ctrl+v".ljust(name_width), style=muted)
+        paste_note.append(
+            "attaches an image or file from the system clipboard",
+            style=dim,
+        )
+        # The key reference joins the COMMAND TABLE directly, with no blank line
+        # between: it answers "what can I press", which is the question the
+        # rows above answer, and the trailing notes below are a different
+        # subject (see the placement note on `paste_note`).
+        lines.append(paste_note)
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
