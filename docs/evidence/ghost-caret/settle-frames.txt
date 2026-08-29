@@ -1,0 +1,27 @@
+# Settle-frame check: does any state reflow after paint?
+#
+# shot.py saves <state>.svg and, one settle later, <state>.frame2.svg.
+# A byte difference between them means the row is still moving when the
+# user would see it. Regenerate with shot.py and re-run:
+#
+#   for f in <outdir>/*.frame2.svg; do
+#     b=${f%.frame2.svg}.svg
+#     cmp -s "$b" "$f" && echo "identical $(basename $b)" || echo "DIFFER $(basename $b)"
+#   done
+#
+# Captured at head 06d5b6f7 (before/after = 0008afef baseline / this branch).
+
+before   resume-full      identical
+after    resume-full      identical
+before   resum-partial    identical
+after    resum-partial    identical
+before   mcp-lo           identical
+after    mcp-lo           identical
+before   mcp-login-n      identical
+after    mcp-login-n      identical
+before   mid-draft        identical
+after    mid-draft        identical
+before   narrow-width     identical
+after    narrow-width     identical
+before   prose-no-ghost   identical
+after    prose-no-ghost   identical
