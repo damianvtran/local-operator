@@ -507,6 +507,19 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # call costs there. Owned by the screen so the cache lives exactly as
         # long as the picker and is discarded with it.
         self._soft_index = SoftSearchIndex()
+        # Shortest query the soft tier has been switched on for, or ``None``
+        # while it is off. Extensions of it keep the tier on, so a typing run
+        # cannot flip tiers mid-word and re-home the cursor onto a row the
+        # previous keystroke did not show. See ``_soft_tier_wanted``. Written
+        # only on a query change, never on a paint, so a fixed query renders
+        # identically however many times it is repainted.
+        self._soft_latched: str | None = None
+        # Query that began the current typing run. A run continues while each
+        # new query extends this one; anything else (a fresh query, or a
+        # backspace below the start) begins a new run and lets the tier be
+        # re-decided. Paired with ``_soft_latched`` so the decision is made once
+        # per run rather than once per keystroke.
+        self._soft_run_start: str | None = None
         # Filtering runs on every keystroke and again on every paint; the
         # result is cached against the query that produced it so a card with
         # several hundred sessions does not re-scan the list per repaint. The
@@ -550,43 +563,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # query change, never per repaint — scanning 200 digests per paint
             # is the cost this cache exists to avoid.
             self._body_matches = search_digests(self._digests, self._query)
-            # The soft tier runs ONLY when the cheap tiers came up short. Its
-            # first call tokenises every digest and builds a vocabulary over
-            # them — measured at 324 ms and 95 MB resident over the 2681-digest
-            # store this picker now reaches uncapped — while the exact tier
-            # answers the same keystroke in ~5 ms. Since the picker was
-            # uncapped, that build sat on the first character typed, which is
-            # the worst possible moment to spend a third of a second.
-            #
-            # Gated on the exact tiers finding NOTHING, not on how much they
-            # found. A count threshold is observable: typing narrows the exact
-            # set, and the keystroke that takes it below the threshold switches
-            # the soft tier on and adds rows BACK. Measured on the count gate,
-            # one keystroke apart: 16 rows, then 10, then 16 again on a longer
-            # query — rows reappearing, every row acquiring a body-match marker,
-            # the footer gaining its legend, and the card changing height under
-            # the cursor mid-word. "Keep typing to narrow" is the model this
-            # surface teaches, and a filter that grows on a longer query reads
-            # as broken even when the extra rows are relevant.
-            #
-            # Zero is the only threshold a user cannot cross downward by typing
-            # more: once a query has an exact hit, every extension either keeps
-            # some hits (still exact-only) or drops to none (soft rescues it,
-            # from an empty list, which can only add). So the list narrows
-            # monotonically within a typing run. It is also the case the tier's
-            # own docstring describes — rescuing a query the exact tiers could
-            # not answer — and it strictly reduces how often the 324 ms / 95 MB
-            # tokenise runs.
-            #
-            # Deterministic in ``(digests, query)``, which the picker's
-            # ordering invariant requires: the gate reads only the exact-tier
-            # result for this same query, so a fixed query admits a fixed set
-            # and rows still never move under the cursor between repaints.
+            # The soft tier is expensive on its first call for a given store —
+            # it tokenises every digest and builds a vocabulary over them — so
+            # it is not run on every keystroke. WHEN it runs is decided by
+            # ``_soft_tier_wanted`` below, which exists because the obvious
+            # answers are all wrong in ways that were measured on this surface.
             admitted = filter_rows(self._all, self._query, self._body_matches)
-            if not admitted:
+            if self._soft_tier_wanted(self._query, admitted):
                 soft = self._soft_index.search(self._digests, self._query)
                 self._admitted = self._body_matches | soft
-                # Recomputed only on the empty branch: on the common path the
+                # Recomputed only on the soft branch: on the common path the
                 # first pass is already the answer, so the uncapped row list is
                 # scanned once per query change rather than twice.
                 admitted = filter_rows(self._all, self._query, self._admitted)
@@ -595,6 +581,81 @@ class SessionPickerScreen(ModalScreen[str | None]):
             self._filtered = rank_rows(admitted, self._query, self._body_matches)
             self._filtered_for = self._query
         return self._filtered
+
+    def _soft_tier_wanted(self, query: str, exact_admitted: list[SessionRow]) -> bool:
+        """Whether the bounded soft tier should run for ``query``.
+
+        LATCHED per typing run, and that is the whole point. Two simpler gates
+        were tried on this surface and both moved the row under the cursor:
+
+        * **A count threshold** (soft when the exact tiers return under a page)
+          is crossed BY TYPING: narrowing past it switched the tier on and put
+          rows back. Measured 16 -> 10 -> 16 one keystroke apart.
+        * **Zero exact hits** looks monotonic and is not. On the operator's real
+          store, ``watch`` shows 10 genuine matches and ``watchl`` shows 46 —
+          the exact set empties, the tier fires, and 46 typo-neighbours replace
+          all 10 real matches. The top row changes identity mid-word, so a user
+          typing and pressing enter by reflex resumes a DIFFERENT session. The
+          old argument for that gate compared against the empty list the soft
+          tier starts from; the user compares against the PREVIOUS KEYSTROKE,
+          which is the only comparison that matters here.
+
+        So the decision is made ONCE PER TYPING RUN and then frozen: whichever
+        tiers were active for the first query of a run stay active for every
+        extension of it, and the tier can only be re-decided by a query that is
+        not an extension of the last one (a fresh query, or backspacing below
+        where the run began).
+
+        What that buys, stated no more strongly than it holds: within one run
+        the same tiers are active on both sides of every keystroke, and
+        ``filter_rows`` is a membership test against a needle that only grows,
+        so each result is a subset of the previous one. Verified on the real
+        store rather than argued from the code — across four typing runs, no
+        keystroke admitted a row that was absent from the keystroke before it.
+        Ranking can still reorder what remains, and the list can empty; neither
+        puts a row under the cursor that the user had not already been shown.
+
+        **The ordering invariant, per keystroke rather than from empty.** The
+        picker's rule (module docstring, and ``session_picker`` lines 20-26) is
+        that a row must not move under the cursor. Latching upholds it for the
+        comparison the user actually experiences: consecutive queries in one
+        run share the same tier configuration, so the second result is a subset
+        of the first, ranked by the same function, and a row can leave the list
+        but no row can be displaced by a newly admitted one. For a FIXED query
+        nothing changes across repaints either, because ``_soft_latched`` is
+        only ever written on a query change, never on a paint.
+
+        Backspacing below the latch point turns the tier back off, which can
+        widen the list — correct, because deleting characters is the user asking
+        for a broader answer, and it restores the same result the shorter query
+        gave on the way in. That keeps the surface reversible rather than
+        path-dependent.
+        """
+        needle = query.strip()
+        if not needle:
+            self._soft_latched = None
+            self._soft_run_start = None
+            return False
+
+        # Same typing run? A run is a query that extends the previous one, so
+        # this is the "user is still typing the same word" test.
+        extending = self._soft_run_start is not None and query.startswith(self._soft_run_start)
+        if not extending:
+            # A fresh query (or a backspace below where the run began) starts a
+            # new run and re-decides the tier from scratch.
+            self._soft_run_start = query
+            self._soft_latched = query if not exact_admitted else None
+            return self._soft_latched is not None
+
+        # Within a run the decision is FROZEN. Switching the tier on mid-word is
+        # what moved the cursor: on the real store ``watch`` has 10 genuine
+        # matches, ``watchl`` has none, and firing the tier there replaced all
+        # 10 with 46 typo-neighbours and changed the top row's identity. The
+        # keystroke that empties the exact set is exactly the keystroke where a
+        # user is about to press enter, so it is the worst possible moment to
+        # re-home the cursor. Extending a query narrows or empties the list; it
+        # never repopulates it from a different source.
+        return self._soft_latched is not None
 
     @property
     def body_matched_ids(self) -> set[str]:
@@ -1033,6 +1094,16 @@ _FOOTER_HINTS: tuple[tuple[str, str], ...] = (
 )
 _FOOTER_DROP_ORDER = ("pgup/pgdn", "type", "↑↓")
 
+#: Drop order for a plain (unmarked) list that SCROLLS. ``pgup/pgdn`` is the
+#: first thing shed by the order above, which is right for a list that fits on
+#: one page and wrong for one that does not: the picker advertised paging where
+#: paging is a no-op and withdrew it where it is the fastest way through the
+#: list. Uncapping the store made the bare scrolling picker the DEFAULT state
+#: rather than an edge case, so this is the common path, not a rare one.
+#: ``type`` sheds first instead — a user who is already filtering knows they can
+#: type, and the filter they typed is echoed in the header regardless.
+_FOOTER_DROP_ORDER_SCROLLING = ("type", "pgup/pgdn", "↑↓")
+
 #: The ``"`` body-match marker is load-bearing but unlabelled in the list: a
 #: first-time reader sees a lone right-quote at the start of some rows and can
 #: read it as a rendering artifact rather than "this row matched inside the
@@ -1087,10 +1158,11 @@ def _footer_hints(
     marked row, so the legend evicted the very hint the reader needed.
     """
     hints = list(_FOOTER_HINTS)
-    drop_order = _FOOTER_DROP_ORDER
     if has_marked:
         hints = [_MARKER_LEGEND, *hints]
         drop_order = _FOOTER_DROP_ORDER_MARKED_SCROLLING if scrolls else _FOOTER_DROP_ORDER_MARKED
+    else:
+        drop_order = _FOOTER_DROP_ORDER_SCROLLING if scrolls else _FOOTER_DROP_ORDER
 
     def cells(pairs: list[tuple[str, str]]) -> int:
         return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(

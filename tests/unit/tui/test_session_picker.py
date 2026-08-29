@@ -1354,30 +1354,95 @@ async def test_the_result_list_never_grows_as_the_user_types() -> None:
     twentyfold on a longer query, every row acquired a body-match marker, and
     the card changed height under the cursor.
 
-    Gating on ZERO exact hits removes the boundary: once a query has an exact
-    hit, every extension either keeps some (still exact-only) or drops to none
-    (soft rescues from an empty list, which can only add to nothing).
+    The gate that replaced it (soft when the exact tiers return NOTHING) failed
+    the same way for a different reason: on the operator's real store `watch`
+    has 10 genuine matches and `watchl` has none, so the exact set empties, the
+    tier fires, and 46 typo-neighbours replace all 10 real matches — the top row
+    changes identity on the keystroke before the user presses enter.
+
+    The fixture mirrors that real shape and is built to DISCRIMINATE: the
+    previous version made every digest contain `watch`, so the counts were
+    constant and the assertion passed on any gate, including the two broken
+    ones. Verified to fail on both before being trusted.
     """
-    rows = [_row(f"s{i:03d}", f"session {i}") for i in range(16)]
-    # Ten digests carry `watch` and stop there; six are an edit-distance
-    # neighbour the soft tier can reach but the exact tier never sees. This is
-    # the shape that made the shipped gate flip mid-word.
-    digests = {
-        row.id: ("watch sweep evicted" if i < 10 else "watch5 sweep evicted")
-        for i, row in enumerate(rows)
-    }
+    rows = [_row(f"s{i:03d}", f"session {i}") for i in range(50)]
+    digests = {}
+    for i, row in enumerate(rows):
+        if i < 10:
+            # Genuine matches for `watch`, and NOT for `watchl` — so the exact
+            # set is non-empty at `watch` and empty one keystroke later. This is
+            # what makes a zero-hit gate fire mid-word.
+            digests[row.id] = "watch the retention sweep"
+        elif i < 12:
+            # A second, smaller exact population so a count threshold has a
+            # boundary to cross: `wa` admits 12, `watch` admits 10.
+            digests[row.id] = "wander through the logs"
+        else:
+            # Edit-distance neighbours of `watchl` (`wotchel` is within two edits
+            # away) that contain neither `watch` nor `watchl` as a SUBSTRING, so
+            # the exact tier never admits them at any keystroke and only the
+            # soft tier can reach them. A neighbour that merely contains the
+            # query would be admitted legitimately and prove nothing.
+            digests[row.id] = "wotchel batch rollup"
     app = _PickerHost(rows, digests)
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
 
-        counts = []
-        for query in ("wat", "watc", "watch", "watchi"):
+        counts: list[int] = []
+        seen: set[str] | None = None
+        appeared: list[tuple[str, int]] = []
+        for query in ("wa", "wat", "watc", "watch", "watchl"):
             screen.set_query(query)
             await pilot.pause()
-            counts.append(len(screen.visible_rows))
+            ids = {row.id for row in screen.visible_rows}
+            counts.append(len(ids))
+            if seen is not None and (ids - seen):
+                appeared.append((query, len(ids - seen)))
+            seen = ids
 
+        # The count must never rise on a longer query.
         assert counts == sorted(counts, reverse=True), f"the list grew on a longer query: {counts}"
+        # And the stronger statement the count alone does not make: no row may
+        # appear that was absent one keystroke earlier. A same-size swap would
+        # satisfy the count check while still moving the row under the cursor.
+        assert not appeared, f"rows appeared mid-typing: {appeared}"
+
+
+@pytest.mark.asyncio
+async def test_a_typing_run_never_swaps_the_row_under_the_cursor() -> None:
+    """The harm D6 named, asserted directly rather than via the row count.
+
+    A user types, the row they want is on top, and they press enter by reflex.
+    If the last keystroke re-homed the cursor onto a different session they
+    resume the wrong one — the failure ``session_picker``'s ordering invariant
+    exists to prevent, and the same class of harm as the original bug.
+    """
+    # The genuine matches are the OLDEST rows, so when soft neighbours flood in
+    # they outrank the real matches on recency and the top row changes identity.
+    # With the real matches newest, a flood is invisible at the cursor and the
+    # test would pass on a gate that evicts them — the trap this test exists to
+    # avoid being caught by.
+    rows = [_row(f"s{i:03d}", f"session {i}", age_s=60.0 * (100 - i)) for i in range(50)]
+    digests = {}
+    for i, row in enumerate(rows):
+        digests[row.id] = "watch the retention sweep" if i >= 40 else "wotchel batch rollup"
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+
+        tops: list[str | None] = []
+        for query in ("wat", "watc", "watch", "watchl"):
+            screen.set_query(query)
+            await pilot.pause()
+            visible = screen.visible_rows
+            tops.append(visible[0].id if visible else None)
+
+        # The top row may become None (the list legitimately empties as the
+        # query stops matching), but it must never become a DIFFERENT session.
+        identities = [top for top in tops if top is not None]
+        assert len(set(identities)) == 1, f"the row under the cursor changed identity: {tops}"
 
 
 @pytest.mark.asyncio
@@ -1438,3 +1503,21 @@ def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> N
     # removal, so nothing is lost when there is room for everything.
     wide = [key for key, _ in _footer_hints(100, has_marked=True, scrolls=True)]
     assert "pgup/pgdn" in wide and _MARKER_LEGEND[0] in wide
+
+
+def test_the_paging_hint_survives_on_a_plain_scrolling_list() -> None:
+    """The same rule on the UNMARKED branch, which is the common one.
+
+    The first version of this fix consulted ``scrolls`` only inside
+    ``if has_marked:``, so a plain scrolling picker still shed ``pgup/pgdn``
+    first at 60 and 66 columns. Uncapping the store makes the bare scrolling
+    picker the DEFAULT state, so that was the usual case rather than an edge.
+    """
+    for width in (56, 60, 66):
+        scrolling = [key for key, _ in _footer_hints(width, has_marked=False, scrolls=True)]
+        assert "pgup/pgdn" in scrolling, f"paging hint dropped at width {width}: {scrolling}"
+
+    # A list that fits on one page may still shed it first: there is nothing to
+    # page through, so the hint is the least useful thing on the row.
+    settled = [key for key, _ in _footer_hints(60, has_marked=False, scrolls=False)]
+    assert "pgup/pgdn" not in settled
