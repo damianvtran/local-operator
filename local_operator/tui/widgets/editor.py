@@ -2881,18 +2881,24 @@ class Editor(TextArea):
         ):
             self._copy_gesture = False
             self._copied_selection = None
-        # A caret move invalidates the ghost: it is rendered AT the caret, so a
-        # ghost set while the caret sat at the end of `/mcp login` and then left
-        # standing renders mid-word once the caret moves back into it
-        # (`/mcp loGHOSTgin notion`, reproduced). Clearing here rather than
-        # re-deriving keeps this watcher cheap and cannot itself paint: the next
-        # `_sync_picker` re-derives on the following keystroke.
+        # A caret move changes the ghost's answer: it renders AT the caret, so
+        # one set while the caret sat at the end of `/mcp login` renders
+        # mid-word once the caret moves back into it (`/mcp loGHOSTgin notion`,
+        # reproduced) — gate 1 is what refuses that, and this is where the
+        # question gets re-asked.
+        #
+        # RE-DERIVED, not merely cleared. Clearing was cheaper but made two
+        # routes to the same caret position disagree: `left` then `right`
+        # restored the preview (``action_cursor_right`` re-derives in its
+        # `finally`) while `left` then `end` left it blank, with the same caret
+        # and the same open list (review round 1, U5). Asking the gates is the
+        # only answer that cannot depend on which key got you here.
         #
         # `getattr` for the same reason as above — a reactive watcher can fire
         # during base-class construction, before this subclass's attributes
-        # exist.
-        if getattr(self, "suggestion", ""):
-            self.suggestion = ""
+        # exist, and `_ghost_completion` reads several of them.
+        if hasattr(self, "_picker"):
+            self._sync_ghost()
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
@@ -3922,6 +3928,26 @@ class Editor(TextArea):
             return ""
         row = name if name is not None else self._picker.highlighted_name()
         if row is None:
+            return ""
+        # Nothing typed to complete FROM, and no row deliberately chosen. A
+        # bare `/` offers the whole registry in registration order, so ghosting
+        # its first row is not extending a query, it is naming the top of an
+        # unfiltered list — the feature's first frame spent on a coin flip
+        # (review round 1, U7). The picker already models "too little typed to
+        # guess" for its fuzzy tail (`FUZZY_MIN_QUERY_CHARS`); this is the same
+        # judgement one keystroke earlier.
+        #
+        # `chosen_by_hand` is the exemption, and it is the same signal the
+        # ambiguity gate trusts to let Enter send: once the user has ARROWED to
+        # a row they have named it themselves, so previewing it is reporting
+        # their choice rather than guessing at one. An ARGUMENT slot is exempt
+        # outright — its empty-query list enumerates that command's own values
+        # (`/mcp ` → the verbs), which IS the answer to what was typed.
+        if (
+            mode is CompletionMode.COMMAND
+            and not self._picker_query()
+            and not self._picker.chosen_by_hand
+        ):
             return ""
         text = self.text
         # Gate 3, and gate 1's selection half. A selection means Tab's edit is

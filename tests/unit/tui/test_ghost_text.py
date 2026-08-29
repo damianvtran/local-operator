@@ -546,3 +546,29 @@ async def test_resizing_re_checks_the_width_gate() -> None:
         await pilot.resize_terminal(100, 24)
         await _settle(pilot, 10)
         assert editor.suggestion == "age ", "the ghost did not come back when the room did"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_slash_predicts_nothing_until_a_row_is_chosen() -> None:
+    """`/` alone has no query to extend, so it previews nothing.
+
+    A bare slash offers the whole registry in registration order; ghosting row
+    one names the top of an unfiltered list rather than completing anything the
+    user typed, so the feature's first frame was a coin flip (review round 1,
+    U7). One typed character makes the prediction real, and an explicit arrow
+    is a deliberate choice the preview should report — the same
+    ``chosen_by_hand`` signal the ambiguity gate trusts to let Enter send.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, "/")
+        await _settle(pilot, 8)
+        assert editor.picker.suggestions(), "precondition: the list is showing rows"
+        assert editor.suggestion == "", "a bare / guessed at the top row"
+
+        await _type(pilot, "h")
+        await _settle(pilot, 8)
+        assert editor.suggestion == "elp ", "a typed character must resume predicting"
