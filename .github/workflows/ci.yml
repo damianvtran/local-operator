@@ -234,24 +234,47 @@ jobs:
           echo "error-path stdout is clean"
 
   tui-e2e:
-    runs-on: ubuntu-latest
+    # BOTH platforms, and macOS is the one that makes this job worth having.
+    #
     # This job exists because a FULLY GREEN unit suite did not catch a total
     # event-loop freeze. PR #401 fixed a deadlock in the MCP OAuth refresh
     # lock: an unbounded blocking `fcntl.flock` on a worker thread, then
-    # `os.close(fd)` on the event-loop thread during cancellation — and on
-    # macOS/BSD `close()` blocks while a sibling thread is parked in `flock()`
-    # on that descriptor. `/resume` cancels in-flight MCP connects, so typing
-    # it froze the whole TUI: banner and composer slid to the bottom and the
-    # app answered nothing, permanently. 8000+ unit tests passed throughout,
-    # because every piece was individually correct and NOTHING drove the
-    # assembled application. This stage drives it.
+    # `os.close(fd)` on the event-loop thread during cancellation. 8000+ unit
+    # tests passed throughout, because every piece was individually correct and
+    # NOTHING drove the assembled application. This stage drives it.
     #
+    # The deadlock is a macOS/BSD property: `close()` blocks there while a
+    # sibling thread is parked in `flock()` on that descriptor, and on Linux it
+    # simply returns. That is measured, not assumed — the same probe reports
+    # `close_blocked=True` on darwin and `close_blocked=False` (7.4 us) on
+    # linux. Running the resume test against the PRE-FIX tree (80df237b^) in
+    # `python:3.12-slim` gives `1 passed`, RC=0: the regression test passes
+    # against the regression. Sampling `sys._current_frames()` through that run
+    # catches the worker parked in `_lock_exclusive`, so the lock IS contended
+    # on Linux and the cancellation does happen — the loop just never wedges.
+    #
+    # So an ubuntu-only wiring would have shipped this stage green against the
+    # very commit it was built to catch. macOS is therefore not a nice-to-have
+    # leg: it is the only platform where the freeze guard can go red at all.
+    # Linux stays because the rest of the stage is genuinely platform-neutral
+    # (boot, the write-turn artifacts, the transcript replay and the
+    # interactivity assertion) and it is the faster, always-available runner.
+    #
+    # `fail-fast: false` so a macOS queue delay or a Linux-only regression each
+    # report on their own rather than cancelling the other leg's evidence.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
     # need a real OpenRouter key, so they are skipped on fork PRs that cannot
     # have one. This job is scripted end to end — no key, no network, no model
-    # — precisely so the resume-liveness assertion runs on EVERY pull request
-    # including forks. A contributor reintroducing that deadlock has to see it
-    # go red on their own PR, which a secrets-gated job could never do.
+    # — so it runs on EVERY pull request including forks, and because the
+    # matrix includes macOS, a fork contributor reintroducing the deadlock sees
+    # it go red on their own PR on the macOS leg. Both halves are load-bearing:
+    # a secrets-gated job could not reach forks at all, and a Linux-only job
+    # would reach them and report green.
     #
     # Fully headless: Textual's own `run_test()` pilot paints into an in-memory
     # compositor, so there is no window, no display server and no TTY beyond
@@ -262,23 +285,25 @@ jobs:
       - type-check
       - test
       - pip-audit
-    # Generous relative to the ~11 s the suite takes when healthy: the failure
-    # mode under test is a hang, and each test carries its own tighter
-    # `faulthandler` bound (see tests/e2e/watchdog.py) that fires first with a
-    # full thread dump. This ceiling is only the backstop for a hang that
-    # somehow escapes those, so it should never be what reports a freeze.
-    timeout-minutes: 15
+    # Generous relative to the ~11 s the stage takes when healthy (~14 s on a
+    # macOS runner, which is slower and queues longer). The failure mode under
+    # test is a hang, and each test carries its own tighter `faulthandler`
+    # bound (see tests/e2e/watchdog.py) that fires first with a full thread
+    # dump — a pre-fix red lands in ~63 s. This ceiling is only the backstop
+    # for a hang that escapes those, so it should never be what reports a
+    # freeze; it is sized to absorb macOS install and queue time instead.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Set Up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # The `mcp` extra is load-bearing here, not incidental: the resume test
-      # drives the REAL OAuth refresh lock through the REAL McpManager, and
-      # without the SDK the manager short-circuits every server with
-      # MCP_SDK_MISSING_ERROR — so the connect never reaches the lock and the
-      # test passes while exercising nothing at all.
+      # `mcp` is a BASE dependency, so `.[dev]` is sufficient and this job does
+      # not name it. If it ever becomes an extra, this install must name it
+      # explicitly: without the SDK the manager short-circuits every server
+      # with MCP_SDK_MISSING_ERROR, the connect never reaches the OAuth lock,
+      # and the resume test would pass while exercising nothing at all.
       - name: Install Package
         run: |
           python -m pip install --upgrade pip
@@ -296,8 +321,14 @@ jobs:
             python -m pytest tests/e2e -m e2e -n0 -q
       - name: Report a hang's thread dump
         # A tripped watchdog kills the process, so pytest never gets to print
-        # anything: the stacks of the parked threads live only in this file,
+        # anything: the stacks of the parked threads live only in a dump file,
         # and without this step a freeze reports as a bare non-zero exit.
+        #
+        # Safe to run after ANY failure. A dump file survives only when a bound
+        # actually fired (every ordinary exit path removes its own), and only
+        # files carrying faulthandler's `Timeout (` marker are printed — so an
+        # ordinary assertion failure gets an explicit "not a hang" line rather
+        # than a fabricated timeout claim for a test that failed in seconds.
         if: failure()
         run: python -m tests.e2e.watchdog
 

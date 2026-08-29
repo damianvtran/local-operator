@@ -45,7 +45,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     here = Path(__file__).parent
     for item in items:
         path = getattr(item, "path", None)
-        if path is not None and here in Path(path).parents or path == here:
+        # A collected item's ``path`` is always the test FILE, so testing
+        # against this package's directory in its parents is the whole check.
+        if path is not None and here in Path(path).parents:
             item.add_marker(E2E_MARKER)
 
 

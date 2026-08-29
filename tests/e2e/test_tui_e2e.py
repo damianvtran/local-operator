@@ -44,6 +44,25 @@ OpenRouter turn through the real agent against a real file write on every
 non-fork PR. This stage adds the assembled-application coverage that job
 cannot give, and the two are complementary rather than redundant.
 
+Where the freeze is observable
+------------------------------
+
+Being ungated is necessary for that fork-PR reach but not sufficient, and the
+missing half is the PLATFORM. The deadlock is a macOS/BSD property: ``close()``
+blocks there while a sibling thread is parked in ``flock()`` on the descriptor,
+and Linux simply lets it return (measured at 7.4 us). The lock is genuinely
+contended on Linux and the cancellation genuinely happens — the loop just never
+wedges — so this file's resume test reports ``1 passed`` against the pre-fix
+tree there.
+
+That is why the CI job runs a ``[ubuntu-latest, macos-latest]`` matrix. Linux
+carries the platform-neutral coverage (startup, the write-turn artifacts, the
+transcript replay and the interactivity assertion); **macOS is the only leg on
+which the freeze guard can go red at all.** A Linux-only wiring would reach
+every fork PR and tell all of them green, which is a worse failure than not
+having the stage: it is a guard that reports success against the very commit it
+was built to catch.
+
 Bounding
 --------
 
@@ -95,7 +114,12 @@ SCREEN = (100, 30)
 #:
 #: Verified against the pre-fix code: the deadlock trips RESUME_BOUND_S and the
 #: watchdog dumps both parked threads, so the red arrives in about a minute
-#: rather than at the job's own timeout with no diagnostic.
+#: (measured 62.6 s) rather than at the job's own timeout with no diagnostic.
+#: That latency is RESUME_BOUND_S itself, not a property of the deadlock — the
+#: freeze is permanent, so the bound is the only thing deciding how long CI
+#: waits before reporting it. Tuning this number down buys a faster red and
+#: spends headroom against a loaded runner; there is no other signal that trades
+#: off, so make that trade deliberately.
 BOOT_BOUND_S = 45.0
 TURN_BOUND_S = 45.0
 RESUME_BOUND_S = 60.0

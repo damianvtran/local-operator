@@ -49,6 +49,16 @@ TTY) and uses no API key, so its CI job carries **no fork gate** — unlike
 deliberate: the resume-liveness assertion is the regression guard, so it has to
 run on every PR including forks.
 
+**It runs on a `[ubuntu-latest, macos-latest]` matrix, and the macOS leg is the
+one that makes it a regression guard.** The deadlock is a macOS/BSD property —
+`close()` blocks there behind a sibling `flock()`, and on Linux it returns in
+microseconds. Measured, not assumed: the same probe reports `close_blocked=True`
+on darwin and `False` on linux, and the resume test run against the pre-fix tree
+(`80df237b^`) in `python:3.12-slim` reports `1 passed`. Linux still runs the
+stage because boot, the write-turn artifacts and the transcript replay are
+platform-neutral, but **do not drop the macOS leg** — without it this stage goes
+green against the exact commit it exists to catch.
+
 Gates, all of which must be clean before a PR. **Run them over the whole tree,
 exactly as CI does** — these are the commands from `.github/workflows/ci.yml`:
 
