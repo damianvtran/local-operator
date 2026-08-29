@@ -157,21 +157,35 @@ async def test_the_clipboard_marker_is_identical_to_the_path_branch_s(
     assert clipboard_image.mime_type == path_image.mime_type
 
 
+@pytest.mark.parametrize("payload", ["    ", "\t", "\n", "\n\n"])
 @pytest.mark.asyncio
-async def test_a_whitespace_only_paste_also_consults_the_clipboard(monkeypatch) -> None:
-    """Some terminals wrap the empty payload in a newline. That is still "the
-    terminal had no text for me", and inserting the whitespace instead would
-    put a character in the draft the user never typed."""
+async def test_copied_whitespace_wins_over_an_image_on_the_clipboard(
+    payload: str, monkeypatch
+) -> None:
+    """Whitespace the user copied is inserted even when an image IS readable.
+
+    Round 2 (D9): the D1 fix keyed on the payload but still let a successful
+    clipboard read override it, so pasting a four-space indent with a PNG on
+    the pasteboard replaced the indent with `[Image #1, 1568x200]` — an image
+    the user did not ask for on that keypress, silently, with the indent gone.
+    Same defect as D1 at one tenth the reach.
+
+    The clipboard is not consulted at all here, which is also what stops an
+    ordinary indent paste paying a multi-second read it never needed (U7).
+    """
     counts = _stub_clipboard(monkeypatch, image=ClipboardImage(_png_bytes(), "image/png"))
     app = Host()
     async with app.run_test() as pilot:
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
-        await _paste(app, pilot, "\n")
+        editor.insert("X")
+        await _paste(app, pilot, payload)
 
-        assert counts["reads"] == 1
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == f"X{payload}", "the copied whitespace was replaced"
+        assert editor.referenced_images() == [], "an image was attached uninvited"
+        assert counts["reads"] == 0, "an ordinary whitespace paste must not read the clipboard"
+        assert app.empty_notices == []
 
 
 # -- the Finder Cmd+C route ---------------------------------------------------
@@ -689,3 +703,86 @@ async def test_a_held_paste_notice_is_retired_by_a_later_successful_paste(monkey
         for _ in range(6):
             await pilot.pause()
         assert toast.message == "", "nothing stale may be promoted into the freed slot"
+
+
+@pytest.mark.asyncio
+async def test_a_path_paste_also_retires_a_held_notice(monkeypatch, tmp_path) -> None:
+    """Round 2 (D8/D3): the path route attaches without retiring the notice.
+
+    D3's fix covered the clipboard route only, so the stale card still surfaced
+    through the route cmux users hit — and, worse, through the exact gesture
+    the notice recommends: "Paste a file path instead." The user follows the
+    advice, it works, and the card that gave the advice reappears to deny it.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    path = tmp_path / "shot.png"
+    path.write_bytes(_png_bytes(400, 100))
+    monkeypatch.setattr(
+        editor_module, "read_clipboard", lambda *a, **k: ClipboardContents(refused_remote=True)
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and app._session is None:
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        toast = app.query_one(Toast)
+
+        toast.show("MCP github failed: command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        await _paste(app, pilot, "")
+        assert toast._deferred is not None, "the SSH notice should be held"
+
+        # The remedy the notice just told the user to perform.
+        await _paste(app, pilot, str(path))
+        assert editor.referenced_images(), "the path paste should have attached"
+        assert toast._deferred is None, (
+            "following the notice's own advice must retire it; otherwise the "
+            "card reappears to deny the thing it recommended"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_vague_notice_does_not_outrank_a_copy_receipt(monkeypatch) -> None:
+    """Round 2 (D11), a consequence of the D6 duration change.
+
+    ``Toast`` derives actionability from duration, so putting the vague notice
+    at ``TOAST_FAILURE_MS`` made it hold the slot against every courtesy notice
+    for 10 s — while naming nothing to act on, which is precisely the test
+    ``toast.py`` documents. The two variants that carry a remedy keep the
+    failure duration; the one that does not takes the default.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    cases = [
+        (ClipboardContents(), False),
+        (ClipboardContents(refused_remote=True), True),
+    ]
+    for contents, expected_actionable in cases:
+        monkeypatch.setattr(editor_module, "read_clipboard", lambda *a, _c=contents, **k: _c)
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and app._session is None:
+                await pilot.pause()
+            app.query_one(Editor).focus()
+            await pilot.pause()
+            await _paste(app, pilot, "")
+
+            toast = app.query_one(Toast)
+            assert toast.message, "a notice should be showing"
+            assert toast._actionable is expected_actionable, (
+                f"{toast.message!r} actionable={toast._actionable}, expected "
+                f"{expected_actionable}; a notice naming no action must not "
+                "suppress a copy receipt for a gesture performed afterwards"
+            )

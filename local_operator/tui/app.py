@@ -5092,17 +5092,29 @@ class OperatorApp(App[None]):
         later successful paste can retire a card that is still held — see
         :data:`COMPOSER_PASTE_NOTICE`.
         """
-        from local_operator.tui.widgets.toast import TOAST_FAILURE_MS
+        from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS, TOAST_FAILURE_MS
 
         if message.reason == "remote":
             text = "Clipboard images aren't read over SSH. Paste a file path instead."
         elif message.reason == "unattachable":
-            text = "Couldn't attach that image. Try a smaller one, or paste its file path."
+            # No "paste its file path" here any more: the path route runs the
+            # same bounding tail, so a refusal caused by the IMAGE cannot be
+            # cured by changing how it is delivered, and the retry fails
+            # silently because the path branch raises no notice (round 2, D10).
+            text = "Couldn't attach that image. It may be too large or corrupt."
+        elif message.reason == "unreadable":
+            text = "Couldn't attach that file. Only PNG, JPEG, GIF and WebP images attach."
         else:
             text = "Couldn't attach an image from the clipboard."
+        # The vague variant takes the COURTESY duration, the two with a remedy
+        # take the failure one. `Toast` derives actionability from duration, so
+        # 10 s on the vague card made it outrank a copy receipt for a gesture
+        # the user performed afterwards — while naming nothing to act on, which
+        # is exactly the test `toast.py` documents (round 2, D11).
+        actionable = message.reason != "nothing"
         self.query_one(Toast).show(
             text,
-            duration_ms=TOAST_FAILURE_MS,
+            duration_ms=TOAST_FAILURE_MS if actionable else TOAST_DEFAULT_MS,
             yield_to_actionable=True,
             owner=COMPOSER_PASTE_NOTICE,
         )

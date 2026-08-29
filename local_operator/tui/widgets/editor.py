@@ -405,8 +405,14 @@ class EditorPasteAttached(Message):
     D3) — the same staleness :class:`EditorCopyStale` answers for the copy
     receipt, and it uses the same machinery.
 
-    Only the clipboard route posts it. The path route cannot leave a stale
-    notice behind because it never raises one.
+    Posted by BOTH ingestion routes. An earlier version reasoned that the path
+    route "cannot leave a stale notice behind because it never raises one",
+    which conflates RAISING a notice with FALSIFYING one: the path route never
+    raises the card, but it does make a held one false, and the held card
+    belongs to the composer's paste slot regardless of which route filled the
+    buffer. That gap left the original stale-toast frame reachable through the
+    route cmux users actually hit — and through the very gesture the notice
+    recommends (round 2, D8/D3).
     """
 
     def __init__(self) -> None:
@@ -444,8 +450,12 @@ class EditorPasteEmpty(Message):
       a missing ``xclip`` and a wedged daemon are indistinguishable by design
       (see :mod:`local_operator.clipboard`) and a message naming a cause here
       would be guessing.
-    * ``"unattachable"`` — an image was found and refused, so the user can act
-      on it by cropping or by attaching the file instead.
+    * ``"unattachable"`` — image BYTES were found and refused: too large even
+      after bounding, undecodable, or a decompression bomb.
+    * ``"unreadable"`` — a copied FILE was found and could not be attached.
+      Distinct from ``"unattachable"`` because the causes differ (a non-image
+      file, an unreadable path, a mixed selection hitting the all-or-nothing
+      rule) and so does the advice that would help (round 2, D10).
     * ``"remote"`` — the read was refused because the session is remote. Not a
       statement about the clipboard at all.
 
@@ -2493,7 +2503,22 @@ class Editor(TextArea):
             # through inserts whitespace the user did have on their clipboard,
             # and for the genuinely empty payload inserting `""` is a no-op
             # nobody can see.
-            attached = await self._attach_clipboard_image(notify=not event.text)
+            if event.text:
+                # WHITESPACE THE USER COPIED. It reaches this branch because
+                # the payload has no text in it, but it is not the terminal's
+                # empty-paste signal, and the clipboard is not consulted at
+                # all: whatever an image read found, the user asked for these
+                # characters on this keypress and trading them for a marker
+                # they did not request is the round-1 D1 defect at one tenth
+                # the reach (round 2, D9 — reproduced here before fixing:
+                # pasting an indent with a PNG on the pasteboard replaced the
+                # indent with `[Image #1, 1568x200]`).
+                #
+                # Skipping the read also makes an ordinary indent paste cost
+                # nothing again, rather than paying a clipboard round trip an
+                # editing gesture never needed (round 2, U7).
+                return
+            attached = await self._attach_clipboard_image()
             if attached is None:
                 return
             event.prevent_default()
@@ -2505,9 +2530,15 @@ class Editor(TextArea):
             return
         event.prevent_default()
         event.stop()
+        # Posted from the PATH branch too, not just the clipboard one. A held
+        # notice is falsified by an image arriving, whichever route delivered
+        # it — and this is the route the notice's own advice sends the user
+        # down ("paste a file path instead"), so without this the card that
+        # gave the instruction reappears to deny it worked (round 2, D8/D3).
+        self.post_message(EditorPasteAttached())
         self.insert(attached)
 
-    async def _attach_clipboard_image(self, *, notify: bool = True) -> str | None:
+    async def _attach_clipboard_image(self) -> str | None:
         """The empty-paste branch: read the clipboard and attach what is there.
 
         Two shapes, tried in the order they are likely. IMAGE BYTES first, the
@@ -2543,14 +2574,11 @@ class Editor(TextArea):
         carries the outcomes the app can honestly name \u2014 see
         :class:`EditorPasteEmpty`.
 
-        ``notify`` is FALSE when the payload was whitespace the user actually
-        copied. Such a paste still consults the clipboard (it reaches this
-        branch, and an image may genuinely be there), but when it finds nothing
-        the paste has already SUCCEEDED on its own terms: the whitespace goes
-        into the buffer where the user can see it, and a card about images they
-        were not pasting is noise on an ordinary gesture. The notice exists for
-        the one case that otherwise produces no visible response at all \u2014 the
-        terminal's empty payload \u2014 so that is the only case that raises it.
+        Reached ONLY for the terminal's genuinely empty payload. Whitespace the
+        user copied is handled by the caller and never gets here, so every
+        outcome below belongs to a keypress that would otherwise produce no
+        visible response at all \u2014 which is what makes a notice right here and
+        noise anywhere else.
         """
         contents = await asyncio.to_thread(read_clipboard)
         if contents.image is not None:
@@ -2563,8 +2591,7 @@ class Editor(TextArea):
             # decompression bomb. Reported as its own outcome rather than as
             # "no image", because the two lead to different moves — cropping
             # versus copying something (review round 1, D2/U2).
-            if notify:
-                self.post_message(EditorPasteEmpty(reason="unattachable"))
+            self.post_message(EditorPasteEmpty(reason="unattachable"))
             return None
         if contents.paths:
             # Rejoins the path branch rather than duplicating it: shell quoting
@@ -2577,13 +2604,17 @@ class Editor(TextArea):
             if markers is not None:
                 self.post_message(EditorPasteAttached())
                 return markers
-            if notify:
-                self.post_message(EditorPasteEmpty(reason="unattachable"))
+            # A COPIED FILE that would not attach, which is a different failure
+            # from an oversized image: the usual causes are a non-image file,
+            # an unreadable path, or a mixed multi-file selection hitting the
+            # all-or-nothing rule. "Try a smaller one" answers none of them,
+            # and neither does "paste its file path" \u2014 the path is exactly what
+            # this branch just tried (round 2, D10).
+            self.post_message(EditorPasteEmpty(reason="unreadable"))
             return None
-        if notify:
-            self.post_message(
-                EditorPasteEmpty(reason="remote" if contents.refused_remote else "nothing")
-            )
+        self.post_message(
+            EditorPasteEmpty(reason="remote" if contents.refused_remote else "nothing")
+        )
         return None
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:

@@ -53,7 +53,7 @@ cd /tmp/pkg && python3 -c "
 from local_operator import clipboard
 import hashlib
 src = open('/tmp/evidence.png','rb').read()
-img = clipboard.read_clipboard_image(4*1024*1024, platform='linux', env={'DISPLAY': ':99'})
+img = clipboard.read_clipboard(4*1024*1024, platform='linux', env={'DISPLAY': ':99'}).image
 print('result:', None if img is None else (img.mime_type, len(img.data)))
 print('bytes identical to source:', img is not None and img.data == src)
 print('source sha256:', hashlib.sha256(src).hexdigest()[:16])
@@ -66,26 +66,26 @@ printf 'raw xclip -t image/png -o gives: '
 xclip -selection clipboard -t image/png -o; echo " (exit $?)"
 cd /tmp/pkg && python3 -c "
 from local_operator import clipboard
-print('backend result:', clipboard.read_clipboard_image(4*1024*1024, platform='linux', env={'DISPLAY': ':99'}))
+print('backend result:', clipboard.read_clipboard(4*1024*1024, platform='linux', env={'DISPLAY': ':99'}).image)
 "
 echo "--- negative: size cap (bound below the payload) ---"
 xclip -selection clipboard -t image/png -i /tmp/evidence.png
 sleep 1
 cd /tmp/pkg && python3 -c "
 from local_operator import clipboard
-print('with max_bytes=1024:', clipboard.read_clipboard_image(1024, platform='linux', env={'DISPLAY': ':99'}))
+print('with max_bytes=1024:', clipboard.read_clipboard(1024, platform='linux', env={'DISPLAY': ':99'}).image)
 "
 echo "--- negative: SSH skip (clipboard is present and full) ---"
 cd /tmp/pkg && python3 -c "
 from local_operator import clipboard
 env = {'DISPLAY': ':99', 'SSH_CONNECTION': '10.0.0.1 22 10.0.0.2 22'}
 print('reads are local:', clipboard.clipboard_reads_are_local(env))
-print('image over ssh:', clipboard.read_clipboard_image(4*1024*1024, platform='linux', env=env))
+print('image over ssh:', clipboard.read_clipboard(4*1024*1024, platform='linux', env=env).image)
 "
 echo "--- negative: no DISPLAY, no WAYLAND_DISPLAY (headless) ---"
 cd /tmp/pkg && python3 -c "
 from local_operator import clipboard
-print('headless:', clipboard.read_clipboard_image(4*1024*1024, platform='linux', env={}))
+print('headless:', clipboard.read_clipboard(4*1024*1024, platform='linux', env={}).image)
 "
 
 echo
@@ -119,7 +119,7 @@ from local_operator import clipboard
 import os
 src = open('/tmp/evidence.png','rb').read()
 env = {'WAYLAND_DISPLAY': os.environ['WAYLAND_DISPLAY'], 'XDG_RUNTIME_DIR': os.environ['XDG_RUNTIME_DIR']}
-img = clipboard.read_clipboard_image(4*1024*1024, platform='linux', env=env)
+img = clipboard.read_clipboard(4*1024*1024, platform='linux', env=env).image
 print('result:', None if img is None else (img.mime_type, len(img.data)))
 print('bytes identical to source:', img is not None and img.data == src)
 \""
@@ -131,7 +131,7 @@ $WL "cd /tmp/pkg && env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAN
 from local_operator import clipboard
 import os
 env = {'WAYLAND_DISPLAY': os.environ['WAYLAND_DISPLAY'], 'XDG_RUNTIME_DIR': os.environ['XDG_RUNTIME_DIR']}
-print('backend result:', clipboard.read_clipboard_image(4*1024*1024, platform='linux', env=env))
+print('backend result:', clipboard.read_clipboard(4*1024*1024, platform='linux', env=env).image)
 \""
 echo "--- wayland is preferred over X11 when both are set ---"
 echo "(wayland clipboard holds TEXT; the X11 clipboard still holds the PNG,"
@@ -140,7 +140,7 @@ $WL "cd /tmp/pkg && env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAN
 from local_operator import clipboard
 import os
 env = {'WAYLAND_DISPLAY': os.environ['WAYLAND_DISPLAY'], 'XDG_RUNTIME_DIR': os.environ['XDG_RUNTIME_DIR'], 'DISPLAY': ':99'}
-print('backend result:', clipboard.read_clipboard_image(4*1024*1024, platform='linux', env=env))
+print('backend result:', clipboard.read_clipboard(4*1024*1024, platform='linux', env=env).image)
 \""
 echo "--- missing tooling: wl-paste and xclip not on PATH ---"
 mkdir -p /tmp/emptybin && ln -sf "$(command -v python3)" /tmp/emptybin/python3
@@ -151,6 +151,6 @@ import os, shutil
 print('wl-paste on PATH:', bool(shutil.which('wl-paste')))
 print('xclip on PATH:   ', bool(shutil.which('xclip')))
 env = {'WAYLAND_DISPLAY': os.environ['WAYLAND_DISPLAY'], 'XDG_RUNTIME_DIR': os.environ['XDG_RUNTIME_DIR']}
-print('wayland backend result:', clipboard.read_clipboard_image(4*1024*1024, platform='linux', env=env))
-print('x11 backend result:    ', clipboard.read_clipboard_image(4*1024*1024, platform='linux', env={'DISPLAY': ':99'}))
+print('wayland backend result:', clipboard.read_clipboard(4*1024*1024, platform='linux', env=env).image)
+print('x11 backend result:    ', clipboard.read_clipboard(4*1024*1024, platform='linux', env={'DISPLAY': ':99'}).image)
 \""

@@ -16,6 +16,9 @@ Captured on macOS (Darwin 25.6.0, arm64) and in Debian bookworm under Docker
 | `composer-notice-ssh.png` | The SSH notice, which no longer claims the clipboard is empty (D2/U2) |
 | `macos_evidence.sh` | Reproduces `macos-pasteboard.txt` |
 | `round1_evidence.sh` | Reproduces `round1-remediation.txt` |
+| `round2-remediation.txt` | Review round 2 fixes verified: F2/U6, U3/U7, D8, D9, D10, D11 |
+| `round2_evidence.sh` | Reproduces `round2-remediation.txt` |
+| `composer-notice-unattachable.png` | The reworded refusal notice (D10) |
 | `linux_evidence.sh` | Reproduces `linux-xclip-wlpaste.txt` (runs inside the container) |
 
 ## What is proven
@@ -110,6 +113,58 @@ paste defers the notice, the screenshot attaches, and the deferred card is
 **F2 (major) — the whole read is bounded.** With every `xclip` hanging and four
 MIME types tried, total blocking time is 2.00 s against a 2.0 s cap (it was
 8.0 s), and each spawn is handed the remaining budget rather than a fresh one.
+
+## Review round 2 remediation
+
+`round2-remediation.txt`, reproducible with `round2_evidence.sh`. Captured at
+load average 143, so the timings are upper bounds.
+
+**F2/U6 (blocker) — a real hung tool is bounded again.** Round 1's fix replaced
+`subprocess.run(timeout=)` with a hand-rolled `Popen` whose blocking
+`stdout.read()` ran *before* the deadline check, so a tool holding stdout open
+never reached it: 15 s on X11, 12 s on macOS, child orphaned. The read now runs
+on a thread the deadline abandons, and the child is killed by process GROUP —
+without that, `sh -c` leaves a grandchild holding the pipe and the bound is
+defeated one level down (measured 30 s on a 1 s budget while writing this).
+All three hang shapes now return in 2.0 s with no orphan:
+
+```
+hung tool, bounded read    returned 2.02s (budget 2.0s) -> None  orphans: none
+hung tool, unbounded read  returned 2.02s (budget 2.0s) -> None  orphans: none
+answers then hangs         returned 2.00s (budget 2.0s) -> None  orphans: none
+healthy tool               -> b'hello'
+```
+
+The regression tests for this spawn **real** processes. The round-1 fakes could
+not fail on the bug: their `stdout` was a `BytesIO` that never blocks, and the
+hang was injected by raising from `wait()` — the one line a real hang never
+reaches.
+
+**U3/U7 (major/minor) — the latency is gone.** The cost was `osascript`
+*spawns*: 2-4 s of wall time each against ~0.25 s of CPU (`pbpaste` answers the
+same pasteboard in 0.05 s, so it is the AppleScript runtime, not the
+pasteboard), and the miss path paid two of them. One script now answers both
+shapes, and a copied-whitespace paste does not consult the clipboard at all:
+
+```
+TEXT paste (control)               24 ms  -> 'hello world'
+WHITESPACE paste (was 4203ms)     106 ms  -> '    '
+TAB paste (was 3850ms)            157 ms  -> '\t'
+EMPTY -> screenshot (was 4-9s)   1825 ms  -> '[Image #1, 1568x1014 ↓]'
+```
+
+**D8 (major) — the path route retires a held notice.** The notice tells the user
+to paste a file path; they do, it works, and the card used to reappear to deny
+it. The full sequence now ends with nothing stale surfacing.
+
+**D9 (minor) — copied whitespace is no longer traded for an image.** Reproduced
+first (an indent with a PNG on the pasteboard became `[Image #1, 1568x200]`),
+then fixed: only the genuinely empty payload lets an image win.
+
+**D10/D11 (minor) — message accuracy and toast rank.** "Paste its file path" is
+gone from the failures it could not cure, a copied file that will not attach has
+its own message, and the vague notice returns to the courtesy duration so it no
+longer suppresses a copy receipt for 10 s.
 
 ## What is NOT proven
 

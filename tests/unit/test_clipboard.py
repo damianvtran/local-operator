@@ -23,8 +23,10 @@ That is stated plainly rather than implied away.
 from __future__ import annotations
 
 import io
+import os
 import struct
 import subprocess
+import time
 import zlib
 from pathlib import Path
 
@@ -35,8 +37,7 @@ from local_operator.clipboard import (
     CLIPBOARD_TIMEOUT_S,
     ClipboardImage,
     clipboard_reads_are_local,
-    read_clipboard_file_paths,
-    read_clipboard_image,
+    read_clipboard,
 )
 
 
@@ -182,8 +183,8 @@ def test_the_ssh_skip_applies_to_every_backend(platform: str, monkeypatch, which
     adding the fourth backend forgets, so it is enforced at the dispatch."""
     fake = _install(monkeypatch, {"osascript": PNG, "xclip": PNG, "pwsh": PNG})
     env = {"SSH_TTY": "/dev/ttys001", "DISPLAY": ":0"}
-    assert read_clipboard_image(BIG, platform=platform, env=env) is None
-    assert read_clipboard_file_paths(platform=platform, env=env) == []
+    assert read_clipboard(BIG, platform=platform, env=env).image is None
+    assert list(read_clipboard(platform=platform, env=env).paths) == []
     assert fake.calls == [], "a remote session must not even spawn the reader"
 
 
@@ -192,13 +193,13 @@ def test_macos_reads_the_png_flavor(monkeypatch, which_all, tmp_path) -> None:
     """The reported case: a native screenshot leaves PNG bytes and no text."""
 
     def osascript(argv, kwargs):
-        # The script writes to the destination path passed as its argv, which
-        # is what the backend then reads back.
+        # The script writes to the destination path passed as its argv and
+        # prints the verdict, which is what the backend then reads back.
         Path(argv[2]).write_bytes(PNG)
-        return b"ok"
+        return b"image"
 
     _install(monkeypatch, {"osascript": osascript})
-    image = read_clipboard_image(BIG, platform="darwin", env={})
+    image = read_clipboard(BIG, platform="darwin", env={}).image
     assert image == ClipboardImage(PNG, "image/png")
 
 
@@ -210,21 +211,21 @@ def test_macos_reads_the_script_from_stdin_not_the_argv(monkeypatch, which_all) 
         assert argv[1] == "-", "the script must come from stdin"
         assert kwargs["stdin"] is subprocess.PIPE, "the script must not ride in argv"
         Path(argv[2]).write_bytes(PNG)
-        return b"ok"
+        return b"image"
 
     _install(monkeypatch, {"osascript": osascript})
-    assert read_clipboard_image(BIG, platform="darwin", env={}) is not None
+    assert read_clipboard(BIG, platform="darwin", env={}).image is not None
     # The script itself carries both flavours; asserted on the source rather
     # than on the pipe write, which the fake swallows.
-    assert "NSPasteboard" in clipboard_module._MACOS_IMAGE_SCRIPT
-    assert "public.tiff" in clipboard_module._MACOS_IMAGE_SCRIPT
+    assert "NSPasteboard" in clipboard_module._MACOS_CLIPBOARD_SCRIPT
+    assert "public.tiff" in clipboard_module._MACOS_CLIPBOARD_SCRIPT
 
 
 def test_macos_with_an_empty_pasteboard_is_no_image(monkeypatch, which_all) -> None:
     """The script writes no file and reports "none"; the backend must not then
     hand back a zero-byte payload that sniffs as nothing."""
     _install(monkeypatch, {"osascript": lambda argv, kwargs: b"none"})
-    assert read_clipboard_image(BIG, platform="darwin", env={}) is None
+    assert read_clipboard(BIG, platform="darwin", env={}).image is None
 
 
 def test_the_sniffed_type_is_what_comes_back_not_the_requested_one(monkeypatch, which_all) -> None:
@@ -237,7 +238,7 @@ def test_the_sniffed_type_is_what_comes_back_not_the_requested_one(monkeypatch, 
         return b"image/png\n" if "--list-types" in argv else JPEG
 
     _install(monkeypatch, {"wl-paste": wl_paste})
-    image = read_clipboard_image(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"})
+    image = read_clipboard(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"}).image
     assert image is not None and image.mime_type == "image/jpeg"
 
 
@@ -245,7 +246,7 @@ def test_macos_file_urls_come_back_as_paths(monkeypatch, which_all) -> None:
     """Finder's Cmd+C puts only ``public.file-url`` on the pasteboard — no
     text, no image bytes — so this is the only route to what was copied."""
     _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/a.png\x00/tmp/b c.png\x00"})
-    assert read_clipboard_file_paths(platform="darwin", env={}) == ["/tmp/a.png", "/tmp/b c.png"]
+    assert list(read_clipboard(platform="darwin", env={}).paths) == ["/tmp/a.png", "/tmp/b c.png"]
 
 
 def test_a_copied_filename_containing_a_newline_survives(monkeypatch, which_all) -> None:
@@ -256,7 +257,7 @@ def test_a_copied_filename_containing_a_newline_survives(monkeypatch, which_all)
     path, so it is the one separator that cannot be ambiguous.
     """
     _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/we\nird.png\x00"})
-    assert read_clipboard_file_paths(platform="darwin", env={}) == ["/tmp/we\nird.png"]
+    assert list(read_clipboard(platform="darwin", env={}).paths) == ["/tmp/we\nird.png"]
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
@@ -267,14 +268,14 @@ def test_file_urls_are_a_macos_only_route(platform: str, monkeypatch, which_all)
     way for one copy to be attached twice.
     """
     fake = _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/a.png\n"})
-    assert read_clipboard_file_paths(platform=platform, env={}) == []
-    assert fake.calls == []
+    assert list(read_clipboard(platform=platform, env={}).paths) == []
+    assert all(call[0] != "osascript" for call in fake.calls)
 
 
 # -- X11 ----------------------------------------------------------------------
 def test_x11_reads_the_png_target(monkeypatch, which_all) -> None:
     _install(monkeypatch, {"xclip": PNG})
-    image = read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"})
+    image = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"}).image
     assert image == ClipboardImage(PNG, "image/png")
 
 
@@ -282,7 +283,7 @@ def test_x11_asks_for_the_clipboard_selection_not_the_primary(monkeypatch, which
     """``PRIMARY`` is the middle-click selection and holds whatever text was
     last highlighted; ``Cmd+V``/``Ctrl+V`` pastes ``CLIPBOARD``."""
     fake = _install(monkeypatch, {"xclip": PNG})
-    read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"})
+    read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"}).image
     assert fake.calls[0] == ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]
 
 
@@ -292,7 +293,7 @@ def test_x11_falls_through_to_the_next_type(monkeypatch, which_all) -> None:
         monkeypatch,
         {"xclip": lambda argv, kwargs: JPEG if "image/jpeg" in argv else None},
     )
-    image = read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"})
+    image = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"}).image
     assert image is not None and image.mime_type == "image/jpeg"
 
 
@@ -311,7 +312,7 @@ def test_x11_never_hands_back_clipboard_text_as_an_image(monkeypatch, which_all)
     type on the result is the sniffed one.
     """
     _install(monkeypatch, {"xclip": b"just text, no image"})
-    assert read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"}) is None
+    assert read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"}).image is None
 
 
 def test_an_unsendable_format_on_the_clipboard_is_refused(monkeypatch, which_all) -> None:
@@ -319,14 +320,14 @@ def test_an_unsendable_format_on_the_clipboard_is_refused(monkeypatch, which_all
     answer than an attachment that earns a 400 mid-turn."""
     heic = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64
     _install(monkeypatch, {"xclip": heic})
-    assert read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"}) is None
+    assert read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"}).image is None
 
 
 def test_x11_without_xclip_installed_is_silent(monkeypatch, which_none) -> None:
     """A missing ``xclip`` is not an error the user should see on every stray
     empty paste — it is simply a machine with no clipboard images."""
     fake = _install(monkeypatch, {})
-    assert read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"}) is None
+    assert read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"}).image is None
     assert fake.calls == []
 
 
@@ -344,14 +345,14 @@ def test_wayland_lists_types_before_reading_one(monkeypatch, which_all) -> None:
         return None
 
     fake = _install(monkeypatch, {"wl-paste": wl_paste})
-    image = read_clipboard_image(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"})
+    image = read_clipboard(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"}).image
     assert image == ClipboardImage(PNG, "image/png")
     assert fake.calls[0][1] == "--list-types"
 
 
 def test_wayland_with_no_image_type_on_offer_reads_nothing(monkeypatch, which_all) -> None:
     fake = _install(monkeypatch, {"wl-paste": lambda argv, kwargs: b"text/plain\ntext/html\n"})
-    assert read_clipboard_image(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"}) is None
+    assert read_clipboard(BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0"}).image is None
     assert len(fake.calls) == 1, "a listing with no image type must not be followed by a read"
 
 
@@ -364,9 +365,9 @@ def test_wayland_is_preferred_when_xwayland_also_sets_display(monkeypatch, which
         return b"image/png\n" if "--list-types" in argv else PNG
 
     fake = _install(monkeypatch, {"wl-paste": wl_paste, "xclip": b"WRONG-SELECTION"})
-    image = read_clipboard_image(
+    image = read_clipboard(
         BIG, platform="linux", env={"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}
-    )
+    ).image
     assert image is not None and image.data == PNG
     assert all(call[0] != "xclip" for call in fake.calls)
 
@@ -375,7 +376,7 @@ def test_a_headless_linux_box_spawns_nothing(monkeypatch, which_all) -> None:
     """No display server means no clipboard, and discovering that by shelling
     out would cost a subprocess on every empty paste."""
     fake = _install(monkeypatch, {"xclip": PNG, "wl-paste": PNG})
-    assert read_clipboard_image(BIG, platform="linux", env={}) is None
+    assert read_clipboard(BIG, platform="linux", env={}).image is None
     assert fake.calls == []
 
 
@@ -390,7 +391,7 @@ def test_windows_reads_the_bitmap_through_a_file(monkeypatch, which_all) -> None
         return b""
 
     _install(monkeypatch, {"pwsh": pwsh})
-    assert read_clipboard_image(BIG, platform="win32", env={}) == ClipboardImage(PNG, "image/png")
+    assert read_clipboard(BIG, platform="win32", env={}).image == ClipboardImage(PNG, "image/png")
 
 
 def test_windows_never_pipes_image_bytes_through_stdout(monkeypatch, which_all) -> None:
@@ -407,7 +408,7 @@ def test_windows_never_pipes_image_bytes_through_stdout(monkeypatch, which_all) 
         return b""
 
     _install(monkeypatch, {"pwsh": pwsh})
-    read_clipboard_image(BIG, platform="win32", env={})
+    read_clipboard(BIG, platform="win32", env={}).image
     script = seen["script"]
     assert "WriteAllBytes" in script, "bytes must go to a file, not to stdout"
     assert "Write-Output" not in script and "Write-Host" not in script
@@ -427,7 +428,7 @@ def test_windows_avoids_the_encoding_flag_the_two_generations_disagree_on(
         return b""
 
     _install(monkeypatch, {"pwsh": pwsh})
-    read_clipboard_image(BIG, platform="win32", env={})
+    read_clipboard(BIG, platform="win32", env={}).image
     assert "-Encoding Byte" not in seen["script"]
     assert "-AsByteStream" not in seen["script"]
 
@@ -438,7 +439,7 @@ def test_windows_runs_in_a_single_threaded_apartment(monkeypatch, which_all) -> 
     fake = _install(
         monkeypatch, {"pwsh": lambda argv, kwargs: (Path(argv[-1]).write_bytes(PNG), b"")[1]}
     )
-    read_clipboard_image(BIG, platform="win32", env={})
+    read_clipboard(BIG, platform="win32", env={}).image
     argv = fake.calls[0]
     assert "-STA" in argv
     assert "-NoProfile" in argv
@@ -459,13 +460,13 @@ def test_windows_prefers_pwsh_then_falls_back_to_powershell(monkeypatch) -> None
         monkeypatch,
         {"powershell.exe": lambda argv, kwargs: (Path(argv[-1]).write_bytes(PNG), b"")[1]},
     )
-    assert read_clipboard_image(BIG, platform="win32", env={}) is not None
+    assert read_clipboard(BIG, platform="win32", env={}).image is not None
     assert fake.calls[0][0] == "/c/powershell.exe"
 
 
 def test_windows_without_any_powershell_is_silent(monkeypatch, which_none) -> None:
     fake = _install(monkeypatch, {})
-    assert read_clipboard_image(BIG, platform="win32", env={}) is None
+    assert read_clipboard(BIG, platform="win32", env={}).image is None
     assert fake.calls == []
 
 
@@ -490,7 +491,7 @@ def test_every_backend_is_bounded_by_the_timeout(
         return subprocess.TimeoutExpired(argv, CLIPBOARD_TIMEOUT_S)
 
     _install(monkeypatch, {binary: hang})
-    assert read_clipboard_image(BIG, platform=platform, env=env) is None
+    assert read_clipboard(BIG, platform=platform, env=env).image is None
 
 
 @pytest.mark.parametrize(
@@ -518,7 +519,7 @@ def test_every_backend_refuses_a_payload_over_the_cap(
         return oversized
 
     _install(monkeypatch, {binary: answer})
-    assert read_clipboard_image(1024, platform=platform, env=env) is None
+    assert read_clipboard(1024, platform=platform, env=env).image is None
 
 
 @pytest.mark.parametrize(
@@ -541,7 +542,7 @@ def test_every_backend_survives_the_binary_disappearing(
         raise OSError(2, "No such file or directory")
 
     _install(monkeypatch, {binary: boom})
-    assert read_clipboard_image(BIG, platform=platform, env=env) is None
+    assert read_clipboard(BIG, platform=platform, env=env).image is None
 
 
 def test_an_unknown_platform_reads_nothing(monkeypatch, which_all) -> None:
@@ -549,7 +550,7 @@ def test_an_unknown_platform_reads_nothing(monkeypatch, which_all) -> None:
     spawning something speculative on a keystroke is worse than doing nothing.
     """
     fake = _install(monkeypatch, {"xclip": PNG, "osascript": PNG})
-    assert read_clipboard_image(BIG, platform="sunos5", env={"DISPLAY": ":0"}) is None
+    assert read_clipboard(BIG, platform="sunos5", env={"DISPLAY": ":0"}).image is None
     assert fake.calls == []
 
 
@@ -584,7 +585,7 @@ def test_the_whole_operation_shares_one_deadline_not_one_per_subprocess(
         return TimedProcess(None)
 
     monkeypatch.setattr(clipboard_module.subprocess, "Popen", popen)
-    assert read_clipboard_image(BIG, platform="linux", env={"DISPLAY": ":0"}) is None
+    assert read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"}).image is None
     assert len(budgets) > 1, "the X11 loop should have tried several types"
     assert budgets == sorted(budgets, reverse=True), (
         "each call must be handed the REMAINING budget, so the sequence is "
@@ -649,7 +650,7 @@ def test_a_payload_over_the_ingest_ceiling_is_refused_without_truncation(
     """Dropped rather than cut short: a truncated PNG still sniffs as a PNG and
     would be attached as a corrupt image block."""
     _install(monkeypatch, {"xclip": PNG + b"\x00" * 4096})
-    assert read_clipboard_image(64, platform="linux", env={"DISPLAY": ":0"}) is None
+    assert read_clipboard(64, platform="linux", env={"DISPLAY": ":0"}).image is None
 
 
 def test_the_ingest_ceiling_is_far_above_the_attachment_budget(monkeypatch) -> None:
@@ -675,20 +676,107 @@ def test_read_clipboard_reports_a_remote_refusal_as_its_own_outcome() -> None:
     contents = clipboard_module.read_clipboard(env={"SSH_TTY": "/dev/ttys001"})
     assert contents.refused_remote is True
     assert contents.image is None
-    assert contents.found_nothing is False, "a refusal is not a failure to find"
+    assert contents.paths == (), "a refusal reads nothing at all"
 
 
 def test_read_clipboard_answers_both_shapes_under_one_deadline(monkeypatch, which_all) -> None:
     """One gesture, one budget. Two entry points meant two deadlines and a 4 s
     worst case on macOS (F2)."""
 
-    def osascript(argv, kwargs):
-        if len(argv) > 2:  # the image script writes to a destination path
-            return None
-        return b"/tmp/a.png\x00"
-
-    fake = _install(monkeypatch, {"osascript": osascript})
+    fake = _install(monkeypatch, {"osascript": lambda argv, kwargs: b"/tmp/a.png\x00"})
     contents = clipboard_module.read_clipboard(platform="darwin", env={})
     assert contents.paths == ("/tmp/a.png",)
     assert contents.image is None
-    assert len(fake.calls) == 2, "the image read and the file-URL read are one operation"
+    assert len(fake.calls) == 1, (
+        "one osascript spawn must answer both shapes: the spawn is 2-4s of wall "
+        "time and asking separately doubled the cost of every clipboard miss"
+    )
+
+
+# -- the bound that only a real process can prove -----------------------------
+#
+# These spawn REAL children. Every other test in this file fakes `Popen`, and
+# round 2 showed exactly what that costs: `FakeProcess.stdout` is a `BytesIO`
+# that never blocks, and the hang was simulated by raising `TimeoutExpired`
+# from `wait()` — injecting the failure at the one line a real hang can never
+# reach. Both timeout tests passed against a `_run` that blocked forever on
+# `stdout.read()` before it ever got to `wait()`, freezing the composer
+# indefinitely and orphaning the child. A mock cannot fail on that bug.
+def test_a_hung_tool_returns_within_the_deadline_and_leaves_no_child() -> None:
+    """A real child that holds stdout open and never writes.
+
+    This is the wedged-daemon shape the budget exists for: `sleep` inherits the
+    pipe, so the parent's read has neither bytes nor EOF to end on. Wall-clock
+    assertion, because the property under test IS elapsed time — round 2
+    measured 15 s on X11 and 12 s on macOS against this same 2 s budget.
+    """
+    deadline = clipboard_module._Deadline(1.0)
+    started = time.monotonic()
+    # `sh -c` so the child is a real process tree, matching how a wedged
+    # `xclip`/`osascript` actually presents.
+    process_marker = f"lo-clip-test-{os.getpid()}"
+    result = clipboard_module._run(
+        ["/bin/sh", "-c", f": {process_marker}; sleep 30"],
+        deadline,
+        max_bytes=4096,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result is None, "a tool that never answers has no clipboard image"
+    assert elapsed < 5.0, (
+        f"the read took {elapsed:.1f}s against a 1.0s budget; the deadline is "
+        "not bounding the READ, only the wait after it"
+    )
+    # No orphan: the child must be killed AND reaped, or a wedged clipboard
+    # leaks a process per paste.
+    time.sleep(0.3)
+    leftover = subprocess.run(
+        ["pgrep", "-f", process_marker], capture_output=True, text=True, check=False
+    )
+    assert leftover.stdout.strip() == "", f"child survived _run: {leftover.stdout!r}"
+
+
+def test_a_hung_tool_is_bounded_on_the_unbounded_read_shape_too() -> None:
+    """The ``max_bytes=None`` call shape, which is how the type listing runs.
+
+    ``read()`` and ``read(n)`` are different calls and only one of them was
+    covered when this regressed, so both are pinned.
+    """
+    deadline = clipboard_module._Deadline(1.0)
+    started = time.monotonic()
+    result = clipboard_module._run(["/bin/sh", "-c", "sleep 30"], deadline)
+    elapsed = time.monotonic() - started
+
+    assert result is None
+    assert elapsed < 5.0, f"unbounded-read shape took {elapsed:.1f}s against a 1.0s budget"
+
+
+def test_a_tool_that_answers_then_hangs_is_still_bounded() -> None:
+    """Partial output followed by silence — the case the original comment
+    claimed to cover and the ordering defeated."""
+    deadline = clipboard_module._Deadline(1.0)
+    started = time.monotonic()
+    result = clipboard_module._run(
+        ["/bin/sh", "-c", "printf xx; sleep 30"], deadline, max_bytes=4096
+    )
+    elapsed = time.monotonic() - started
+
+    assert result is None
+    assert elapsed < 5.0, f"partial-then-hang took {elapsed:.1f}s against a 1.0s budget"
+
+
+def test_a_real_healthy_tool_still_returns_its_output() -> None:
+    """The control: the bound must not break the ordinary path. Without this,
+    a `_run` that returned `None` unconditionally would pass every test above.
+    """
+    deadline = clipboard_module._Deadline(CLIPBOARD_TIMEOUT_S)
+    assert clipboard_module._run(["/bin/echo", "-n", "hello"], deadline) == b"hello"
+
+
+def test_a_real_oversized_stream_is_refused_without_buffering_it_all() -> None:
+    """A real producer of more bytes than the ceiling allows."""
+    deadline = clipboard_module._Deadline(CLIPBOARD_TIMEOUT_S)
+    result = clipboard_module._run(
+        ["/bin/sh", "-c", "head -c 200000 /dev/zero"], deadline, max_bytes=1024
+    )
+    assert result is None

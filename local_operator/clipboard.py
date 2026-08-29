@@ -63,9 +63,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,7 +160,6 @@ def _as_image(data: bytes | None, max_bytes: int) -> ClipboardImage | None:
     special-casing the one that was caught doing it, and it also settles the
     size bound in the same place — the clipboard is an untrusted-size source,
     so the ceiling belongs where the bytes are accepted.
-
     """
     if not data or len(data) > max_bytes:
         return None
@@ -186,6 +187,49 @@ def clipboard_reads_are_local(env: Mapping[str, str] | None = None) -> bool:
     return not any(source.get(name) for name in SSH_ENV_VARS)
 
 
+#: Below this much time left, a further subprocess is not worth spawning: the
+#: interpreters here (``osascript``, ``pwsh``) cost more than this just to
+#: start, so a spawn under it can only end in a kill.
+_MIN_SPAWN_BUDGET_S = 0.05
+
+#: How long to wait for a KILLED child to be reaped. A signalled process is
+#: gone almost immediately; this only exists so a pathological one cannot make
+#: the cleanup itself unbounded, which would reintroduce the bug the kill is
+#: there to fix.
+_REAP_TIMEOUT_S = 0.5
+
+#: POSIX gives each spawned tool its own process group so the whole tree can be
+#: signalled at once. Windows has no equivalent here (and no forking clipboard
+#: helper either — the PowerShell backend is one process), so it takes the
+#: plain kill.
+_SUPPORTS_PROCESS_GROUPS = os.name == "posix"
+
+
+def _kill_tree(process: "subprocess.Popen[bytes]") -> None:
+    """Kill the tool AND anything it forked, so nothing holds the pipe open.
+
+    Signalling the process GROUP is the part that matters: a wedged tool is
+    typically a shell or an interpreter with a child doing the actual blocking,
+    and killing only the parent leaves that child alive holding the inherited
+    stdout, which keeps the reader thread blocked forever (round 2, F2 — the
+    same freeze, one level down).
+
+    Best-effort by design. The process may have exited between the poll and the
+    signal, or the platform may not support groups; either way the fallback is
+    the direct kill, and neither may raise into a keystroke handler.
+    """
+    if _SUPPORTS_PROCESS_GROUPS:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            return
+        except (OSError, AttributeError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
 class _Deadline:
     """The remaining budget for one clipboard operation, shared by its calls.
 
@@ -211,12 +255,6 @@ class _Deadline:
         # A read cannot usefully be given a zero or negative timeout, so the
         # floor is what "no time left" means rather than a bare `<= 0`.
         return self.remaining <= _MIN_SPAWN_BUDGET_S
-
-
-#: Below this much time left, a further subprocess is not worth spawning: the
-#: interpreters here (``osascript``, ``pwsh``) cost more than this just to
-#: start, so a spawn under it can only end in a kill.
-_MIN_SPAWN_BUDGET_S = 0.05
 
 
 def _run(
@@ -251,6 +289,23 @@ def _run(
     against a 4 MB cap. Reading ``max_bytes + 1`` and refusing a longer stream
     is the same stat-first discipline the composer's path branch documents.
 
+    **The read happens on a THREAD, and the deadline abandons it.** This is the
+    correction from round 2 (F2/U6), and it is the whole reason the obvious
+    shape does not work here. Reading the pipe inline and *then* calling
+    ``wait(timeout=...)`` cannot bound anything: ``read()`` blocks until EOF,
+    and a wedged tool holds its stdout open forever, so the line that enforces
+    the deadline is never reached. That regression measured 15 s on X11 and
+    12 s on macOS against a 2 s budget, with the child orphaned because the
+    cleanup never ran either — strictly worse than the 8 s it was meant to fix,
+    and invisible to any test whose fake stdout cannot block.
+
+    A reader thread is what satisfies both bounds at once, which neither
+    ``run(timeout=)`` nor ``communicate(timeout=)`` does: they enforce the
+    deadline but buffer without limit, reopening F3. Here the join is the time
+    bound and the ``read(limit)`` is the byte bound. The child is killed on
+    expiry, which is also what unblocks the thread (the pipe hits EOF), so the
+    thread is a daemon purely as a backstop and never accumulates.
+
     The deadline is REQUIRED rather than defaulted, so a future backend cannot
     quietly opt out of the total bound by omitting it.
     """
@@ -263,31 +318,59 @@ def _run(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            # Its OWN process group, so the kill below reaches the whole tree.
+            # These tools fork: `osascript` and a shell-wrapped `xclip` both
+            # leave a grandchild holding the inherited stdout, and signalling
+            # only the direct child leaves that grandchild alive and the pipe
+            # open — the read stays blocked and the bound is defeated by the
+            # same mechanism it was written to fix. Measured: killing just the
+            # child still took 30 s on a 1 s budget.
+            start_new_session=_SUPPORTS_PROCESS_GROUPS,
         ) as process:
+            captured: list[bytes] = []
+
+            def drain() -> None:
+                # Never raises into the caller: this runs on its own thread, so
+                # an exception here would be printed by the interpreter and
+                # otherwise lost. A failed read is an empty capture, which the
+                # returncode check below already treats as "no image".
+                try:
+                    stream = process.stdout
+                    if stream is not None:
+                        captured.append(stream.read() if limit is None else stream.read(limit))
+                except (OSError, ValueError):
+                    pass
+
+            reader = threading.Thread(target=drain, daemon=True)
             try:
                 if stdin_text is not None and process.stdin is not None:
-                    # Written before the bounded read so an interpreter waiting
+                    # Written before the reader starts so an interpreter waiting
                     # on its script is not deadlocked against a reader waiting
                     # on its output. These scripts are a few hundred bytes,
                     # comfortably inside the pipe buffer.
                     process.stdin.write(stdin_text.encode("utf-8"))
                     process.stdin.close()
-                if process.stdout is None:
-                    stdout = b""
-                elif limit is None:
-                    stdout = process.stdout.read()
-                else:
-                    stdout = process.stdout.read(limit)
-                # The wait is what turns a bounded read into a bounded RUN: a
-                # tool that answers instantly and then hangs would otherwise
-                # escape the deadline entirely.
+                reader.start()
+                reader.join(max(deadline.remaining, 0.0))
+                if reader.is_alive():
+                    # Still reading when the budget ran out: the tool is wedged.
+                    # Killing the child is what ends the thread's read, and it
+                    # is done in the `finally` below so the same path covers a
+                    # timed-out wait.
+                    return None
                 returncode = process.wait(timeout=max(deadline.remaining, 0.0))
             finally:
                 # `Popen.__exit__` closes the pipes but only reaps a process
-                # that has already exited, so a timed-out child is killed here
-                # rather than left orphaned holding the selection.
+                # that has already exited, so a child that outlived the budget
+                # is killed here rather than left orphaned holding the
+                # selection. `wait()` after the kill is what reaps it: without
+                # it the process becomes a zombie until this process exits.
                 if process.poll() is None:
-                    process.kill()
+                    _kill_tree(process)
+                    try:
+                        process.wait(timeout=_REAP_TIMEOUT_S)
+                    except subprocess.SubprocessError:
+                        pass
     except (OSError, subprocess.SubprocessError, ValueError):
         # OSError covers the binary vanishing between `which` and `exec`;
         # SubprocessError covers the timeout; ValueError covers a pipe closed
@@ -295,6 +378,7 @@ def _run(
         return None
     if returncode != 0:
         return None
+    stdout = captured[0] if captured else b""
     if limit is not None and len(stdout) >= limit:
         # Longer than the ceiling allows. Dropped rather than truncated: a
         # truncated PNG still sniffs as one and would be attached as a corrupt
@@ -316,7 +400,39 @@ def _run(
 #: ``representationUsingType:4`` is ``NSBitmapImageFileTypePNG``; the numeric
 #: form is used because the symbolic constant is not visible to AppleScript's
 #: ObjC bridge.
-_MACOS_IMAGE_SCRIPT = """\
+#: BOTH pasteboard shapes are answered by ONE script, and the reason is
+#: measured rather than aesthetic. ``osascript`` costs 2-4 s of WALL time per
+#: spawn on a loaded machine against ~0.25 s of CPU — it is the AppleScript
+#: runtime starting up, not the pasteboard, and merely reaching
+#: ``generalPasteboard()`` with an empty script reproduces it (``pbpaste``, no
+#: AppleScript involved, answers the same pasteboard in 0.05 s). So the spawn
+#: count IS the latency, and asking the image question and the file-URL
+#: question separately doubled the cost of every miss — which is the common
+#: case, since a text clipboard reaches both (review round 2, U3/U7).
+#:
+#: The image wins when both are present: it is what the user copied in the
+#: reported gesture, and the file-URL branch is the Finder ``Cmd+C`` fallback
+#: that only matters when there are no image bytes at all.
+#:
+#: Output is a one-line verdict on stdout (``image`` or the NUL-separated
+#: paths); the image bytes go to a FILE, because ``osascript`` prints its
+#: result through a text coercion that mangles binary — the same trap the
+#: Windows backend documents.
+#:
+#: TIFF is handled explicitly because it is not a rare case: several macOS apps
+#: (Preview's copy, some screenshot utilities) put ONLY ``public.tiff`` on the
+#: pasteboard, and no provider accepts TIFF. ``NSBitmapImageRep`` re-encodes it
+#: to PNG in-process, which is cheaper and more reliable than declining.
+#: ``representationUsingType:4`` is ``NSBitmapImageFileTypePNG``; the numeric
+#: form is used because the symbolic constant is not visible to AppleScript's
+#: ObjC bridge.
+#:
+#: The URLs are enumerated by INDEX rather than with ``repeat with u in``,
+#: which hands back AppleScript's own coerced items instead of the ``NSURL``
+#: objects and fails with "doesn't understand the isFileURL message". They are
+#: NUL-separated because a newline is legal in a macOS filename and splitting
+#: on one turned a real path into two nonexistent ones (round 1, F5).
+_MACOS_CLIPBOARD_SCRIPT = """\
 use framework "AppKit"
 use framework "Foundation"
 use scripting additions
@@ -327,34 +443,18 @@ on run argv
 \tset png to pb's dataForType:"public.png"
 \tif png is missing value then
 \t\tset tiff to pb's dataForType:"public.tiff"
-\t\tif tiff is missing value then return "none"
-\t\tset rep to current application's NSBitmapImageRep's imageRepWithData:tiff
-\t\tif rep is missing value then return "none"
-\t\tset props to current application's NSDictionary's dictionary()
-\t\tset png to rep's representationUsingType:4 |properties|:props
-\t\tif png is missing value then return "none"
+\t\tif tiff is not missing value then
+\t\t\tset rep to current application's NSBitmapImageRep's imageRepWithData:tiff
+\t\t\tif rep is not missing value then
+\t\t\t\tset props to current application's NSDictionary's dictionary()
+\t\t\t\tset png to rep's representationUsingType:4 |properties|:props
+\t\t\tend if
+\t\tend if
 \tend if
-\tpng's writeToFile:dest atomically:true
-\treturn "ok"
-end run
-"""
-
-#: The Finder ``Cmd+C`` case. Finder puts only a ``public.file-url`` flavor on
-#: the pasteboard — no plain text and no image bytes — so ``pbpaste`` returns
-#: zero bytes and the image backend above finds nothing either. Reading the
-#: URLs turns that gesture back into the path list the composer already knows
-#: how to attach.
-#:
-#: Enumerated by INDEX rather than with ``repeat with u in``, which hands back
-#: AppleScript's own coerced items instead of the ``NSURL`` objects and fails
-#: with "doesn't understand the isFileURL message".
-_MACOS_FILE_URL_SCRIPT = """\
-use framework "AppKit"
-use framework "Foundation"
-use scripting additions
-
-on run argv
-\tset pb to current application's NSPasteboard's generalPasteboard()
+\tif png is not missing value then
+\t\tpng's writeToFile:dest atomically:true
+\t\treturn "image"
+\tend if
 \tset urls to pb's readObjectsForClasses:{current application's NSURL} options:(missing value)
 \tif urls is missing value then return ""
 \tset out to ""
@@ -368,19 +468,21 @@ end run
 """
 
 
-def _read_macos_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
-    """macOS: the ``public.png`` flavor, or ``public.tiff`` re-encoded to PNG.
+def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
+    """macOS: image bytes, or file URLs, from ONE ``osascript`` spawn.
 
-    Writes to a temp FILE rather than returning bytes on stdout. ``osascript``
-    prints an AppleScript result through a text coercion, so raw image bytes on
-    stdout are mangled by encoding before this process ever sees them — the
-    same trap the Windows backend documents. A file is the only lossless
-    channel out of ``osascript``, and it is deleted before this returns.
+    Both shapes in one call because the spawn is the cost — see
+    :data:`_MACOS_CLIPBOARD_SCRIPT`. Asking them separately doubled the latency
+    of every clipboard miss, which is the case a text or empty clipboard hits
+    (round 2, U3/U7).
+
+    The image is collected from a temp FILE, which is the only lossless channel
+    out of ``osascript``; it is deleted before this returns.
     """
     if not shutil.which("osascript"):
         # Not reachable on a stock macOS, but this module must never assume a
         # binary exists just because the platform usually ships it.
-        return None
+        return ClipboardContents()
     with tempfile.TemporaryDirectory(prefix="lo-clip-") as tmp:
         dest = Path(tmp) / "clipboard.png"
         # `-` reads the script from stdin; everything after it is `argv` to the
@@ -389,12 +491,19 @@ def _read_macos_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | N
         stdout = _run(
             ["osascript", "-", str(dest)],
             deadline,
-            stdin_text=_MACOS_IMAGE_SCRIPT,
+            stdin_text=_MACOS_CLIPBOARD_SCRIPT,
         )
         if stdout is None:
-            return None
-        data = _read_bounded(dest, max_bytes)
-    return _as_image(data, max_bytes)
+            return ClipboardContents()
+        verdict = stdout.decode("utf-8", errors="replace")
+        if verdict.strip() == "image":
+            image = _as_image(_read_bounded(dest, max_bytes), max_bytes)
+            # An image that was found and then refused (oversized, unsendable)
+            # does NOT fall through to the file-URL list: the pasteboard's
+            # answer to "what did the user copy" was the image, and attaching
+            # some unrelated file instead would be a different gesture.
+            return ClipboardContents(image=image)
+    return ClipboardContents(paths=tuple(p for p in verdict.split("\x00") if p.strip()))
 
 
 def _read_bounded(path: Path, max_bytes: int) -> bytes | None:
@@ -414,24 +523,6 @@ def _read_bounded(path: Path, max_bytes: int) -> bytes | None:
         return path.read_bytes()
     except OSError:
         return None
-
-
-def _read_macos_file_urls(deadline: _Deadline) -> list[str]:
-    """macOS: file paths from the pasteboard's ``public.file-url`` flavor.
-
-    Split on ``\\x00`` rather than on newlines. A newline is legal in a macOS
-    filename, and splitting on it turned one real path into two nonexistent
-    ones — which the composer's all-or-nothing rule then correctly refused, so
-    a Finder copy of such a file silently attached nothing (review round 1,
-    F5). NUL cannot occur in a path, so it is the one unambiguous separator.
-    """
-    if not shutil.which("osascript"):
-        return []
-    stdout = _run(["osascript", "-"], deadline, stdin_text=_MACOS_FILE_URL_SCRIPT)
-    if stdout is None:
-        return []
-    text = stdout.decode("utf-8", errors="replace")
-    return [path for path in text.split("\x00") if path.strip()]
 
 
 def _read_wayland_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
@@ -599,84 +690,6 @@ def _read_windows_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage |
     return _as_image(data, max_bytes)
 
 
-def read_clipboard_image(
-    max_bytes: int,
-    *,
-    platform: str | None = None,
-    env: Mapping[str, str] | None = None,
-) -> ClipboardImage | None:
-    """The image on the system clipboard, or ``None``.
-
-    ``None`` covers every "there is nothing to attach" case without
-    distinguishing them, because no backend can reliably tell them apart: an
-    empty clipboard, a text-only clipboard, a missing ``xclip``, a wedged
-    daemon and an unreadable payload are one answer here. The two cases the
-    CALLER can distinguish are deliberately not collapsed into this function —
-    a remote session is knowable up front via
-    :func:`clipboard_reads_are_local`, and an oversized image is knowable from
-    the bytes it returns — because those are the two the user can act on
-    (review round 1, D2/U2).
-
-    ``max_bytes`` is the INGEST ceiling, not the attachment budget; see
-    :data:`MAX_CLIPBOARD_READ_BYTES` for why passing the smaller of the two
-    here defeats the resize that makes a screenshot attachable.
-
-    ``platform`` and ``env`` are injectable so each backend is testable on any
-    host — this module's whole failure mode is a platform assumption that only
-    one developer's environment could disprove.
-
-    Wayland is chosen over X11 by ``WAYLAND_DISPLAY`` rather than by
-    distribution: a Wayland session commonly also runs XWayland, so ``DISPLAY``
-    is set in both, and testing ``DISPLAY`` first would route a Wayland session
-    to ``xclip`` and read XWayland's separate, usually empty selection.
-    """
-    if not clipboard_reads_are_local(env):
-        return None
-    # ONE deadline for the whole operation, created here rather than inside a
-    # backend so a multi-call read cannot outlive the documented cap (F2).
-    deadline = _Deadline(CLIPBOARD_TIMEOUT_S)
-    system = sys.platform if platform is None else platform
-    source = os.environ if env is None else env
-    if system == "darwin":
-        return _read_macos_image(max_bytes, deadline)
-    if system == "win32":
-        return _read_windows_image(max_bytes, deadline)
-    if system.startswith("linux") or "bsd" in system:
-        # BSDs run the same X11/Wayland stacks, so they take the same backends
-        # rather than falling through to "no clipboard".
-        if source.get("WAYLAND_DISPLAY"):
-            return _read_wayland_image(max_bytes, deadline)
-        if source.get("DISPLAY"):
-            return _read_x11_image(max_bytes, deadline)
-        # A headless Linux box (a container, a bare tty) has no clipboard at
-        # all, and shelling out to discover that costs a subprocess per paste.
-        return None
-    return None
-
-
-def read_clipboard_file_paths(
-    *,
-    platform: str | None = None,
-    env: Mapping[str, str] | None = None,
-) -> list[str]:
-    """File paths on the clipboard, for the Finder ``Cmd+C`` case.
-
-    macOS only, and deliberately so. This exists for one specific pasteboard
-    shape — ``public.file-url`` with no text and no image flavor — which is
-    what Finder's copy produces. Linux file managers put ``text/uri-list`` on
-    the clipboard alongside plain text of the same paths, so the terminal
-    bracket-pastes those paths and the composer's existing path branch already
-    handles them; adding a second route there would be a way for one drop to be
-    attached twice.
-    """
-    if not clipboard_reads_are_local(env):
-        return []
-    system = sys.platform if platform is None else platform
-    if system != "darwin":
-        return []
-    return _read_macos_file_urls(_Deadline(CLIPBOARD_TIMEOUT_S))
-
-
 @dataclass(frozen=True)
 class ClipboardContents:
     """What one look at the clipboard found, and whether it was even allowed.
@@ -706,11 +719,6 @@ class ClipboardContents:
     #: reported as one.
     refused_remote: bool = False
 
-    @property
-    def found_nothing(self) -> bool:
-        """Nothing to attach, and not because the read was refused."""
-        return self.image is None and not self.paths and not self.refused_remote
-
 
 def read_clipboard(
     max_bytes: int = MAX_CLIPBOARD_READ_BYTES,
@@ -720,15 +728,25 @@ def read_clipboard(
 ) -> ClipboardContents:
     """One look at the clipboard for one paste, under one deadline.
 
-    The entry point the composer uses. It exists so that the image read and the
-    file-URL read share a single :data:`CLIPBOARD_TIMEOUT_S` budget rather than
-    getting one each, and so the caller learns the two things it can act on
-    without this module having to explain itself per backend.
+    The ONLY entry point, so the whole operation cannot cost more than
+    :data:`CLIPBOARD_TIMEOUT_S` no matter how many shapes or subprocesses a
+    platform needs. Separate per-shape functions were how round 1's F2 got a
+    4 s worst case out of a 2 s constant, and re-exposing them would put that
+    back one caller at a time.
 
     ``max_bytes`` defaults to the INGEST ceiling
     (:data:`MAX_CLIPBOARD_READ_BYTES`) rather than to any attachment budget:
     resizing happens downstream, and a ceiling applied before it discards
-    images that would have been perfectly attachable (U1).
+    images that would have been perfectly attachable (round 1, U1).
+
+    ``platform`` and ``env`` are injectable so each backend is testable on any
+    host — this module's whole failure mode was a platform assumption that only
+    one developer's environment could disprove.
+
+    Wayland is chosen over X11 by ``WAYLAND_DISPLAY`` rather than by
+    distribution: a Wayland session commonly also runs XWayland, so ``DISPLAY``
+    is set in both, and testing ``DISPLAY`` first would route a Wayland session
+    to ``xclip`` and read XWayland's separate, usually empty selection.
     """
     if not clipboard_reads_are_local(env):
         return ClipboardContents(refused_remote=True)
@@ -737,23 +755,23 @@ def read_clipboard(
     system = sys.platform if platform is None else platform
     source = os.environ if env is None else env
 
-    image: ClipboardImage | None = None
     if system == "darwin":
-        image = _read_macos_image(max_bytes, deadline)
-    elif system == "win32":
+        # One spawn answers both shapes; see `_MACOS_CLIPBOARD_SCRIPT` for why
+        # the spawn count is the latency here.
+        return _read_macos(max_bytes, deadline)
+
+    image: ClipboardImage | None = None
+    if system == "win32":
         image = _read_windows_image(max_bytes, deadline)
     elif system.startswith("linux") or "bsd" in system:
         if source.get("WAYLAND_DISPLAY"):
             image = _read_wayland_image(max_bytes, deadline)
         elif source.get("DISPLAY"):
             image = _read_x11_image(max_bytes, deadline)
-    if image is not None:
-        return ClipboardContents(image=image)
-
-    # Only macOS has a second shape to try; every other platform's file manager
-    # puts the paths on the clipboard as text, which the terminal already
-    # bracket-pastes into the composer's existing path branch.
-    paths: tuple[str, ...] = ()
-    if system == "darwin":
-        paths = tuple(_read_macos_file_urls(deadline))
-    return ClipboardContents(paths=paths)
+        # A headless Linux box (a container, a bare tty) has no clipboard at
+        # all, and shelling out to discover that costs a subprocess per paste.
+    # No file-URL shape off macOS: every other platform's file manager puts the
+    # paths on the clipboard as text too, which the terminal already
+    # bracket-pastes into the composer's existing path branch — a second route
+    # here would be a way for one copy to be attached twice.
+    return ClipboardContents(image=image)
