@@ -5299,7 +5299,9 @@ async def test_mcp_unknown_subcommand_names_the_three_verbs() -> None:
             await pilot.pause()
         text = _transcript_text(app)
         assert "unknown mcp subcommand" in text
-        assert "login|logout|reauth" in text
+        # Every verb the command accepts, so the one discoverability surface
+        # besides the argument list stays complete as verbs are added.
+        assert "list|add|remove|login|logout|reauth" in text
 
 
 @pytest.mark.asyncio
@@ -5331,7 +5333,16 @@ async def test_mcp_argument_list_offers_subcommands_then_servers() -> None:
             for _ in range(6):
                 await pilot.pause()
             verb_rows = [name for name, _ in editor.picker.suggestions()]
-            assert verb_rows == ["login", "logout", "reauth"], verb_rows
+            # `list` leads: the safe, non-destructive row is the one a stray
+            # Enter lands on.
+            assert verb_rows == [
+                "list",
+                "add",
+                "remove",
+                "login",
+                "logout",
+                "reauth",
+            ], verb_rows
 
             _set_editor_line(editor, "/mcp login ")
             for _ in range(6):
@@ -5385,6 +5396,530 @@ async def test_mcp_logout_list_offers_only_servers_holding_a_credential() -> Non
             for _ in range(6):
                 await pilot.pause()
             assert [name for name, _ in editor.picker.suggestions()] == ["logout linear"]
+
+
+async def _type_into_editor(pilot, app, text: str) -> None:
+    """Type ``text`` one REAL keystroke at a time, leaving it in the buffer.
+
+    Deliberately NOT ``_set_editor_line``. That helper assigns ``editor.text``
+    and calls ``_sync_picker()`` directly, which BYPASSES the
+    ``RefreshArgumentChoices`` message the picker relies on to swap its rows
+    when a two-level command crosses into its second slot. A whole class of
+    wiring bug is therefore invisible to it: the `/mcp <verb> ` server rows
+    were unreachable by typing while six tests using that helper passed, and
+    the captured screenshots showed a state the UI never produced.
+
+    Unlike ``_type_command`` this does not press Enter, because the state under
+    test is the OPEN picker rather than the executed command.
+    """
+    editor = app.query_one(Editor)
+    editor.text = ""
+    editor.move_cursor(editor._end_of_buffer())
+    for _ in range(4):
+        await pilot.pause()
+    editor.focus()
+    for ch in text:
+        await pilot.press("space" if ch == " " else ch)
+    for _ in range(6):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_rows_are_reachable_by_typing_not_just_by_setting_text() -> None:
+    """The rows must appear for a user at the KEYBOARD, not only when a test
+    assigns the buffer.
+
+    `/mcp` is two-level: the first argument slot holds a verb, and the space
+    after it opens the SERVER slot. The picker only refills when its tracked
+    sub-slot changes, so a tracker keyed on the verb TOKEN alone never fires on
+    that space — `remove` and `remove ` are the same token — and the stale verb
+    rows get filtered to nothing by the server query, closing the list.
+
+    Every other server-row test here uses `_set_editor_line`, which calls
+    `_sync_picker()` directly and cannot observe that message at all. This test
+    types, so it fails when the wiring is broken even though those pass.
+    """
+    from local_operator.mcp.config import (
+        MCPAuthConfig,
+        MCPHttpServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+        "filesystem": MCPStdioServerConfig(command="npx"),
+    }
+    sources = {"linear": "/tmp/x/.local-operator/mcp.json", "filesystem": "/tmp/x/.claude.json"}
+    manager = FakeMcpManager(["linear", "filesystem"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, sources),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            # The verb slot still works when typed.
+            await _type_into_editor(pilot, app, "/mcp ")
+            assert [n for n, _ in editor.picker.suggestions()] == list(OperatorApp.MCP_SUBCOMMANDS)
+
+            # Each verb -> server transition, reached by the space alone.
+            for typed, expected in (
+                ("/mcp remove ", ["remove linear", "remove filesystem"]),
+                ("/mcp login ", ["login linear"]),
+                ("/mcp logout ", ["logout linear"]),
+                ("/mcp reauth ", ["reauth linear"]),
+            ):
+                await _type_into_editor(pilot, app, typed)
+                rows = [n for n, _ in editor.picker.suggestions()]
+                assert sorted(rows) == sorted(expected), f"typing {typed!r} gave {rows}"
+                assert editor.picker.display, f"typing {typed!r} left the picker closed"
+
+            # And narrowing still works from the typed state.
+            await _type_into_editor(pilot, app, "/mcp remove fs")
+            assert [n for n, _ in editor.picker.suggestions()] == ["remove filesystem"]
+
+
+@pytest.mark.asyncio
+async def test_the_destructive_gate_is_armed_on_the_TYPED_path() -> None:
+    """#378's fuzzy-Enter guard reads the highlighted row's ``alert`` flag, so
+    it is only as good as the list being open.
+
+    While the server rows were unreachable by typing there was no highlighted
+    choice, and the gate returned ``False`` for every `/mcp` row on the real
+    key path — the flag was set correctly and protected nothing. Asserted here
+    on TYPED input so the safety property is proven where a user meets it:
+    armed for the verbs that destroy, and off for `login`, which does not.
+    """
+    from local_operator.mcp.config import (
+        MCPAuthConfig,
+        MCPHttpServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+        "filesystem": MCPStdioServerConfig(command="npx"),
+    }
+    sources = {"linear": "/tmp/x/.local-operator/mcp.json", "filesystem": "/tmp/x/.claude.json"}
+    manager = FakeMcpManager(["linear", "filesystem"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, sources),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            for typed, destroys in (
+                ("/mcp remove fs", True),
+                ("/mcp logout lin", True),
+                # The fuzzy shape that motivated the gate: `lnr` spells nothing
+                # and still narrows to one row.
+                ("/mcp reauth lnr", True),
+                ("/mcp login lin", False),
+            ):
+                await _type_into_editor(pilot, app, typed)
+                assert editor.picker.suggestions(), f"typing {typed!r} opened no list"
+                assert editor._argument_is_destructive() is destroys, (
+                    f"typing {typed!r}: gate={editor._argument_is_destructive()}, "
+                    f"expected {destroys}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_every_mcp_verb_that_destroys_something_flags_its_rows() -> None:
+    """`alert` is the SAFETY bit, so the set it covers must match what the
+    verbs actually destroy — not what they are named.
+
+    `reauth` reads like a login and IS a deletion: `_cmd_mcp` runs
+    `_mcp_logout` first (the docstring calls it "the two composed — forget
+    first"), so the stored grant leaves the shared auth.db the moment the row
+    runs, and an abandoned browser round trip leaves the server with no
+    credential at all. It was flagged `False` while the PR that made this flag
+    load-bearing claimed every destructive row carried it.
+
+    Asserted as a whole table rather than one row, because the claim the
+    editor's destructive gate relies on is about the SET: `login` is the only
+    verb here that destroys nothing, and it is the only one left unflagged.
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {"linear": "/tmp/x/.local-operator/mcp.json"}),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            # verb -> does choosing a row DESTROY persistent state?
+            # `logout` last: its list is filtered by the credential store, so
+            # ordering it after the others keeps a failure here pointing at the
+            # alert flag rather than at an empty list.
+            for verb, destroys in (
+                ("login", False),
+                ("reauth", True),
+                ("remove", True),
+                ("logout", True),
+            ):
+                # Clear between verbs: the picker tracks the sub-slot and only
+                # refills when it CHANGES, so hopping verb-to-verb without
+                # passing through the bare form leaves the previous list up.
+                _set_editor_line(editor, "/mcp ")
+                for _ in range(4):
+                    await pilot.pause()
+                _set_editor_line(editor, f"/mcp {verb} ")
+                for _ in range(8):
+                    await pilot.pause()
+                rows = editor.picker.suggestions()
+                assert rows, f"/mcp {verb} offered no rows"
+                for name, choice in rows:
+                    assert isinstance(choice, ArgumentChoice)
+                    assert choice.alert is destroys, (
+                        f"/mcp {verb} row {name!r} has alert={choice.alert}, "
+                        f"but the verb destroys={destroys}"
+                    )
+
+
+def _mcp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A sandbox HOME holding one owned config and one Claude-imported server.
+
+    The `/mcp add|remove` paths WRITE, so every test touching them needs its
+    own home — a test that mutated the developer's real
+    ``~/.local-operator/mcp.json`` would delete servers off their machine.
+    """
+    home = tmp_path / "home"
+    (home / ".local-operator").mkdir(parents=True)
+    (home / ".local-operator" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "filesystem": {"type": "stdio", "command": "npx"},
+                    "grafana": {"type": "http", "url": "https://grafana.example/mcp"},
+                }
+            }
+        )
+    )
+    # Visible to `/mcp`, and none of local-operator's business to delete.
+    (home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": "https://n.example/mcp"}}})
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.asyncio
+async def test_mcp_remove_list_offers_every_server_not_just_the_oauth_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug this list had: it was built from `oauth_server_names`, so a
+    stdio server and a non-OAuth http server were invisible to the picker even
+    though `remove` is exactly the verb that can act on them. `remove` reads
+    the CONFIG, which is the thing it edits."""
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana", "notion"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/mcp remove ")
+        for _ in range(6):
+            await pilot.pause()
+        rows = {}
+        for name, choice in editor.picker.suggestions():
+            # An ARGUMENT list only ever carries ArgumentChoice rows;
+            # suggestions() is typed as the union it shares with the
+            # command-word list, so assert the mode rather than casting.
+            assert isinstance(choice, ArgumentChoice), "the picker is not in argument mode"
+            rows[name] = choice
+        assert sorted(rows) == ["remove filesystem", "remove grafana", "remove notion"]
+        # The detail column carries the SOURCE FILE, abbreviated: that is what
+        # turns the refusal into something the user saw coming.
+        assert rows["remove filesystem"].detail == "~/.local-operator/mcp.json"
+        assert rows["remove notion"].detail == "~/.claude.json"
+        assert str(home) not in rows["remove notion"].detail
+        # `alert` is LOAD-BEARING SAFETY here, not a tint (see
+        # _mcp_remove_choices): the editor's destructive gate reads it to make
+        # Enter fill rather than fire.
+        assert all(choice.alert for choice in rows.values())
+
+
+@pytest.mark.asyncio
+async def test_mcp_remove_refuses_a_server_defined_by_a_foreign_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing a Claude-imported server would either fail or write a
+    local-operator file that silently shadows a config the user still
+    maintains in Claude Code. The refusal names the FILE and the TOOL and says
+    where to go instead, and leaves both configs untouched."""
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    claude_before = (home / ".claude.json").read_text()
+    manager = FakeMcpManager(["filesystem", "grafana", "notion"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        await _type_command(pilot, app, "mcp remove notion")
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+        assert "~/.claude.json" in text
+        assert "imported from Claude Code" in text
+        assert "Remove it there" in text
+    # Neither file was touched.
+    assert (home / ".claude.json").read_text() == claude_before
+    owned = json.loads((home / ".local-operator" / "mcp.json").read_text())
+    assert sorted(owned["mcpServers"]) == ["filesystem", "grafana"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_writes_both_transports_and_names_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grammar discriminates on whether the third token is an http(s) URL.
+    The receipt NAMES the file written, because the global scope is otherwise
+    an invisible default the user has no way to confirm.
+
+    OAuth is deliberately NOT inferred from the URL: real configs carry
+    non-OAuth http servers, and inferring auth would silently change how a
+    server authenticates."""
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        await _type_command(pilot, app, "mcp add demo-stdio npx -y demo-mcp")
+        for _ in range(6):
+            await pilot.pause()
+        await _type_command(pilot, app, "mcp add demo-http https://demo.example/mcp")
+        for _ in range(6):
+            await pilot.pause()
+        assert "~/.local-operator/mcp.json" in _transcript_text(app)
+    servers = json.loads((home / ".local-operator" / "mcp.json").read_text())["mcpServers"]
+    assert servers["demo-stdio"] == {"type": "stdio", "command": "npx", "args": ["-y", "demo-mcp"]}
+    assert servers["demo-http"] == {"type": "http", "url": "https://demo.example/mcp"}
+    assert "auth" not in servers["demo-http"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_is_an_alias_for_the_bare_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lop mcp list` has always existed, so a user who guesses `/mcp list`
+    used to get `unknown mcp subcommand: list` for a correctly-formed command.
+
+    Reserving `list` is safe HERE because `/mcp`'s first token is a CLOSED verb
+    set — nothing can be named `list` in that slot. `/team` and `/agent` take
+    an OPEN namespace and must NOT copy this fix."""
+    _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana"], ["grafana"])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        await _type_command(pilot, app, "mcp list")
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+        assert "MCP servers" in text
+        assert "unknown mcp subcommand" not in text
+        assert "filesystem" in text and "grafana" in text
+
+
+@pytest.mark.asyncio
+async def test_a_fuzzy_mcp_remove_row_fills_rather_than_deleting_a_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `/logout` hazard, applied to config deletion. The matcher is a
+    SUBSEQUENCE matcher, so a query that spells nothing can still leave one
+    survivor: `fsy` reaches `filesystem`. Enter on that row must COMPLETE it —
+    leaving the user looking at the full name they never typed — rather than
+    deleting a server off disk on a single keystroke.
+
+    Verified as a real data-loss defect before this test existed: `/mcp remove
+    fsy` + Enter removed `filesystem` from mcp.json outright."""
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/mcp remove fsy")
+        for _ in range(6):
+            await pilot.pause()
+        assert [name for name, _ in editor.picker.suggestions()] == ["remove filesystem"]
+        await pilot.press("enter")
+        for _ in range(8):
+            await pilot.pause()
+        # Completed into the buffer, not run.
+        assert editor.text.strip() == "/mcp remove filesystem"
+    servers = json.loads((home / ".local-operator" / "mcp.json").read_text())["mcpServers"]
+    assert "filesystem" in servers, "a fuzzy match must never delete a server on one keystroke"
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_refuses_to_shadow_or_no_op_over_an_existing_definition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`add` honours the SAME ownership rule `remove` enforces, and reports the
+    two cases differently because their consequences differ.
+
+    A foreign, lower-priority definition (`~/.claude.json`): our write would
+    WIN and silently repoint a server the user still maintains in Claude Code —
+    the outcome `_mcp_remove_result` refuses to cause from the other side.
+
+    A higher-priority definition (`<cwd>/.mcp.json`): our write lands and
+    changes nothing observable, so an unqualified "added" would be a receipt
+    that LIES about an effect the user will never see. That is the worse half.
+    """
+    home = _mcp_home(tmp_path, monkeypatch)
+    project = home / "proj"
+    project.mkdir()
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"proj": {"type": "http", "url": "https://proj.example/mcp"}}})
+    )
+    monkeypatch.chdir(project)
+    manager = FakeMcpManager(["filesystem", "grafana", "notion", "proj"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    claude_before = (home / ".claude.json").read_text()
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+
+        await _type_command(pilot, app, "mcp add notion https://evil.example/mcp")
+        for _ in range(8):
+            await pilot.pause()
+        text = " ".join(_transcript_text(app).split())
+        assert "~/.claude.json" in text and "shadow" in text
+
+        marker = len(_transcript_text(app))
+        await _type_command(pilot, app, "mcp add proj https://mine.example/mcp")
+        for _ in range(8):
+            await pilot.pause()
+        # The transcript hard-wraps, so compare on collapsed whitespace.
+        second = " ".join(_transcript_text(app)[marker:].split())
+        assert "takes priority" in second and "no effect" in second
+        # The no-op case must NOT claim success.
+        assert "added MCP server" not in second
+
+    # Neither foreign file was touched, and no shadowing entry was written.
+    assert (home / ".claude.json").read_text() == claude_before
+    owned = json.loads((home / ".local-operator" / "mcp.json").read_text())["mcpServers"]
+    assert "notion" not in owned and "proj" not in owned
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_receipt_suggests_a_command_that_can_actually_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt used to end with `/mcp login <name>`, which was guaranteed
+    to fail for every server this command creates: `add` deliberately writes no
+    `auth` block and `_resolve_mcp_server` refuses any server whose `auth.type`
+    is not `oauth`. The hint now names the CLI flag that writes the block."""
+    _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        await _type_command(pilot, app, "mcp add gw https://gw.example/mcp")
+        for _ in range(8):
+            await pilot.pause()
+        text = _transcript_text(app)
+        assert "--oauth" in text
+        # The suggestion that cannot work must be gone.
+        assert "/mcp login gw" not in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_refuses_trailing_tokens_on_fixed_arity_verbs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silently dropping the tail is the same class of mistake this command
+    exists to avoid — acting on something other than what the user described.
+    It matters most on `remove`, where the ignored token could be the name they
+    actually meant to delete."""
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    manager = FakeMcpManager(["filesystem", "grafana"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+
+        marker = len(_transcript_text(app))
+        await _type_command(pilot, app, "mcp list junk")
+        for _ in range(6):
+            await pilot.pause()
+        listing = " ".join(_transcript_text(app)[marker:].split())
+        assert "takes no arguments" in listing and "MCP servers" not in listing
+
+        marker = len(_transcript_text(app))
+        await _type_command(pilot, app, "mcp remove filesystem extra")
+        for _ in range(6):
+            await pilot.pause()
+        assert "takes one server name" in " ".join(_transcript_text(app)[marker:].split())
+
+    # The destructive verb refused, so the server is still configured.
+    servers = json.loads((home / ".local-operator" / "mcp.json").read_text())["mcpServers"]
+    assert "filesystem" in servers
 
 
 @pytest.mark.asyncio

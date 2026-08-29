@@ -520,14 +520,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     # The listing is the receipt.
     SlashCommand("skills", "List loaded skills"),
-    # The listing is the receipt; the subcommands re-authorize or forget an
-    # OAuth server whose grant expired (startup never opens a browser on its
-    # own). OPTIONAL: bare `/mcp` answers something (the listing), so Enter
-    # still sends it and the subcommand list is an offer for the next
-    # keystroke, matching `/approvals`.
+    # The listing is the receipt; the subcommands configure servers or manage
+    # the OAuth grants startup never opens a browser for. OPTIONAL: bare
+    # `/mcp` answers something (the listing), so Enter still sends it and the
+    # subcommand list is an offer for the next keystroke, matching
+    # `/approvals`. The description names the SHAPE rather than all six verbs —
+    # the argument picker enumerates them with a line of help each, which is
+    # more than this one truncating row can carry.
     SlashCommand(
         "mcp",
-        "List MCP servers (login/logout/reauth <name> to manage OAuth)",
+        "List MCP servers; add/remove one, or manage an OAuth grant",
         arguments=ArgumentMode.OPTIONAL,
     ),
     # The flow narrates itself: URL block, progress notices, then success.
@@ -14152,14 +14154,46 @@ class OperatorApp(App[None]):
             # ``_mcp_block`` reads the identical rows.
             return SlashResult(kind="block", data={"type": "mcp"})
         sub = parts[0].lower()
-        if sub not in ("login", "logout", "reauth"):
+        if sub not in self.MCP_SUBCOMMANDS:
             return SlashResult(
                 kind="notice",
-                text=f"unknown mcp subcommand: {parts[0]} — try /mcp login|logout|reauth <name>",
+                text=f"unknown mcp subcommand: {parts[0]} — try "
+                f"/mcp {'|'.join(self.MCP_SUBCOMMANDS)} <name>",
                 style="warning",
             )
+        # Same fixed-arity refusal the local handler applies, kept in step so a
+        # follower and an owner answer one command identically.
+        if sub == "list" and len(parts) > 1:
+            return SlashResult(
+                kind="notice",
+                text=f"/mcp list takes no arguments — got {' '.join(parts[1:])!r}",
+                style="warning",
+            )
+        if sub == "list":
+            # Same canonical-local answer bare ``/mcp`` gets: the listing is
+            # data the invoker renders from its own snapshot facade.
+            block = self._mcp_block()
+            if block is None:
+                return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
+            return SlashResult(kind="block", data={"type": "mcp"})
+        # ``add``/``remove`` mutate the OWNER's config files and reconnect the
+        # owner's manager, so they run here rather than on the follower — the
+        # follower's MCP facade is read-only and its filesystem is not the one
+        # the session reads its servers from.
+        if sub == "add":
+            text, kind = self._mcp_add_result(parts[1:])
+            return SlashResult(kind="notice", text=text, style=_slash_style(kind))
         if len(parts) < 2:
             return SlashResult(kind="notice", text=f"usage: /mcp {sub} <name>", style="warning")
+        if len(parts) > 2:
+            return SlashResult(
+                kind="notice",
+                text=f"/mcp {sub} takes one server name — got {' '.join(parts[1:])!r}",
+                style="warning",
+            )
+        if sub == "remove":
+            text, kind = self._mcp_remove_result(parts[1])
+            return SlashResult(kind="notice", text=text, style=_slash_style(kind))
         # The grant runs HERE, on the authoritative owner: the follower's MCP
         # facade is read-only and the OAuth credential store is the owner's.
         # The interactive browser round trip opens on the owner's machine (the
@@ -14427,8 +14461,24 @@ class OperatorApp(App[None]):
             style="info",
         )
 
+    #: The CLOSED verb set ``/mcp`` accepts in its first argument slot, in the
+    #: order the picker offers them. ``list`` leads deliberately: it is the one
+    #: verb that destroys nothing, so the row a stray Enter lands on first is
+    #: safe.
+    #:
+    #: Reserving ``list`` as a verb is safe HERE and nowhere else in this app.
+    #: ``/mcp``'s first token is a closed verb set — no server name is ever
+    #: parsed from this slot, so nothing a user configures can collide with it.
+    #: ``/team`` and ``/agent`` are the opposite shape: their first token is an
+    #: OPEN namespace (``teams.py``'s ``_NAME_RE`` permits a team literally
+    #: named ``list``), so this fix must NOT be copy-pasted onto them — there
+    #: the safe shape is inverted precedence (resolve as a name first, fall
+    #: back to the listing), which is error recovery rather than a reserved
+    #: word.
+    MCP_SUBCOMMANDS = ("list", "add", "remove", "login", "logout", "reauth")
+
     def _cmd_mcp(self, arg: str, notice: NoticeFn) -> None:
-        """``/mcp`` lists servers; its subcommands manage OAuth grants.
+        """``/mcp`` lists servers; its subcommands manage servers and grants.
 
         ``/mcp login <name>`` is the in-TUI twin of ``local-operator mcp
         login``: it exists because startup and auto-reconnect are deliberately
@@ -14440,6 +14490,11 @@ class OperatorApp(App[None]):
         fresh grant cannot be short-circuited by a stored registration or a
         refreshable token. The browser flow runs on a worker so the UI stays
         responsive while the round trip completes.
+
+        ``list``/``add``/``remove`` complete the parity with ``lop mcp``: the
+        CLI has had all six verbs since the rewrite, so a user who knows the
+        CLI (or simply guesses) used to get ``unknown mcp subcommand: list``
+        for a correctly-formed command — a hostile error for a right answer.
         """
         parts = arg.split()
         if not parts:
@@ -14450,14 +14505,48 @@ class OperatorApp(App[None]):
                 notice("no MCP servers configured.")
             return
         sub = parts[0].lower()
-        if sub not in ("login", "logout", "reauth"):
+        if sub not in self.MCP_SUBCOMMANDS:
             self._system_notice(
-                f"unknown mcp subcommand: {parts[0]} — try /mcp login|logout|reauth <name>",
+                f"unknown mcp subcommand: {parts[0]} — try "
+                f"/mcp {'|'.join(self.MCP_SUBCOMMANDS)} <name>",
                 "warning",
             )
             return
+        # Trailing tokens are REFUSED rather than dropped, for every verb whose
+        # argument count is fixed. `add` does this already for a url with extra
+        # tokens; silently ignoring the tail elsewhere is the same class of
+        # mistake this command exists to avoid — acting on something other than
+        # what the user described. It matters most on `remove`, where the
+        # ignored token could be the name they actually meant to delete.
+        if sub == "list" and len(parts) > 1:
+            self._system_notice(
+                f"/mcp list takes no arguments — got {' '.join(parts[1:])!r}", "warning"
+            )
+            return
+        if sub == "list":
+            # An explicit alias for bare ``/mcp``, routed through the SAME
+            # block builder rather than a second listing: two renderers for one
+            # listing is how they drift apart.
+            block = self._mcp_block()
+            if block is not None:
+                self._append_block(block)
+            else:
+                notice("no MCP servers configured.")
+            return
+        if sub == "add":
+            self._cmd_mcp_add(parts[1:])
+            return
         if len(parts) < 2:
             self._system_notice(f"usage: /mcp {sub} <name>", "warning")
+            return
+        if len(parts) > 2:
+            # login/logout/reauth/remove all take exactly one name.
+            self._system_notice(
+                f"/mcp {sub} takes one server name — got {' '.join(parts[1:])!r}", "warning"
+            )
+            return
+        if sub == "remove":
+            self._cmd_mcp_remove(parts[1])
             return
         name = parts[1]
         resolved = self._resolve_mcp_server(name)
@@ -14489,6 +14578,229 @@ class OperatorApp(App[None]):
             group="mcp-login",
             exclusive=True,
         )
+
+    def _mcp_add_result(self, tokens: list[str]) -> tuple[str, NoticeKind]:
+        """Do one ``/mcp add`` and return its receipt as ``(text, kind)``.
+
+        Grammar, the smallest unambiguous thing that covers both transports::
+
+            /mcp add <name> <url>              -> http server
+            /mcp add <name> <command> [args…]  -> stdio server
+
+        The discriminator is whether the third token parses as an http(s) URL.
+        There is no scope token: the write always lands in the GLOBAL
+        ``~/.local-operator/mcp.json``, matching ``lop mcp add``'s default, and
+        the receipt NAMES the file so an invisible default becomes a visible
+        fact the user can go and check.
+
+        OAuth is deliberately NOT inferred from a URL. Real configs carry
+        non-OAuth http servers (an internal gateway, a header-authenticated
+        endpoint), so inferring ``auth: oauth`` from the scheme would silently
+        change how a server authenticates and produce a browser prompt for a
+        server that never needed one. Added without auth; ``/mcp login <name>``
+        is the documented next step for a server that does use OAuth.
+
+        Env vars are out of scope on purpose — a ``KEY=VALUE`` token in this
+        grammar cannot be told apart from a command argument, and the CLI's
+        explicit ``--env`` flag already covers it.
+        """
+        from local_operator.mcp.config import (
+            MCPConfigWriteError,
+            add_server,
+            load_all_mcp_configs,
+            owned_scope_for_source,
+        )
+
+        if len(tokens) < 2:
+            return (
+                "usage: /mcp add <name> <url>  |  /mcp add <name> <command> [args…]",
+                "warning",
+            )
+        name, target, *rest = tokens
+        is_url = target.startswith(("http://", "https://"))
+        cwd = os.getcwd()
+        # ``remove`` refuses to touch a server it does not own; ``add`` is the
+        # mirror operation and has to answer the same question, or the two
+        # verbs disagree about one invariant. What the answer IS depends on
+        # priority, so the two cases are reported differently rather than
+        # collapsed into one refusal:
+        #
+        #   * The existing definition OUTRANKS the global file we write (a
+        #     project ``.local-operator/mcp.json`` or ``.mcp.json``). The write
+        #     lands and changes nothing the user can observe — they keep
+        #     getting the old server. Refused, because a success receipt for a
+        #     write with no effect is a receipt that lies, and that is worse
+        #     than the shadowing case below.
+        #   * The existing definition ranks BELOW it (an imported foreign
+        #     config). Our entry would win and silently repoint a server the
+        #     user still maintains in Claude Code or Cursor — exactly what
+        #     ``_mcp_remove_result`` refuses to cause from the other side.
+        #     Refused too, naming the file and the tool, so the user can
+        #     change it where it lives or pick another name.
+        try:
+            existing = load_all_mcp_configs(cwd)[1].get(name)
+        except Exception:  # noqa: BLE001 — an unreadable config is reported by the write
+            existing = None
+        if existing is not None:
+            # Priority FIRST: `<cwd>/.mcp.json` is both unowned and
+            # higher-priority, and "your write would not take effect" is the
+            # more useful thing to say about it than "you would shadow it" —
+            # which would also be false.
+            if _outranks_global_mcp_scope(existing, cwd):
+                return (
+                    f"{name!r} is already defined in {_home_relative(str(existing))}, "
+                    f"which takes priority over the global config /mcp add writes.\n"
+                    f"Adding it here would have no effect. Edit that file, or remove "
+                    f"the entry there first.",
+                    "warning",
+                )
+            if owned_scope_for_source(existing, cwd) is None:
+                return (
+                    f"{name!r} is already defined in {_home_relative(str(existing))} "
+                    f"({_foreign_config_origin(existing)}).\nAdding it here would "
+                    f"shadow that entry rather than update it. Change it there, or "
+                    f"pick another name.",
+                    "warning",
+                )
+        try:
+            if is_url:
+                if rest:
+                    # An http server takes exactly one target; trailing tokens
+                    # are a stdio-shaped mistake and dropping them silently
+                    # would configure something the user did not describe.
+                    return (
+                        f"/mcp add {name} <url> takes no extra arguments — "
+                        f"got {' '.join(rest)!r}",
+                        "warning",
+                    )
+                path = add_server(name, url=target, cwd=os.getcwd())
+            else:
+                path = add_server(name, command=target, args=list(rest) or None, cwd=os.getcwd())
+        except MCPConfigWriteError as exc:
+            return (f"could not add MCP server {name!r}: {_home_abbreviated(str(exc))}", "warning")
+        except Exception as exc:  # noqa: BLE001 — a failed write is a notice, not a crash
+            return (f"could not add MCP server {name!r}: {exc}", "error")
+        self._reconnect_mcp_after_config_change()
+        # An http server added without auth is the common half-done case, so
+        # the receipt still points at the next step — but it must point at one
+        # that WORKS. `/mcp login` was wrong: this command deliberately writes
+        # no `auth` block, and `_resolve_mcp_server` refuses any server whose
+        # `auth.type` is not `oauth`, so the suggestion failed for every server
+        # this command can create. The CLI's `--oauth` flag is the only path
+        # that writes the block, so name that instead. Inferring OAuth from the
+        # URL remains ruled out: real configs carry non-OAuth http servers, and
+        # guessing would silently change how a server authenticates.
+        hint = (
+            f" — needs OAuth? re-add it with: lop mcp add {name} --url {target} --oauth"
+            if is_url
+            else ""
+        )
+        return (f"added MCP server {name!r} to {_home_relative(str(path))}{hint}", "success")
+
+    def _cmd_mcp_add(self, tokens: list[str]) -> None:
+        """The local ``/mcp add``: write the config, print the receipt."""
+        text, kind = self._mcp_add_result(tokens)
+        self._system_notice(text, kind)
+
+    def _mcp_remove_result(self, name: str) -> tuple[str, NoticeKind]:
+        """Do one ``/mcp remove`` and return its receipt as ``(text, kind)``.
+
+        The refusal is the point of this command. ``load_all_mcp_configs``
+        merges SEVEN sources but local-operator only writes two of them, so a
+        server can be perfectly visible in ``/mcp`` and still be none of our
+        business to delete. Removing an entry defined by ``~/.claude.json``
+        would either fail or, worse, write a local-operator file that shadows a
+        config the user still maintains in Claude Code — a silent divergence
+        between two tools that both claim to own the server.
+
+        ``<cwd>/.mcp.json`` is refused for a subtler reason: it is READ by
+        ``load_all_mcp_configs`` but never written by ``_scope_path``, so it is
+        foreign to the writer even though it is a local-operator-ish path.
+
+        A Codex TOML source (``~/.codex/config.toml``, see issue #367) is the
+        permanent case: ``tomllib`` is read-only (``load``/``loads`` only, and
+        ``tomli_w`` is not a dependency), so an imported Codex server can never
+        be removed in place. Refusal there is the ONLY correct behaviour rather
+        than a policy choice, and stays correct until a TOML writer is added.
+        """
+        from local_operator.mcp.config import (
+            MCPConfigWriteError,
+            load_all_mcp_configs,
+            owned_scope_for_source,
+            remove_server,
+        )
+
+        cwd = os.getcwd()
+        try:
+            configs, sources = load_all_mcp_configs(cwd)
+        except Exception as exc:  # noqa: BLE001 — an unreadable config is a notice
+            return (f"could not read the MCP configuration: {exc}", "error")
+        if name not in configs:
+            # Same shape as ``_resolve_mcp_server``'s unknown-name refusal,
+            # minus its OAuth check: removal is not an OAuth operation, so a
+            # stdio server must reach the real answer rather than "does not use
+            # OAuth login".
+            return (f"MCP server {name!r} is not configured — see /mcp", "warning")
+        source = sources.get(name)
+        scope = owned_scope_for_source(source, cwd)
+        if scope is None:
+            return (
+                f"{name!r} is defined in {_home_relative(str(source))} "
+                f"({_foreign_config_origin(source)}), not by local-operator.\n"
+                "Remove it there.",
+                "warning",
+            )
+        try:
+            path = remove_server(name, scope=scope, cwd=cwd)
+        except MCPConfigWriteError as exc:
+            return (
+                f"could not remove MCP server {name!r}: {_home_abbreviated(str(exc))}",
+                "warning",
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed write is a notice, not a crash
+            return (f"could not remove MCP server {name!r}: {exc}", "error")
+        self._reconnect_mcp_after_config_change()
+        return (f"removed MCP server {name!r} from {_home_relative(str(path))}", "success")
+
+    def _cmd_mcp_remove(self, name: str) -> None:
+        """The local ``/mcp remove``: refuse, or remove and print the receipt."""
+        text, kind = self._mcp_remove_result(name)
+        self._system_notice(text, kind)
+
+    def _reconnect_mcp_after_config_change(self) -> None:
+        """Re-read the config and reconnect after ``/mcp add|remove`` wrote it.
+
+        Without this the command would be true on disk and invisible in the
+        session: the manager holds the configs it discovered at boot, so a
+        freshly added server has no connection and a removed one keeps its
+        tools registered until the next launch. ``reload`` reuses the manager
+        object, so the tools-changed callback this app installed survives
+        (MCP-17) and the band repaints itself through the normal event.
+
+        Best-effort by design: a reduced host or a follower's read-only facade
+        has no ``reload``, and the config write already succeeded — failing the
+        whole command because the live refresh is unavailable would report a
+        failure for work that is done.
+        """
+        manager = getattr(self._session, "mcp_manager", None)
+        reload = getattr(manager, "reload", None)
+        if not callable(reload):
+            return
+        # ``getattr`` on an untyped facade yields ``object``; the callable check
+        # above is the real guard, so name the awaitable shape for the checker.
+        typed_reload = cast(Callable[[], Awaitable[Any]], reload)
+
+        async def _reload() -> None:
+            try:
+                await typed_reload()
+            except Exception:  # noqa: BLE001 — a failed refresh must not crash the app
+                logger.debug("MCP reload after a config change failed", exc_info=True)
+            self._refresh_mcp_status()
+
+        # NOT the exclusive ``mcp-login`` group: a reload posted there would be
+        # cancelled by (or cancel) an in-flight browser grant, and these are
+        # unrelated operations on unrelated servers.
+        self.run_worker(_reload, thread=False, group="mcp-reload", exclusive=True)
 
     def _resolve_mcp_server(self, name: str) -> tuple[Any, Any] | str:
         """The authoritative ``(manager, config)`` for ``name``, or a notice body.
@@ -14634,10 +14946,23 @@ class OperatorApp(App[None]):
         Which list is showing is decided by the buffer, not by stored picker
         state: with no subcommand typed yet the argument IS the subcommand
         slot, so the verbs are offered; once one is there the argument is the
-        server slot, so OAuth-enabled servers are offered — exactly the ones
-        login/reauth/logout can act on, per the same rule ``/logout`` uses
-        (offering a server with no grant would be a row whose only outcome is
-        a warning).
+        server slot.
+
+        WHICH servers depends on the verb, and the split is real rather than a
+        convenience. ``login``/``reauth``/``logout`` act on OAuth grants, so
+        they offer OAuth servers only — per the same rule ``/logout`` uses,
+        offering a server with no grant would be a row whose only outcome is a
+        warning. ``remove`` acts on the CONFIG, so it offers every configured
+        server: a stdio server and a non-OAuth http server are removable and
+        were previously invisible here, because this list was built from
+        ``oauth_server_names`` alone. ``add`` and ``list`` offer nothing — an
+        added name is new by definition, and ``list`` takes no argument.
+
+        The ``remove`` rows carry their SOURCE FILE in the detail column. That
+        is the design point, not decoration: a server imported from
+        ``~/.claude.json`` cannot be removed by local-operator, and showing the
+        file on the row turns the refusal into something the user saw coming
+        instead of an error they ran into.
 
         The rows are complete-then-keep-typing shapes: choosing a verb leaves
         ``/mcp login `` in the buffer with the cursor past the space, which
@@ -14661,7 +14986,15 @@ class OperatorApp(App[None]):
             return []
         sub, _space, _rest = argument.partition(" ")
         if not _space:
+            # ``list`` FIRST: the verbs below it destroy credentials or config
+            # entries, and the row a stray Enter lands on should be the one
+            # that only shows something.
             return [
+                ArgumentChoice("list", "Show every configured server and its status"),
+                ArgumentChoice("add", "Configure a new server (url, or a stdio command)"),
+                ArgumentChoice(
+                    "remove", "Delete a server from local-operator's config", alert=True
+                ),
                 ArgumentChoice("login", "Authorize an OAuth server (opens the browser)"),
                 ArgumentChoice("logout", "Forget a server's stored OAuth credential", alert=True),
                 # The differentiating clause leads: at narrow widths the tail
@@ -14672,13 +15005,19 @@ class OperatorApp(App[None]):
                 ),
             ]
         verb = sub.lower()
-        if verb not in ("login", "logout", "reauth"):
+        # ``list`` takes no argument and ``add``'s name is new by definition,
+        # so neither has rows to offer — an empty list closes the picker and
+        # lets the user type, which is the correct affordance for both.
+        if verb not in ("remove", "login", "logout", "reauth"):
             return []
+        manager = getattr(self._session, "mcp_manager", None)
+        if verb == "remove":
+            editor.picker.set_notice("choose a server to delete from the config")
+            return self._mcp_remove_choices()
         try:
             names = oauth_server_names(os.getcwd())
         except Exception:
             return []
-        manager = getattr(self._session, "mcp_manager", None)
         if verb == "logout":
             # Only what can actually be removed — the /logout rule. Rows are
             # keyed by server NAME but the store is keyed by URL, so the
@@ -14725,13 +15064,67 @@ class OperatorApp(App[None]):
                     # description cells saying nothing.
                     "",
                     detail=detail,
-                    # Every row on a logout list destroys a credential, so the
-                    # danger tint is a property of the verb, not of a row that
-                    # went wrong — the same rule /logout applies to providers.
-                    alert=verb == "logout",
+                    # `reauth` is flagged alongside `logout` because it DELETES
+                    # the stored grant before re-authorizing — `_mcp_logout` is
+                    # its first step, so the credential is gone from the shared
+                    # auth.db the moment the row runs. That it usually ends in a
+                    # fresh grant does not make the deletion conditional: an
+                    # abandoned browser round trip leaves the server with no
+                    # credential at all. `login` is the only non-destructive
+                    # verb here and the only one left unflagged.
+                    #
+                    # LOAD-BEARING SAFETY, not colour: the editor's destructive
+                    # gate reads this flag to make Enter FILL the row rather
+                    # than RUN it, so a fuzzy subsequence match (`reauth lnr`)
+                    # cannot forget the credential of a server the user never
+                    # named. Do not narrow this set without re-checking the
+                    # gate — the tint and the guard are the same bit.
+                    alert=verb in ("logout", "reauth"),
                 )
             )
         return choices
+
+    def _mcp_remove_choices(self) -> list[ArgumentChoice]:
+        """``remove <name>`` rows for EVERY configured server, source in detail.
+
+        Built from the config layer rather than the manager's
+        ``get_all_server_names``: the config is the thing ``remove`` actually
+        edits, and it answers even when there is no manager at all (a remote
+        follower's read-only facade, a session whose MCP discovery failed).
+        Reading the manager would make the picker disagree with the config in
+        exactly the states where a user is most likely to be fixing something.
+
+        The detail column is the SOURCE FILE, abbreviated, and rows whose
+        source is not a file local-operator writes are the ones the command
+        will refuse — saying so on the row is cheaper for the user than an
+        error after the fact.
+        """
+        from local_operator.mcp.config import load_all_mcp_configs
+
+        cwd = os.getcwd()
+        try:
+            # ``load_all_mcp_configs`` rather than ``list_effective_servers``
+            # only because this needs the SOURCES too; the server set is
+            # identical (the latter is a model_dump of the former).
+            _configs, sources = load_all_mcp_configs(cwd)
+        except Exception:
+            return []
+        return [
+            ArgumentChoice(
+                f"remove {name}",
+                "",
+                detail=_home_relative(str(source)),
+                # EVERY remove row is alert, not only the foreign ones. This
+                # flag is LOAD-BEARING SAFETY rather than a tint: the editor's
+                # destructive gate reads it to make Enter FILL instead of FIRE,
+                # and an OWNED server is precisely the row that CAN be deleted
+                # — the one that most needs the second keystroke. Foreign rows
+                # are already protected by the refusal; these are not. Do not
+                # narrow this to the foreign rows on the theory it is colour.
+                alert=True,
+            )
+            for name, source in sources.items()
+        ]
 
     def _mcp_server_url(self, name: str, manager: Any) -> str | None:
         """The configured URL for one server, or ``None`` when unknown."""
@@ -16587,6 +16980,96 @@ def _status_line(*bits: str) -> str:
     return " · ".join(bit for bit in bits if bit)
 
 
+def _slash_style(kind: NoticeKind) -> str:
+    """Map a local ``NoticeKind`` onto the wire's narrower ``SlashResult.style``.
+
+    ``_render_authoritative_slash`` understands only ``info``/``warning``/
+    ``error`` — ``success`` and ``note`` are transcript tints with no wire
+    spelling — so a follower's receipt renders as the plain informational line
+    a local success prints, rather than being silently downgraded to a warning
+    by a fall-through.
+    """
+    if kind in ("warning", "error"):
+        return kind
+    return "info"
+
+
+#: Which TOOL owns each foreign MCP config file, keyed by the trailing path
+#: fragment ``load_all_mcp_configs`` reads it from. A refusal that names only
+#: the file leaves the user hunting for what writes it; naming the tool makes
+#: "remove it there" an instruction rather than a dead end. The Codex entry is
+#: read-only for a reason that will not change soon: ``tomllib`` parses TOML
+#: (``load``/``loads``) and cannot emit it, and ``tomli_w`` is not a
+#: dependency, so refusing is the only correct answer for a Codex-imported
+#: server rather than a policy we could relax (issue #367).
+_FOREIGN_MCP_CONFIGS: tuple[tuple[tuple[str, ...], str], ...] = (
+    ((".claude.json",), "imported from Claude Code"),
+    ((".claude", ".mcp.json"), "imported from Claude Code"),
+    ((".cursor", "mcp.json"), "imported from Cursor"),
+    ((".vscode", "mcp.json"), "imported from VS Code"),
+    ((".codex", "config.toml"), "imported from Codex CLI"),
+    # Read by the loader, never written by ``_scope_path`` — foreign to the
+    # writer despite living in the project the user is sitting in.
+    ((".mcp.json",), "a project .mcp.json local-operator does not write"),
+)
+
+
+def _outranks_global_mcp_scope(source: str | os.PathLike[str], cwd: str) -> bool:
+    """Whether ``source`` beats the GLOBAL mcp.json in the merge order.
+
+    ``/mcp add`` always writes the global file, and ``load_all_mcp_configs``
+    resolves a name first-source-wins in a fixed priority order. Anything ahead
+    of the global file therefore keeps defining the server after our write, so
+    the add is a no-op the user cannot see. This answers "would the write be
+    observable", which is a different question from "do we own the file" — a
+    project ``.local-operator/mcp.json`` is ours to write AND outranks us.
+
+    Resolved paths on both sides, for the reason ``owned_scope_for_source``
+    resolves: a symlinked home or a ``/private/var`` prefix must not decide it.
+    """
+    from pathlib import Path
+
+    root = Path(cwd).expanduser()
+    ahead_of_global = (
+        root / ".local-operator" / "mcp.json",
+        root / ".mcp.json",
+    )
+    try:
+        resolved = Path(source).expanduser().resolve()
+        return any(candidate.expanduser().resolve() == resolved for candidate in ahead_of_global)
+    except OSError:
+        return False
+
+
+def _foreign_config_origin(source: str | None) -> str:
+    """Name the tool that owns ``source``, for the ``/mcp remove`` refusal."""
+    # Function-local import: this module keeps `pathlib` off its import path
+    # (every other use here is local too), and this runs once per refusal.
+    from pathlib import Path
+
+    if source:
+        parts = Path(source).parts
+        for fragment, origin in _FOREIGN_MCP_CONFIGS:
+            if len(parts) >= len(fragment) and tuple(parts[-len(fragment) :]) == fragment:
+                return origin
+    return "not written by local-operator"
+
+
+def _home_abbreviated(text: str) -> str:
+    """Abbreviate the home prefix wherever it appears INSIDE a message.
+
+    :func:`_home_relative` abbreviates a string that IS a path; this one is for
+    prose that merely contains one — the config writers embed the file they
+    refused to write in their error text ("server 'x' already exists in
+    /Users/…/mcp.json"), and a receipt that abbreviates its success path while
+    spelling the whole thing out on failure reads as two different commands.
+    """
+    home = os.path.expanduser("~")
+    if home in ("", "/"):
+        return text
+    return text.replace(home + os.sep, "~" + os.sep)
+
+
 def _home_relative(path: str) -> str:
     """``~/.local-operator/config.yml`` rather than the full ``/Users/…`` form.
 
@@ -16596,6 +17079,19 @@ def _home_relative(path: str) -> str:
     left absolute, because there is no shorter honest rendering of it.
     """
     home = os.path.expanduser("~")
-    if home in ("", "/") or not path.startswith(home + os.sep):
+    if home in ("", "/"):
         return path
-    return "~" + path[len(home) :]
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    # A path that came from `Path.resolve()` can disagree with `$HOME` purely
+    # by symlink — macOS hands out `/private/var/…` for a `/var/…` home — so a
+    # prefix test on the raw strings leaves an under-home path rendered in
+    # full. Retry against the resolved home before giving up; still absolute
+    # for anything genuinely outside the home tree.
+    try:
+        resolved_home = os.path.realpath(home)
+    except OSError:
+        return path
+    if resolved_home not in ("", "/") and path.startswith(resolved_home + os.sep):
+        return "~" + path[len(resolved_home) :]
+    return path

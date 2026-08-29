@@ -431,6 +431,60 @@ def _scope_path(cwd: str | os.PathLike[str] | None, scope: str) -> Path:
     return Path.home() / ".local-operator" / "mcp.json"
 
 
+class MCPConfigWriteError(Exception):
+    """One refused config write, carrying every reason it was refused.
+
+    The writers below have TWO callers with incompatible output channels: the
+    CLI prints to stderr and answers in exit codes, while the TUI runs inside a
+    Textual screen where any ``print`` lands on the terminal *underneath* the
+    frame and corrupts the display. Raising is what lets one implementation
+    serve both — each caller phrases the failure in its own vocabulary at its
+    own boundary.
+
+    ``errors`` is a LIST because validation reports every problem at once and
+    the CLI has always printed one ``error:`` line per problem; collapsing them
+    into a single string here would change CLI output that users and scripts
+    read. ``str(exc)`` joins them for callers (the TUI) that render one line.
+    """
+
+    def __init__(self, errors: list[str]) -> None:
+        super().__init__("; ".join(errors))
+        self.errors = list(errors)
+
+
+def owned_scope_for_source(
+    source: str | os.PathLike[str] | None,
+    cwd: str | os.PathLike[str] | None = None,
+) -> str | None:
+    """The write scope whose file is ``source``, or ``None`` when unowned.
+
+    ``load_all_mcp_configs`` merges seven sources but :func:`_scope_path` only
+    ever writes two of them, so "where did this server come from" and "can we
+    edit it here" are different questions. Callers that MUTATE a server (the
+    TUI's ``/mcp remove``) must ask this one: removing an entry defined by
+    ``~/.claude.json`` or ``<cwd>/.mcp.json`` would either fail or, worse,
+    write a local-operator file that silently shadows a foreign config the user
+    still maintains elsewhere.
+
+    Comparison is on RESOLVED paths, never on strings: ``sources`` records the
+    path as constructed, so a symlinked home, a ``/private/var`` vs ``/var``
+    prefix on macOS, or a relative ``cwd`` would each defeat a string compare
+    and turn an owned file into a refusal.
+    """
+    if source is None:
+        return None
+    try:
+        resolved = Path(source).expanduser().resolve()
+        for scope in ("project", "global"):
+            if _scope_path(cwd, scope).expanduser().resolve() == resolved:
+                return scope
+    except OSError:
+        # An unresolvable path cannot be proven ours, and "not ours" is the
+        # safe answer for a question that gates a delete.
+        return None
+    return None
+
+
 def add_server(
     name: str,
     *,
@@ -442,30 +496,24 @@ def add_server(
     oauth: bool = False,
     scope: str = "global",
     cwd: str | os.PathLike[str] | None = None,
-) -> int:
+) -> Path:
     """Add one server to the scoped mcp.json (``mcp add``).
 
     ``oauth=True`` writes the canonical HTTP auth block used by the SDK's
     dynamic client-registration flow. It is rejected for stdio because that
     transport owns authentication inside its child process.
 
-    Returns an exit code: 0 on success, 1 on a validation or duplicate error
-    (the message is printed to stderr so the CLI can report it).
+    Returns the path written, so a caller can NAME the file in its receipt —
+    scope is otherwise an invisible default and "added" gives the user no way
+    to tell which of the two config files just changed. Raises
+    :class:`MCPConfigWriteError` on any refusal.
     """
-    import sys
-
     if command and url:
-        print(
-            "error: pass either command (stdio) or url (http), not both",
-            file=sys.stderr,
-        )
-        return 1
+        raise MCPConfigWriteError(["pass either command (stdio) or url (http), not both"])
     if not command and not url:
-        print("error: a server needs a command (stdio) or a url (http)", file=sys.stderr)
-        return 1
+        raise MCPConfigWriteError(["a server needs a command (stdio) or a url (http)"])
     if oauth and not url:
-        print("error: OAuth is supported only for remote HTTP servers", file=sys.stderr)
-        return 1
+        raise MCPConfigWriteError(["OAuth is supported only for remote HTTP servers"])
 
     raw: dict[str, Any]
     if command:
@@ -484,9 +532,7 @@ def add_server(
     cfg = _coerce_server_config(raw)
     errors = validate_server_config(name, cfg)
     if errors:
-        for error in errors:
-            print(f"error: {error}", file=sys.stderr)
-        return 1
+        raise MCPConfigWriteError(errors)
 
     path = _scope_path(cwd, scope)
     doc = _read_json(path) or {}
@@ -495,15 +541,13 @@ def add_server(
         servers = {}
         doc["mcpServers"] = servers
     if name in servers:
-        print(f"error: server {name!r} already exists in {path}", file=sys.stderr)
-        return 1
+        raise MCPConfigWriteError([f"server {name!r} already exists in {path}"])
     servers[name] = raw
     try:
         _write_json_atomic(path, doc)
     except OSError as exc:
-        print(f"error: could not write {path}: {exc}", file=sys.stderr)
-        return 1
-    return 0
+        raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+    return path
 
 
 def set_http_oauth_server(
@@ -553,23 +597,22 @@ def remove_server(
     *,
     scope: str = "global",
     cwd: str | os.PathLike[str] | None = None,
-) -> int:
+) -> Path:
     """Remove one server from the scoped mcp.json (``mcp remove``).
 
-    Returns 0 on success, 1 when the name is not present (reported on stderr).
+    Returns the path written, for the same receipt reason as :func:`add_server`
+    ("removed from WHICH file" is the fact a user needs when two scopes can
+    define the same name). Raises :class:`MCPConfigWriteError` when the name is
+    not present in that scope, or when the write fails.
     """
-    import sys
-
     path = _scope_path(cwd, scope)
     doc = _read_json(path)
     servers = doc.get("mcpServers") if doc is not None else None
     if doc is None or not isinstance(servers, dict) or name not in servers:
-        print(f"error: server {name!r} not found in {path}", file=sys.stderr)
-        return 1
+        raise MCPConfigWriteError([f"server {name!r} not found in {path}"])
     del servers[name]
     try:
         _write_json_atomic(path, doc)
     except OSError as exc:
-        print(f"error: could not write {path}: {exc}", file=sys.stderr)
-        return 1
-    return 0
+        raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+    return path
