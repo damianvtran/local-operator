@@ -3779,8 +3779,18 @@ async def test_a_wrapped_table_rows_continuation_never_maps_to_the_next_row() ->
     above would also pass if the copy path merely papered over a mis-mapping.
     A continuation must map to its own row or to nothing; mapping it to a
     following row is the substitution.
+
+    The expected first cells are spelled out as LITERALS below rather than
+    re-derived with the implementation's own parsing expression. An earlier
+    version of this test called ``_copy_markdown``'s helpers to compute them,
+    so a wrong parse produced the identical wrong expectation on both sides and
+    the test passed regardless -- it restated the implementation instead of
+    checking it (R1-3).
     """
     text = ORACLE_SUBSTITUTION_CORPUS["table_long_notes"]
+    # The corpus table's body rows, in source order, with the first cell each
+    # one paints. Independent of how production code parses a row.
+    expected_first_cells = {2: "alpha", 3: "beta"}
     for width in range(28, 102, 2):
         app = StyledTranscriptApp()
         async with app.run_test(size=(width, 120)) as pilot:
@@ -3798,19 +3808,119 @@ async def test_a_wrapped_table_rows_continuation_never_maps_to_the_next_row() ->
                 source = mapping[index]
                 if not row.strip() or source is None:
                     continue
-                # A row placed on a table line must actually open it: the first
-                # cell's text is what Rich paints at the row's start. Anything
+                # A row placed on a table body line must actually OPEN it: the
+                # first cell is what Rich paints at the row's start. Anything
                 # else placed there is a continuation wearing another row's
                 # identity.
-                line = lines[source]
-                if "|" not in line or _copy_markdown._is_rule_like(line):
+                if source not in expected_first_cells:
                     continue
-                first_cell = line.strip().strip("|").split("|")[0].strip().lower()
-                assert first_cell and first_cell.split()[0] in row.lower(), (
+                first_cell = expected_first_cells[source]
+                assert first_cell in row.lower(), (
                     f"width {width} row {index}: a continuation row was mapped to "
-                    f"source line {source}, whose first cell it does not paint.\n"
-                    f"  row  : {row.rstrip()!r}\n  line : {line!r}"
+                    f"source line {source}, whose first cell {first_cell!r} it does "
+                    f"not paint.\n"
+                    f"  row  : {row.rstrip()!r}\n  line : {lines[source]!r}"
                 )
+
+
+@pytest.mark.asyncio
+async def test_a_table_row_whose_first_cell_is_a_number_still_copies_as_markdown() -> None:
+    """R1-1: a numeric first column must still round-trip as markdown.
+
+    Pins the neighbour that #399's fix broke. ``_row_word`` deliberately skips a
+    leading bare number as an ordered-list marker, so for `` 1   the first step``
+    the row word is ``the`` while the first cell is ``1`` -- the first-cell
+    narrowing then matched nothing and left a genuine row-OPENING row unplaced,
+    and highlighting it pasted space-aligned glyphs instead of the markdown row.
+    Numeric first columns (ids, ranks, steps, years) are a common table shape, so
+    this pins the markdown answer at every swept width rather than at one.
+
+    Asserts the copy is the SOURCE row, not merely that a mapping exists, so it
+    fails on the user-visible symptom.
+    """
+    text = ORACLE_CORPUS["table_numeric_first_column"]
+    expected = {
+        "1": "| 1 | the first step which is long enough that it wraps at narrow widths |",
+        "2": "| 2 | the second step, also long enough to fold across several rows |",
+    }
+    checked = 0
+    for width in range(60, 102, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            for index, row in enumerate(_rendered_rows(block)):
+                stripped = row.strip()
+                # Only the rows that OPEN a numeric body row; a continuation is
+                # indented past the id column and carries no leading number.
+                head = stripped.split()[0] if stripped.split() else ""
+                if head not in expected or not row[:1].isspace():
+                    continue
+                selection = Selection.from_offsets(
+                    Offset(x=0, y=index), Offset(x=len(row.rstrip()), y=index)
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None and copied[0] == expected[head], (
+                    f"width {width} row {index}: a numeric-first-cell row lost its "
+                    f"markdown answer.\n  row     : {row.rstrip()!r}\n"
+                    f"  copied  : {(copied[0] if copied else None)!r}\n"
+                    f"  expected: {expected[head]!r}"
+                )
+                checked += 1
+    assert checked, "no numeric opener rows were exercised"
+
+
+def test_a_first_cell_is_parsed_with_the_markdown_pipe_escape_resolved() -> None:
+    """R1-2: ``\\|`` inside a cell is content, not a cell boundary.
+
+    Splitting a table line on the raw ``|`` reports the first cell of
+    ``| ps aux \\| grep x | note |`` as ``ps aux \\``, truncating it at the
+    escape. That was latent rather than active -- the rendered row starts with
+    ``ps aux`` so the truncated text still matched -- but the parse is wrong at
+    the source and the next change to the expression would make it live.
+
+    Expectations are written as literals: this is the independent oracle for the
+    expression the mapping test used to borrow (R1-3).
+    """
+    assert _copy_markdown._first_cell("| ps aux \\| grep x | note |") == "ps aux | grep x"
+    assert _copy_markdown._first_cell("| a \\| b \\| c | d |") == "a | b | c"
+    # Unescaped pipes still delimit, and an absent leading delimiter is fine.
+    assert _copy_markdown._first_cell("| alpha | 0.91 | note |") == "alpha"
+    assert _copy_markdown._first_cell("alpha | 0.91 |") == "alpha"
+    assert _copy_markdown._first_cell("|  spaced  | b |") == "spaced"
+
+
+def test_a_rows_leading_number_identifies_a_cell_only_by_exact_match() -> None:
+    """R1-1's numeric path must not become a second route to a substitution.
+
+    The word path matches by CONTAINMENT, which is safe there because the word
+    is a content token. Containment on a bare number is not: a continuation
+    beginning ``1`` would prefix-match a ``2015`` first cell and reopen #399's
+    silent substitution one construct over. Exact equality on the cell's leading
+    token is what keeps the numeric path additive rather than widening.
+
+    Also pins the indent gate: the numeric read exists only to recover the token
+    ``_row_word`` skipped, and that skip is itself gated on the row being
+    indented, so a flush-left number-led paragraph must not reach this path.
+    """
+    assert _copy_markdown._number_matches_cell("1", "1")
+    assert _copy_markdown._number_matches_cell("2015", "2015")
+    assert not _copy_markdown._number_matches_cell("1", "2015")
+    assert not _copy_markdown._number_matches_cell("1", "")
+    assert not _copy_markdown._number_matches_cell("", "1")
+
+    # Indented bare number: the ordered-marker shape ``_row_word`` skips.
+    assert _copy_markdown._row_number(" 1   the first detail") == "1"
+    assert _copy_markdown._row_number(" 2015  the later milestone") == "2015"
+    # Flush left is number-led CONTENT, already anchored by ``_row_word``.
+    assert _copy_markdown._row_number("2026 roadmap") == ""
+    # Not a bare digit run, so not a marker: a score cell, a date.
+    assert _copy_markdown._row_number(" 0.91 score") == ""
+    assert _copy_markdown._row_number(" 2026-01 note") == ""
 
 
 # -- the oracle sweep --------------------------------------------------------
@@ -3872,6 +3982,28 @@ ORACLE_CORPUS: dict[str, str] = {
         "| --- | --- | --- |\n"
         "| alpha | 0.91 | the first row with some longer note text here |\n"
         "| beta | 0.72 | the second row, also with a reasonably long note |"
+    ),
+    # A NUMERIC first column -- ids, ranks, steps, years. Its absence is why the
+    # suite stayed green while such rows silently stopped round-tripping as
+    # markdown (R1-1): ``_row_word`` reads a leading bare number as an ordered
+    # list MARKER and skips it, so the row word is ``the`` where the first cell
+    # is ``1``. ``years`` carries a shared numeric PREFIX (``1`` vs ``2015``) so
+    # a containment match on the number would be caught here rather than in
+    # review.
+    "table_numeric_first_column": (
+        "| id | step |\n| --- | --- |\n"
+        "| 1 | the first step which is long enough that it wraps at narrow widths |\n"
+        "| 2 | the second step, also long enough to fold across several rows |"
+    ),
+    "table_year_first_column": (
+        "| year | milestone |\n| --- | --- |\n"
+        "| 1 | the earliest milestone with a note long enough to wrap somewhere |\n"
+        "| 2015 | the later milestone whose note also wraps at the swept widths |"
+    ),
+    "table_escaped_pipe": (
+        "| command | note |\n| --- | --- |\n"
+        "| ps aux \\| grep ingest | the pipeline check that operators run first |\n"
+        "| journalctl -u ingest | the follow-up when the check above finds nothing |"
     ),
     "cjk": "这是一个中文段落，用于验证在终端宽度下折行之后复制粘贴不会插入多余的空格字符。",
     "cjk_ja": "これは日本語の段落です。この行は端末の幅で折り返されますので、コピーの境界を検証します。",
@@ -4121,6 +4253,15 @@ ORACLE_SUBSTITUTION_CORPUS: dict[str, str] = {
         "| name | score | notes |\n| --- | --- | --- |\n"
         "| alpha | 0.91 | the first row with some longer note text here that wraps |\n"
         "| beta | 0.72 | the second row, also with a reasonably long note here |"
+    ),
+    # The numeric-first-column twin of ``table_long_notes``. R1-1's fix gives a
+    # bare-number row a SECOND way to be placed, so the substitution oracle has
+    # to sweep that path too: a wrapped numeric row's continuation must still be
+    # refused rather than claiming the next row on its number.
+    "table_numeric_long_notes": (
+        "| id | notes |\n| --- | --- |\n"
+        "| 1 | the first row with some longer note text here that wraps over rows |\n"
+        "| 2 | the second row, also with a reasonably long note that folds too |"
     ),
 }
 

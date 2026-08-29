@@ -322,33 +322,43 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                     placed = look
                     break
                 # A table body row renders as its cells with the pipes dropped;
-                # match it on the first cell's word. Rich truncates a long cell
-                # with ``…``, so also match a truncated stem: the rendered word
-                # is the cell's prefix, not a substring of the full line (the F4
-                # review finding).
-                #
-                # Matched against the FIRST CELL ONLY, never the whole line.
-                # Table cells WRAP -- the ``no_wrap_now`` claim above is about a
-                # row never CONTINUING, not about its cells fitting -- so a
-                # wrapped row leaves continuation rows carrying the tail of some
-                # later cell. Searching the whole line let one of those match the
-                # NEXT table row on any shared word: at width 28 the ``alpha``
-                # row's continuation ``row with`` was found inside ``| beta |
-                # 0.72 | the second row, ... |`` and consumed it, so highlighting
-                # that continuation copied the ``beta`` row entire (issue #399).
-                # That is silent substitution -- the reader pastes a row they did
-                # not light -- the same harm class as R4-1.
-                #
-                # The first cell is what Rich paints at the row's START, so it is
-                # the only part of the line a row-opening rendered row can be
-                # identified by. A continuation matches no first cell and is
-                # therefore left UNPLACED, which is the honest answer: the copy
-                # path already treats ``None`` as "assume nothing" and falls back
-                # to the lit glyphs, rather than being handed a different row.
-                if "|" in line and word:
-                    first_cell = line.strip().strip("|").split("|")[0].strip().lower()
+                # match it on the FIRST CELL ONLY, never the whole line. Table
+                # cells WRAP -- the ``no_wrap_now`` claim above is about a row
+                # never CONTINUING, not about its cells fitting -- so searching
+                # the whole line let a continuation carrying some later cell's
+                # tail match the NEXT table row on any shared word and copy it
+                # entire (issue #399). The first cell is what Rich paints at the
+                # row's START, so it is the only part of the line a row-opening
+                # rendered row can be identified by; a continuation matches no
+                # first cell and is left UNPLACED, which the copy path already
+                # reads as "assume nothing" and answers with the lit glyphs.
+                if "|" in line and (word or _row_number(row)):
+                    first_cell = _first_cell(line)
+                    # Rich truncates a long cell with ``…``, so a truncated stem
+                    # matches too: the rendered word is the cell's PREFIX, not a
+                    # substring of the full line (the F4 review finding).
                     stem = word.rstrip("…")
-                    if first_cell and (word in first_cell or (stem and stem in first_cell)):
+                    matched = (
+                        bool(first_cell)
+                        and bool(word)
+                        and (word in first_cell or (stem and stem in first_cell))
+                    )
+                    # A numeric first column (``| 1 | step |``, ids, ranks,
+                    # years) is invisible to ``word``: ``_row_word`` skips a
+                    # leading bare number as an ordered-list MARKER, so the row
+                    # word for `` 1   the first detail`` is ``the`` and no first
+                    # cell matches it. The row is a genuine OPENER, and dropping
+                    # it cost the markdown answer at 124 sweep sites (R1-1).
+                    #
+                    # Matched EXACTLY and only for a bare number, not by the
+                    # containment the word path uses: containment on a raw token
+                    # would let a continuation ``be careful`` prefix-match a
+                    # ``beta`` first cell and reopen #399's substitution. Exact
+                    # equality on a digit run cannot: ``1`` is not ``2015``.
+                    if not matched:
+                        number = _row_number(row)
+                        matched = bool(number) and _number_matches_cell(number, first_cell)
+                    if matched:
                         placed = look
                         break
             if placed is not None:
@@ -367,6 +377,63 @@ def _is_rule_like(text: str) -> bool:
     """A row whose visible content is only rule/divider characters."""
     body = text.strip().strip("|")
     return bool(body) and set(body) <= {"-", "─", ":", " ", "=", "_"}
+
+
+#: An UNESCAPED cell boundary: a ``|`` not preceded by a backslash. Markdown
+#: writes a literal pipe inside a cell as ``\|``, so splitting on the raw
+#: character cuts a cell like ``ps aux \| grep x`` in half and reports the
+#: first cell as ``ps aux \`` (R1-2). Latent rather than active -- the rendered
+#: row still starts with ``ps aux``, so the truncated cell happened to match --
+#: but the parse is wrong at the source and the next change to this expression
+#: would turn it live.
+_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
+def _first_cell(line: str) -> str:
+    """A table source line's first cell, lowercased, escapes resolved.
+
+    Splits on UNESCAPED pipes only, then unescapes ``\\|`` to the literal pipe
+    the reader sees, so the returned text is what Rich paints in that cell
+    rather than the markdown that produced it.
+    """
+    body = line.strip()
+    # Only a LEADING delimiter is stripped by position; ``strip("|")`` would
+    # also eat a trailing escaped pipe's character and shift the escape.
+    if body.startswith("|"):
+        body = body[1:]
+    return _UNESCAPED_PIPE_RE.split(body)[0].replace("\\|", "|").strip().lower()
+
+
+#: A rendered row whose first painted token is a bare number, carrying the
+#: leading pad Rich puts before a table cell. The indent is REQUIRED so this
+#: path is exactly complementary to the token ``_row_word`` skipped: that skip
+#: is itself gated on the row being indented, so a flush-left number-led
+#: paragraph (``2026 roadmap``) already reaches ``word`` and must not get a
+#: second, looser way to claim a table line. Anchored so it cannot match a
+#: number later in the row, and bounded to a digit run so a ``0.91`` score cell
+#: and ``2026-01`` do not read as one.
+_ROW_LEADING_NUMBER_RE = re.compile(r"^[ \t]+(\d{1,9})(?:\s|$)")
+
+
+def _row_number(rendered_row: str) -> str:
+    """The rendered row's leading bare number, or ``""`` if it has none."""
+    match = _ROW_LEADING_NUMBER_RE.match(rendered_row)
+    return match.group(1) if match else ""
+
+
+def _number_matches_cell(number: str, first_cell: str) -> bool:
+    """Does a rendered row's leading number identify this first cell?
+
+    EXACT equality on the cell's own leading token, never containment: the
+    numeric path exists to place ``| 1 | step |`` rows (R1-1) and must not
+    become a second way for a continuation to claim a later row. ``1`` matches
+    the cell ``1`` and not the cell ``2015``, and a continuation beginning with
+    a number matches only a cell that IS that number.
+    """
+    if not number or not first_cell:
+        return False
+    head = first_cell.split()[0] if first_cell.split() else ""
+    return head == number
 
 
 #: The quote bar as Rich paints it, repeated once per nesting level. A quote's
