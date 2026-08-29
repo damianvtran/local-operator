@@ -6080,6 +6080,26 @@ class OperatorApp(App[None]):
         # Checked BEFORE the draft branch, because a composer being dragged over
         # always has text in it and would otherwise take that branch every time.
         mid_copy = editor.copy_in_flight
+        # A BARREN MULTI-CLICK just happened: the user made a deliberate
+        # selection gesture, the frame came back identical to the one before it,
+        # and this press is them reaching for the copy that gesture implied.
+        # Clearing the draft here is the exact sentence the composer's click
+        # chain exists to eliminate — "my draft disappeared" — reached on the
+        # blank last row and on a pair of clicks one cell apart (design round 2,
+        # D2 and D2-1).
+        #
+        # Declining is the whole action: no copy (there is nothing to copy) and
+        # no interrupt. The press is spent making nothing happen, which is what
+        # the gesture already led the user to expect.
+        #
+        # Gated on the GESTURE and never on selection STATE, and the claim is
+        # SPENT here so this suppresses exactly one press: the D17 hazard is a
+        # composer that diverts the key indefinitely, and a rung that cannot be
+        # reached twice in a row is not a ladder. A second press gets the
+        # ordinary behaviour, as does any press after the window expires.
+        if editor.barren_multi_click:
+            editor.retire_barren_click()
+            return
         if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a
             # draft that cannot be filed must not be thrown away either.
