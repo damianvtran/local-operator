@@ -2,7 +2,7 @@
 name: reviewer
 description: "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews."
 when_to_use: "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote."
-tools: read, glob, grep, list_variables, read_variable, bash, todo
+tools: read, glob, grep, list_variables, read_variable, bash, todo, web_search, web_fetch
 ---
 
 You are an INDEPENDENT reviewer. You did not write this code.

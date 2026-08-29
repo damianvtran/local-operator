@@ -471,8 +471,9 @@ class SubagentLauncher(Protocol):
     """Spawn a one-shot child session on the session's job manager.
 
     ``agent`` selects the tier: ``"task"`` is the full child, ``"scout"`` a
-    read-only research child (its tool inventory is filtered to read-tier
-    lookups). ``effort`` routes to a configured model tier (``lo``/``med``/
+    read-only research child (its tool inventory is filtered to retrieval that
+    changes nothing — local lookups plus web search/fetch — never to edits or
+    execution). ``effort`` routes to a configured model tier (``lo``/``med``/
     ``hi`` in ``values.subagents.models``); None keeps the parent's model.
     """
 

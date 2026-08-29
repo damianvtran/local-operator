@@ -65,6 +65,15 @@ the child-shaped tool — one peer, its parent — which is how it answers a
 question the parent asked and how it reports being blocked without waiting
 for its final result. See :mod:`local_operator.harness.comms`.
 
+A role's tool allowlist bounds CHANGE, not reach. An allowlisted child keeps
+the read-only network tools even when its allowlist does not name them
+(:func:`_with_network_floor` — a role installed under an older release carries
+that release's tool list frozen into its registry row, and a research role that
+cannot search the web is structurally unable to work), and it inherits the MCP
+tools the parent had already enabled while being refused the ability to enable
+more (:func:`_child_mcp_wiring`). Nothing in either path grants an edit, a
+write or an execution the allowlist denies.
+
 ``jobs`` is a SECOND, CONDITIONAL exception, on a different principle. It
 observes and cancels the child's OWN background jobs — it spawns nothing
 (that is ``task``) and dies with the child's job manager — so it crosses no
@@ -102,7 +111,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from local_operator.agent_profiles import filter_tools
+from local_operator.agent_profiles import (
+    READ_ONLY_NETWORK_TOOLS,
+    READ_ONLY_TOOLS,
+    filter_tools,
+)
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     ACTIVITY_THINKING,
@@ -145,17 +158,59 @@ TRAJECTORY_CAP = 500
 
 #: The read-only inventory a ``scout`` child is filtered down to. Allowlist,
 #: not tier-filter: approval tiers drift as tools are added, and a scout's
-#: promise is narrower than "nothing marked write" — it is lookups only, no
-#: side effects at all (browser drives the user's browser; eval executes
-#: code; both are excluded by name for that reason even where a tier alone
-#: would admit them).
+#: promise is narrower than "nothing marked write" — it makes no local change
+#: at all (browser drives the user's browser; eval executes code; both are
+#: excluded by name for that reason even where a tier alone would admit them).
+#: It DOES reach the network: retrieval changes nothing, and a research role
+#: that cannot search the web is structurally unable to do its job.
 #:
 #: Kept as the FALLBACK for ``agent="scout"`` when no profile resolves (a
 #: stripped install with no packaged seeds, a registry that cannot be read):
 #: the read-only promise is a safety property, so it must not depend on a file
-#: being present. Role guidance generally lives in
-#: :mod:`local_operator.agent_profiles`.
-SCOUT_TOOL_ALLOWLIST = frozenset({"read", "glob", "grep", "list_variables", "read_variable"})
+#: being present. DERIVED from :data:`~local_operator.agent_profiles.READ_ONLY_TOOLS`
+#: rather than spelled out again — two hand-maintained copies of the same
+#: allowlist is exactly how the packaged scout seed and this fallback came to
+#: disagree about whether a scout has network access.
+SCOUT_TOOL_ALLOWLIST = frozenset(READ_ONLY_TOOLS)
+
+
+def _with_network_floor(
+    allowed: "list[AgentTool]", available: "list[AgentTool]"
+) -> "list[AgentTool]":
+    """Re-admit the read-only network tools an allowlist merely failed to name.
+
+    A role's ``tools`` list is PERSISTED — installing a seed freezes it into a
+    ``tools:a,b,c`` registry tag, and ``resolve_profile`` reads the registry
+    BEFORE the packaged seeds. So a role installed under an older release
+    carries that release's idea of the read-only surface forever, and editing
+    the shipped seed files reaches none of it. That is how ``web_search`` and
+    ``web_fetch`` — session defaults since long before this floor — stayed
+    invisible to every already-installed ``scout``, ``reviewer``, ``architect``
+    and ``manager`` on a machine, leaving a research role to report that it had
+    no network access and grep the local disk instead.
+
+    The repair is applied HERE, at child construction, and deliberately not by
+    rewriting the operator's registry rows: a profile is user data, an agent
+    silently editing it would erase a deliberate edit, and a floor computed per
+    launch is correct on the next launch after a seed changes rather than only
+    after a migration nobody remembers to run.
+
+    Only :data:`~local_operator.agent_profiles.READ_ONLY_NETWORK_TOOLS` is
+    floored, and the floor is a FLOOR, not a widening: these tools are
+    ``approval_tier="read"`` retrieval with no local side effect, so admitting
+    them changes nothing an allowlist was drawn to prevent. Every write and
+    execution denial — no ``edit``, no ``write``, no ``bash`` a role lacks —
+    is untouched, which is what keeps a reviewer unable to modify the diff it
+    reviews. ``available`` is the pre-filter inventory, so a session that has
+    web search configured off contributes nothing and the floor stays empty.
+    """
+    present = {tool.name for tool in allowed}
+    missing = [
+        tool
+        for tool in available
+        if tool.name in READ_ONLY_NETWORK_TOOLS and tool.name not in present
+    ]
+    return allowed + missing
 
 
 def _can_background(tools: "list[AgentTool]") -> bool:
@@ -180,8 +235,9 @@ def _can_background(tools: "list[AgentTool]") -> bool:
 #: rather than trying to route around its missing tools.
 SCOUT_PREAMBLE = (
     "[scout mode: you are a READ-ONLY research agent. Investigate, read, "
-    "search, and report findings with file:line evidence; you cannot edit, "
-    "write, or run anything. Your final message is the deliverable.]\n\n"
+    "search the workspace and the web, and report findings with evidence "
+    "(file:line locally, a URL remotely); you cannot edit, write, or run "
+    "anything. Your final message is the deliverable.]\n\n"
 )
 
 
@@ -829,7 +885,19 @@ class _ChildMcp:
     attach: Callable[["Session"], None]
 
 
-def _child_mcp_wiring(parent_session: "Session") -> _ChildMcp | None:
+#: Rendered in place of a tool schema when a tool-restricted role reads
+#: ``mcp://<server>/<tool>``. It names the boundary and what the child still
+#: has, because a child told only "no" retries the same URL; a child told the
+#: rule reports it to the parent, which is the outcome the delegation wants.
+_MCP_ACTIVATION_DENIED = (
+    "This role runs on a restricted tool allowlist, so it can use the MCP "
+    "tools its parent had already enabled but cannot enable new ones. Use the "
+    "tools already in your inventory, or report to your parent (`hub`) that "
+    "this tool needs enabling on its side."
+)
+
+
+def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) -> _ChildMcp | None:
     """Give the child the PARENT's MCP surface, on the parent's live manager.
 
     The reported failure: a delegated task could not call the Linear MCP tools
@@ -865,6 +933,20 @@ def _child_mcp_wiring(parent_session: "Session") -> _ChildMcp | None:
     already public. The parent paid those schemas' token cost for the very task
     it is now delegating.
 
+    ``restricted`` is the tool-allowlist case (a reviewer, a scout). Such a
+    child used to get NO MCP at all, which cost it the reads its role is made
+    of — an MCP server is frequently the only route to the ticket, the design
+    doc or the log the research was about — while the write risk it was
+    protecting against is not evenly distributed: a server's tools are minted
+    ``approval_tier="exec"`` because their side effects are unknowable from
+    here, so the harness cannot tell a read tool from a write tool by
+    inspection. The line drawn instead is the one the code CAN enforce
+    honestly: INHERIT what the parent already enabled (the parent is
+    unrestricted, it chose those tools for this very task, and it remains
+    accountable for them), and refuse to ENABLE anything further, so a
+    restricted role can never widen its own surface past its delegator's.
+    Discovery still resolves, because reading the catalogue enables nothing.
+
     ``None`` when the parent has no manager: MCP unconfigured, SDK missing, or
     a bare ``Session`` built by a host that never wired one.
     """
@@ -890,6 +972,10 @@ def _child_mcp_wiring(parent_session: "Session") -> _ChildMcp | None:
         return [tool for tool in source if origin(tool) in enabled]
 
     def activate(server_name: str, raw_tool_name: str) -> None:
+        # Unreachable for a restricted child: its resolver is built with
+        # ``deny_activation_reason``, which returns before calling this. Kept
+        # unguarded so there is ONE activation path rather than a second
+        # allow-check that could drift from the resolver's.
         enabled.add((server_name, raw_tool_name))
         if child is not None:
             child.refresh_tools(base + selected(manager.get_tools()))
@@ -905,7 +991,11 @@ def _child_mcp_wiring(parent_session: "Session") -> _ChildMcp | None:
     return _ChildMcp(
         tools=selected(manager.get_tools()),
         catalogue=lambda query: render_mcp_catalogue(manager, query),
-        resolve=make_mcp_resolver(manager, activate),
+        resolve=make_mcp_resolver(
+            manager,
+            activate,
+            deny_activation_reason=_MCP_ACTIVATION_DENIED if restricted else None,
+        ),
         attach=attach,
     )
 
@@ -979,11 +1069,15 @@ async def _build_child_session(
     user_instructions = load_user_instructions()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
-    # MCP activation is an executable capability, so restricted roles must not
-    # receive its resolver or its prompt hint. Decide before ToolContext closes
-    # over the resolver rather than merely filtering already activated schemas.
-    mcp_allowed = not ((profile is not None and bool(profile.tools)) or agent == "scout")
-    mcp = _child_mcp_wiring(parent_session) if mcp_allowed else None
+    # Whether this child runs on a role allowlist. Decided HERE, before the
+    # ToolContext closes over the resolver, because the MCP surface is built
+    # from it: a restricted child gets the read half (inherit + discover) and
+    # not the activation half, which cannot be retrofitted by filtering
+    # already-minted schemas afterwards. ``agent == "scout"`` is the no-profile
+    # fallback path and is restricted for the same reason the allowlist below
+    # applies to it.
+    restricted = (profile is not None and bool(profile.tools)) or agent == "scout"
+    mcp = _child_mcp_wiring(parent_session, restricted=restricted)
     parent_resolver = parent_session._skill_resolver
 
     def resolve_internal_url(url: str) -> str | None:
@@ -999,11 +1093,13 @@ async def _build_child_session(
             handled = mcp.resolve(url)
             if handled is not None:
                 return handled
-        # The parent's resolver also ends in its MCP resolver. Falling through
-        # for a restricted child would therefore bypass the child's capability
-        # boundary and activate schemas in the parent inventory. Reject only
-        # this namespace here so guide:// and skill:// remain inherited.
-        if not mcp_allowed and url.startswith("mcp://"):
+        # The parent's resolver also ends in its OWN MCP resolver, which
+        # activates into the PARENT's inventory. Falling through to it for any
+        # ``mcp://`` URL the child's resolver did not answer would therefore
+        # enable a tool on the wrong session — and for a restricted child it
+        # would additionally route around the activation denial above. Reject
+        # only this namespace here so guide:// and skill:// stay inherited.
+        if url.startswith("mcp://"):
             return None
         return parent_resolver(url) if parent_resolver is not None else None
 
@@ -1055,8 +1151,9 @@ async def _build_child_session(
     tools = create_tools(tool_context)
     # A role's tool allowlist is a capability boundary, not advice: a reviewer
     # that cannot call ``edit`` cannot "helpfully" fix what it was asked to
-    # review and thereby end up reviewing its own patch.
-    restricted = profile is not None and bool(profile.tools)
+    # review and thereby end up reviewing its own patch. ``restricted`` itself
+    # was decided above, because the MCP surface is built from it.
+    #
     # Captured BEFORE the allowlist filter: a restricted child must keep the
     # ability to ANSWER its parent even when its role allowlist does not name
     # ``hub`` (the installed reviewer profile is read/glob/grep/bash/todo).
@@ -1068,19 +1165,21 @@ async def _build_child_session(
     # or execute anything the allowlist denies, so sparing it weakens no
     # boundary.
     hub_tool = next((tool for tool in tools if tool.name == "hub"), None)
-    if restricted:
-        tools = filter_tools(tools, profile)
+    if profile is not None and profile.tools:
+        tools = _with_network_floor(filter_tools(tools, profile), tools)
     elif agent == "scout":
         # Fallback for a scout with no resolvable profile — the read-only
         # promise must not depend on a seed file being present.
         tools = [tool for tool in tools if tool.name in SCOUT_TOOL_ALLOWLIST]
-        restricted = True
     if restricted and hub_tool is not None and not any(tool.name == "hub" for tool in tools):
         tools = list(tools) + [hub_tool]
-    # MCP tools execute arbitrary server calls, so a role filtered to an
-    # allowlist never receives them: they are excluded wholesale rather than
-    # trusted per tool, since the allowlist cannot name servers it has not met.
-    if mcp is not None and not restricted:
+    # A restricted role receives the MCP tools its PARENT had already enabled
+    # (see :func:`_child_mcp_wiring` for why inheriting is the honest line and
+    # activation is not): withholding them cost a reviewer or scout the reads
+    # its role is made of, while the parent that chose those tools for this
+    # task remains accountable for them. It cannot widen the set — its
+    # resolver refuses to activate anything new.
+    if mcp is not None:
         tools = tools + mcp.tools
 
     def system_blocks_provider(model_label: str = "") -> list[str]:
