@@ -1352,6 +1352,25 @@ class OperatorApp(App[None]):
     TITLE = "Local Operator"
     CSS_PATH = "local_operator.tcss"
 
+    #: How long a second click still counts as part of the same chain.
+    #:
+    #: Textual's default is 0.5 s, which decided a composer double-click's
+    #: outcome on 200 ms the user cannot perceive: two clicks 0.7 s apart were
+    #: not a chain, so they made no selection, and the Ctrl+C pressed next found
+    #: no range and CLEARED THE DRAFT (design round 1, D3). The user's intent is
+    #: identical in both cases and nothing on the frame distinguishes them, so
+    #: the outcome must not swing between "word copied" and "draft cleared" on a
+    #: gap that fast.
+    #:
+    #: 0.9 s is the top of the macOS double-click slider's range (0.25-1.0 s),
+    #: which is the interval this app's users have actually calibrated their
+    #: hands against — and it skews toward the deliberate, slower clicker, who
+    #: is exactly the user least likely to know about `↑` recovery. The cost of
+    #: erring long is small and symmetric: a slow pair of clicks the user meant
+    #: as two separate caret placements selects a word instead, which the next
+    #: click or keystroke undoes. The cost of erring short is a lost draft.
+    CLICK_CHAIN_TIME_THRESHOLD = 0.9
+
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
@@ -6061,6 +6080,48 @@ class OperatorApp(App[None]):
         # Checked BEFORE the draft branch, because a composer being dragged over
         # always has text in it and would otherwise take that branch every time.
         mid_copy = editor.copy_in_flight
+        # A BARREN MULTI-CLICK just happened: the user made a deliberate
+        # selection gesture, the frame came back identical to the one before it,
+        # and this press is them reaching for the copy that gesture implied.
+        # Clearing the draft here is the exact sentence the composer's click
+        # chain exists to eliminate — "my draft disappeared" — reached on the
+        # blank last row and on a pair of clicks one cell apart (design round 2,
+        # D2 and D2-1).
+        #
+        # Declining is the whole action: no copy (there is nothing to copy) and
+        # no interrupt. The press is spent making nothing happen, which is what
+        # the gesture already led the user to expect.
+        #
+        # Gated on the GESTURE and never on selection STATE, and the claim is
+        # SPENT here so this suppresses exactly one press: the D17 hazard is a
+        # composer that diverts the key indefinitely, and a rung that cannot be
+        # reached twice in a row is not a ladder. A second press gets the
+        # ordinary behaviour, as does any press after the window expires.
+        #
+        # GATED ON THERE BEING A DRAFT TO PROTECT. The rung's entire
+        # justification is that clearing the draft here is the sentence this
+        # change exists to eliminate, so on an EMPTY composer it protects
+        # nothing and costs a real interrupt on a live turn. Worse, it was
+        # chainable: re-clicking when nothing appeared to happen is exactly the
+        # user's reflex, each gesture re-armed the claim, and four rounds of
+        # (click, Ctrl+C) never reached the interrupt at all — the exit ladder
+        # becoming unreachable, which is the invariant this area exists to
+        # protect (agent review round 3, R3-1). The suppression now only ever
+        # diverts the press away from the DRAFT rung, which is the only rung it
+        # was ever arguing about.
+        if editor.barren_multi_click and editor.text.strip():
+            editor.retire_barren_click()
+            # The ladder is NOT armed and any live exit hint is stale, for the
+            # same reason the draft rung below resets both: this press is being
+            # absorbed, so leaving "ctrl+c again to exit" on screen would
+            # promise an exit the next press does not make (design review round
+            # 3, D3-2). The neighbouring rung was written to prevent exactly
+            # this stale promise and returning early here reintroduced it.
+            self._last_interrupt_at = 0.0
+            if self._exit_hint is not None:
+                self._transcript_view().remove_block(self._exit_hint)
+                self._exit_hint = None
+            return
         if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a
             # draft that cannot be filed must not be thrown away either.
@@ -8397,6 +8458,13 @@ class OperatorApp(App[None]):
         # repaint. Here rather than in `_submit_prompt`, because this is the
         # single dispatch point every prompt passes through, held or not.
         self._pending_user_echoes.append(text)
+        # A turn STARTING ends any barren click gesture: from here Ctrl+C means
+        # "stop this turn", and a claim raised before the turn existed cannot
+        # speak for a press aimed at it (agent review round 3, R3-3). Belt and
+        # braces with the editor's own submit seam, because a prompt held
+        # through a compaction reaches this dispatch point long after the
+        # submit that queued it.
+        self._editor().retire_barren_click()
         # Naming is deliberately NOT cancelled here. It used to be, because the
         # title call took the same provider lane the turn takes and a follow-up
         # had to be able to evict it. The call is now `isolated` and concurrent,

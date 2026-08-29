@@ -53,6 +53,8 @@ consequences worth naming rather than discovering:
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, cast
 
 import pytest
@@ -73,7 +75,7 @@ from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.markdown_theme import install_markdown_theme
 from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.assistant import AssistantBlock, flatten
-from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.editor import BARREN_CLICK_WINDOW_S, Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
 from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
 from local_operator.tui.widgets.transcript import (
@@ -1905,6 +1907,462 @@ async def test_an_explicit_composer_copy_takes_what_was_highlighted() -> None:
         assert not app.screen.selections
 
 
+async def _composer_multi_click(
+    app: OperatorApp,
+    pilot: Any,
+    editor: Editor,
+    column: int,
+    times: int,
+    row: int = 0,
+) -> None:
+    """A double/triple click in the composer, through the CLICK path.
+
+    Deliberately `pilot.click(times=...)` rather than the hand-built
+    MouseDown/Move/Up of `_composer_drag`. The distinction is the whole reason
+    the double-click defect survived a green suite: `_composer_drag` posts the
+    three mouse events and stops, but a real terminal ALSO produces a `Click`
+    carrying a chain count, and `Widget._on_click` is what reacts to that
+    chain. A helper that never emits a Click cannot model the gesture the field
+    report was about, so these tests use the pilot's own click, which builds
+    the chain the driver builds.
+
+    The composer's PLACEMENT settles several frames after its text does. A
+    multi-line draft grows the widget, which moves the whole input dock up the
+    screen, and `region.y` was still migrating (15 -> 16 here) for up to five
+    pauses after `_composer` returned. `pilot.click` resolves the widget-
+    relative offset against the region AT CLICK TIME, so a click aimed one
+    frame early lands a row high: a row-1 click silently became a row-0 click
+    and the assertion then described a gesture the test never made.
+
+    Worse, `pilot.click` resolves the offset to SCREEN coordinates ONCE and
+    then pauses between each event of the chain, so a dock that moves partway
+    through sends the later clicks of a triple-click to a coordinate that is no
+    longer the row they were aimed at. Waiting for the region to hold still
+    across several consecutive frames — not merely to differ from the last one
+    — is what makes a row-aimed click land where it says.
+    """
+    stable = 0
+    previous = None
+    for _ in range(40):
+        await pilot.pause()
+        current = editor.region
+        stable = stable + 1 if current == previous and editor.size.height > row else 0
+        previous = current
+        if stable >= 8:
+            break
+    assert editor.size.height > row, f"the composer never grew to row {row}"
+    offset = (editor.gutter.left + column, editor.gutter.top + row)
+
+    # VERIFY THE AIM, do not merely wait for it. `stable >= 4` was not always
+    # enough for the taller fixtures: the dock was still migrating when
+    # `pilot.click` resolved its offset, so a row-1 click landed on row 0 about
+    # 14% of the time and the D2 regression test failed intermittently while the
+    # product was correct (design review round 2, D2-2). A flaky test pinning a
+    # data-loss fix is worse than no test, because the next real regression
+    # reads as "that one's just flaky".
+    #
+    # Recording where the click will ACTUALLY land — through the same resolver
+    # the handler uses — turns a mis-aimed gesture into a loud setup failure
+    # naming the row it hit, instead of a confusing assertion about a selection
+    # the test never really made.
+    landed: list[int] = []
+    original = type(editor)._on_click
+
+    async def _record(self: Editor, event: Any) -> None:
+        landed.append(self.get_target_document_location(event)[0])
+        await original(self, event)
+
+    type(editor)._on_click = _record
+    try:
+        await pilot.click(editor, offset=offset, times=times)
+        await pilot.pause()
+        await pilot.pause()
+    finally:
+        type(editor)._on_click = original
+    assert landed, "the click never reached the editor's chain handler"
+    assert landed[-1] == row, (
+        f"the click was aimed at row {row} but landed on row {landed[-1]} — "
+        "the composer dock moved between resolving the offset and delivering "
+        "the click, so this run tested a different gesture"
+    )
+
+
+@pytest.mark.asyncio
+async def test_double_click_selects_the_word_under_the_pointer() -> None:
+    """The reported defect: double-click made no selection the composer could copy.
+
+    Measured under a real pty before the fix: `Widget._on_click` answered a
+    chain of 2 with `text_select_all()`, which writes a SCREEN selection —
+    `{Editor(): Selection(None, None)}`. For a `TextArea` that entry is inert
+    twice over: it paints nothing (the widget renders its own lines rather
+    than a `Content`), and `Widget.get_selection` yields no text for it. The
+    document selection stayed collapsed, so `selected_text` was `''` and the
+    highlight the user believed they had made did not exist.
+
+    Pins the document meaning of the gesture: the word, taken from the widget's
+    own `_word_pattern` boundaries, in `TextArea.selection` where both the
+    painted highlight and `selected_text` read it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        # Column 18 sits inside "ingest" (columns 14-20).
+        await _composer_multi_click(app, pilot, editor, 18, times=2)
+
+        assert editor.selection == DocumentSelection((0, 14), (0, 20))
+        assert editor.selected_text == "ingest"
+        # The inert screen selection is gone rather than merely ignored: an
+        # entry there makes the next mouse-down clear it and puts this widget
+        # in the map the transcript-copy path walks.
+        assert not app.screen.selections
+
+
+@pytest.mark.asyncio
+async def test_triple_click_selects_the_whole_composer_line() -> None:
+    """Chain 3 takes the line, the gesture's meaning in every other editor.
+
+    Before the fix this was worse than chain 2: `Widget._on_click` escalated to
+    the CONTAINER, so `Screen.selections` picked up the input row and the
+    chrome around it and a copy took the frame's furniture — captured on a real
+    pty as a clipboard holding `'\\ndraft cleared — ↑ to recover\\n…◆ test/model
+    › ⌂ …'`. The composer's own line was the one thing not in it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=3)
+
+        assert editor.selection == DocumentSelection((0, 0), (0, 32))
+        assert editor.selected_text == "summarise the ingest path please"
+        assert not app.screen.selections
+
+
+@pytest.mark.asyncio
+async def test_double_click_then_ctrl_c_copies_and_keeps_the_draft() -> None:
+    """THE reported sequence, end to end: highlight by double-click, then Ctrl+C.
+
+    This is what the user actually did, and before the fix it did not merely
+    fail to copy — it DESTROYED THE PROMPT. With no live range, Ctrl+C fell
+    through to the interrupt rung, whose first tap clears the draft. The report
+    ("I can't properly copy via ctrl/cmd+C on highlighted text in the
+    composer") understates it: the gesture cost the user their text.
+
+    Pins all three outcomes, because a fix that restored the copy while still
+    clearing the draft would satisfy a narrower assertion.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await _composer_multi_click(app, pilot, editor, 18, times=2)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app._clipboard == "ingest"
+        assert toast.message == "copied 6 characters"
+        assert editor.text == "summarise the ingest path please"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_click_does_not_copy_on_its_own() -> None:
+    """Selecting is not copying, and the click must not write the clipboard.
+
+    The same rule `_copy_drag` enforces for a drag and `_on_mouse_up` for a
+    marker click: a composer highlight is usually the first half of an edit, so
+    a gesture that merely SELECTS must leave the clipboard alone. Without this,
+    the double-click fix would reintroduce the original field report — "the
+    copy can end up clearing something you have in the clipboard" — through a
+    new gesture.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await _composer_multi_click(app, pilot, editor, 18, times=2)
+        await _composer_multi_click(app, pilot, editor, 18, times=3)
+
+        assert app._clipboard == "SOMETHING THE USER PUT THERE"
+        assert toast.message == ""
+
+
+@pytest.mark.asyncio
+async def test_a_single_click_still_only_places_the_caret() -> None:
+    """Chain 1 is a caret move, not a selection — the commonest gesture here.
+
+    The guard the word/line handler needs: a fix that widened EVERY click
+    would make placing the caret select a word, so the next character typed
+    would replace it. Pins the collapsed selection a plain click leaves.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=1)
+
+        assert editor.selection.start == editor.selection.end
+        assert editor.selected_text == ""
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_after_a_single_click_still_reaches_the_interrupt() -> None:
+    """The invariant the fix must not trade away (D17).
+
+    Ctrl+C's interrupt meaning cannot become conditional on a highlight, and
+    the exit ladder's first rung is what clears the draft. A single click
+    leaves no range, so the press must still reach the interrupt — the same
+    behaviour as before this change, asserted here because the new handler runs
+    on the same event that decides it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=1)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert editor.text == ""
+
+
+@pytest.mark.asyncio
+async def test_double_click_on_whitespace_takes_the_gap_not_a_neighbour() -> None:
+    """A click on a gap selects the gap, never a word the user did not point at.
+
+    `_word_span` splits on `TextArea._word_pattern`, so a run of spaces is its
+    own span. Silently snapping to the word on either side would put text on
+    the clipboard that the pointer was not over — the same class of surprise as
+    copying without being asked.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        # Column 9 is the single space between "summarise" and "the".
+        await _composer_multi_click(app, pilot, editor, 9, times=2)
+
+        assert editor.selected_text == " "
+
+
+@pytest.mark.asyncio
+async def test_double_click_on_an_empty_composer_selects_nothing() -> None:
+    """The placeholder is not the user's text, so there is nothing to take.
+
+    An empty composer still paints `Message Local Operator…`. The word span is
+    computed from the DOCUMENT, which is empty, so the gesture yields an empty
+    range and the Ctrl+C that may follow keeps its interrupt meaning.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "")
+
+        await _composer_multi_click(app, pilot, editor, 4, times=2)
+
+        assert editor.selected_text == ""
+
+
+@pytest.mark.asyncio
+async def test_a_fourth_click_keeps_the_line_selected() -> None:
+    """Clicking on past three does not flicker the highlight off.
+
+    `CLICK_CHAIN_TIME_THRESHOLD` keeps counting while the user keeps clicking
+    in place, so chain 4 is reachable by accident. Folding it onto the line
+    keeps the selection stable rather than collapsing it, which would read as
+    the highlight dropping out on its own.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=4)
+
+        assert editor.selected_text == "summarise the ingest path please"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_click_on_a_blank_line_leaves_a_live_range() -> None:
+    """A blank line between paragraphs must not answer the gesture with nothing.
+
+    Regression for design round 1, D2. Paragraphs split by an empty line are
+    the commonest shape of a real prompt. Both chains used to fall through to a
+    collapsed range there, so the frame after the gesture was byte-identical to
+    the frame before it — the "the highlight did not exist" signature of the
+    original defect — and the Ctrl+C that followed found no range and CLEARED
+    THE DRAFT.
+
+    The range taken is the row's own line break, the only character the line
+    has, so the gesture answers with something real and the draft survives the
+    press. Pinned for both chains because they reach it by different branches.
+    """
+    for times in (2, 3):
+        app = _pilot_app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            editor = await _composer(
+                app, pilot, "first paragraph of my prompt\n\nsecond paragraph here"
+            )
+            app._clipboard = "SOMETHING THE USER PUT THERE"
+
+            await _composer_multi_click(app, pilot, editor, 0, times=times, row=1)
+
+            assert editor.selection == DocumentSelection((1, 0), (2, 0))
+            assert editor.selected_text == "\n"
+
+            # The press the user makes next: it copies the range instead of
+            # falling through to the rung that scraps the draft.
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._clipboard == "\n"
+            assert editor.text == "first paragraph of my prompt\n\nsecond paragraph here"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_click_on_the_last_empty_row_stays_collapsed() -> None:
+    """The trailing blank row has no line break to take, so it takes nothing.
+
+    The bound on the D2 fix. A range on the final row would have to run
+    BACKWARDS into the previous line and take a character the user never
+    pointed at, so the selection stays collapsed there — which also keeps the
+    empty composer correct (design round 1, D7 verified that as good, and it
+    must not regress).
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "a draft with a trailing newline\n")
+
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=1)
+
+        assert editor.selection.start == editor.selection.end
+        assert editor.selected_text == ""
+
+
+@pytest.mark.asyncio
+async def test_a_deliberately_slow_double_click_is_still_a_double_click() -> None:
+    """A gesture 0.7 s apart selects, rather than eating the draft.
+
+    Regression for design round 1, D3. Textual's default
+    `CLICK_CHAIN_TIME_THRESHOLD` is 0.5 s, so two clicks 0.7 s apart were not a
+    chain at all: no selection, and the Ctrl+C pressed next found no range and
+    fell through to the rung that clears the composer. The user's intent is the
+    same in both cases and nothing on the frame tells them which one they made,
+    so the outcome must not hinge on 200 ms they cannot perceive.
+
+    Driven through `App.on_event` rather than `pilot.click(times=...)`: the
+    pilot builds the `Click` with the chain count already decided, so it cannot
+    exercise the arithmetic under test. Real MouseDown/MouseUp pairs are what
+    the chain is computed from.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+
+        async def press_and_release() -> None:
+            """One physical click, as the driver delivers it."""
+            x = editor.region.x + editor.gutter.left + 18
+            y = editor.region.y + editor.gutter.top
+            arguments: dict[str, Any] = dict(
+                widget=None,
+                x=x,
+                y=y,
+                delta_x=0,
+                delta_y=0,
+                button=1,
+                shift=False,
+                meta=False,
+                ctrl=False,
+                screen_x=x,
+                screen_y=y,
+            )
+            await app.on_event(events.MouseDown(**arguments))
+            await app.on_event(events.MouseUp(**arguments))
+            await pilot.pause()
+
+        await press_and_release()
+        # Longer than Textual's 0.5 s default, inside this app's own threshold.
+        await asyncio.sleep(0.7)
+        await press_and_release()
+        await pilot.pause()
+
+        assert editor.selected_text == "ingest", "the slow pair was not read as a chain"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app._clipboard == "ingest"
+        assert editor.text == "summarise the ingest path please", "the draft was cleared"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_still_interrupts_after_a_stale_multi_click_range() -> None:
+    """The exit ladder stays reachable after a REFLEXIVE double-click.
+
+    Regression for agent review round 1, R1-2. `action_copy`'s rule is that a
+    live range makes the press a copy, and that is deliberate for a range the
+    user MADE deliberately (shift+arrow, a drag). A double-click in an input
+    box is reflexive, so this change put a persistent range one stray gesture
+    away — and with it, Ctrl+C could never reach the interrupt while the agent
+    was working, at any number of presses.
+
+    The measured ladder after this fix, re-measured in agent review round 2
+    (R2-2) because round 1's own figures did not reproduce: press 1 copies,
+    press 2 clears the draft, press 3 interrupts, press 4 interrupts and exits.
+    An untouched composer interrupts on press 2 and exits on press 3, so the
+    accepted residual cost is ONE EXTRA TAP for a user who reflexively
+    double-clicked mid-turn.
+
+    The rule is kept, and the ladder is restored by the SECOND press: the first
+    copies the range and collapses the caret to its end, which is the same
+    "collapsing the caret hands the key back" escape `action_copy` documents,
+    now performed by the copy itself rather than requiring the user to know
+    about it. One press is still a copy, so nothing about the explicit-copy
+    gesture changes.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        session.streaming = True
+        await pilot.pause()
+
+        await _composer_multi_click(app, pilot, editor, 18, times=2)
+        assert editor.selected_text == "ingest", "the gesture must leave a range"
+
+        # First press: the copy the range earns.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app._clipboard == "ingest"
+        assert session.aborts == [], "the copy must not also interrupt"
+        assert not editor.selected_text, "the copy must hand the key back"
+
+        # Second press: the key means what it means with no range live.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert editor.text == "", "the draft rung never ran"
+        assert "summarise the ingest path please" in editor.prompt_history()
+
+        # Third press: the interrupt, with the draft already filed.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert session.aborts == ["interrupted"], "the interrupt stayed unreachable"
+
+
 @pytest.mark.asyncio
 async def test_a_composer_copy_says_so_in_the_same_words() -> None:
     """One receipt for both gestures, or the toast becomes a tell.
@@ -3731,3 +4189,486 @@ def test_a_fence_marker_in_indented_code_reads_as_a_fence_on_purpose() -> None:
     # ...and the direction that makes it acceptable: content stays covered, so
     # the copy is verbatim rather than losing a leading character.
     assert 3 in covered, f"the indented code line lost its fence cover: {covered}"
+
+
+async def _click_pair(
+    app: OperatorApp,
+    pilot: Any,
+    editor: Editor,
+    drift: int,
+    vertical: int = 0,
+    base_row: int = 0,
+    base_column: int = 18,
+) -> None:
+    """Two SINGLE clicks `(drift, vertical)` cells apart, as a terminal sends them.
+
+    `pilot.click(times=2)` builds the Click with its chain count already
+    decided, so it cannot model a pair that Textual scores as two singles.
+    These are hand-built MouseDown/MouseUp pairs through the app's own event
+    path, which is where `_click_chain_last_offset` is compared.
+
+    `vertical` and `base_row` exist because the drift band is a RADIUS and was
+    silently one-sided on BOTH axes (R3-2): the caller has to be able to aim the
+    second click above the first, which needs a base row that is not row 0 and a
+    draft tall enough to hold it.
+    """
+    base = editor.region.offset + Offset(
+        editor.gutter.left + base_column, editor.gutter.top + base_row
+    )
+    for offset in (base, base + Offset(drift, vertical)):
+        for kind in (events.MouseDown, events.MouseUp):
+            app.post_message(
+                kind(
+                    widget=editor,
+                    x=offset.x,
+                    y=offset.y,
+                    delta_x=0,
+                    delta_y=0,
+                    button=1,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                    screen_x=offset.x,
+                    screen_y=offset.y,
+                    style=None,
+                )
+            )
+        await pilot.pause()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_barren_multi_click_on_the_last_row_does_not_clear_the_draft() -> None:
+    """The blank LAST row answers Ctrl+C with nothing, not with a lost draft.
+
+    Regression for design review round 2, D2. `_line_break_span` must stay
+    collapsed on the final row — there is no following row to reach, and
+    widening backwards would take a character the user never pointed at, which
+    is also what keeps the empty composer correct (D7). So the range cannot
+    reach this row, and for a while that meant the row still ate the draft.
+
+    It is not an edge case: shift+enter is this composer's newline, so a user
+    who finishes a paragraph and hits it twice SITS on a blank last row while
+    they think of the next sentence. Double-clicking there painted a frame
+    byte-identical to the one before it and the Ctrl+C that followed cleared
+    the draft — the exact sentence this whole change exists to eliminate.
+
+    Fixed on the GESTURE rather than the range: a multi-click that produced no
+    range declines to let the very next press take the interrupt rung.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        # Typed, not loaded: shift+enter is the key the finding is about.
+        for character in "first paragraph":
+            await pilot.press(character if character != " " else "space")
+        await pilot.press("shift+enter")
+        await pilot.press("shift+enter")
+        draft = editor.text
+        assert draft.endswith("\n\n"), "the fixture must sit on a blank last row"
+
+        row = editor.document.line_count - 1
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=row)
+        assert not editor.selected_text, "the last row must still take no range"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert editor.text == draft, "the barren gesture still cleared the draft"
+
+
+@pytest.mark.asyncio
+async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft() -> None:
+    """A one-column drift is still one gesture, so the draft survives.
+
+    Regression for design review round 2, D2-1. Widening the chain's TIME
+    window (D3) covered only one axis: `App._on_event` also requires an EXACT
+    cell match against `_click_chain_last_offset`, so a fast pair one column
+    apart is two singles, makes no selection, and the Ctrl+C that follows
+    clears the draft. The slow clicker and the jittery clicker are the same
+    deliberate user the D3 rationale optimises for.
+
+    The pair deliberately still makes NO SELECTION — inventing a range from a
+    gesture Textual scored as two singles would paint a highlight the user did
+    not ask for. It only declines the interrupt rung for one press.
+    """
+    for drift in (1, 2):
+        app = _pilot_app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            editor = await _composer(app, pilot, "summarise the ingest path please")
+            for _ in range(8):
+                await pilot.pause()
+            draft = editor.text
+
+            await _click_pair(app, pilot, editor, drift)
+            assert not editor.selected_text, "a near miss must not invent a range"
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert editor.text == draft, f"a {drift}-cell drift cleared the draft"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", [6, -6, 3, -3])
+async def test_a_deliberate_second_click_elsewhere_keeps_the_draft_rung(drift: int) -> None:
+    """The near-miss window must not swallow a real second caret placement.
+
+    The bound on D2-1. Two clicks a few cells apart are one jittery gesture;
+    two clicks further apart are a user deliberately placing a second caret
+    somewhere else, and Ctrl+C there means what it means on any untouched
+    composer. A rule that suppressed the draft rung for any pair of clicks
+    would make the composer's commonest key unpredictable.
+
+    PARAMETRISED IN BOTH DIRECTIONS, which is the assertion that was missing.
+    The band is a radius, so it has no sign — but it was computed with
+    `Offset.clamped`, which restricts x and y to values ABOVE ZERO rather than
+    taking a magnitude. Every negative component became `0`, so a second click
+    ANY distance to the left measured as no drift at all and armed the claim
+    (agent review round 3, R3-2). This test passed only because it used `+6`;
+    at `-6` it failed, and the product was wrong in exactly the way the test
+    was written to forbid.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        for _ in range(8):
+            await pilot.pause()
+
+        await _click_pair(app, pilot, editor, drift)
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert (
+            editor.text == ""
+        ), f"a deliberate second click {drift} cells away suppressed the draft rung"
+        assert "summarise the ingest path please" in editor.prompt_history()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vertical", [3, -3])
+async def test_a_deliberate_second_click_on_another_row_keeps_the_draft_rung(
+    vertical: int,
+) -> None:
+    """The drift band is symmetric on the VERTICAL axis too.
+
+    Round 3 left this axis explicitly unproven: a row-below click leaves a
+    one-row composer, so the reviewer could measure the arithmetic but not the
+    behaviour. It needs a draft tall enough that a three-row drift in EITHER
+    direction still lands inside the widget, and a base click on a middle row so
+    an upward drift has somewhere to go.
+
+    Measured that way the axis was affected exactly as the arithmetic predicted:
+    `dy=+3` correctly fell outside the band while `dy=-3` was clamped to zero
+    drift and armed the claim, so a user placing a second caret three rows UP
+    lost a press (R3-2).
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        # Seven rows, typed through the composer's own newline, so a drift of
+        # three from row three stays inside the widget in both directions.
+        for index in range(7):
+            for character in f"row {index} of a tall draft":
+                await pilot.press(character if character != " " else "space")
+            if index < 6:
+                await pilot.press("shift+enter")
+        stable, previous = 0, None
+        for _ in range(60):
+            await pilot.pause()
+            current = editor.region
+            stable = stable + 1 if current == previous and editor.size.height > 6 else 0
+            previous = current
+            if stable >= 8:
+                break
+        assert editor.size.height > 6, "the composer never grew to seven rows"
+        draft = editor.text
+
+        await _click_pair(app, pilot, editor, 0, vertical=vertical, base_row=3, base_column=6)
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert (
+            editor.text == ""
+        ), f"a deliberate second click {vertical} rows away suppressed the draft rung"
+        assert draft.splitlines()[0] in "\n".join(editor.prompt_history())
+
+
+@pytest.mark.asyncio
+async def test_a_barren_click_never_swallows_an_interrupt_on_an_empty_composer() -> None:
+    """A genuine interrupt during a running turn is never absorbed. THE invariant.
+
+    The barren rung's entire justification is that clearing the draft is the
+    sentence this change exists to eliminate. On an EMPTY composer there is no
+    draft, the press was always destined for the interrupt, and absorbing it
+    protected nothing while costing a real interrupt on a live turn.
+
+    Worse, it CHAINED. Double-clicking again when nothing appeared to happen is
+    precisely the user's reflex, and each gesture re-armed the claim, so the
+    interrupt was never reached at all — the exit ladder becoming unreachable,
+    which is the invariant this whole area exists to protect (agent review round
+    3, R3-1). The claim is now read only when there is a draft to protect, so it
+    can only ever divert the press away from the DRAFT rung.
+    """
+    session = FakeSession()
+    session.streaming = True
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        assert editor.text == "", "the fixture must have no draft to protect"
+
+        # Four rounds of the user's actual reflex: click, nothing happens,
+        # press, nothing happens, click again.
+        for round_number in range(1, 5):
+            await _composer_multi_click(app, pilot, editor, 0, times=2, row=0)
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert session.aborts, (
+                f"round {round_number}: a barren gesture swallowed a genuine interrupt "
+                "on an empty composer, and re-clicking chains it indefinitely"
+            )
+            session.aborts.clear()
+            # Disarm the EXIT ladder between rounds, not the claim under test.
+            # Each round leaves `_last_interrupt_at` set, so the next round's
+            # press would land inside `DOUBLE_INTERRUPT_WINDOW_S` and correctly
+            # interrupt-AND-EXIT — ending the app mid-test and reporting a
+            # product failure that is really the ordinary second rung. This
+            # models a user who pauses between attempts, which is the shape of
+            # the reflex the finding describes.
+            app._last_interrupt_at = 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seam", ["keystroke", "blur", "load_text", "history_recall", "submit"])
+async def test_the_barren_claim_retires_when_the_gesture_ends(seam: str) -> None:
+    """The claim is gesture-scoped, so it ends when the gesture demonstrably does.
+
+    The window bounds how long the claim can be wrong for; it does not stop it
+    being wrong. Nothing retired it when the user moved on, so it survived them
+    typing and survived the composer losing focus, and the next Ctrl+C was
+    absorbed on the strength of a gesture that was over (agent review round 3,
+    R3-3).
+
+    Parametrised over EVERY seam rather than the two that were cheapest to
+    drive. Covering only the keystroke and the blur is what let the fifth seam
+    ship missing: ``load_text`` is a mutation funnel ``edit()`` never runs for,
+    so no keystroke-shaped test can reach it, and the sweep passed with the gap
+    open (agent review round 4, R4-2). ``history_recall`` drives that funnel the
+    way a user does — ``self.text = ...`` from the Up arrow — so the case is
+    pinned at the product path and not only at the method.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        if seam == "history_recall":
+            # A recallable entry has to exist BEFORE the claim is raised, or the
+            # Up arrow is a no-op and the test passes for the wrong reason.
+            for character in "earlier prompt":
+                await pilot.press(character if character != " " else "space")
+            await pilot.press("enter")
+            for _ in range(6):
+                await pilot.pause()
+
+        row = editor.document.line_count - 1
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=row)
+        assert editor.barren_multi_click, "the barren gesture was not recorded"
+
+        if seam == "keystroke":
+            await pilot.press("n")
+        elif seam == "blur":
+            editor.blur()
+        elif seam == "load_text":
+            editor.load_text("replaced wholesale")
+        elif seam == "history_recall":
+            await pilot.press("up")
+            assert (
+                editor.text == "earlier prompt"
+            ), f"the Up arrow did not recall, so the seam was never crossed: {editor.text!r}"
+        else:
+            await pilot.press("enter")
+            for _ in range(6):
+                await pilot.pause()
+        await pilot.pause()
+
+        assert (
+            not editor.barren_multi_click
+        ), f"the claim outlived the gesture across the {seam} seam"
+
+
+@pytest.mark.asyncio
+async def test_a_barren_click_before_a_submit_does_not_eat_the_turns_interrupt() -> None:
+    """Ctrl+C aimed at a turn the user just started always reaches it.
+
+    The seam that costs most, driven end to end rather than by inspecting the
+    flag: click in the composer, type, submit, then reach for Ctrl+C to stop a
+    prompt you have decided is wrong. Submitting is well inside a reaction-time
+    budget, so the 1.5 s window bounded the damage without preventing it and the
+    interrupt was swallowed (R3-3).
+
+    Two independent seams retire the claim here — the editor's own submit and
+    the app's turn dispatch — because a prompt HELD through a compaction reaches
+    `_start_turn` long after the submit that queued it.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for character in "wrong prompt":
+            await pilot.press(character if character != " " else "space")
+        await pilot.press("shift+enter")
+        await pilot.press("shift+enter")
+
+        row = editor.document.line_count - 1
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=row)
+        assert editor.barren_multi_click, "the barren gesture was not recorded"
+
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        assert not editor.barren_multi_click, "the claim survived the submit"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert session.aborts == [
+            "interrupted"
+        ], "a barren click made before the submit ate the interrupt aimed at the turn"
+
+
+@pytest.mark.asyncio
+async def test_an_absorbed_press_withdraws_the_exit_hint_it_cannot_honour() -> None:
+    """The screen never promises an exit the absorbed press does not make.
+
+    The draft rung already resets the ladder and removes the hint for this exact
+    reason, in a comment on the line above: leaving `ctrl+c again to exit` on
+    screen would promise an exit the next press does not make. The barren rung
+    returned early and did neither, reintroducing the stale promise its
+    neighbour was written to prevent (design review round 3, D3-2).
+
+    Note the reachable shape of this changed with R3-1: the rung is now gated on
+    a draft, so the fixture arms the ladder on the empty composer and THEN types
+    one.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        # Arm the ladder while the composer is empty: this is what paints the hint.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app._exit_hint is not None, "the fixture never armed the exit hint"
+
+        for character in "my prompt":
+            await pilot.press(character if character != " " else "space")
+        await pilot.press("shift+enter")
+        await pilot.press("shift+enter")
+        draft = editor.text
+
+        row = editor.document.line_count - 1
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=row)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert editor.text == draft, "the absorbed press did not protect the draft"
+        assert app._exit_hint is None, "a stale exit hint outlived the press it invited"
+        rows = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert not any(
+            "again to exit" in row for row in rows
+        ), "the screen still promises an exit the absorbed press does not make"
+        assert app._last_interrupt_at == 0.0, "the ladder stayed armed under an absorbed press"
+
+
+@pytest.mark.asyncio
+async def test_a_barren_multi_click_suppresses_exactly_one_press() -> None:
+    """The exit ladder stays reachable after a barren gesture.
+
+    THE bound on the D2/D2-1 remedy, and the reason it is scoped to a bounded
+    recent gesture rather than to live selection state. D17 is the lost-draft
+    bug where a composer diverted Ctrl+C indefinitely on stale state: the
+    interrupt never fired, the user pressed again, and the app exited with the
+    draft never filed to history.
+
+    So the claim is SPENT by the press that reads it. One press is absorbed;
+    the next is an ordinary first press, and the full ladder — draft, then
+    interrupt, then interrupt-and-exit — runs from there unchanged.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for character in "first paragraph":
+            await pilot.press(character if character != " " else "space")
+        await pilot.press("shift+enter")
+        await pilot.press("shift+enter")
+        draft = editor.text
+        session.streaming = True
+        await pilot.pause()
+
+        row = editor.document.line_count - 1
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=row)
+
+        # Press 1: absorbed by the barren gesture.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert editor.text == draft
+        assert session.aborts == []
+
+        # Press 2: the ordinary draft rung, exactly as on an untouched composer.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert editor.text == "", "the claim outlived the press that spent it"
+        assert draft.strip() in "\n".join(editor.prompt_history())
+
+        # Press 3: the interrupt. The ladder is reachable, one rung further on.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert session.aborts == ["interrupted"], "the exit ladder became unreachable"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_barren_click_stops_suppressing_the_interrupt() -> None:
+    """The barren claim EXPIRES, so it can never strand the exit ladder.
+
+    The other half of the D17 argument. A claim that suppressed a press
+    indefinitely would be the same hazard by a new route: a user who clicked
+    minutes ago, forgot, and now needs out. The window is a reaction-time
+    budget for the hand moving from mouse to keyboard, so a press after it has
+    passed gets the ordinary rung with no memory of the gesture at all.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "a draft with a trailing newline\n")
+
+        row = editor.document.line_count - 1
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=row)
+        assert editor.barren_multi_click, "the barren gesture was not recorded"
+
+        # Age the claim past its window rather than sleeping through it.
+        editor._barren_click_at = time.monotonic() - (BARREN_CLICK_WINDOW_S + 0.1)
+        assert not editor.barren_multi_click, "the claim did not expire"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert editor.text == "", "a stale claim still diverted the key"
