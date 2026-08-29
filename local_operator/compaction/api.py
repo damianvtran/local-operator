@@ -28,11 +28,20 @@ from pydantic import BaseModel
 
 from local_operator.harness.types import AgentMessage, CustomMessage, Message, ToolCall
 
+from .advisor import (
+    ADVISOR_MAX_REASON_CHARS,
+    ADVISOR_SYSTEM_PROMPT,
+    CompactionHint,
+    build_advisor_prompt,
+    parse_hint,
+    validate_hint,
+)
 from .cutpoint import (
     PRESERVED_USER_TURN_KEY,
     extract_preserved_user_turns,
     find_cut_point,
     prepare_partitions,
+    task_boundary_floor,
 )
 from .pruning import (
     MIN_PRUNE_TOKENS,
@@ -48,6 +57,7 @@ from .thresholds import (
     cleared_headroom,
     compaction_context_tokens,
     effective_reserve_tokens,
+    resolve_advisor_floor_tokens,
     resolve_strategy,
     resolve_threshold_tokens,
     should_compact,
@@ -67,6 +77,9 @@ from .tokens import (
 )
 
 __all__ = [
+    "ADVISOR_MAX_REASON_CHARS",
+    "ADVISOR_SYSTEM_PROMPT",
+    "CompactionHint",
     "CompactionResult",
     "CompactionSettings",
     "IMAGE_TOKEN_ESTIMATE",
@@ -79,6 +92,7 @@ __all__ = [
     "TOOL_ARGS_MAX_CHARS",
     "TOOL_RESULT_MAX_CHARS",
     "USELESS_NOTICE",
+    "build_advisor_prompt",
     "build_compaction_prompt",
     "clear_estimate_cache",
     "cleared_headroom",
@@ -95,16 +109,20 @@ __all__ = [
     "format_file_operations",
     "invalidate_message_cache",
     "messages_tokens_upper_bound",
+    "parse_hint",
     "prepare_partitions",
     "prune_tool_outputs",
     "register_invalidator",
     "render_file_operations",
+    "resolve_advisor_floor_tokens",
     "resolve_strategy",
     "resolve_threshold_tokens",
     "serialize_conversation",
     "should_compact",
     "summarize_messages",
+    "task_boundary_floor",
     "upsert_file_operations",
+    "validate_hint",
 ]
 
 #: Tool results in the serialized transcript are truncated to this many

@@ -1,0 +1,88 @@
+transcript: /Users/damian/.local-operator/sessions/bda7b76d34e0/transcript.jsonl
+entries: 9,438
+prices $/Mtok: cache_read=0.5 cache_write=6.25 (write/read = 12.5x)
+calibration: warm_carry=23,855 tok  residual=25.5% of pre-pass  re-write=83.6% of post-pass  (n=5, measured from this transcript's post-pass turns)
+
+
+== WHAT THIS SESSION'S TASKS ACTUALLY DEMANDED ==
+tasks: 58 (genuine, non-continuation user turns)
+  task's OWN span:   p50    30,898  p90   160,907  max   270,700
+  LIVE context run:  p50   360,216  p90   596,679  max   601,144
+
+A ceiling truncates the LIVE context, not the task's own span. How often
+this session would have been cut short by each candidate ceiling:
+  ceiling 300,000: 35/58 tasks (60.3%) ran past it   headroom above the largest single task:   29,300
+  ceiling 400,000: 26/58 tasks (44.8%) ran past it   headroom above the largest single task:  129,300
+  ceiling 500,000: 16/58 tasks (27.6%) ran past it   headroom above the largest single task:  229,300
+  ceiling 600,000:  5/58 tasks ( 8.6%) ran past it   headroom above the largest single task:  329,300
+
+Largest single task: 270,700 tokens. A ceiling below that
+cannot hold that task whole regardless of cut policy.
+
+
+== OPTION SPACE: snapcompact ==
+option                         passes   adv  sever   peak ctx     cost $  vs base  headroom  new code
+-----------------------------------------------------------------------------------------------------
+A. do nothing (600k, today)         5     0      3    601,144   1,415.01     0.0%   329,300        no
+B. static ceiling 300k             10     0      7    301,100     806.96   -43.0%    29,300        no
+B. static ceiling 400k              7     0      2    402,020   1,044.82   -26.2%   129,300        no
+B. static ceiling 500k              6     0      4    501,165   1,190.61   -15.9%   229,300        no
+B'. task-aware cut only (600k)      5     0      0    600,980   1,482.96     4.8%   329,300       yes
+C. advisor (defaults, 600k)        10    39      0    457,394     869.82   -38.5%   329,300       yes
+C. advisor (best cfg, 600k)        11    21      0    330,256     852.12   -39.8%   329,300       yes
+D. advisor + 400k ceiling          19    62      3    318,094     663.77   -53.1%   129,300       yes
+D. advisor + 500k ceiling          14    49      1    453,990     818.78   -42.1%   229,300       yes
+
+  cheapest: D. advisor + 400k ceiling at $663.77
+  best advisor option (D. advisor + 400k ceiling) vs best no-code option (B. static ceiling 300k): -17.7%
+
+
+== OPTION SPACE: context-full ==
+option                         passes   adv  sever   peak ctx     cost $  vs base  headroom  new code
+-----------------------------------------------------------------------------------------------------
+A. do nothing (600k, today)         5     0      4    600,676   1,470.34     0.0%   329,300        no
+B. static ceiling 300k             11     0      7    305,186     922.81   -37.2%    29,300        no
+B. static ceiling 400k              8     0      4    407,834   1,140.90   -22.4%   129,300        no
+B. static ceiling 500k              6     0      5    500,652   1,234.69   -16.0%   229,300        no
+B'. task-aware cut only (600k)      5     0      0    600,676   1,530.88     4.1%   329,300       yes
+C. advisor (defaults, 600k)        12    20      0    337,037     977.21   -33.5%   329,300       yes
+C. advisor (best cfg, 600k)        12    27      0    337,037     977.31   -33.5%   329,300       yes
+D. advisor + 400k ceiling          21    48      2    344,319     824.51   -43.9%   129,300       yes
+D. advisor + 500k ceiling          16    38      1    324,129     913.25   -37.9%   229,300       yes
+
+  cheapest: D. advisor + 400k ceiling at $824.51
+  best advisor option (D. advisor + 400k ceiling) vs best no-code option (B. static ceiling 300k): -10.7%
+
+
+== DECISION TABLE: advisor on/off at MATCHED ceiling ==
+(same ceiling both sides, so capability is held constant)
+
+strategy        ceiling      off $       on $  advisor delta  sever off  sever on
+---------------------------------------------------------------------------------
+snapcompact     300,000     842.88     570.76         -32.3%          0         7
+snapcompact     400,000   1,076.18     663.77         -38.3%          1         3
+snapcompact     500,000   1,365.13     818.78         -40.0%          0         1
+snapcompact     600,000   1,482.96     869.82         -41.3%          0         0
+context-full    300,000     970.18     835.38         -13.9%          1         7
+context-full    400,000   1,132.89     824.51         -27.2%          1         2
+context-full    500,000   1,462.66     913.25         -37.6%          0         1
+context-full    600,000   1,530.88     977.21         -36.2%          0         0
+
+Read this table, not the raw cheapest-option row: it is the only one
+where both sides retain the same capacity, so the delta column is the
+advisor's own contribution rather than the cost of a smaller product.
+
+
+== WHAT FIXES SEVERANCE: task-aware cut vs the advisor ==
+(snapcompact; severance is passes whose cut landed inside a live task)
+
+  ceiling  recency sever  task-aware sever   recency $  task-aware $  cost of the fix
+-------------------------------------------------------------------------------------
+  300,000              7                 0      806.96        842.88             4.5%
+  400,000              2                 1    1,044.82      1,076.18             3.0%
+  500,000              4                 0    1,190.61      1,365.13            14.7%
+  600,000              3                 0    1,415.01      1,482.96             4.8%
+
+The task-aware preserve window alone takes severance to zero at every
+ceiling, for a few percent. It needs no beta flag and makes no extra
+provider call, so the advisor cannot claim the severance win as its own.

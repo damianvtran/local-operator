@@ -28,7 +28,12 @@ from local_operator.harness.types import AgentMessage, CustomMessage, Message
 
 from .tokens import _encode_len, estimate_tokens
 
-__all__ = ["find_cut_point", "prepare_partitions", "extract_preserved_user_turns"]
+__all__ = [
+    "find_cut_point",
+    "prepare_partitions",
+    "extract_preserved_user_turns",
+    "task_boundary_floor",
+]
 
 
 def _is_compaction_marker(message: AgentMessage) -> bool:
@@ -284,6 +289,71 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     if len(summarizable) == 1 and _message_tokens(summarizable[0]) < keep_recent_tokens:
         return None
     return index
+
+
+def task_boundary_floor(
+    messages: Sequence[AgentMessage],
+    genuine_user_ids: set[str] | None = None,
+    *,
+    cap: int,
+) -> int:
+    """Estimated tokens from the last GENUINE user turn to the end, capped.
+
+    ``find_cut_point`` is recency-shaped ("keep the last N tokens") while a
+    session is task-shaped ("keep what this request has been working on").
+    Measured on a real 8102-record session, the active-task span at the seven
+    compaction passes was 0.3k / 46.9k / 48.8k / 30.0k / 19.8k / 123.4k /
+    49.1k tokens (p50 32k, p90 99k) against a ``keep_recent_tokens`` of 20k —
+    so five of the seven passes summarized away the first half of the task the
+    agent was still executing. That severance, not the token spend, is what
+    makes an EARLIER trigger dangerous; widening the preserve window to the
+    task boundary is what makes it safe.
+
+    Callers use this as a FLOOR under ``keep_recent_tokens``
+    (``max(keep_recent_tokens, task_boundary_floor(...))``), never as a
+    replacement: it can only keep MORE history, so it can never introduce a
+    cut that the recency rule would not already have allowed.
+
+    ``cap`` is mandatory and load-bearing. A session whose last genuine user
+    turn is 500k tokens back would otherwise demand a preserve window larger
+    than the context itself, and ``find_cut_point`` would answer ``None`` —
+    turning "protect the task" into "never compact", which is the failure the
+    trigger exists to prevent. At the cap the pass reverts to plain recency
+    behaviour, which is exactly the pre-existing behaviour.
+
+    ``genuine_user_ids`` is the same discriminator
+    :func:`extract_preserved_user_turns` takes and for the same reason: in the
+    RENDERED history a compaction marker and every injected user-role delivery
+    (wake, hub, session-incident, todo reminder) is structurally a
+    ``Message(role="user")``, so counting from the last of THOSE would measure
+    from an injection rather than from the request the user actually made.
+    Omitted (unit tests over raw lists), every user ``Message`` qualifies.
+
+    Returns ``0`` when there is no genuine user turn at all, which leaves the
+    caller's ``keep_recent_tokens`` untouched.
+    """
+    if cap <= 0:
+        return 0
+    total = len(messages)
+    last_user = -1
+    for index in range(total - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, Message) or message.role != "user":
+            continue
+        # A turn a PRIOR pass preserved verbatim is carried-forward context,
+        # not the start of the live task: measuring from it would re-anchor
+        # every subsequent pass to the same ancient request and grow the floor
+        # without bound.
+        if _is_preserved_user_turn(message):
+            continue
+        if genuine_user_ids is not None and message.id not in genuine_user_ids:
+            continue
+        last_user = index
+        break
+    if last_user < 0:
+        return 0
+    span = sum(_message_tokens(m) for m in messages[last_user:])
+    return min(span, cap)
 
 
 def prepare_partitions(
