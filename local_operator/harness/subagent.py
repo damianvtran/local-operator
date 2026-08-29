@@ -196,21 +196,36 @@ def _with_network_floor(
     after a migration nobody remembers to run.
 
     Only :data:`~local_operator.agent_profiles.READ_ONLY_NETWORK_TOOLS` is
-    floored, and the floor is a FLOOR, not a widening: these tools are
-    ``approval_tier="read"`` retrieval with no local side effect, so admitting
-    them changes nothing an allowlist was drawn to prevent. Every write and
-    execution denial — no ``edit``, no ``write``, no ``bash`` a role lacks —
-    is untouched, which is what keeps a reviewer unable to modify the diff it
-    reviews. ``available`` is the pre-filter inventory, so a session that has
-    web search configured off contributes nothing and the floor stays empty.
+    floored. Every write and execution denial — no ``edit``, no ``write``, no
+    ``bash`` a role lacks — is untouched, which is what keeps a reviewer unable
+    to modify the diff it reviews. ``available`` is the pre-filter inventory,
+    so a session with web search configured off contributes nothing and the
+    floor stays empty; it also cannot admit an MCP tool, since those are minted
+    ``mcp__<server>_<tool>`` and can never match these two names.
+
+    THE TRADE-OFF, stated rather than implied (review round 1, R2): a persisted
+    tag list cannot distinguish "omits ``web_search`` because it predates the
+    tool" from "omits it on purpose", so an operator who deliberately narrowed a
+    role to keep it offline gets retrieval back, and ``agent show`` keeps
+    printing the narrower list the row actually stores. That is a real change to
+    user-data semantics and it is accepted here, not overlooked: the alternative
+    leaves every role installed before this release permanently unable to do the
+    research it exists for, and what is re-admitted is read-tier retrieval
+    behind the ``web_fetch`` SSRF gate. If anyone needs the offline case, the
+    fix is an explicit opt-out (a ``network: no`` frontmatter key) rather than
+    inferring intent from an omission.
     """
+    # Keyed by NAME, and deduped against ``missing`` as well as ``allowed``:
+    # matching on a bare name means a pathological inventory holding two tools
+    # called ``web_search`` would otherwise contribute both and put a duplicate
+    # in the child's schema list (R3). Unreachable through the normal path,
+    # cheap to make impossible.
     present = {tool.name for tool in allowed}
-    missing = [
-        tool
-        for tool in available
-        if tool.name in READ_ONLY_NETWORK_TOOLS and tool.name not in present
-    ]
-    return allowed + missing
+    floored: dict[str, AgentTool] = {}
+    for tool in available:
+        if tool.name in READ_ONLY_NETWORK_TOOLS and tool.name not in present:
+            floored.setdefault(tool.name, tool)
+    return allowed + list(floored.values())
 
 
 def _can_background(tools: "list[AgentTool]") -> bool:
@@ -941,11 +956,18 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     ``approval_tier="exec"`` because their side effects are unknowable from
     here, so the harness cannot tell a read tool from a write tool by
     inspection. The line drawn instead is the one the code CAN enforce
-    honestly: INHERIT what the parent already enabled (the parent is
-    unrestricted, it chose those tools for this very task, and it remains
-    accountable for them), and refuse to ENABLE anything further, so a
-    restricted role can never widen its own surface past its delegator's.
-    Discovery still resolves, because reading the catalogue enables nothing.
+    honestly: INHERIT what the parent already enabled (the parent chose those
+    tools for this very task and remains accountable for them), and refuse to
+    ENABLE anything further, so a restricted role can never widen its own
+    surface past its delegator's. Discovery still resolves, because reading the
+    catalogue enables nothing.
+
+    That claim only holds because restriction is INHERITED at
+    ``_build_child_session`` rather than recomputed per child from its own
+    profile. A delegating restricted role would otherwise launder the denial
+    through a grandchild: it keeps ``task``, its child rebuilds with no profile
+    and so counts as unrestricted, and it activates into this same borrowed
+    manager. See the ``restricted`` computation there.
 
     ``None`` when the parent has no manager: MCP unconfigured, SDK missing, or
     a bare ``Session`` built by a host that never wired one.

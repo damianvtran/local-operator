@@ -1434,6 +1434,122 @@ async def test_restricted_child_inherits_the_mcp_tools_the_parent_enabled(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_grandchild_cannot_activate_what_its_restricted_ancestor_was_refused(
+    tmp_path, monkeypatch
+):
+    """The MCP denial is STICKY DOWNWARD, checked at depth 2.
+
+    Review round 1 (R1). Restriction used to be computed from the child's own
+    profile alone, so a delegating restricted role had a trivial escape: the
+    packaged ``manager`` carries an allowlist AND ``delegate: yes``, keeps
+    ``task``, and is handed the parent's live MCP manager. Its child rebuilt
+    with ``profile=None``, computed ``restricted=False``, and activated freely
+    into that shared manager -- so a manager refused ``delete_issue`` could
+    spawn a plain child and have IT enable the tool, an ``approval_tier="exec"``
+    write obtained one hop below the boundary that refused it.
+
+    Driven off the REAL packaged seed rather than a synthetic profile, because
+    the finding is that a SHIPPED role reaches the escape: a hand-written
+    profile in this test could drift from what the seed actually grants and the
+    regression would silently stop being covered."""
+    from local_operator.agent_profiles import load_seed
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager_seed = load_seed("manager")
+    assert manager_seed is not None
+    # The two properties that make this role the vector. If a future edit drops
+    # either, this test would pass while covering nothing.
+    assert manager_seed.tools, "the manager seed must carry an allowlist"
+    assert manager_seed.may_delegate, "the manager seed must be able to delegate"
+
+    manager = FakeMcpManager({"linear": ["list_issues", "delete_issue"]})
+    parent = make_session(tmp_path, OneShotStream())
+    attach_manager(parent, manager)
+    # The top-level parent enabled ONLY list_issues; delete_issue is the write.
+    parent.refresh_tools(
+        list(parent._tools) + [t for t in manager.get_tools() if t.name.endswith("list_issues")]
+    )
+
+    child = await subagent_mod._build_child_session(
+        label="mgr",
+        prompt="coordinate the work",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-mgr",
+        agent="manager",
+        profile=manager_seed,
+    )
+    denied = resolve(child, "mcp://linear/delete_issue")
+    assert denied is not None and "cannot enable new ones" in denied
+    # It really can delegate -- otherwise there is no depth 2 to test.
+    assert "task" in {tool.name for tool in child._tools}
+
+    # The manager delegates an ordinary full child: no profile, no role.
+    grandchild = await subagent_mod._build_child_session(
+        label="worker",
+        prompt="do the thing",
+        parent_session=child,
+        model_spec=None,
+        job_id="job-worker",
+        agent="task",
+        profile=None,
+    )
+
+    escalated = resolve(grandchild, "mcp://linear/delete_issue")
+    assert escalated is not None and "cannot enable new ones" in escalated
+    names = {tool.name for tool in grandchild._tools}
+    assert "mcp__linear_delete_issue" not in names
+    # It still INHERITS what the lineage legitimately held.
+    assert "mcp__linear_list_issues" in names
+    await grandchild.dispose()
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unrestricted_lineage_still_activates_at_depth_two(tmp_path, monkeypatch):
+    """The counter-check to the sticky denial: it must not over-apply.
+
+    Restriction propagates from a restricted ancestor only. A plain ``task``
+    lineage has no allowlist anywhere in it, so activation must keep working at
+    every depth -- otherwise the R1 fix would have closed the escape by
+    breaking ordinary delegation, which no test above would have caught."""
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager = FakeMcpManager({"linear": ["list_issues"]})
+    parent = make_session(tmp_path, OneShotStream())
+    attach_manager(parent, manager)
+
+    child = await subagent_mod._build_child_session(
+        label="c",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-c",
+        agent="task",
+        profile=None,
+    )
+    grandchild = await subagent_mod._build_child_session(
+        label="g",
+        prompt="p",
+        parent_session=child,
+        model_spec=None,
+        job_id="job-g",
+        agent="task",
+        profile=None,
+    )
+
+    rendered = resolve(grandchild, "mcp://linear/list_issues")
+    assert rendered is not None and "Enabled MCP tool" in rendered
+    assert "mcp__linear_list_issues" in {tool.name for tool in grandchild._tools}
+    await grandchild.dispose()
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatch):
     """The scout tier: tool inventory filtered to retrieval (allowlist, not
     tier — no bash, no eval-style execution, no delegation), its prompt
