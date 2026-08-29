@@ -105,22 +105,36 @@ REFRESH_SKEW_S = 60.0
 #: the startup gate defers us, and the breaker bounds retries.
 REFRESH_HTTP_TIMEOUT_S = 10.0
 
-#: Bound on ACQUIRING the cross-process refresh lock, derived from the honest
-#: budget of the critical section it guards: one token POST (capped at
-#: ``REFRESH_HTTP_TIMEOUT_S``) plus a couple of SQLite reads. A peer that holds
-#: the lock legitimately therefore clears it well inside this bound, and
-#: overrunning it means the holder is not working — a leaked lock from a killed
-#: process, or a peer wedged on something that is not our problem. Waiting
-#: longer than the work can possibly take buys nothing and costs a hung connect,
-#: so we give up and let the SDK's own refresh path handle it (see
+#: Bound on ACQUIRING the cross-process refresh lock, derived from the budget of
+#: the critical section it guards: one token POST plus a couple of SQLite reads.
+#: That derivation is only sound because the POST is capped in TOTAL wall time
+#: (see the ``asyncio.timeout`` in :func:`_refresh_oauth_token_locked`) —
+#: ``httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)`` alone does NOT bound a request:
+#: it is per operation, and its read timeout is per socket read, so a dribbling
+#: server measured 140.7s inside a nominal 10s timeout. Keep the two in step: if
+#: the POST's cap is ever raised or removed, this bound stops being honest and a
+#: slow-but-working peer starts getting timed out by its own siblings.
+#: Overrunning this bound therefore means the holder really is not working — a
+#: leaked lock from a killed process, or a peer wedged on something that is not
+#: our problem. Waiting longer than the work can possibly take buys nothing and
+#: costs a hung connect, so we give up and degrade (see
 #: :func:`_oauth_refresh_lock`, which yields False rather than raising).
 LOCK_ACQUIRE_TIMEOUT_S = 15.0
 
-#: Gap between non-blocking lock attempts. Short enough that a released lock is
-#: picked up promptly and that a cancelled acquire abandons the retry loop
-#: within one tick, long enough that waiting out the full bound costs a few
-#: hundred cheap syscalls rather than a hot spin.
+#: FIRST gap between non-blocking lock attempts, and the cancellation
+#: granularity: a cancelled acquire abandons the retry loop within one sleep,
+#: so this also bounds how long an abandoned worker lingers. Small, because the
+#: overwhelmingly common contended case is a peer finishing in a moment and
+#: pickup latency is what the user feels.
 _LOCK_RETRY_SLEEP_S = 0.05
+
+#: Ceiling for the backoff below. A fixed 50 ms gap would cost ~300 wakeups per
+#: contended acquire per server, and six OAuth servers connecting together would
+#: run six worker threads ticking for up to the full bound against a default
+#: executor of 18. Backing off to a quarter second cuts that by most while
+#: leaving the fast case untouched, since a lock still free after a few seconds
+#: is a leaked one we are going to abandon anyway.
+_LOCK_RETRY_SLEEP_MAX_S = 0.25
 
 
 class McpAuthRequiredError(RuntimeError):
@@ -1413,13 +1427,18 @@ def _acquire_locked_fd(path: str, cancelled: threading.Event) -> int | None:
     """
     deadline = time.monotonic() + LOCK_ACQUIRE_TIMEOUT_S
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    sleep_s = _LOCK_RETRY_SLEEP_S
     try:
         while True:
             if _try_lock_exclusive(fd):
                 return fd
             if cancelled.is_set() or time.monotonic() >= deadline:
                 break
-            time.sleep(_LOCK_RETRY_SLEEP_S)
+            time.sleep(sleep_s)
+            # Gentle geometric backoff: keeps pickup fast for the common
+            # released-in-a-moment case, then stops burning wakeups once the
+            # holder is evidently not finishing soon.
+            sleep_s = min(sleep_s * 1.5, _LOCK_RETRY_SLEEP_MAX_S)
     except BaseException:
         os.close(fd)
         raise
@@ -1484,7 +1503,9 @@ async def _oauth_refresh_lock(server_url: str):
     exchange, and RE-READING the stored token after acquiring it, guarantees
     exactly one process performs the refresh no matter how many sessions start
     at once. The lock file lives next to ``auth.db``, is per server (see
-    :func:`_oauth_refresh_lock_path`), and is only ever flocked, never written.
+    :func:`_oauth_refresh_lock_path`), and carries no state: it is only ever
+    flocked, never read or written for content (on Windows it holds a single
+    padding byte, which ``msvcrt.locking`` requires to have a range to lock).
 
     Yields True when the lock was taken and False when the bounded acquire gave
     up. A False body must still be SAFE to run: the guarantee degrades from
@@ -1553,6 +1574,13 @@ def _close_abandoned_lock_fd(task: asyncio.Task[int | None]) -> None:
     the loop. Without it a lock acquired just as its waiter was cancelled would
     leak the descriptor and, worse, keep the lock held for the process's life.
     """
+    # On both of these paths the WORKER has already closed the fd itself, so
+    # there is nothing here to clean up: a cancelled task never returns one,
+    # and an exception unwinds through :func:`_acquire_locked_fd`'s
+    # ``except BaseException``, which closes before re-raising. That coupling is
+    # what makes the early returns safe — an edit that moves the ``os.open``
+    # into the ``try``, or adds a ``return fd`` ahead of the loop, would leak
+    # both the descriptor AND the lock here with no diagnostic.
     if task.cancelled():
         return
     if task.exception() is not None:
@@ -1707,9 +1735,30 @@ async def _refresh_oauth_token_locked(
         headers["Authorization"] = f"Basic {encoded}"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)) as client:
-            response = await client.post(token_endpoint, data=data, headers=headers)
-    except httpx.HTTPError:
+        # TOTAL wall-clock cap, not just httpx's per-operation timeouts.
+        # ``httpx.Timeout(N)`` sets connect/read/write/pool to N EACH, and the
+        # read timeout applies per socket read rather than to the whole
+        # response — so a server that dribbles the body stays inside every
+        # individual read and takes arbitrarily long. Measured against a server
+        # sending one byte every 2s, this exact request returned HTTP 200 after
+        # 140.7s with the 10s timeout set and never tripping it.
+        #
+        # That matters because this call runs UNDER the cross-process refresh
+        # lock, and ``LOCK_ACQUIRE_TIMEOUT_S`` is derived from the claim that
+        # the section is bounded by ``REFRESH_HTTP_TIMEOUT_S``. Without an
+        # overall cap that claim is false, and a slow-but-honest provider would
+        # systematically push every peer past its acquire bound onto the
+        # unlocked degrade path — which for the in-flight coordinator means the
+        # SDK's own unlocked refresh, i.e. the rotating-token double-spend this
+        # subsystem exists to prevent, reached by timeout instead of by race.
+        # Bounding the POST is what makes the documented budget true.
+        async with asyncio.timeout(REFRESH_HTTP_TIMEOUT_S):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)) as client:
+                response = await client.post(token_endpoint, data=data, headers=headers)
+    except (httpx.HTTPError, TimeoutError):
+        # ``asyncio.timeout`` raises TimeoutError (which ``httpx.HTTPError``
+        # does not cover); a refresh that overran its budget is simply a failed
+        # refresh, handled exactly like a transport error.
         logger.debug("MCP token refresh request failed for %s", server_url, exc_info=True)
         return False
     if response.status_code != 200:
@@ -1991,10 +2040,13 @@ def _make_refresh_coordinating_provider(
     class _RefreshCoordinatingOAuthProvider(OAuthClientProvider):
         # Bound on the re-read/refresh interception: a stuck lock acquisition or
         # a hung endpoint must not park an authenticated request forever. The
-        # file lock is only ever held for one token POST (REFRESH_HTTP_TIMEOUT_S)
-        # plus the SQLite read, so a peer that legitimately holds it clears well
-        # inside this bound; overrunning it means a leaked lock, and degrading to
-        # the SDK's own refresh is strictly better than blocking the request.
+        # file lock is only ever held for one token POST plus the SQLite read,
+        # and that POST is bounded in TOTAL wall time by the ``asyncio.timeout``
+        # in ``_refresh_oauth_token_locked`` (httpx's own per-operation timeout
+        # does not bound a dribbling response), so a peer that legitimately
+        # holds it clears well inside this bound. Overrunning it means a leaked
+        # lock, and degrading to the SDK's own refresh is strictly better than
+        # blocking the request.
         _refresh_coord_server_url = server_url
         _refresh_coord_storage = storage
         _refresh_coord_endpoints = endpoints

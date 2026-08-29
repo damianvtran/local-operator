@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -2544,3 +2545,272 @@ asyncio.run(main())
             assert first is True
         async with auth_mod._oauth_refresh_lock(self.URL_A) as second:
             assert second is True
+
+
+class TestRefreshLockDegradePaths:
+    """What the CALLERS do when the bounded acquire gives up.
+
+    ``TestOAuthRefreshLock`` proves the context manager yields False at the
+    deadline; these pin the thing that makes yielding False safe. The rule is
+    the same at both call sites: never SPEND the rotating refresh token without
+    exclusivity, but still adopt whatever a sibling already persisted. Getting
+    that ordering wrong is how a degrade turns into the double-spend the lock
+    exists to prevent.
+    """
+
+    URL = "https://mcp.example.com/v1/mcp"
+
+    def _cfg(self) -> MCPHttpServerConfig:
+        return MCPHttpServerConfig(url=self.URL, auth=MCPAuthConfig(type="oauth"))
+
+    def _endpoints(self):
+        from mcp.shared.auth import OAuthMetadata
+
+        from local_operator.mcp.auth import DiscoveredOAuthEndpoints
+
+        return DiscoveredOAuthEndpoints(
+            oauth_metadata=OAuthMetadata.model_validate(
+                {
+                    "issuer": self.URL,
+                    "authorization_endpoint": "https://a/authorize",
+                    "token_endpoint": "https://a/token",
+                }
+            )
+        )
+
+    @staticmethod
+    def _unlocked_lock_stub():
+        """A ``_oauth_refresh_lock`` that always reports "not acquired"."""
+
+        @contextlib.asynccontextmanager
+        async def stub(server_url: str):
+            yield False
+
+        return stub
+
+    @pytest.mark.asyncio
+    async def test_ensure_fresh_skips_the_exchange_when_the_lock_is_not_taken(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The proactive refresh must be SKIPPED, not attempted unlocked: without
+        exclusivity a second process may be spending the same rotating token."""
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        # Expired, so the refresh path is genuinely reached.
+        await storage.set_tokens(
+            OAuthToken(access_token="a-old", refresh_token="r-old", expires_in=1)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+
+        endpoints = self._endpoints()
+
+        async def fake_discover(url: str):
+            return endpoints
+
+        refreshed = {"n": 0}
+
+        async def fake_refresh(*args: Any, **kwargs: Any) -> bool:
+            refreshed["n"] += 1
+            return True
+
+        monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", fake_discover)
+        monkeypatch.setattr(auth_mod, "_refresh_oauth_token_locked", fake_refresh)
+        monkeypatch.setattr(auth_mod, "_oauth_refresh_lock", self._unlocked_lock_stub())
+
+        result = await auth_mod.ensure_mcp_oauth_fresh(self.URL, self._cfg(), store=store)
+
+        assert refreshed["n"] == 0  # no token spent without the lock
+        # Still returns the endpoints, so the CONNECT proceeds rather than
+        # hanging -- degrade, never block.
+        assert result is endpoints
+
+    @pytest.mark.asyncio
+    async def test_ensure_fresh_does_spend_the_token_when_the_lock_is_taken(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The control for the test above: with the lock held the exchange runs,
+        so the skip is attributable to the degrade and not to some other gate."""
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="a-old", refresh_token="r-old", expires_in=1)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+
+        endpoints = self._endpoints()
+
+        async def fake_discover(url: str):
+            return endpoints
+
+        refreshed = {"n": 0}
+
+        async def fake_refresh(*args: Any, **kwargs: Any) -> bool:
+            refreshed["n"] += 1
+            return True
+
+        @contextlib.asynccontextmanager
+        async def locked_stub(server_url: str):
+            yield True
+
+        monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", fake_discover)
+        monkeypatch.setattr(auth_mod, "_refresh_oauth_token_locked", fake_refresh)
+        monkeypatch.setattr(auth_mod, "_oauth_refresh_lock", locked_stub)
+
+        await auth_mod.ensure_mcp_oauth_fresh(self.URL, self._cfg(), store=store)
+
+        assert refreshed["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_inflight_coordination_resyncs_before_it_degrades(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ordering that makes the in-flight degrade safe.
+
+        When the lock is not taken the coordinator must STILL re-read the store
+        first, then return without exchanging. The re-read is what upholds the
+        invariant that the SDK's own unlocked refresh never runs with an
+        in-memory refresh token older than what a sibling persisted; dropping it
+        (or returning before it) reintroduces the family-revoking double-spend.
+        """
+        import time as _time
+
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="a-old", refresh_token="r-old", expires_in=60)
+        )
+        await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
+        # Age the issue time past the lifetime so the loaded token reads as
+        # EXPIRED -- the coordinator only intercepts when the SDK itself would
+        # refresh, which is the gate this test needs open.
+        store.rows[0].data["tokens_obtained_at"] = _time.time() - 600
+
+        provider = build_oauth_provider(
+            self.URL, self._cfg(), store=store, endpoints=self._endpoints()
+        )
+
+        refreshed = {"n": 0}
+
+        async def fake_refresh(*args: Any, **kwargs: Any) -> bool:
+            refreshed["n"] += 1
+            return True
+
+        monkeypatch.setattr(auth_mod, "_refresh_oauth_token_locked", fake_refresh)
+        monkeypatch.setattr(auth_mod, "_oauth_refresh_lock", self._unlocked_lock_stub())
+
+        ctx = provider.context
+        async with ctx.lock:
+            if not provider._initialized:
+                await provider._initialize()
+
+        # A sibling process rotates the token while we hold only a stale copy.
+        await storage.set_tokens(
+            OAuthToken(access_token="a-peer", refresh_token="r-peer", expires_in=3600)
+        )
+
+        await provider._coordinate_inflight_refresh()
+
+        # No exchange without the lock ...
+        assert refreshed["n"] == 0
+        # ... but the peer's token WAS adopted, which is the whole point.
+        assert ctx.current_tokens is not None
+        assert ctx.current_tokens.access_token == "a-peer"
+
+
+class TestCloseAbandonedLockFd:
+    """The done-callback that releases a lock nobody is waiting for any more.
+
+    Reached when a cancellation loses the race with a worker that goes on to WIN
+    the lock. Its failure mode is silent and durable: the fd stays open and the
+    lock stays held for the life of the process, so every later refresh for that
+    server degrades. No test reached it before.
+    """
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX flock semantics")
+    @pytest.mark.asyncio
+    async def test_a_won_but_abandoned_lock_is_released(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+        import subprocess
+        import sys as _sys
+
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.paths import CONFIG_DIR_ENV
+
+        monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+        url = "https://mcp.example.com/abandoned"
+        lock_path = auth_mod._oauth_refresh_lock_path(url)
+
+        # Acquire for real, then hand the fd to the callback exactly as the
+        # cancellation arm does.
+        fd = auth_mod._acquire_locked_fd(str(lock_path), threading.Event())
+        assert fd is not None
+
+        async def _already_done() -> int:
+            return fd
+
+        task = asyncio.create_task(_already_done())
+        await task
+        auth_mod._close_abandoned_lock_fd(task)
+
+        # A FOREIGN process is the only honest witness: flock is per
+        # open-file-description, so a same-process attempt would succeed even if
+        # the callback had leaked the lock.
+        probe = subprocess.run(
+            [
+                _sys.executable,
+                "-c",
+                "import fcntl,os,sys;"
+                "fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600);"
+                "\ntry:\n fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);print('FREE')\n"
+                "except OSError:\n print('HELD')",
+                str(lock_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert probe.stdout.strip() == "FREE", f"lock leaked: {probe.stdout!r}"
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_or_failed_acquire_is_a_no_op(self) -> None:
+        """Both early returns: the worker has already closed the fd on these
+        paths, so the callback must not touch a descriptor it does not own."""
+        import asyncio
+
+        from local_operator.mcp import auth as auth_mod
+
+        async def _boom() -> int:
+            raise OSError("open failed")
+
+        failed = asyncio.create_task(_boom())
+        with contextlib.suppress(OSError):
+            await failed
+        auth_mod._close_abandoned_lock_fd(failed)  # must not raise
+
+        async def _forever() -> int:
+            await asyncio.sleep(3600)
+            return -1
+
+        cancelled_task = asyncio.create_task(_forever())
+        await asyncio.sleep(0)
+        cancelled_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cancelled_task
+        auth_mod._close_abandoned_lock_fd(cancelled_task)  # must not raise
