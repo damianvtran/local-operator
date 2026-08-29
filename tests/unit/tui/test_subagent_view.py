@@ -17,6 +17,7 @@ test there is.
 from __future__ import annotations
 
 import asyncio
+import copy
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -30,10 +31,17 @@ from local_operator.harness.comms import (
 )
 from local_operator.harness.jobs import (
     CANCELLED_BEFORE_START,
+    TRAJECTORY_SEQ_KEY,
     AsyncJob,
     AsyncJobManager,
 )
-from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
+from local_operator.harness.types import (
+    CustomMessage,
+    Message,
+    NoticeEvent,
+    TextContent,
+    ToolCall,
+)
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
     Transcript,
@@ -41,6 +49,7 @@ from local_operator.session.transcript import (
     TranscriptPage,
 )
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
+from local_operator.tui.widgets import subagent_view
 from local_operator.tui.widgets.assistant import FALLBACK_WIDTH, AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.subagent_panel import (
@@ -343,6 +352,290 @@ def test_fold_admits_that_the_engine_dropped_the_start_of_a_long_run() -> None:
     folded = fold_trajectory(capped, settled=True)
     assert folded[0].text == TRUNCATION_NOTE
     assert folded[0].notice_kind == "note"
+
+
+def _evicting_refreshes(
+    trajectory: list[dict[str, Any]],
+    ticks: int,
+    *,
+    stamped: bool = False,
+) -> dict[str, Any]:
+    """Refresh the page ``ticks`` times while the engine evicts from the front.
+
+    Reproduces the two halves of the live coupling that produced duplicate
+    rows: the writer appends one event and drops the oldest (keeping the list
+    at the cap), and the view accumulates folded rows by key and never removes
+    one. Returns the accumulated ``key -> entry`` map the page would hold, so a
+    test can count how many ROWS one event produced.
+    """
+    known: dict[str, Any] = {}
+    seq = len(trajectory)
+    for tick in range(ticks):
+        for entry in fold_trajectory(trajectory):
+            if entry.head:
+                continue
+            known.setdefault(entry.key, entry)
+        filler: dict[str, Any] = {
+            "type": "message_start",
+            "message": {"role": "assistant", "id": f"filler-{tick}"},
+        }
+        if stamped:
+            filler[TRAJECTORY_SEQ_KEY] = seq
+        seq += 1
+        trajectory.append(filler)
+        overflow = len(trajectory) - TRAJECTORY_MAX_EVENTS
+        if overflow > 0:
+            del trajectory[:overflow]
+    return known
+
+
+def _filler_events(count: int, *, stamped: bool = False) -> list[dict[str, Any]]:
+    """Events that hold a trajectory slot without painting a row."""
+    events: list[dict[str, Any]] = []
+    for index in range(count):
+        event: dict[str, Any] = {
+            "type": "message_start",
+            "message": {"role": "assistant", "id": f"seed-{index}"},
+        }
+        if stamped:
+            event[TRAJECTORY_SEQ_KEY] = index
+        events.append(event)
+    return events
+
+
+@pytest.mark.parametrize("stamped", [False, True])
+def test_one_notice_stays_one_row_while_the_engine_evicts(stamped: bool) -> None:
+    """A single error notice must not multiply as the trajectory rotates.
+
+    The retained window evicts from the FRONT, so every append shifts a
+    surviving event one slot left. Keying a notice by that offset re-spelled
+    the SAME error on every 1 Hz refresh, and because the page only ever adds
+    rows, each new spelling mounted another identical copy — the reported
+    defect was eleven stacked "Invalid arguments" lines under a running tool.
+
+    Parametrized over both identity sources: the writer's monotonic stamp, and
+    the content fallback a trajectory from an older release still has to use.
+    """
+    error = "Invalid arguments: argument 'edits' does not match type array"
+    trajectory = _filler_events(TRAJECTORY_MAX_EVENTS - 1, stamped=stamped)
+    notice: dict[str, Any] = {"type": "notice", "kind": "error", "text": error}
+    if stamped:
+        notice[TRAJECTORY_SEQ_KEY] = TRAJECTORY_MAX_EVENTS - 1
+    trajectory.append(notice)
+
+    known = _evicting_refreshes(trajectory, 12, stamped=stamped)
+    rows = [entry for entry in known.values() if entry.kind == "notice" and entry.text == error]
+    assert len(rows) == 1
+
+
+@pytest.mark.parametrize("stamped", [False, True])
+def test_two_distinct_notices_with_identical_text_stay_two_rows(stamped: bool) -> None:
+    """Deduplication must not be bought by collapsing distinct events.
+
+    The same error legitimately occurring twice is two things that happened,
+    and a page that folds them into one row under-reports the child's run.
+    """
+    error = "Invalid arguments: argument 'edits' does not match type array"
+    trajectory: list[dict[str, Any]] = []
+    for index in range(2):
+        notice: dict[str, Any] = {"type": "notice", "kind": "error", "text": error}
+        if stamped:
+            notice[TRAJECTORY_SEQ_KEY] = index
+        trajectory.append(notice)
+
+    rows = [entry for entry in fold_trajectory(trajectory) if not entry.head]
+    assert [entry.text for entry in rows] == [error, error]
+    assert len({entry.key for entry in rows}) == 2
+
+
+def test_id_less_message_and_tool_survive_eviction_without_duplicating() -> None:
+    """The message and tool fallbacks carried the same positional defect.
+
+    A child that streams prose with no message id, or a tool call with no
+    ``tool_call_id``, was keyed by offset too — so an unstamped trajectory
+    duplicated its text block and its tool card exactly as it duplicated a
+    notice. They are one defect and are fixed by one anchor.
+    """
+    trajectory = _filler_events(TRAJECTORY_MAX_EVENTS - 3)
+    trajectory += [
+        {"type": "message_start", "message": {"role": "assistant"}},
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "prose with no id"}],
+            },
+        },
+        {"type": "tool_execution_start", "tool_name": "bash", "args": {"command": "ls"}},
+    ]
+
+    known = _evicting_refreshes(trajectory, 12)
+    texts = [entry for entry in known.values() if entry.kind == "text"]
+    tools = [entry for entry in known.values() if entry.kind == "tool"]
+    assert [entry.text for entry in texts] == ["prose with no id"]
+    assert [entry.tool_name for entry in tools] == ["bash"]
+
+
+#: A realistic long agent error: nine identical stack frames, so two different
+#: failures agree for ~900 characters and differ only in the final line. This
+#: is the shape that made a head-only fingerprint drop a row (round 2, F4/D5).
+_SHARED_TRACEBACK = "Traceback (most recent call last):\n" + "".join(
+    f'  File "/app/local_operator/mod{index}.py", line {100 + index}, in handler\n'
+    f"    result = step{index}(payload, context)\n"
+    for index in range(9)
+)
+
+
+def _long_notice(tail: str) -> dict[str, Any]:
+    return {"type": "notice", "kind": "error", "text": _SHARED_TRACEBACK + tail}
+
+
+def test_unstamped_fingerprint_is_bounded_for_a_1hz_path() -> None:
+    """The fallback may not pay for an unbounded payload on a 1 Hz path.
+
+    Fingerprinting whole events made a window of id-less notices carrying
+    20 KB each cost ~133 ms per fold (review round 1, F2). The bound is
+    asserted through the observable property rather than a timing number: the
+    hashed projection of a value cannot grow with the payload.
+    """
+    small = _long_notice("KeyError: 'tool_call_id'")
+    huge = {"type": "notice", "kind": "error", "text": "y" * 200_000}
+
+    assert subagent_view._DIGEST_VALUE_CHARS < len(huge["text"])
+    # Stable for equal input — the property row identity depends on.
+    assert subagent_view._digest(small) == subagent_view._digest(dict(small))
+    assert subagent_view._digest(huge) == subagent_view._digest(dict(huge))
+    # A difference inside the head is seen, as is one only in length.
+    assert subagent_view._digest(huge) != subagent_view._digest(
+        {"type": "notice", "kind": "error", "text": "y" * 199_999}
+    )
+
+
+def test_two_different_errors_sharing_a_long_prefix_both_reach_the_page() -> None:
+    """Distinct events must not share a key, INCLUDING across folds.
+
+    The regression this pins (round 2, F4/D5): bounding the fingerprint to a
+    value's head alone made two different failures from one deep stack share a
+    fingerprint. Within a single fold that was harmless, because the occurrence
+    ordinal separated them — which is exactly what the previous version of this
+    test asserted, and why it passed while the defect was live.
+
+    Across folds it is content LOSS. ``_Anchors`` is built per fold with an
+    empty ``_seen``, so once the earlier event has been front-evicted the later
+    one takes ordinal 0, collides with the key the page already holds, and —
+    since notices never supersede — is silently discarded. The reader is shown
+    one stale error where two different things failed.
+
+    Both regimes are asserted here, because only the second one ever broke.
+    """
+    first = _long_notice("KeyError: 'tool_call_id'")
+    second = _long_notice("ValueError: malformed duration")
+    assert first["text"][:512] == second["text"][:512]  # the aliasing shape
+
+    # Co-resident: never at risk, kept so a fix cannot regress it.
+    resident = [entry for entry in fold_trajectory([first, second]) if not entry.head]
+    assert len({entry.key for entry in resident}) == 2
+
+    # Cross-fold: the first error is evicted before the second ever happens,
+    # so the page can only tell them apart by their fingerprints.
+    trajectory: list[dict[str, Any]] = [first]
+    trajectory += _filler_events(TRAJECTORY_MAX_EVENTS - 1)
+    known = _evicting_refreshes(trajectory, TRAJECTORY_MAX_EVENTS + 5)
+    assert not any(event.get("text") == first["text"] for event in trajectory)
+
+    trajectory.append(second)
+    del trajectory[: max(0, len(trajectory) - TRAJECTORY_MAX_EVENTS)]
+    for entry in fold_trajectory(trajectory):
+        if not entry.head:
+            known.setdefault(entry.key, entry)
+
+    endings = sorted(
+        entry.text.splitlines()[-1] for entry in known.values() if entry.kind == "notice"
+    )
+    assert endings == ["KeyError: 'tool_call_id'", "ValueError: malformed duration"]
+
+
+def test_a_repeated_identical_notice_still_folds_to_one_row_across_folds() -> None:
+    """The D2 ceiling, pinned so the F4 fix does not quietly widen it.
+
+    Identical wording that is never co-resident still collapses to one row —
+    documented, deliberate, and the safe direction. The point of this test is
+    that the fix for F4 separates DIFFERENT content without also making the
+    same content register twice.
+    """
+    error = _long_notice("KeyError: 'tool_call_id'")
+    trajectory: list[dict[str, Any]] = [dict(error)]
+    trajectory += _filler_events(TRAJECTORY_MAX_EVENTS - 1)
+    known = _evicting_refreshes(trajectory, TRAJECTORY_MAX_EVENTS + 5)
+
+    trajectory.append(dict(error))
+    del trajectory[: max(0, len(trajectory) - TRAJECTORY_MAX_EVENTS)]
+    for entry in fold_trajectory(trajectory):
+        if not entry.head:
+            known.setdefault(entry.key, entry)
+
+    notices = [entry for entry in known.values() if entry.kind == "notice"]
+    assert len(notices) == 1
+
+
+def test_a_large_payload_nested_in_a_dict_is_bounded_and_still_distinguished() -> None:
+    """The bound must reach values that are not top-level strings (round 2, F5).
+
+    ``repr`` builds its entire result before anything can slice it, so a large
+    payload inside ``message`` or ``args`` — which is where the id-less message
+    and tool paths actually carry one — was materialized in full on every fold.
+    The bounded repr must still tell two such events apart, or F5's fix would
+    reintroduce F4 by another route.
+    """
+    payload = "x" * 20_000
+    first = {
+        "type": "message_start",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": payload + "ALPHA"}]},
+    }
+    second = {
+        "type": "message_start",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": payload + "BETA"}]},
+    }
+
+    assert subagent_view._digest(first) != subagent_view._digest(second)
+    assert subagent_view._digest(first) == subagent_view._digest(copy.deepcopy(first))
+    # The bounded repr never renders the whole payload.
+    assert len(subagent_view._VALUE_REPR.repr(first["message"])) < len(payload)
+
+
+def test_relay_stamps_a_sequence_that_eviction_cannot_renumber() -> None:
+    """The writer's half of the contract the fold depends on.
+
+    The stamp counts events RELAYED, not events retained, so it keeps rising
+    past the cap and an evicted event's number is never reissued to a later
+    one. Without that, a reader keying by it would still collide after a
+    rotation.
+    """
+    from local_operator.harness.subagent import TRAJECTORY_CAP, _make_relay
+
+    job = AsyncJob(id="j1", type="task", status="running", label="child", start_time=1.0)
+    job.trajectory = []
+
+    async def _emit(_event: Any) -> None:
+        return None
+
+    relay = _make_relay(
+        "j1", "child", job, cast(Any, None), _emit, lambda _text: None, {"text": "", "error": None}
+    )
+
+    async def _drive() -> None:
+        for index in range(TRAJECTORY_CAP + 5):
+            await relay(NoticeEvent(text=f"notice {index}", kind="error"))
+
+    asyncio.run(_drive())
+
+    assert job.trajectory is not None
+    stamps = [event[TRAJECTORY_SEQ_KEY] for event in job.trajectory]
+    # Evicted to the cap, still numbered by relay order, and strictly rising.
+    assert len(stamps) == TRAJECTORY_CAP
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == len(stamps)
+    assert stamps[-1] == TRAJECTORY_CAP + 4
 
 
 def test_fold_survives_junk_without_raising() -> None:

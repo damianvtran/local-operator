@@ -44,6 +44,31 @@ DEFAULT_RETENTION_MS = 5 * 60_000
 #: is what lets a peek report the loss instead of hiding it.
 OUTPUT_TAIL_CHARS = 64_000
 
+#: Key of the monotonic per-job sequence number stamped onto every retained
+#: trajectory dict as the writer appends it (``subagent._make_relay``).
+#:
+#: WHY a stamp rather than a reader using the list index: the trajectory evicts
+#: from the FRONT past ``subagent.TRAJECTORY_CAP``, so a surviving event's
+#: offset decreases by one on every later append. A reader that identifies an
+#: event by its position therefore sees the SAME event under a new identity
+#: after each eviction. The subagent page accumulates rows by key and never
+#: removes (``tui/widgets/subagent_view``), so one error notice re-keyed that
+#: way mounted an ADDITIONAL identical row on every refresh — the defect this
+#: stamp exists to make unrepresentable.
+#:
+#: Same discipline as ``output_seq`` above, for the same reason: it counts
+#: events RELAYED, not events retained, so it keeps rising past the cap and is
+#: never reused within a job. It is NOT an index into the retained list and
+#: must not be treated as one.
+#:
+#: ``AgentEvent`` is ``extra='allow'``, so the stamp survives the round trip
+#: through ``model_dump``/``model_validate`` and through the frontend-state
+#: wire projection (``JobState.trajectory``, also ``extra='allow'``) without
+#: any model declaring the field. Readers must still tolerate its ABSENCE: a
+#: trajectory from an older release, a restored roster row, or a hand-built
+#: test fixture carries no stamp, so every consumer needs a stable fallback.
+TRAJECTORY_SEQ_KEY = "_lo_seq"
+
 #: ``result_text`` stamped by :meth:`AsyncJobManager.cancel` on a job whose
 #: runner was never entered, so the one fact the cancellation destroys — that
 #: the job never ran — survives on the row every settled surface already reads.
@@ -172,7 +197,12 @@ class AsyncJob(BaseModel):
     # ``None`` (not []) on jobs without a trajectory: a host probing
     # ``getattr(job, "trajectory", None)`` must be able to tell "no child
     # events recorded" apart from "this job type has none".
+    #
+    # Each dict additionally carries :data:`TRAJECTORY_SEQ_KEY`, stamped by the
+    # writer — see that constant for why a reader may not use list position as
+    # an event's identity.
     trajectory: list[dict[str, Any]] | None = None
+
     # The instruction a ``task`` job was launched with, verbatim. ``label`` is
     # a short summary the launcher wrote for a status line, so it cannot stand
     # in for this: a reader looking at a child's transcript otherwise sees an
