@@ -1,0 +1,16 @@
+{
+  "label": "BEFORE synthetic 2700u/29000s",
+  "recent_sessions_uncapped_ms": 1073.0,
+  "user_sessions": 2700,
+  "recent_sessions_limit200_ms": 1120.2,
+  "recent_session_rows_uncapped_ms": 1255.9,
+  "build_index_warm_ms": 62.2,
+  "digests": 2700,
+  "build_index_after_daemon_thrash_ms": 768.0,
+  "exact_search_first_ms": 4.75,
+  "exact_search_steady_ms": 3.42,
+  "soft_first_keystroke_ms": 161.2,
+  "soft_steady_keystroke_ms": 2.1,
+  "rss_mb": 92.6,
+  "picker_open_total_ms": 1354.8
+}

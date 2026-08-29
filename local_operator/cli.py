@@ -2511,6 +2511,7 @@ def main() -> int:
         # gets a one-line message, the ids that DO exist, and a non-zero status.
         if getattr(args, "resume", None) is not None:
             from local_operator.resume import (
+                RESUME_RECOVERY_LISTING,
                 ResumeNotFound,
                 backfill_session_origins,
                 backfill_session_titles,
@@ -2545,7 +2546,12 @@ def main() -> int:
                 # With the age: a column of bare 12-hex ids gives the reader
                 # nothing to choose between, and the recency the listing already
                 # sorted by is the one fact that makes them recognisable.
-                available = recent_sessions(config_dir())
+                # Ten explicitly: this is an error path printing to stderr after
+                # a typo'd id, where a short list of the most recent sessions is
+                # the help and the whole store would bury it. ``recent_sessions``
+                # returns everything by default, so the cap belongs here where a
+                # reader can see the listing is deliberately short.
+                available = recent_sessions(config_dir(), limit=RESUME_RECOVERY_LISTING)
                 if available:
                     now = time.time()
                     print("recent sessions (newest first):", file=sys.stderr)

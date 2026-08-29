@@ -21,11 +21,21 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 #: ``--resume`` with no id. A sentinel rather than a second boolean flag so the
 #: whole "which session" decision stays ONE value threaded through one parameter.
 RESUME_LATEST = "@latest"
+
+#: Rows the CLI's ``--resume <typo>`` recovery listing prints to stderr.
+#:
+#: Named rather than a bare ``10`` at the call site because it is a DELIBERATELY
+#: short list, not an incidental one: the listing is an error message helping a
+#: user who mistyped an id, where the newest few sessions are the help and the
+#: whole store would bury it. The picker is the surface that shows everything
+#: (:func:`recent_session_rows` returns the full store by default); this is the
+#: one place a cap is the right answer, so it says so.
+RESUME_RECOVERY_LISTING = 10
 
 #: The file whose presence makes a directory a resumable session. Also what the
 #: recency ordering is read from: a directory's own mtime moves for reasons that
@@ -48,6 +58,49 @@ ORIGIN_NAME = "origin.json"
 #: key is a string rather than a bare flag, so a future non-user origin (a
 #: scheduled run, a server-side session) is a new value and not a second file.
 ORIGIN_SUBAGENT = "subagent"
+
+#: Memoised ``origin.json`` verdicts for :func:`recent_sessions`, keyed on each
+#: marker's own ``(mtime, size)``.
+#:
+#: Why this exists. The listing must READ AND PARSE every marker that exists —
+#: existence alone must never be read as "subagent", because a truncated or
+#: hand-edited sidecar deliberately parses to ``""`` so it reads as the USER's
+#: session rather than vanishing from the picker (see :func:`session_origin`;
+#: one such file took the picker down for every session on the machine). The
+#: markers that exist are the SUBAGENT ones, and subagents outnumber user
+#: sessions ~10.6:1, so that rule costs one file read per subagent directory:
+#: measured at 1127 ms over a 31,700-directory store, of which 639 ms is the
+#: reads and only 17 ms the parsing. Skipping the read for unmarked directories
+#: therefore saves ~8% and cannot fix it; the parse is not the cost.
+#:
+#: Why memoising is SOUND rather than a guess: the marker is written once, at
+#: directory creation (``harness.subagent``), and the only other writer is the
+#: one-shot backfill below. The verdict is immutable once written, so a marker
+#: whose ``(mtime, size)`` is unchanged cannot have changed its meaning.
+#:
+#: What may NOT go in here, and why each would be a bug:
+#: * Only a verdict actually PARSED from a marker that was READ is stored. A
+#:   stat failure or an unreadable file falls through to the real read every
+#:   time (:func:`_session_origin_read` reports readability separately for
+#:   exactly this): those describe the MOMENT — EMFILE under the descriptor
+#:   pressure this scan itself creates, a network volume blip — while the key
+#:   is the marker's immutable ``(mtime, size)``, so caching one would serve a
+#:   transient outage as a permanent wrong verdict for the life of the file.
+#: * A CORRUPT payload is cached, and that is deliberate rather than an
+#:   oversight: a parse failure is a fact about the file's CONTENT, stable for
+#:   as long as the bytes are, and re-deriving it every scan would return the
+#:   same ``""``. Rewriting the marker changes its ``(mtime, size)`` and
+#:   expires the entry, which is exactly when the verdict could differ.
+#: * ABSENCE is never cached. Unmarked already means user and is the cheap path,
+#:   and a directory the backfill stamps later must be re-read, not answered
+#:   from a stale "no marker" fact.
+ORIGIN_CACHE_NAME = "origin-verdicts.json"
+
+#: Bumped when the cache's shape or key changes, so an older file is discarded
+#: rather than misread. Independent of ``search_index.INDEX_VERSION`` — the two
+#: caches version separately and neither number constrains the other; only the
+#: mechanism is borrowed.
+ORIGIN_CACHE_VERSION = 1
 
 #: Journals the session's title (and every name it has ever borne) beside the
 #: transcript, mirroring :data:`ORIGIN_NAME` exactly. A SIDECAR rather than a
@@ -278,18 +331,42 @@ def session_origin(session_dir: Path) -> str:
     picker and every ``--resume`` with no id, for every session, until the
     user found and deleted the file by hand.
     """
+    origin, _readable = _session_origin_read(session_dir)
+    return origin
+
+
+def _session_origin_read(session_dir: Path) -> tuple[str, bool]:
+    """:func:`session_origin`'s verdict, plus whether the marker was READ at all.
+
+    Exists because those two facts are different and only the traversal needs
+    the second. ``session_origin`` deliberately collapses every failure into
+    ``""`` — that tolerance is its whole point and its public contract, and a
+    caller asking "is this the user's session" is right to be told "yes" when
+    the claim cannot be trusted.
+
+    A CACHE, though, must not memoise that answer. ``""`` from a parse failure
+    is a fact about the file's CONTENT, so it is stable while the bytes are:
+    re-deriving it on every scan would return the same verdict, and the marker
+    changing is exactly when the memo's ``(mtime, size)`` key expires. ``""``
+    from an ``OSError`` is a fact about the MOMENT — EMFILE under the descriptor
+    pressure a 30,000-directory scan creates, a network volume blip, a
+    permissions change mid-scan — and the file it describes is immutable by
+    design, so memoising it pins a wrong verdict for the life of the marker
+    rather than for the life of the outage. ``readable=False`` is how the
+    traversal tells those apart and declines to cache the second.
+    """
     try:
         raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return ""
+        return "", False
     try:
         payload = json.loads(raw)
     except ValueError:
-        return ""
+        return "", True
     if not isinstance(payload, dict):
-        return ""
+        return "", True
     origin = payload.get("origin")
-    return origin if isinstance(origin, str) else ""
+    return (origin if isinstance(origin, str) else ""), True
 
 
 class SessionTitle(NamedTuple):
@@ -919,8 +996,68 @@ def live_session_owner(config_dir: Path, session_id: str) -> int | None:
     return pid
 
 
-def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]]:
+def origin_cache_path(config_dir: Path) -> Path:
+    """Where this store's ``origin.json`` verdict cache lives.
+
+    Beside the search index, under ``cache/``: both are derived data a user may
+    delete at any time to force a rebuild, and neither is a source of truth.
+    """
+    return config_dir / "cache" / ORIGIN_CACHE_NAME
+
+
+def _load_origin_cache(path: Path) -> dict[str, Any]:
+    """The cached verdicts, or an empty mapping when absent, stale or corrupt.
+
+    Every failure yields an empty mapping rather than raising, mirroring
+    ``search_index._load``: this is a cache whose worst cost must be a rebuild
+    (today's full-read behaviour), never a wrong verdict and never the picker.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(loaded, dict) or loaded.get("version") != ORIGIN_CACHE_VERSION:
+        return {}
+    entries = loaded.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+
+def _save_origin_cache(path: Path, entries: dict[str, Any]) -> None:
+    """Persist the verdicts, best-effort and atomically.
+
+    Atomic with a PID-suffixed temp for the reason ``search_index._save``
+    documents: several sessions open a picker at once, and a fixed temp name
+    lets one process ``replace`` a document another is still filling. A torn
+    document is discarded by the loader, so the bound is a needless rebuild.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps({"version": ORIGIN_CACHE_VERSION, "entries": entries}),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        return
+
+
+def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[str, float]]:
     """``(id, mtime)`` for the USER's resumable sessions, newest first.
+
+    ``limit=None`` means NO TRUNCATION and is the default, so a caller that says
+    nothing gets the whole store. That direction is deliberate and was learned
+    the expensive way: this defaulted to ``10`` while the picker called it with
+    no argument, and the "uncapped" picker silently showed ten rows on a
+    236-session store — a worse version of the bug the change was written to
+    fix. A default that truncates makes forgetting to pass a limit look like
+    working code, so the safe default is the complete answer and every caller
+    that wants less has to say so at its own call site, where a reader can see
+    it.
 
     Subagent sessions are excluded (:func:`is_user_session`): they are the
     machine's own scratch conversations, and a listing offered to a human is
@@ -935,20 +1072,114 @@ def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]
     Best-effort: a directory that vanishes mid-scan (retention sweeps run
     concurrently) is skipped rather than raising out of an error path whose whole
     job is to be helpful.
+
+    The traversal is ``os.scandir``-based over the store, with one ``stat`` per
+    directory for the transcript and one for the marker. The store is scanned
+    once rather than each directory being scanned individually: the latter is
+    what the origin design proposed, and it measures ~2x WORSE (1986 ms vs
+    1127 ms over 31,700 dirs) because it stats every entry in every directory
+    to learn two filenames. Do not "fix" it back.
+
+    The cost that matters is the ORIGIN check, which runs once per directory
+    and therefore scales with the SUBAGENT population — ~10.6x the user
+    population on the reporting machine, and the part that actually grows.
+    Because a marker that EXISTS must still be read and parsed (see
+    :data:`ORIGIN_CACHE_NAME`), that is one file read per subagent directory:
+    1127 ms over 31,700 dirs, of which the reads are 639 ms. The verdict cache
+    is what removes it, taking the same scan to ~310 ms warm
+    (``bench/resume-picker-after.json``; independently re-measured at 307 ms in
+    agent review round 1). Quote the committed bench figure here rather than a
+    remembered one — an optimistic number in a docstring is how the next
+    person's regression looks like an improvement.
+
+    ``limit`` truncates the RESULT, never the work: every directory is visited
+    regardless, so a caller asking for all sessions costs the same as one
+    asking for ten.
     """
     rows: list[tuple[str, float]] = []
-    for path in (config_dir / "sessions").glob("*"):
-        try:
-            mtime = (path / TRANSCRIPT_NAME).stat().st_mtime
-        except OSError:
-            continue
-        # After the stat, not before: the stat is what proves the directory is
-        # a session at all, and an unreadable marker must not cost a row.
-        if not is_user_session(path):
-            continue
-        rows.append((path.name, mtime))
+    try:
+        scan = os.scandir(config_dir / "sessions")
+    except OSError:
+        return []
+    cache_path = origin_cache_path(config_dir)
+    cached = _load_origin_cache(cache_path)
+    fresh: dict[str, Any] = {}
+    # Every name that carried a marker in THIS scan. The cache is rewritten to
+    # exactly this set, which is what drops entries for disposed sessions and
+    # keeps the file bounded by the live store rather than by every session
+    # that has ever existed.
+    seen: set[str] = set()
+    with scan:
+        for entry in scan:
+            try:
+                mtime = os.stat(os.path.join(entry.path, TRANSCRIPT_NAME)).st_mtime
+            except OSError:
+                continue
+            # After the transcript stat, not before: the stat is what proves the
+            # directory is a session at all, and an unreadable marker must not
+            # cost a row.
+            #
+            # This stat does double duty — it answers "is there a marker" AND
+            # produces the cache key — so the cache costs no extra syscall.
+            marker = os.path.join(entry.path, ORIGIN_NAME)
+            try:
+                marker_stat: os.stat_result | None = os.stat(marker)
+            except OSError:
+                # No marker, or it cannot be stat'd. ABSENCE means the user's
+                # own session and is deliberately NOT cached: it is already the
+                # cheap path, and a directory the backfill stamps later must be
+                # re-read rather than answered from a stale "unmarked" fact.
+                marker_stat = None
+            if marker_stat is not None:
+                seen.add(entry.name)
+                key = [marker_stat.st_mtime, marker_stat.st_size]
+                previous = cached.get(entry.name)
+                if (
+                    isinstance(previous, dict)
+                    and previous.get("key") == key
+                    and isinstance(previous.get("origin"), str)
+                ):
+                    origin = previous["origin"]
+                else:
+                    # Existence gates the READ, never the verdict: the file is
+                    # read and PARSED, because ``session_origin`` returns "" for
+                    # a truncated or hand-edited sidecar so a CORRUPT marker
+                    # reads as the user's own session rather than vanishing from
+                    # the picker. Treating "file exists" as "subagent" would
+                    # invert that fail-safe and hide real work.
+                    origin, readable = _session_origin_read(Path(entry.path))
+                    # Only a verdict PARSED off a marker that was actually read
+                    # is memoised. A read failure yields the same "" as a
+                    # corrupt payload — safe for the listing, which shows the
+                    # session — but it describes the moment, not the file, and
+                    # the key is the marker's immutable (mtime, size): caching
+                    # it would serve one transient EMFILE or volume blip as a
+                    # permanent wrong verdict for the life of that marker. So it
+                    # falls through and is re-read on the next scan instead.
+                    if readable:
+                        fresh[entry.name] = {"key": key, "origin": origin}
+                    else:
+                        # Drop any entry inherited from ``cached``: this scan
+                        # could not confirm it, and ``merged`` below is built
+                        # from the names seen here.
+                        seen.discard(entry.name)
+                if origin:
+                    continue
+            rows.append((entry.name, mtime))
+    merged = {
+        name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
+    }
+    merged.update(fresh)
+    # Written only when it would actually change, so a steady store's picker
+    # open stays read-only: an unconditional save would rewrite a multi-megabyte
+    # file on every open to persist nothing.
+    if merged != cached:
+        _save_origin_cache(cache_path, merged)
     rows.sort(key=lambda row: row[1], reverse=True)
-    return rows[:limit]
+    # Sliced only when a limit was actually asked for: ``rows[:None]`` would
+    # also return everything, but spelling it out keeps "no limit" a decision
+    # the code states rather than a property of slice syntax.
+    return rows if limit is None else rows[:limit]
 
 
 def format_age(seconds: float) -> str:
@@ -1205,7 +1436,7 @@ def _condense(text: str, max_chars: int) -> str:
     return cut.rstrip(" ,.;:") + "…"
 
 
-def recent_session_rows(config_dir: Path, limit: int = 10) -> list[SessionRow]:
+def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[SessionRow]:
     """:class:`SessionRow` per resumable session, newest first.
 
     Layered over :func:`recent_sessions` rather than replacing it: the CLI's
@@ -1218,6 +1449,17 @@ def recent_session_rows(config_dir: Path, limit: int = 10) -> list[SessionRow]:
     is an 80 MB paste — measures 0.2 ms, and fifty of them are still under a
     frame. Moving this to a worker would trade that for a picker that opens
     empty and fills in, which is worse for a list the user is about to read.
+
+    ``limit=None`` means NO TRUNCATION, matching :func:`recent_sessions` — see
+    its docstring for why the untruncated answer is the DEFAULT rather than the
+    opt-in. The ``/resume`` picker relies on that default; every caller that
+    wants a short list passes its own number at its own call site (the CLI's
+    recovery listing, the mobile daemon's history and search), so the cap is
+    visible where it is chosen instead of hiding in this signature.
+
+    Uncapping is affordable because the scan underneath is limit-independent
+    (see :func:`recent_sessions`) and the only per-row cost added is
+    :func:`session_name`, one bounded head read.
     """
     return [
         SessionRow(session_id, mtime, session_name(config_dir / "sessions" / session_id))

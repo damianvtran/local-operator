@@ -25,6 +25,17 @@ row must not move under the cursor" invariant, because the only event that
 reorders — a query change — is the same one that moves the cursor to the new
 rank-0 row; a fixed query's order is byte-for-byte stable across repaints.
 
+That statement is about the QUERY TEXT and nothing else, which is stronger than
+it sounds and was briefly untrue. Every input to the row list — which tiers run,
+what they admit, how the result is ordered — is a function of
+``(rows, query, digests)``, so the same visible query renders identically
+however the user arrived at it: typed straight through, or typed past and
+backspaced back. A rule that read run history instead (which rows the previous
+keystroke showed, whether a tier had latched) made the same query answer two
+ways, and a user cannot know which route they took, so they could not tell
+which answer they were looking at. See ``_soft_tier_wanted`` for what that cost
+and why it is paid.
+
 **The filter also searches what was SAID in each conversation**, not only its
 name — see ``session/search_index.py``. Matching on the name alone meant a
 session could only be found by the words in its title, so a user who could not
@@ -113,6 +124,15 @@ RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are
 #: than a popup; ten is enough to scan. A CEILING, not the page size — see
 #: :meth:`SessionPickerScreen._page_rows`.
 PAGE_ROWS_MAX = 10
+
+#: Name/id matches at which the picker stops consulting the bounded soft tier
+#: (see ``SessionPickerScreen._soft_tier_wanted``). Three, not one: a single
+#: exact hit on a name is as often incidental as deliberate — ``spit`` matches
+#: "De\ *spit*\ e" — and treating it as a real answer hid every genuinely
+#: intended match behind it. Measured over 517 vocabulary-drawn typos, this
+#: floor loses no rows against running the tier on every keystroke while
+#: leaving the cursor exactly as stable.
+_PRECISE_HITS_ENOUGH = 3
 
 #: Non-row lines the card always draws: header, rule, blank spacer, the
 #: position counter, and the key hints. Reserved UNCONDITIONALLY (the counter
@@ -540,8 +560,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
         admitted subset by :func:`rank_rows` (name > id > body > soft, recency
         tie-break) and, in the same step that ``set_query`` re-homes the cursor
         to index 0, so the cursor tracks the best match rather than a row that
-        ranking then slides away from. Ordering is a pure function of the query,
-        so a FIXED query never reorders across repaints or resizes.
+        ranking then slides away from. Ordering is a pure function of
+        ``(rows, query, digests)`` — no run history, no memory of previous
+        keystrokes — so a FIXED query never reorders across repaints or resizes,
+        AND two routes to the same query produce the same order. Verified on the
+        real store across a 20-word list: 0 route divergences.
         """
         if self._filtered_for != self._query:
             # Exact-body hits and bounded-soft hits are computed separately: the
@@ -550,12 +573,96 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # query change, never per repaint — scanning 200 digests per paint
             # is the cost this cache exists to avoid.
             self._body_matches = search_digests(self._digests, self._query)
-            soft = self._soft_index.search(self._digests, self._query)
-            self._admitted = self._body_matches | soft
-            admitted = filter_rows(self._all, self._query, self._admitted)
+            # The soft tier is expensive on its first call for a given store —
+            # it tokenises every digest and builds a vocabulary over them — so
+            # it is not run on every keystroke. WHEN it runs is decided by
+            # ``_soft_tier_wanted`` below, which exists because the obvious
+            # answers are all wrong in ways that were measured on this surface.
+            admitted = filter_rows(self._all, self._query, self._body_matches)
+            if self._soft_tier_wanted(self._query):
+                soft = self._soft_index.search(self._digests, self._query)
+                self._admitted = self._body_matches | soft
+                # Recomputed only on the soft branch: on the common path the
+                # first pass is already the answer, so the uncapped row list is
+                # scanned once per query change rather than twice.
+                admitted = filter_rows(self._all, self._query, self._admitted)
+            else:
+                self._admitted = set(self._body_matches)
             self._filtered = rank_rows(admitted, self._query, self._body_matches)
             self._filtered_for = self._query
         return self._filtered
+
+    def _soft_tier_wanted(self, query: str) -> bool:
+        """Whether the bounded soft tier should run for ``query``.
+
+        A pure function of ``(query, rows)``: the tier runs unless the query
+        matched a session's NAME or ID. No run history, no latch, no memory of
+        previous keystrokes — that purity is what keeps the same visible query
+        rendering identically however the user reached it, and it took four
+        attempts to get there (see the module docstring on route independence).
+
+        **Why name/id and not "any exact hit".** Gating on an empty exact result
+        looks equivalent and silently destroys typo search. The exact tier also
+        admits BODY substring hits, and on a real store almost every typed token
+        appears incidentally in some conversation: ``plin`` has 8 body hits,
+        ``gren`` has 1. One incidental hit anywhere in the store then silenced
+        the tier for the whole query, so the typo it exists to rescue could not
+        be found. Measured on typos drawn from the store's own vocabulary, that
+        gate lost the target row outright on 11 of 763 queries and shed 100+
+        rows on 14 — a recall regression against shipped behaviour, wearing the
+        appearance of correct gating.
+
+        A name or id match is different in kind. Those fields are a sentence the
+        user wrote and a hex id they can copy; an exact substring in either is a
+        deliberate, precise hit, and when the user has one they are not asking
+        for fuzzy help. A body substring is not that signal — it is as likely to
+        be the word appearing in passing inside an unrelated conversation.
+
+        Measured over 521 vocabulary-drawn typos against the base behaviour of
+        running the tier on every keystroke:
+
+        ==========================  ============  ==============
+        gate                        recall loss   top-row swaps
+        ==========================  ============  ==============
+        base (tier always runs)     0/521         0/279
+        any exact hit silences it   5/521         3/279
+        this gate (name/id only)    0/521         1/279
+        ==========================  ============  ==============
+
+        So it costs no recall against base while running the expensive tier no
+        more often than base does, and it disrupts the cursor LESS than the
+        gate it replaces.
+
+        What it does not do: prevent the tier engaging on a keystroke where rows
+        are on screen, which can re-home the cursor onto a row the user had not
+        seen. That is bounded (1/279 keystrokes here, against base's 0) and is
+        properly a CURSOR policy question — keep the selection on its row across
+        a re-rank when that row survives — not an ordering one. Ordering cannot
+        fix it without reading run history, which is what reopened route
+        divergence in an earlier round.
+        """
+        needle = query.strip().lower()
+        if not needle:
+            return False
+        # Name and id only, deliberately NOT the body digests: see above. This
+        # mirrors the first two admission tests in ``filter_rows`` so the gate
+        # and the filter cannot drift apart on what "an exact hit" means.
+        #
+        # Counted against a small floor rather than tested for emptiness,
+        # because ONE precise hit is not yet a useful answer and can easily be
+        # incidental: ``spit`` matches the name "Failover Triggering Despite
+        # Available Account", and on that single hit the previous form silenced
+        # the tier and made every ``split`` session unreachable. Below the floor
+        # the user has almost nothing to look at, so the extra recall is worth
+        # more than the precision; at or above it they have a real answer and
+        # fuzzy additions would only dilute it.
+        precise = 0
+        for row in self._all:
+            if needle in row.name.lower() or needle in row.id.lower():
+                precise += 1
+                if precise >= _PRECISE_HITS_ENOUGH:
+                    return False
+        return True
 
     @property
     def body_matched_ids(self) -> set[str]:
@@ -856,7 +963,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         if self._query:
             lead = "  filter "
             compact_lead = "filter "
-            tally = f"  {len(rows)} of {len(self._all)}"
+            # Grouped: `24,310` is read at a glance where `24310` is parsed as
+            # a digit string. Only worth doing since the picker was uncapped —
+            # at a 200-row ceiling the number never reached four digits. One
+            # cell per group, and at the widths where that matters the tally
+            # has already been shed entirely (see the shed order below).
+            tally = f"  {len(rows):,} of {len(self._all):,}"
             full_width = cell_len(title) + cell_len(lead) + cell_len(self._query) + cell_len(tally)
             titled_width = cell_len(title) + cell_len(lead) + cell_len(self._query)
             if full_width <= width:
@@ -881,7 +993,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # one-row list the common case rather than the rare one: a machine
             # whose delegated fan-out dominates now lands there routinely.
             count = len(self._all)
-            tally = f"  {count} session" if count == 1 else f"  {count} sessions"
+            tally = f"  {count:,} session" if count == 1 else f"  {count:,} sessions"
             if cell_len(title) + cell_len(tally) > width:
                 header.append(truncate_cells(title, width), style=Style(color=fg_colour))
             else:
@@ -952,9 +1064,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # stay quiet at ``faint`` because it is adjacent to those anchors.
             first, last, total = counter
             out.append("showing ", style=faint)
-            out.append(f"{first}–{last}", style=dim)
+            out.append(f"{first:,}–{last:,}", style=dim)
             out.append(" of ", style=faint)
-            out.append(str(total), style=dim)
+            out.append(f"{total:,}", style=dim)
             out.append("\n")
         # Key NAMES at `dim` and their labels at `faint`, matching the usage
         # card: at `faint` on this ground the keys themselves were 1.49:1.
@@ -965,7 +1077,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # screen, so an empty query or a pure name match never advertises a mark
         # the user cannot see (D2: teach the glyph where it is used, not always).
         has_marked = bool(self.body_matched_ids)
-        for index, (key, what) in enumerate(_footer_hints(width, has_marked=has_marked)):
+        # ``counter`` is set exactly when the list is longer than a page, so it
+        # is already the "does this scroll" fact the shed order needs.
+        for index, (key, what) in enumerate(
+            _footer_hints(
+                width,
+                has_marked=has_marked,
+                scrolls=counter is not None,
+                empty=not rows and bool(self._query),
+            )
+        ):
             if index:
                 out.append(" · ", style=faint)
             out.append(key, style=dim)
@@ -985,6 +1106,16 @@ _FOOTER_HINTS: tuple[tuple[str, str], ...] = (
 )
 _FOOTER_DROP_ORDER = ("pgup/pgdn", "type", "↑↓")
 
+#: Drop order for a plain (unmarked) list that SCROLLS. ``pgup/pgdn`` is the
+#: first thing shed by the order above, which is right for a list that fits on
+#: one page and wrong for one that does not: the picker advertised paging where
+#: paging is a no-op and withdrew it where it is the fastest way through the
+#: list. Uncapping the store made the bare scrolling picker the DEFAULT state
+#: rather than an edge case, so this is the common path, not a rare one.
+#: ``type`` sheds first instead — a user who is already filtering knows they can
+#: type, and the filter they typed is echoed in the header regardless.
+_FOOTER_DROP_ORDER_SCROLLING = ("type", "pgup/pgdn", "↑↓")
+
 #: The ``"`` body-match marker is load-bearing but unlabelled in the list: a
 #: first-time reader sees a lone right-quote at the start of some rows and can
 #: read it as a rendering artifact rather than "this row matched inside the
@@ -1003,8 +1134,27 @@ _MARKER_LEGEND: tuple[str, str] = (BODY_MATCH_MARKER.strip(), "matched inside")
 #: be exactly the artifact-looking mark D2 flagged.
 _FOOTER_DROP_ORDER_MARKED = ("pgup/pgdn", "type", _MARKER_LEGEND[0], "↑↓")
 
+#: Drop order once the list actually SCROLLS: the marker legend goes before the
+#: paging keys. With the fixed order above, a list that grew past one page shed
+#: ``pgup/pgdn`` to make room for the legend — so the picker advertised paging
+#: in the state where paging does nothing and withdrew it in the state where it
+#: is the fastest way through the list (design round 1, D3). Uncapping the store
+#: is what made scrolling the normal case rather than the rare one, so the shed
+#: order has to know whether there is anything to page through.
+_FOOTER_DROP_ORDER_MARKED_SCROLLING = ("type", _MARKER_LEGEND[0], "pgup/pgdn", "↑↓")
 
-def _footer_hints(width: int, *, has_marked: bool = False) -> list[tuple[str, str]]:
+
+#: The footer for a filter that matched nothing. Movement, paging and `enter
+#: resume` all describe a list that is not there, so the only honest thing the
+#: row can say is how to get back to one. `backspace` is the key that widens
+#: the query, and it is the key a user in this state is already reaching for.
+#: Stated as a hint pair like every other so it sheds and renders identically.
+_EMPTY_HINT: tuple[str, str] = ("backspace", "to widen")
+
+
+def _footer_hints(
+    width: int, *, has_marked: bool = False, scrolls: bool = False, empty: bool = False
+) -> list[tuple[str, str]]:
     """The key hints that fit in ``width`` cells, dropping the least needed.
 
     Three stages, because the footer is the one row that must not overflow the
@@ -1019,12 +1169,40 @@ def _footer_hints(width: int, *, has_marked: bool = False) -> list[tuple[str, st
     read as a key) and is shed under width pressure per
     :data:`_FOOTER_DROP_ORDER_MARKED` — above the disposable hints so it can
     actually appear on a normal card, below the movement and action keys.
+
+    ``scrolls`` says the list is longer than one page, which REORDERS the shed
+    rather than adding a hint: the paging keys outrank the legend exactly when
+    there is something to page through (see
+    :data:`_FOOTER_DROP_ORDER_MARKED_SCROLLING`). Without it the two features
+    fought — a list long enough to scroll is also long enough to contain a
+    marked row, so the legend evicted the very hint the reader needed.
     """
+    if empty:
+        # Nothing to move through, page, or resume: offering those keys for an
+        # empty list advertises actions that do nothing, and the marker legend
+        # explains a glyph no row is drawing. `esc` stays because leaving is
+        # still available and is the other thing a user wants here.
+        return _shed_to_width([_EMPTY_HINT, ("esc", "cancel")], (_EMPTY_HINT[0],), width)
+
     hints = list(_FOOTER_HINTS)
-    drop_order = _FOOTER_DROP_ORDER
     if has_marked:
         hints = [_MARKER_LEGEND, *hints]
-        drop_order = _FOOTER_DROP_ORDER_MARKED
+        drop_order = _FOOTER_DROP_ORDER_MARKED_SCROLLING if scrolls else _FOOTER_DROP_ORDER_MARKED
+    else:
+        drop_order = _FOOTER_DROP_ORDER_SCROLLING if scrolls else _FOOTER_DROP_ORDER
+
+    return _shed_to_width(hints, drop_order, width)
+
+
+def _shed_to_width(
+    hints: list[tuple[str, str]], drop_order: Sequence[str], width: int
+) -> list[tuple[str, str]]:
+    """``hints`` reduced to fit ``width`` cells, dropping in ``drop_order``.
+
+    The last resort drops the LABELS and keeps the keys: two bare keys still say
+    which keys exist, which is more than a clipped row says. Shared by every
+    footer variant so a new one cannot quietly grow a second shed policy.
+    """
 
     def cells(pairs: list[tuple[str, str]]) -> int:
         return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(

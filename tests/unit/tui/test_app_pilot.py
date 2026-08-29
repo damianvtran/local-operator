@@ -6559,6 +6559,33 @@ def _seed_session(tmp_path: Path, session_id: str, prompt: str = "") -> None:
     (sess_dir / "transcript.jsonl").write_text(body)
 
 
+def _append_turn(tmp_path: Path, session_id: str, text: str) -> None:
+    """Add a later message to an existing seeded session.
+
+    The picker names a row by its FIRST user message, so anything appended here
+    lands in the searchable body without changing the visible name. That is the
+    distinction some fixtures need: on a real store an incidental keyword hit is
+    a word buried in a conversation, not the title of one.
+    """
+    line = (
+        json.dumps(
+            {
+                "id": "e2",
+                "ts": 1,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "user",
+                    "content": [{"text": text}],
+                },
+            }
+        )
+        + "\n"
+    )
+    with (tmp_path / "sessions" / session_id / "transcript.jsonl").open("a") as handle:
+        handle.write(line)
+
+
 @pytest.mark.asyncio
 async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monkeypatch) -> None:
     """A bare ``/resume`` opens the picker instead of printing ids.
@@ -6591,6 +6618,124 @@ async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monk
         # Named by the opening message, not just listed by id.
         assert "Make an asteroids game" in card, card
         assert "aabbcc" in card, card
+
+
+@pytest.mark.asyncio
+async def test_the_picker_lists_a_store_far_larger_than_any_default_limit(
+    tmp_path, monkeypatch
+) -> None:
+    """The picker shows the WHOLE store, exercised through the real command.
+
+    This is the regression that two review rounds and a full CI run missed,
+    because every other fixture here has fewer rows than the smallest cap: the
+    reach fix removed ``RESUME_PICKER_LIMIT`` but ``recent_session_rows``
+    defaulted to ``limit=10`` and ``_cmd_resume`` passed no argument, so the
+    "uncapped" picker showed ten rows on a 236-session store — strictly worse
+    than the cap of 200 it replaced.
+
+    250 sessions, chosen to exceed every limit in the codebase (10 recovery,
+    100 daemon summaries, 200 daemon search) so no default can satisfy it
+    accidentally. Driven by typing ``/resume`` rather than by calling
+    ``recent_session_rows`` directly: a parameterised stand-in for the product
+    path is exactly what let this through the first time.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    total = 250
+    for index in range(total):
+        _seed_session(tmp_path, f"s{index:04d}", prompt=f"session number {index}")
+
+    session = FakeSession()
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory([]),
+    )
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        # Every session is HELD, which is what makes it filterable: the filter
+        # only ever scans the rows the screen was handed.
+        assert (
+            len(picker.visible_rows) == total
+        ), f"picker holds {len(picker.visible_rows)} of {total} sessions"
+        # And the header says so, rather than reporting a truncated total.
+        assert f"{total:,} sessions" in "\n".join(picker.render_lines_for_test())
+
+        # The oldest session — the one furthest past every cap — is reachable by
+        # filtering, which is the user-visible failure being fixed ("a session I
+        # know exists cannot be found").
+        oldest = f"s{total - 1:04d}"
+        picker.set_query(oldest)
+        await pilot.pause()
+        assert [row.id for row in picker.visible_rows] == [oldest]
+
+
+@pytest.mark.asyncio
+async def test_typing_a_typo_reaches_the_soft_tier(tmp_path, monkeypatch) -> None:
+    """The soft tier must be REACHABLE from a keyboard, not merely harmless.
+
+    Two prior regression tests pinned the absence of harm (no row withdrawn, no
+    cursor swap) and passed with the soft tier replaced by ``return False`` —
+    deleting the feature satisfies them. Nothing asserted the tier ever runs.
+
+    It did not. A gate that decided once at the START of a typing run froze the
+    tier off for every word a user can type: a run begins at one character, and
+    every single character has exact hits in a real store, so the tier was
+    unreachable. Zero ``SoftSearchIndex.search`` calls across 25 typed runs.
+
+    Drives real ``pilot.press`` keystrokes, because ``set_query("classifer")``
+    jumps straight to the final query and cannot observe a per-run latch at
+    all — which is exactly how that bug was validated as working.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # One session whose body carries the correctly-spelled word, plus filler so
+    # the early keystrokes have exact hits and the run latches off under the
+    # old gate.
+    _seed_session(tmp_path, "aaaa0001", prompt="improve the adm classifier throughput")
+    for index in range(5):
+        _seed_session(tmp_path, f"bbbb{index:04d}", prompt="classroom scheduling notes")
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        calls: list[str] = []
+        real_search = picker._soft_index.search
+
+        def counting(digests, query):
+            calls.append(query)
+            return real_search(digests, query)
+
+        picker._soft_index.search = counting  # type: ignore[method-assign]
+
+        # `classifer` is a typo: no session contains it as a substring, so only
+        # the soft tier can find the `classifier` session.
+        for key in "classifer":
+            await pilot.press(key)
+            await pilot.pause()
+
+        assert calls, "the soft tier never ran while the user typed a typo"
+        assert "aaaa0001" in {
+            row.id for row in picker.visible_rows
+        }, "a typo'd query found nothing; soft matching is unreachable by keyboard"
 
 
 @pytest.mark.asyncio
@@ -8483,3 +8628,174 @@ async def test_effective_model_change_repaints_the_band() -> None:
         )
         await pilot.pause()
         assert app._status._model_label == "test/model"
+
+
+@pytest.mark.asyncio
+async def test_route_independence_holds_on_a_real_store_shape(tmp_path, monkeypatch) -> None:
+    """Route independence, exercised against a store shaped like a real one.
+
+    D12's finding, taken seriously: the previous guards ran on 16- and 50-row
+    fixtures whose digests were two hand-written strings, and three consecutive
+    rounds shipped defects those fixtures could not express. This builds a store
+    with the properties that actually produce the bug — many sessions, digests
+    that share prefixes, and a query whose exact matches vanish partway through
+    so the soft tier engages mid-word.
+
+    Drives real keystrokes through `/resume` and compares two routes to the same
+    visible query. It fails on `bc55a183`, where ranking read run history.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # 120 sessions: 20 that match `watch` exactly and stop there, 100 that only
+    # a bounded edit-distance search can reach. Enough rows that the page window
+    # matters and the recency tie-break has something to order.
+    # `watch` and `watchl` both have exact hits, `watchlq` does not. So the two
+    # routes reach the final query having latched the soft tier at DIFFERENT
+    # points: typing straight to `watchl` never latches, while `watchlq` latches
+    # and then backspaces into `watchl` carrying that state. Any rule that reads
+    # run history diverges here; a rule that is a function of the query cannot.
+    # Getting this wrong is why the first version of this guard passed on the
+    # broken head — the fixture has to make the two routes actually differ.
+    for index in range(20):
+        _seed_session(tmp_path, f"aa{index:06d}", prompt=f"watchl the retention sweep {index}")
+    for index in range(100):
+        _seed_session(tmp_path, f"bb{index:06d}", prompt=f"wotchel batch rollup {index}")
+
+    async def route(extra: str | None) -> list[str]:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one(Editor).focus()
+            for key in "/resume":
+                await pilot.press(key)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            picker = app.screen
+            assert isinstance(picker, SessionPickerScreen)
+            for key in "watchl" if extra is None else "watchl" + extra:
+                await pilot.press(key)
+                await pilot.pause()
+            if extra is not None:
+                for _ in extra:
+                    await pilot.press("backspace")
+                    await pilot.pause()
+            return [row.id for row in picker.visible_rows]
+
+    forward = await route(None)
+    backspaced = await route("q")
+
+    assert forward == backspaced, (
+        "the same visible query rendered differently depending on the route: "
+        f"{forward[:5]} vs {backspaced[:5]}"
+    )
+    # And the cursor row specifically, since that is what Enter resumes.
+    assert (forward or [None])[0] == (backspaced or [None])[0]
+
+
+@pytest.mark.asyncio
+async def test_a_typo_is_findable_despite_an_incidental_body_hit(tmp_path, monkeypatch) -> None:
+    """The recall regression that four rounds of guards did not catch (F15).
+
+    Gating the soft tier on "the exact tiers found nothing" reads as correct and
+    destroys typo search on a real store. The exact tier also admits BODY
+    substring hits, and almost every typed token appears incidentally somewhere
+    in a corpus of conversations — so one unrelated session mentioning the typo
+    in passing silenced the tier for the whole query, and the session the user
+    was actually looking for became unreachable.
+
+    The fixture encodes exactly that: `mispelled` appears as a body substring in
+    one unrelated session (the incidental hit) while the target session is
+    reachable only by edit distance. A gate that stops at "some exact hit
+    exists" returns the decoy and hides the target.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # The decoy: the typo appears in the BODY only, never in the row's name.
+    # That distinction is the whole point — the picker names a row by its first
+    # user message, so a one-line fixture would put the typo in the name and
+    # test a different gate than the one that fails on a real store, where the
+    # incidental hit is a word buried in a long conversation.
+    # THREE decoys, not one: the gate tolerates a couple of incidental hits
+    # before it treats them as a real answer, so a single-decoy fixture cannot
+    # tell the shipped floor from a floor of one. Each carries the typo in the
+    # BODY only — the picker names a row by its first user message, so a
+    # one-line fixture would put the typo in the NAME and exercise a different
+    # path than the one that fails on a real store.
+    for decoy in range(3):
+        _seed_session(tmp_path, f"dec{decoy:05d}", prompt=f"quarterly planning notes {decoy}")
+        _append_turn(tmp_path, f"dec{decoy:05d}", "a paragraph that mentions mispelled in passing")
+    # The target: contains the correct spelling only, reachable by soft match.
+    for index in range(5):
+        _seed_session(tmp_path, f"tgt{index:05d}", prompt=f"the misspelled word report {index}")
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        for key in "mispelled":
+            await pilot.press(key)
+            await pilot.pause()
+
+        shown = {row.id for row in picker.visible_rows}
+        targets = {f"tgt{index:05d}" for index in range(5)}
+        assert shown & targets, (
+            "a typo'd query returned only the incidental body hit; the session the "
+            f"user was looking for is unreachable. shown={sorted(shown)}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_one_incidental_name_hit_does_not_silence_the_typo_tier(
+    tmp_path, monkeypatch
+) -> None:
+    """The floor, tested where it actually applies.
+
+    A single exact hit on a NAME is as often incidental as deliberate: on the
+    real store `spit` matches "Failover Triggering Despite Available Account",
+    and treating that as a real answer hid every `split` session behind it. So
+    the tier keeps running until a few precise hits accumulate.
+
+    The sibling body-hit test cannot cover this: with no name/id match at all
+    the tier runs whatever the floor is, so that fixture cannot tell a floor of
+    three from a floor of one. This one puts the typo in a NAME, which is the
+    only shape where the floor is the deciding factor.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # One incidental NAME hit: "despite" contains "spit".
+    _seed_session(tmp_path, "dec00001", prompt="Failover triggering despite available account")
+    # The sessions the user means, reachable only by edit distance from `spit`.
+    for index in range(5):
+        _seed_session(tmp_path, f"tgt{index:05d}", prompt=f"split the transcript window {index}")
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        for key in "spit":
+            await pilot.press(key)
+            await pilot.pause()
+
+        shown = {row.id for row in picker.visible_rows}
+        targets = {f"tgt{index:05d}" for index in range(5)}
+        assert shown & targets, (
+            "one incidental name hit silenced the soft tier, so the sessions the "
+            f"user meant are unreachable. shown={sorted(shown)}"
+        )

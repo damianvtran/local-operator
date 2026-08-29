@@ -160,6 +160,33 @@ def digest_transcript(transcript: Path) -> str:
     Returns ``""`` for anything unreadable. A session that cannot be digested
     is still listed and still searchable by name and id — losing its body from
     the index must never cost it its row.
+
+    Callers that CACHE the result want :func:`digest_transcript_read` instead,
+    which distinguishes "this transcript has no indexable prose" from "this
+    transcript could not be read". Both are ``""`` here, and memoising the
+    second against a signature that has not changed drops a session's body from
+    search permanently.
+    """
+    digest, _readable = digest_transcript_read(transcript)
+    return digest
+
+
+def digest_transcript_read(transcript: Path) -> tuple[str, bool]:
+    """:func:`digest_transcript`'s digest, plus whether the file was READ.
+
+    Exists for the same reason ``resume._session_origin_read`` does, and guards
+    the same class of bug in the other cache. ``build_index`` keys an entry on
+    the transcript's ``(size, mtime)``; a read that fails for a transient reason
+    — EMFILE under the descriptor pressure a full-store scan creates, a network
+    volume blip, a permissions change — yields ``""`` while leaving that
+    signature untouched. Cached, it is served for as long as the file is
+    unmodified, so the session stays body-unsearchable long after the failure
+    is over. Reproduced: readable -> unreadable -> readable-again still returned
+    ``""``.
+
+    ``readable=False`` is how :func:`build_index` tells the two apart and
+    declines to cache the second. An empty digest from a transcript that WAS
+    read is a fact about its contents and is cached normally.
     """
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
@@ -169,7 +196,7 @@ def digest_transcript(transcript: Path) -> str:
             # allocated whole by the very loop meant to bound it.
             head = handle.read(SCAN_BYTES)
     except OSError:
-        return ""
+        return "", False
     parts: list[str] = []
     size = 0
     for line in head.splitlines():
@@ -195,8 +222,8 @@ def digest_transcript(transcript: Path) -> str:
                 # Stop reading as soon as the cap is reached rather than
                 # collecting everything and slicing at the end: the slice would
                 # still have paid to build the discarded remainder.
-                return " ".join(" ".join(parts).split())[:DIGEST_CHARS]
-    return " ".join(" ".join(parts).split())[:DIGEST_CHARS]
+                return " ".join(" ".join(parts).split())[:DIGEST_CHARS], True
+    return " ".join(" ".join(parts).split())[:DIGEST_CHARS], True
 
 
 def _texts(content: object) -> list[str]:
@@ -276,11 +303,40 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
     changed costs one file read, and the common case — one session appended to
     since the last open — costs one re-digest.
 
-    Entries for sessions no longer being listed are dropped, so the file cannot
-    grow forever behind a store that retention keeps trimming.
+    Entries for sessions this call was NOT asked about are PRESERVED. The
+    previous behaviour rebuilt the file from the requested ids alone, which
+    made every narrow caller evict the wide caller's work: the mobile daemon
+    asks for 200 ids (``mobile.daemon._search_sessions``) or 100
+    (``SessionRegistry.summaries``), pruning the cache to those, and the next
+    picker open then re-digested the whole store from disk — measured at
+    936-2430 ms, the one production path that reached a full second.
+
+    The pruning's original justification ("so the file cannot grow forever
+    behind a store that retention keeps trimming") is OBSOLETE and its removal
+    is the point of this shape. Commit 4173ec73 retired eviction; ``retention``
+    never deletes a transcript, so the cache can only grow as fast as the store
+    and the store is permanent by policy. The bound that replaces it is the
+    honest one for that world: an entry is dropped when its session DIRECTORY
+    is gone, which is now the only way a session leaves the store (explicit
+    user disposal). Keep both facts together — a future reader who restores the
+    prune-to-requested behaviour because the docstring sounds prudent
+    reintroduces the daemon thrash.
     """
     cached = _load(index_path(config_dir))
-    entries: dict[str, Any] = {}
+    # Seed from the cache rather than from scratch, then update only the ids
+    # this call was asked about (see the docstring): this is what preserves a
+    # wide caller's entries across a narrow caller.
+    sessions_root = config_dir / "sessions"
+    entries: dict[str, Any] = {
+        sid: entry
+        for sid, entry in cached.items()
+        # The replacement bound for the pruning removed above: an entry whose
+        # session directory is gone can never be valid again, and a session
+        # only leaves the store by explicit disposal now. One stat per cached
+        # entry (~5 ms at 2700) buys a cache that tracks the live store
+        # instead of growing across every session that ever existed.
+        if isinstance(entry, dict) and os.path.isdir(os.path.join(sessions_root, sid))
+    }
     digests: dict[str, str] = {}
     for session_id in session_ids:
         session_dir = config_dir / "sessions" / session_id
@@ -290,7 +346,11 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
         except OSError:
             # Vanished mid-scan (retention sweeps run concurrently). Skip it
             # rather than caching an empty digest that would then be treated as
-            # valid if the file came back.
+            # valid if the file came back. The seeded entry is dropped with it:
+            # a transcript that cannot be stat'd cannot have its signature
+            # confirmed, and keeping a stale digest under a live directory
+            # would serve search results for a body that no longer exists.
+            entries.pop(session_id, None)
             continue
         # The title sidecar's mtime joins the signature so a RENAME re-folds the
         # digest even when the transcript is byte-identical (a rename appends to
@@ -320,8 +380,20 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
             # names always survive the DIGEST_CHARS cap the opening stretch would
             # otherwise fill.
             names = read_title_names(session_dir)
-            body = digest_transcript(transcript)
+            body, readable = digest_transcript_read(transcript)
             digest = " ".join([*names, body]).strip()[: DIGEST_CHARS + TITLE_HEADROOM]
+            if not readable:
+                # The transcript could not be READ, which says nothing about its
+                # contents and everything about this moment. The signature is
+                # unchanged, so caching the empty body would serve it until the
+                # file is next modified — dropping the session from body search
+                # permanently after one transient EMFILE or volume blip. Serve
+                # the degraded digest for this call (the folded titles still
+                # make the row findable) and leave the cache alone so the next
+                # open re-reads. Same rule as ``resume._session_origin_read``.
+                digests[session_id] = digest
+                entries.pop(session_id, None)
+                continue
         entries[session_id] = {"signature": signature, "digest": digest}
         digests[session_id] = digest
     if entries != cached:
@@ -340,7 +412,66 @@ def search_digests(digests: dict[str, str], query: str) -> set[str]:
     needle = query.strip().lower()
     if not needle:
         return set()
-    return {sid for sid, digest in digests.items() if needle in digest.lower()}
+    # Lower the corpus ONCE per distinct digest set rather than per query. The
+    # old form re-lowered every digest on every keystroke, which is 10 MB of
+    # string allocation per character typed: 24 ms per keystroke at 2700
+    # digests, against a 21 ms one-time cost and 5 ms per keystroke here. The
+    # cache is keyed on the digests mapping's identity AND length so a
+    # re-digested or resized store re-lowers rather than answering stale.
+    return {sid for sid, digest in _lowered(digests).items() if needle in digest}
+
+
+#: One-entry memo for the lowered corpus, keyed on the identity and size of the
+#: digests mapping it was derived from. One entry because the picker holds a
+#: single digest set for its whole life, and the phone daemon's calls are
+#: one-shot: a larger cache would retain corpora nobody will ask for again.
+_LOWERED_KEY: tuple[int, int] | None = None
+_LOWERED: dict[str, str] = {}
+#: The mapping ``_LOWERED`` was derived from, retained ONLY so its ``id()``
+#: cannot be handed to a different object. Without it the memo was unsound: an
+#: ``id`` is unique among LIVE objects, not over time, so once a caller dropped
+#: its digests CPython could recycle the address for the next dict of similar
+#: shape, and a successor with the same ``len`` matched the key and was answered
+#: from its predecessor's lowered bodies. ``mobile.daemon``'s search is exactly
+#: that shape (a fresh ``build_index`` result per request, dropped at return,
+#: with ``limit`` pinning the length); it measured 2 wrong session sets in 60
+#: real searches, and a search returning the wrong rows is the failure this
+#: module exists to prevent. Retaining the source makes the address
+#: un-recyclable for as long as the memo can answer for it, which is what the
+#: identity key silently assumed all along.
+_LOWERED_SRC: dict[str, str] | None = None
+
+
+def _lowered(digests: dict[str, str]) -> dict[str, str]:
+    """``digests`` with every body lowercased, memoised across queries.
+
+    Identity-keyed rather than content-keyed on purpose: hashing 10 MB of
+    digests to decide whether to lower 10 MB of digests would cost what it
+    saves. Soundness rests on :data:`_LOWERED_SRC` pinning the source mapping
+    alive, so its ``id`` cannot be reused by a later dict while this memo would
+    still answer for it — an ``id`` identifies an object only among the living.
+
+    A caller that MUTATES a mapping in place between queries would still see a
+    stale corpus, which is why ``build_index`` returns a fresh dict on every
+    call rather than updating one.
+
+    One entry, so alternating between two equally sized LIVE mappings re-lowers
+    every call (2700 digests: 20 queries against one mapping is 4.3 ms,
+    alternating between two is 102 ms). Still far cheaper than the per-query
+    lowering this replaced, and the picker never alternates — it holds one
+    corpus for its whole life. Recorded so a future mixed caller does not
+    assume the memo is free.
+    """
+    global _LOWERED_KEY, _LOWERED, _LOWERED_SRC
+    key = (id(digests), len(digests))
+    if _LOWERED_KEY != key:
+        _LOWERED = {sid: digest.lower() for sid, digest in digests.items()}
+        _LOWERED_KEY = key
+        # Assigned in the SAME branch that sets the key: the retained source and
+        # the id it protects are one fact, and letting them drift apart reopens
+        # the recycled-address bug.
+        _LOWERED_SRC = digests
+    return _LOWERED
 
 
 #: Minimum token length for edit-distance matching. Short tokens (``adm``,
