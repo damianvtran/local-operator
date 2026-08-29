@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
+import local_operator.session.search_index as search_index_mod
 from local_operator.harness.types import Message, MessageRole, TextContent
 from local_operator.resume import write_session_title
 from local_operator.session.search_index import (
@@ -337,3 +339,157 @@ def test_soft_index_prunes_dropped_sessions_and_stays_bounded():
     assert pruned == set()  # s2 is gone, so its match is gone
     assert set(index._tokens) == {"s1"}  # and its cache entry with it
     assert index.search({"s1": "retention policy"}, "retention") == {"s1"}
+
+
+def test_build_index_preserves_entries_it_was_not_asked_about(tmp_path: Path):
+    """The daemon-thrash regression, pinned.
+
+    ``build_index`` used to rebuild the on-disk cache from the requested ids
+    alone, so a narrow caller evicted a wide caller's work. The mobile daemon
+    asks for 200 ids (``_search_sessions``) or 100 (``summaries``); each call
+    pruned the cache to those, and the next ``/resume`` open then re-digested
+    the whole store from disk — measured at 936-2430 ms, the one production
+    path that reached a full second.
+
+    Its original justification (bounding a file "behind a store that retention
+    keeps trimming") is obsolete: retention has not deleted a transcript since
+    4173ec73.
+    """
+    for i in range(4):
+        _write(tmp_path / "sessions" / f"s{i}", ("user", f"conversation number {i}"))
+    ids = [f"s{i}" for i in range(4)]
+
+    build_index(tmp_path, ids)
+    # A narrow caller, standing in for the mobile daemon's limit=200 call.
+    build_index(tmp_path, ["s0"])
+
+    on_disk = json.loads(index_path(tmp_path).read_text(encoding="utf-8"))
+    assert set(on_disk["entries"]) == set(ids), "a narrow call evicted the wide call's entries"
+
+
+def test_build_index_re_digests_nothing_after_a_narrow_call(tmp_path: Path, monkeypatch):
+    """The round trip the fix exists for: wide -> narrow -> wide must read no
+    transcript on the second wide call. Counting ``digest_transcript`` calls is
+    the honest probe — a timing assertion would be flaky, while a re-digest is
+    exactly the work that produced the ~1 s freeze."""
+    for i in range(4):
+        _write(tmp_path / "sessions" / f"s{i}", ("user", f"conversation number {i}"))
+    ids = [f"s{i}" for i in range(4)]
+
+    build_index(tmp_path, ids)
+    build_index(tmp_path, ["s0"])
+
+    calls: list[Path] = []
+    real = search_index_mod.digest_transcript
+
+    def counting(path: Path) -> str:
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(search_index_mod, "digest_transcript", counting)
+    digests = build_index(tmp_path, ids)
+
+    assert calls == [], "a wide call after a narrow one re-digested from disk"
+    assert set(digests) == set(ids)
+
+
+def test_build_index_drops_entries_whose_session_directory_is_gone(tmp_path: Path):
+    """The bound that replaces the pruning removed above.
+
+    Preserving unrequested entries must not mean growing forever. A session now
+    leaves the store only by explicit disposal, so a vanished DIRECTORY is the
+    honest signal that its entry can never be valid again.
+    """
+    for i in range(3):
+        _write(tmp_path / "sessions" / f"s{i}", ("user", f"conversation number {i}"))
+    build_index(tmp_path, ["s0", "s1", "s2"])
+
+    shutil.rmtree(tmp_path / "sessions" / "s2")
+    build_index(tmp_path, ["s0"])
+
+    on_disk = json.loads(index_path(tmp_path).read_text(encoding="utf-8"))
+    assert set(on_disk["entries"]) == {"s0", "s1"}, "a disposed session kept its cache entry"
+
+
+def test_search_digests_is_unchanged_by_the_pre_lowered_corpus():
+    """The pre-lowering is a cost change, not a behaviour change.
+
+    ``search_digests`` used to re-``.lower()`` every digest on every query — 10
+    MB of allocation per keystroke at store scale, 24 ms measured. Lowering the
+    corpus once must return byte-identical match sets, including for a mixed-
+    case query and a query that matches nothing.
+    """
+    digests = {
+        "s1": "The Retention Sweep Evicted Live Directories",
+        "s2": "classifier throughput work",
+        "s3": "",
+    }
+
+    def naive(query: str) -> set[str]:
+        needle = query.strip().lower()
+        if not needle:
+            return set()
+        return {sid for sid, digest in digests.items() if needle in digest.lower()}
+
+    for query in ("retention", "RETENTION", "  Sweep  ", "throughput", "nothing-here", ""):
+        assert search_digests(digests, query) == naive(query), query
+
+
+def test_search_digests_sees_a_rebuilt_corpus_rather_than_a_stale_one(tmp_path: Path):
+    """The memo behind the pre-lowering is identity-keyed, so a caller handed a
+    NEW digests mapping must be answered from that mapping.
+
+    ``build_index`` returns a fresh dict per call, which is what makes identity
+    a sound key; this pins that a re-digest is visible to the next query rather
+    than served from the previous corpus.
+    """
+    _write(tmp_path / "sessions" / "s1", ("user", "classifier throughput work"))
+    first = build_index(tmp_path, ["s1"])
+    assert search_digests(first, "classifier") == {"s1"}
+
+    _write(tmp_path / "sessions" / "s1", ("user", "database migration rollback"))
+    second = build_index(tmp_path, ["s1"])
+    assert search_digests(second, "migration") == {"s1"}
+    assert search_digests(second, "classifier") == {"s1"}  # the opener is still in the digest
+
+
+def test_the_lowered_memo_survives_a_recycled_dict_address():
+    """The memo keys on ``id(digests)``, and an ``id`` is unique only among LIVE
+    objects. Before the source mapping was retained, a caller that dropped its
+    digests let CPython recycle the address for the next dict of similar shape;
+    a successor with the same ``len`` matched the key and was answered from its
+    PREDECESSOR's lowered bodies.
+
+    ``mobile.daemon``'s search is exactly that shape — a fresh ``build_index``
+    result per request, dropped at return, with ``limit`` pinning the length —
+    and it measured 2 wrong session sets in 60 real searches.
+
+    The loop below forces the collision rather than waiting for it: each corpus
+    is built, queried and dropped without ever being bound to a surviving name,
+    so the allocator is free to reuse the address immediately. Any trial whose
+    answer comes from a previous corpus is a wrong search result.
+    """
+    wrong = 0
+    for trial in range(200):
+        # Same length every time, so ``len`` cannot rescue the key; unique body
+        # per trial, so a stale corpus is detectable rather than coincidental.
+        word = f"unique{trial}word"
+        corpus = {"s0": f"alpha {word} omega", "s1": "beta unrelated gamma"}
+        if search_digests(corpus, word) != {"s0"}:
+            wrong += 1
+        del corpus
+
+    assert wrong == 0, f"{wrong}/200 searches answered from a recycled corpus"
+
+
+def test_the_lowered_memo_re_derives_for_a_new_equal_length_corpus():
+    """The narrower statement of the same rule: two DIFFERENT mappings of equal
+    length must get their own lowered corpus, whether or not their addresses
+    collide. Pins the behaviour the identity key is a performance shortcut for.
+    """
+    first = {"s0": "RETENTION sweep", "s1": "classifier"}
+    assert search_digests(first, "retention") == {"s0"}
+
+    second = {"s0": "unrelated", "s1": "RETENTION sweep"}
+    assert search_digests(second, "retention") == {"s1"}
+    assert search_digests(first, "retention") == {"s0"}

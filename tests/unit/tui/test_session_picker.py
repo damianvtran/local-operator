@@ -1236,3 +1236,352 @@ def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
     assert (_MARKER_LEGEND[0], "") not in narrow
     assert ("enter", "resume") in narrow
     assert ("esc", "cancel") in narrow
+
+
+@pytest.mark.asyncio
+async def test_the_soft_tier_is_skipped_once_the_exact_tiers_fill_a_page() -> None:
+    """The soft tier's first call tokenises every digest and builds a vocabulary
+    over them — 324 ms and 95 MB resident over the 2681-digest store the picker
+    now reaches uncapped, against ~5 ms for the exact tier.
+
+    Since the picker went uncapped that build sat on the first character typed.
+    It is deferred behind the cheap tiers: a query the exact tiers can answer at
+    all has nothing for soft matching to rescue.
+    """
+    rows = [_row(f"s{i:03d}", f"classifier run {i}") for i in range(15)]
+    digests = {row.id: "body text" for row in rows}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        calls: list[str] = []
+        real = screen._soft_index.search
+
+        def counting(digests_arg, query):
+            calls.append(query)
+            return real(digests_arg, query)
+
+        screen._soft_index.search = counting  # type: ignore[method-assign]
+        screen.set_query("classifier")
+        await pilot.pause()
+
+        assert len(screen.visible_rows) == len(rows)
+        assert calls == [], "the soft tier ran for a query the exact tiers already answered"
+
+
+@pytest.mark.asyncio
+async def test_the_soft_tier_still_runs_when_the_exact_tiers_come_up_short() -> None:
+    """The other half of the gate: a typo the exact tiers cannot answer must
+    still reach the soft tier, or deferring it would silently cost recall."""
+    rows = [_row("aaa1", "vague title"), _row("bbb2", "another")]
+    digests = {"aaa1": "improve adm classifier throughput"}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_query("classifer")  # typo: no exact hit anywhere
+        await pilot.pause()
+        assert [r.id for r in screen.visible_rows] == ["aaa1"]
+        assert screen.body_matched_ids == {"aaa1"}
+
+
+@pytest.mark.asyncio
+async def test_the_header_tally_reports_the_stores_true_total() -> None:
+    """Once the cap is gone ``_all`` IS the store's user-session total, so the
+    counter stops reporting a number that is not the total and never said so.
+
+    The filtered ``showing a-b of N`` counter keeps reporting the FILTERED
+    count — the two answer different questions and must not converge.
+    """
+    rows = [_row(f"s{i:04d}", f"session {i}") for i in range(2700)]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        # Grouped: the separator is part of the fix for reading a 4-digit
+        # total at a glance (design round 1, D4).
+        assert "2,700 sessions" in "\n".join(screen.render_lines_for_test())
+
+        screen.set_query("session 1")
+        await pilot.pause()
+        lines = "\n".join(screen.render_lines_for_test())
+        shown = len(screen.visible_rows)
+        assert f"of {len(rows):,}" in lines  # header tally: the store total
+        assert f"of {shown:,}" in lines  # position counter: the filtered count
+
+
+@pytest.mark.asyncio
+async def test_a_large_row_set_does_not_move_a_row_under_the_cursor() -> None:
+    """R1 at the scale the uncapped picker now reaches.
+
+    A fixed query must order rows identically across repaints AND a resize, and
+    the row under the cursor must keep its identity — a row moving out from
+    under the cursor is how a user resumes the wrong session.
+    """
+    rows = [_row(f"s{i:04d}", f"session {i} work") for i in range(2700)]
+    digests = {row.id: f"body {row.id}" for row in rows}
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_query("session 12")
+        await pilot.pause()
+        first = [r.id for r in screen.visible_rows]
+        screen.action_move(1)
+        screen.action_move(1)
+        selected = screen.selected_id()
+
+        screen._repaint()
+        screen._repaint()
+        assert [r.id for r in screen.visible_rows] == first
+        assert screen.selected_id() == selected
+
+        # A resize repaints at a different width; ordering is a pure function of
+        # the query, so it must survive that too.
+        await pilot.resize_terminal(60, 30)
+        await pilot.pause()
+        assert [r.id for r in screen.visible_rows] == first
+        assert screen.selected_id() == selected
+
+
+@pytest.mark.asyncio
+async def test_the_result_list_never_grows_as_the_user_types() -> None:
+    """The filter must narrow monotonically within a typing run.
+
+    The first soft-tier gate fired when the exact tiers returned fewer than a
+    page, which is a threshold typing CROSSES: on the operator's real store,
+    `watc` and `watch` showed 41 rows and `watchl` showed 1519 — the list grew
+    twentyfold on a longer query, every row acquired a body-match marker, and
+    the card changed height under the cursor.
+
+    The gate that replaced it (soft when the exact tiers return NOTHING) failed
+    the same way for a different reason: on the operator's real store `watch`
+    has 10 genuine matches and `watchl` has none, so the exact set empties, the
+    tier fires, and 46 typo-neighbours replace all 10 real matches — the top row
+    changes identity on the keystroke before the user presses enter.
+
+    The fixture mirrors that real shape and is built to DISCRIMINATE: the
+    previous version made every digest contain `watch`, so the counts were
+    constant and the assertion passed on any gate, including the two broken
+    ones. Verified to fail on both before being trusted.
+    """
+    rows = [_row(f"s{i:03d}", f"session {i}") for i in range(50)]
+    digests = {}
+    for i, row in enumerate(rows):
+        if i < 10:
+            # Genuine matches for `watch`, and NOT for `watchl` — so the exact
+            # set is non-empty at `watch` and empty one keystroke later. This is
+            # what makes a zero-hit gate fire mid-word.
+            digests[row.id] = "watch the retention sweep"
+        elif i < 12:
+            # A second, smaller exact population so a count threshold has a
+            # boundary to cross: `wa` admits 12, `watch` admits 10.
+            digests[row.id] = "wander through the logs"
+        else:
+            # Edit-distance neighbours of `watchl` (`wotchel` is within two edits
+            # away) that contain neither `watch` nor `watchl` as a SUBSTRING, so
+            # the exact tier never admits them at any keystroke and only the
+            # soft tier can reach them. A neighbour that merely contains the
+            # query would be admitted legitimately and prove nothing.
+            digests[row.id] = "wotchel batch rollup"
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+
+        counts: list[int] = []
+        seen: set[str] | None = None
+        removed: list[tuple[str, int]] = []
+        # Real keystrokes, not ``set_query`` per whole word: the gate this
+        # guards is decided per typing RUN, and jumping straight to each final
+        # query cannot observe a run at all. That shape is how a tier that
+        # never ran was validated as working for two rounds.
+        typed = ""
+        for key in "watchl":
+            await pilot.press(key)
+            typed += key
+            await pilot.pause()
+            query = typed
+            ids = {row.id for row in screen.visible_rows}
+            counts.append(len(ids))
+            if seen is not None:
+                gone = seen - ids
+                # A row leaving because it genuinely stopped matching the longer
+                # query is narrowing, not eviction. Eviction is a row leaving on
+                # a keystroke that ALSO admitted new ones — the list swapping
+                # its contents rather than narrowing them.
+                if gone and (ids - seen):
+                    removed.append((query, len(gone)))
+            seen = ids
+
+        # The property is NOT "the count never rises". Once the soft tier
+        # latches on (at the first keystroke whose exact tiers find nothing) it
+        # legitimately admits rows, and it must — a gate that kept the count
+        # monotonic by never running the tier made typo search unreachable from
+        # a keyboard, which is a worse bug than a count that goes up.
+        #
+        # What must hold is that rows are never admitted while the user still
+        # has results to read: growth is only allowed out of an EMPTY list,
+        # where there is nothing on screen to displace.
+        # Rows may be ADDED when the soft tier latches on — that is the tier
+        # doing its job, and it is what makes a typo findable. What must never
+        # happen is a row the user was already reading being REMOVED to make
+        # room, which is the eviction that swapped the cursor in round 2.
+        assert not removed, f"rows the user was already shown were withdrawn: {removed}"
+
+
+@pytest.mark.asyncio
+async def test_the_same_query_renders_identically_by_either_route() -> None:
+    """The property this surface actually guarantees: order is a function of the
+    QUERY, not of the route taken to it.
+
+    A user cannot know which route they took, so a picker that answers the same
+    visible query two ways is one they cannot reason about at all. Reaching
+    `watchl` by typing it, and by typing `watchlq` then backspacing, must give
+    byte-identical rows in byte-identical order.
+
+    This replaces a test asserting that the cursor never lands on a row absent
+    one keystroke earlier. That property was real but could only be held by
+    ranking on run history, which is exactly what made the same query render
+    two ways (D11). The two are not both satisfiable by ordering; see
+    ``_soft_tier_wanted``. What remains of the displacement concern is recorded
+    honestly in that docstring rather than asserted here falsely.
+    """
+    rows = [_row(f"s{i:03d}", f"session {i}", age_s=60.0 * (100 - i)) for i in range(50)]
+    digests = {
+        row.id: ("watch the retention sweep" if i >= 40 else "wotchel batch rollup")
+        for i, row in enumerate(rows)
+    }
+
+    async def route(extra: str | None) -> list[str]:
+        app = _PickerHost(rows, digests)
+        async with app.run_test(size=(100, 30)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            for key in "watchl" if extra is None else "watchl" + extra:
+                await pilot.press(key)
+                await pilot.pause()
+            if extra is not None:
+                for _ in extra:
+                    await pilot.press("backspace")
+                    await pilot.pause()
+            return [row.id for row in screen.visible_rows]
+
+    forward = await route(None)
+    backspaced = await route("q")
+    assert (
+        forward == backspaced
+    ), f"the same query rendered differently by route: {forward[:5]} vs {backspaced[:5]}"
+
+
+@pytest.mark.asyncio
+async def test_the_soft_tier_runs_only_when_the_exact_tiers_are_empty() -> None:
+    """The one-line rule the gate implements, observed rather than reconstructed.
+
+    The soft tier runs ONLY for a query the cheap tiers cannot answer at all.
+    That is what bounds the disruption: with exact hits the user keeps exactly
+    those, and with none there is nothing on screen for an addition to displace.
+
+    Deliberately NOT asserting "the list never grows" or "no row appears that
+    was absent one keystroke earlier". Both were asserted in earlier rounds and
+    both are false on real data (`sesion` typed goes 83 to 129 rows with the
+    tier active on both sides). A guard stating a false invariant passes only
+    until someone measures it.
+    """
+    rows = [_row(f"s{i:03d}", f"session {i}", age_s=60.0 * (100 - i)) for i in range(50)]
+    digests = {
+        row.id: ("watch the retention sweep" if i >= 40 else "wotchel batch rollup")
+        for i, row in enumerate(rows)
+    }
+    app = _PickerHost(rows, digests)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+
+        ran: list[str] = []
+        real = screen._soft_index.search
+
+        def counting(digests_arg, query):
+            ran.append(query)
+            return real(digests_arg, query)
+
+        screen._soft_index.search = counting  # type: ignore[method-assign]
+
+        typed = ""
+        for key in "watchl":
+            await pilot.press(key)
+            await pilot.pause()
+            typed += key
+            # The gate is NAME/ID hits, not any exact hit. Gating on any hit
+            # (which includes body substrings) is what destroyed typo recall:
+            # one unrelated conversation mentioning the query silenced the tier
+            # for the whole store. Computed the way the widget computes it so
+            # the two cannot drift.
+            precise = [row for row in rows if typed in row.name.lower() or typed in row.id.lower()]
+            if precise:
+                assert typed not in ran, f"soft tier ran at {typed!r} despite a name/id hit"
+            else:
+                assert typed in ran, f"soft tier did not run at {typed!r} with no name/id hit"
+
+
+def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> None:
+    """The paging hint was offered where paging does nothing and withdrawn where
+    it is the fastest way through the list.
+
+    A scrolling list is also long enough to contain a marked row, so the legend
+    shed `pgup/pgdn` to make room for itself. Uncapping the store made that the
+    normal case rather than the rare one (design round 1, D3).
+    """
+    width = 62  # narrow enough that legend and paging cannot both fit
+
+    not_scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=False)]
+    scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=True)]
+
+    assert _MARKER_LEGEND[0] in not_scrolling, "the legend should win when nothing scrolls"
+    assert "pgup/pgdn" not in not_scrolling
+
+    assert "pgup/pgdn" in scrolling, "paging must survive when the list actually pages"
+    assert _MARKER_LEGEND[0] not in scrolling
+
+    # A wide card keeps both regardless: the reorder is a shed policy, not a
+    # removal, so nothing is lost when there is room for everything.
+    wide = [key for key, _ in _footer_hints(100, has_marked=True, scrolls=True)]
+    assert "pgup/pgdn" in wide and _MARKER_LEGEND[0] in wide
+
+
+def test_the_paging_hint_survives_on_a_plain_scrolling_list() -> None:
+    """The same rule on the UNMARKED branch, which is the common one.
+
+    The first version of this fix consulted ``scrolls`` only inside
+    ``if has_marked:``, so a plain scrolling picker still shed ``pgup/pgdn``
+    first at 60 and 66 columns. Uncapping the store makes the bare scrolling
+    picker the DEFAULT state, so that was the usual case rather than an edge.
+    """
+    for width in (56, 60, 66):
+        scrolling = [key for key, _ in _footer_hints(width, has_marked=False, scrolls=True)]
+        assert "pgup/pgdn" in scrolling, f"paging hint dropped at width {width}: {scrolling}"
+
+    # A list that fits on one page may still shed it first: there is nothing to
+    # page through, so the hint is the least useful thing on the row.
+    settled = [key for key, _ in _footer_hints(60, has_marked=False, scrolls=False)]
+    assert "pgup/pgdn" not in settled
+
+
+def test_the_empty_state_footer_offers_only_what_works() -> None:
+    """A filter that matched nothing has no rows to move through, page, or
+    resume, so advertising those keys names actions that do nothing.
+
+    `backspace` is what widens the query and is the key a user in this state is
+    already reaching for; `esc` stays because leaving is still available.
+    """
+    hints = _footer_hints(100, empty=True)
+    keys = [key for key, _ in hints]
+    assert keys == ["backspace", "esc"], keys
+
+    # Fits the narrow cards too, where the tally has already shed.
+    for width in (50, 56, 60):
+        assert [key for key, _ in _footer_hints(width, empty=True)] == ["backspace", "esc"]
+
+    # And the populated footer is untouched.
+    populated = [key for key, _ in _footer_hints(100, empty=False)]
+    assert "↑↓" in populated and "enter" in populated

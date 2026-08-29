@@ -934,23 +934,6 @@ class _TerminalFrontendReaper:
 #: silently demote the press back to a no-op.
 DOUBLE_STOP_WINDOW_S = 4.0
 
-#: Sessions the ``/resume`` picker offers. Higher than the recovery listing's
-#: ten because the picker can scroll and filter, and a conversation from a
-#: fortnight ago is exactly the one worth searching for.
-#:
-#: Raised from 50 to cover the whole store a retention sweep is willing to
-#: keep (``retention.DEFAULT_MAX_SESSIONS`` is 200). At 50 the picker silently
-#: hid every session past the newest fifty — on the reporting machine, 20 of
-#: 70 — so a search that should have found a conversation returned nothing and
-#: the session was indistinguishable from one that had been deleted. A filter
-#: that cannot see a row cannot find it, and "not found" is the one answer a
-#: search must not give wrongly.
-#:
-#: Affordable because the per-row cost is bounded (one tail read for the title,
-#: one cached digest lookup): measured at 10 ms for 50 rows and 36 ms for a
-#: full 204-session store, both inside a frame.
-RESUME_PICKER_LIMIT = 200
-
 #: The working line's PHASE while a turn is parked on something the USER owes —
 #: a tool-approval prompt, or an `ask` picker waiting for a decision. One phase
 #: for both because the two waits are the same fact to every surface that reads
@@ -3948,7 +3931,26 @@ class OperatorApp(App[None]):
             return
 
         if not arg:
-            rows = recent_session_rows(config_dir(), limit=RESUME_PICKER_LIMIT)
+            # UNCAPPED, deliberately. Every finite cap reproduces the bug it was
+            # meant to bound: the picker's filter only ever sees the rows it was
+            # handed (``session_picker.filter_rows`` scans ``_all``), so a
+            # session past the cap is not merely off-screen, it is unfindable
+            # and indistinguishable from one that was deleted. The previous
+            # limit of 200 was justified by a retention sweep that no longer
+            # exists (``retention`` never deletes a transcript since 4173ec73),
+            # and the store had already grown past it, hiding 30 of the
+            # reporting machine's 230 sessions. Affordable because the scan is
+            # limit-independent (see ``resume.recent_sessions``) and the counter
+            # below becomes truthful as a consequence: ``_all`` is now the
+            # store's real total rather than a number that never says it is one.
+            #
+            # ``limit=None`` is passed EXPLICITLY rather than left to the
+            # default. Relying on the default is what shipped this surface with
+            # a cap of ten: the signature defaulted to ``10``, this line said
+            # nothing, and "uncapped" was true only in the comment above. The
+            # argument is now visible at the call site, so the claim and the
+            # code can be checked against each other in one place.
+            rows = recent_session_rows(config_dir(), limit=None)
             if not rows:
                 # Says whose sessions, not that the disk is empty. Delegated
                 # subagent runs live in the same directory and are deliberately
