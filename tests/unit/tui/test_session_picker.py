@@ -1499,18 +1499,25 @@ async def test_the_soft_tier_runs_only_when_the_exact_tiers_find_nothing() -> No
 
         screen._soft_index.search = counting  # type: ignore[method-assign]
 
-        # One exact hit is enough to suppress the tier, even though the result
-        # is far short of a page — the old gate would have run it here.
-        screen.set_query("classifier")
-        await pilot.pause()
+        # Typed, not set: the gate is decided across a typing RUN, so setting a
+        # whole query at once cannot observe it. That shape is what let a tier
+        # that never ran be validated as working (F10).
+        for key in "classifier":
+            await pilot.press(key)
+            await pilot.pause()
         assert len(screen.visible_rows) == 1
-        assert calls == [], "the soft tier ran despite an exact hit"
+        assert calls == [], "the soft tier ran while the exact tiers had a hit"
 
-        # No exact hit anywhere: the tier runs and rescues the typo.
-        screen.set_query("classifer")
-        await pilot.pause()
+        # Backspace to a shorter query, then type a typo: no exact hit anywhere,
+        # so the tier latches on and rescues it.
+        for _ in range(3):  # back to "classi"
+            await pilot.press("backspace")
+            await pilot.pause()
+        for key in "fer":
+            await pilot.press(key)
+            await pilot.pause()
         assert [r.id for r in screen.visible_rows] == ["aaa1"]
-        assert calls == ["classifer"], "the soft tier did not run for a typo"
+        assert calls, "the soft tier did not run for a typo"
 
 
 def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> None:
