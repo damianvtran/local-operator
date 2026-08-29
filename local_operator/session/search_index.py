@@ -160,6 +160,33 @@ def digest_transcript(transcript: Path) -> str:
     Returns ``""`` for anything unreadable. A session that cannot be digested
     is still listed and still searchable by name and id — losing its body from
     the index must never cost it its row.
+
+    Callers that CACHE the result want :func:`digest_transcript_read` instead,
+    which distinguishes "this transcript has no indexable prose" from "this
+    transcript could not be read". Both are ``""`` here, and memoising the
+    second against a signature that has not changed drops a session's body from
+    search permanently.
+    """
+    digest, _readable = digest_transcript_read(transcript)
+    return digest
+
+
+def digest_transcript_read(transcript: Path) -> tuple[str, bool]:
+    """:func:`digest_transcript`'s digest, plus whether the file was READ.
+
+    Exists for the same reason ``resume._session_origin_read`` does, and guards
+    the same class of bug in the other cache. ``build_index`` keys an entry on
+    the transcript's ``(size, mtime)``; a read that fails for a transient reason
+    — EMFILE under the descriptor pressure a full-store scan creates, a network
+    volume blip, a permissions change — yields ``""`` while leaving that
+    signature untouched. Cached, it is served for as long as the file is
+    unmodified, so the session stays body-unsearchable long after the failure
+    is over. Reproduced: readable -> unreadable -> readable-again still returned
+    ``""``.
+
+    ``readable=False`` is how :func:`build_index` tells the two apart and
+    declines to cache the second. An empty digest from a transcript that WAS
+    read is a fact about its contents and is cached normally.
     """
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
@@ -169,7 +196,7 @@ def digest_transcript(transcript: Path) -> str:
             # allocated whole by the very loop meant to bound it.
             head = handle.read(SCAN_BYTES)
     except OSError:
-        return ""
+        return "", False
     parts: list[str] = []
     size = 0
     for line in head.splitlines():
@@ -195,8 +222,8 @@ def digest_transcript(transcript: Path) -> str:
                 # Stop reading as soon as the cap is reached rather than
                 # collecting everything and slicing at the end: the slice would
                 # still have paid to build the discarded remainder.
-                return " ".join(" ".join(parts).split())[:DIGEST_CHARS]
-    return " ".join(" ".join(parts).split())[:DIGEST_CHARS]
+                return " ".join(" ".join(parts).split())[:DIGEST_CHARS], True
+    return " ".join(" ".join(parts).split())[:DIGEST_CHARS], True
 
 
 def _texts(content: object) -> list[str]:
@@ -353,8 +380,20 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
             # names always survive the DIGEST_CHARS cap the opening stretch would
             # otherwise fill.
             names = read_title_names(session_dir)
-            body = digest_transcript(transcript)
+            body, readable = digest_transcript_read(transcript)
             digest = " ".join([*names, body]).strip()[: DIGEST_CHARS + TITLE_HEADROOM]
+            if not readable:
+                # The transcript could not be READ, which says nothing about its
+                # contents and everything about this moment. The signature is
+                # unchanged, so caching the empty body would serve it until the
+                # file is next modified — dropping the session from body search
+                # permanently after one transient EMFILE or volume blip. Serve
+                # the degraded digest for this call (the folded titles still
+                # make the row findable) and leave the cache alone so the next
+                # open re-reads. Same rule as ``resume._session_origin_read``.
+                digests[session_id] = digest
+                entries.pop(session_id, None)
+                continue
         entries[session_id] = {"signature": signature, "digest": digest}
         digests[session_id] = digest
     if entries != cached:
