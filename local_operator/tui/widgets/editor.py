@@ -3378,9 +3378,10 @@ class Editor(TextArea):
           to protect. On an empty composer it protected nothing and swallowed a
           genuine interrupt, chainably (R3-1).
         * **Retired eagerly.** :meth:`retire_barren_click` drops it at every
-          seam that ends the gesture — an edit, a submit, a blur, a turn
-          starting — rather than waiting for the window. The window bounds how
-          long the claim can be wrong; it does not stop it being wrong (R3-3).
+          seam that ends the gesture — an edit, a whole-buffer replacement, a
+          submit, a blur, a turn starting — rather than waiting for the window.
+          The window bounds how long the claim can be wrong; it does not stop it
+          being wrong (R3-3, and R4-1 for the replacement seam).
         """
         at = self._barren_click_at
         return at is not None and (time.monotonic() - at) < BARREN_CLICK_WINDOW_S
@@ -3402,10 +3403,12 @@ class Editor(TextArea):
         round 3, R3-3).
 
         So it retires wherever the gesture provably ended: a document edit (the
-        hand is on the keyboard, the click is over), a submit (the composer it
-        described has been emptied and a turn has started), a blur, and a turn
-        starting under it. Each of those makes the next Ctrl+C mean something
-        the click cannot speak for.
+        hand is on the keyboard, the click is over), a whole-buffer replacement
+        (:meth:`load_text` — the funnel ``edit()`` does NOT run for, so history
+        recall and a compaction hand-back reach it and nothing else, R4-1), a
+        submit (the composer it described has been emptied and a turn has
+        started), a blur, and a turn starting under it. Each of those makes the
+        next Ctrl+C mean something the click cannot speak for.
         """
         self._barren_click_at = None
         # The near-miss bookkeeping is half of the same claim: leaving the first
@@ -3999,6 +4002,15 @@ class Editor(TextArea):
         self._copied = False
         self._copy_gesture = False
         self._copied_selection = None
+        # The FIFTH retirement seam, for the same reason the receipt is stood
+        # down here: this funnel bypasses ``edit()`` entirely, so the keystroke
+        # seam never runs for it. A barren claim raised just before an Up-arrow
+        # history recall, a ``/clear``, or a compaction/aside/steer hand-back
+        # therefore survived a whole-buffer swap and absorbed the next Ctrl+C —
+        # aimed at text the click had never seen (agent review round 4, R4-1).
+        # One no-op press rather than a lost draft, but the claim is wrong the
+        # instant the buffer it described is gone, so it ends here too.
+        self.retire_barren_click()
         super().load_text(text)
         # Suppressed by :meth:`_set_text_and_caret`, which moves the caret AFTER
         # this returns and then syncs ONCE at the final position. Without the

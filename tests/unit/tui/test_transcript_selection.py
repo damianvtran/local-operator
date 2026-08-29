@@ -4448,7 +4448,7 @@ async def test_a_barren_click_never_swallows_an_interrupt_on_an_empty_composer()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("seam", ["keystroke", "blur"])
+@pytest.mark.parametrize("seam", ["keystroke", "blur", "load_text", "history_recall", "submit"])
 async def test_the_barren_claim_retires_when_the_gesture_ends(seam: str) -> None:
     """The claim is gesture-scoped, so it ends when the gesture demonstrably does.
 
@@ -4457,6 +4457,14 @@ async def test_the_barren_claim_retires_when_the_gesture_ends(seam: str) -> None
     typing and survived the composer losing focus, and the next Ctrl+C was
     absorbed on the strength of a gesture that was over (agent review round 3,
     R3-3).
+
+    Parametrised over EVERY seam rather than the two that were cheapest to
+    drive. Covering only the keystroke and the blur is what let the fifth seam
+    ship missing: ``load_text`` is a mutation funnel ``edit()`` never runs for,
+    so no keystroke-shaped test can reach it, and the sweep passed with the gap
+    open (agent review round 4, R4-2). ``history_recall`` drives that funnel the
+    way a user does — ``self.text = ...`` from the Up arrow — so the case is
+    pinned at the product path and not only at the method.
     """
     app = _pilot_app()
     async with app.run_test(size=(80, 24)) as pilot:
@@ -4465,13 +4473,34 @@ async def test_the_barren_claim_retires_when_the_gesture_ends(seam: str) -> None
         editor.focus()
         await pilot.pause()
 
-        await _composer_multi_click(app, pilot, editor, 0, times=2, row=0)
+        if seam == "history_recall":
+            # A recallable entry has to exist BEFORE the claim is raised, or the
+            # Up arrow is a no-op and the test passes for the wrong reason.
+            for character in "earlier prompt":
+                await pilot.press(character if character != " " else "space")
+            await pilot.press("enter")
+            for _ in range(6):
+                await pilot.pause()
+
+        row = editor.document.line_count - 1
+        await _composer_multi_click(app, pilot, editor, 0, times=2, row=row)
         assert editor.barren_multi_click, "the barren gesture was not recorded"
 
         if seam == "keystroke":
             await pilot.press("n")
-        else:
+        elif seam == "blur":
             editor.blur()
+        elif seam == "load_text":
+            editor.load_text("replaced wholesale")
+        elif seam == "history_recall":
+            await pilot.press("up")
+            assert (
+                editor.text == "earlier prompt"
+            ), f"the Up arrow did not recall, so the seam was never crossed: {editor.text!r}"
+        else:
+            await pilot.press("enter")
+            for _ in range(6):
+                await pilot.pause()
         await pilot.pause()
 
         assert (
