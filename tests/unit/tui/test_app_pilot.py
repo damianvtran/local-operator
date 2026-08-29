@@ -7083,7 +7083,10 @@ async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command(
         await pilot.pause()
         text = _transcript_text(app)
     assert _unwrapped("this session") in _unwrapped(text), text
-    assert _unwrapped("/model default") in _unwrapped(text), text
+    # #369 repointed the persist breadcrumb at the picker's `d` affordance, so
+    # the receipt names PERSIST_HINT rather than the old `/model default`
+    # spelling whose elided form no longer writes.
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(text), text
     # The access clause is unchanged by the new one sharing the line.
     assert _unwrapped("anthropic logged in") in _unwrapped(text), text
 
@@ -7334,7 +7337,9 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     # keeps it to two wrapped lines at the widths this app supports. Folding the
     # timing into the scope parenthetical measured three.
     assert _unwrapped("(this session)") in text, text
-    assert _unwrapped("/model default") in text, text
+    # #369: the persist breadcrumb is PERSIST_HINT's `d` affordance now, not the
+    # old `/model default` spelling.
+    assert _unwrapped(PERSIST_HINT) in text, text
     # SAME INK as the receipt it qualifies (design review D3). At `note` the
     # subordinate row measured 8.62:1 against the receipt's 4.55:1 and the eye
     # landed on the qualifier first; the token is asserted rather than the
