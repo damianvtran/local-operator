@@ -3992,7 +3992,7 @@ class Editor(TextArea):
         """
         self.suggestion = self._ghost_completion(name)
 
-    def _on_resize(self, event: events.Resize) -> None:
+    def _on_resize(self) -> None:
         """Re-check the width gate when the composer's width changes.
 
         Gate 2's answer is a function of the terminal width, and nothing else
@@ -4003,9 +4003,11 @@ class Editor(TextArea):
         correctly withheld at 18 columns did not come back on widening until
         the user typed another character (review round 1, U4).
 
-        Cheap and idempotent, so it needs no guard. The event is deliberately
-        not stopped — the base class re-wraps on it.
+        Cheap and idempotent, so it needs no guard. ``super()`` first because
+        the base class re-wraps here, and the gate measures against the wrapped
+        geometry.
         """
+        super()._on_resize()
         self._sync_ghost()
 
     def action_cursor_right(self, select: bool = False) -> None:

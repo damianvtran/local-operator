@@ -25,10 +25,9 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
-from local_operator.tui.app import OperatorApp
 from textual.widgets.text_area import Selection
 
+from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from tests.unit.tui.test_app_pilot import (
     FakeMcpManager,
