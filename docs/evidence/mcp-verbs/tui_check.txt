@@ -12,8 +12,8 @@ MCP servers
 --- global mcp.json now: ['demo-stdio', 'filesystem', 'grafana', 'linear']
 
 === /mcp add demo-http https://demo.example/mcp
-✓ added MCP server 'demo-http' to ~/.local-operator/mcp.json — /mcp login demo-http if it
-    needs OAuth
+✓ added MCP server 'demo-http' to ~/.local-operator/mcp.json — needs OAuth? re-add it with:
+    lop mcp add demo-http --url https://demo.example/mcp --oauth
 --- global mcp.json now: ['demo-http', 'demo-stdio', 'filesystem', 'grafana', 'linear']
 
 === /mcp add demo-stdio npx
