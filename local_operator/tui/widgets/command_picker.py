@@ -507,7 +507,58 @@ def completion_for(
     # and Tab would appear to fill the field and abandon it in one keystroke.
     suffix = " " if mode is CompletionMode.NAME_ARGUMENT else ""
     filled = f"{text[: argument.start]}{row_name}{suffix}{text[argument.end :]}"
-    return filled, argument.start + len(row_name) + len(suffix)
+    caret_after = argument.start + len(row_name) + len(suffix)
+    if mode is CompletionMode.NAME_ARGUMENT:
+        # INLINE ENGAGE. When a draft survives outside the command token,
+        # ``Editor._complete_name_argument`` does NOT stop at the span
+        # replacement above: it hands off to ``_reassemble_prompt_command``,
+        # which moves the whole ``/<cmd> <name>`` construct to the FRONT of the
+        # buffer with the surviving draft as its message. That second edit has
+        # to be modelled HERE, in the one function both Tab and the ghost read,
+        # or the ghost describes an edit that never happens — it previewed a
+        # dimmed append while Tab reordered the entire buffer (review round 1,
+        # B1). Modelling it rather than special-casing the renderer is what
+        # keeps "one function, one answer" true; a renderer-side exception
+        # would reintroduce exactly the two-implementations drift this shared
+        # helper exists to prevent.
+        #
+        # The result is deliberately NOT an append, so ``ghost_for``'s
+        # ``startswith`` rule withholds the ghost of its own accord. That is
+        # the honest outcome: no string appended at the caret can describe a
+        # whole-buffer reordering, the same reason a fuzzy match shows nothing.
+        outside = (text[: argument.token_start] + text[argument.end :]).strip()
+        if outside:
+            return _reassembled_completion(filled, caret_after, known)
+    return filled, caret_after
+
+
+def _reassembled_completion(
+    filled: str, caret: int, known: frozenset[str]
+) -> tuple[str, int] | None:
+    """Apply the inline reassembly to an already-filled NAME_ARGUMENT buffer.
+
+    Mirrors ``Editor._reassemble_prompt_command`` on the FILLED text, which is
+    the state that method actually runs against (the name is in place before
+    the token span is recomputed). Kept beside :func:`completion_for` so the
+    prediction and the edit are read together and cannot drift apart.
+    """
+    span = slash_token_span(filled, caret, known)
+    if span is None:
+        return None
+    token_start, token_end = span
+    command = filled[token_start:token_end].strip()
+    # One adjoining separator goes with the token, matching the splice rule so
+    # ``msg /goal`` and ``/goal\nmsg`` both collapse to just ``msg``. The
+    # PRECEDING separator is preferred; the following one is taken only when
+    # the token opened the buffer.
+    start, end = token_start, token_end
+    if start > 0 and filled[start - 1] in " \t\n":
+        start -= 1
+    elif end < len(filled) and filled[end] in " \t\n":
+        end += 1
+    rest = (filled[:start] + filled[end:]).strip()
+    assembled = f"{command} {rest}" if rest else f"{command} "
+    return assembled, len(assembled)
 
 
 def ghost_for(completion: tuple[str, int] | None, text: str) -> str:

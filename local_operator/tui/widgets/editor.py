@@ -4128,29 +4128,24 @@ class Editor(TextArea):
         if context is None:
             return
         # Fill the name+space through the shared helper (see
-        # :meth:`_apply_command`), which replaces the argument SPAN rather than
-        # the buffer tail so a trailing inline message survives. The context is
-        # still read here because the INLINE branch below needs its token span.
-        text = self.text
+        # :meth:`_apply_command`). ``completion_for`` models BOTH edits this
+        # completion can make — the span replacement, and the inline
+        # reassembly that moves the whole construct to the front when a draft
+        # survives outside the token — so the buffer this writes is the exact
+        # buffer the ghost predicted (review round 1, B1). Reading the answer
+        # from there rather than recomputing the reassembly here is what makes
+        # that guarantee structural instead of a coincidence of two edits
+        # happening to agree.
+        # An INLINE engage (a draft outside the token) therefore arrives here
+        # already reassembled, and is STAGED rather than submitted — the user
+        # reads the assembled line and presses Enter themselves.
+        # ``_set_text_and_caret`` re-derives the pickers either way, so the
+        # command word paints as recognised and a list-taking command opens its
+        # argument list.
         completed = self._completion_for(CompletionMode.NAME_ARGUMENT, name)
         if completed is None:
             return
-        filled, caret = completed
-        # If a draft survives outside the command token, this is an INLINE engage:
-        # reassemble to the front rather than leaving the command mid-draft. The
-        # name is already filled, so the token now reads ``/team <name>``; the
-        # reassembly moves it to the front with the rest of the draft appended.
-        outside = (text[: context.token_start] + text[context.end :]).strip()
-        if outside:
-            # Recompute the token span on the FILLED text (the name changed its
-            # length) and reassemble from there.
-            self.text = filled
-            self.move_cursor(self._location_at_offset(caret))
-            span = slash_token_span(self.text, caret, self._command_names)
-            if span is not None:
-                self._reassemble_prompt_command(*span)
-            return
-        self._set_text_and_caret(filled, caret)
+        self._set_text_and_caret(*completed)
 
     def _extend_to_common_prefix(self) -> None:
         """Grow the typed word to the matches' longest common prefix, no further.
