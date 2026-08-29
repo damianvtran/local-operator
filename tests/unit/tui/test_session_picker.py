@@ -25,7 +25,6 @@ from local_operator.resume import (
     recent_session_rows,
     session_name,
 )
-from local_operator.session.search_index import search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     _MARKER_LEGEND,
@@ -1513,13 +1512,16 @@ async def test_the_soft_tier_runs_only_when_the_exact_tiers_are_empty() -> None:
             await pilot.press(key)
             await pilot.pause()
             typed += key
-            # Whether the cheap tiers answered THIS query, computed the way the
-            # widget computes it rather than re-derived from the fixture.
-            exact = filter_rows(rows, typed, search_digests(digests, typed))
-            if exact:
-                assert typed not in ran, f"soft tier ran at {typed!r} despite exact hits"
+            # The gate is NAME/ID hits, not any exact hit. Gating on any hit
+            # (which includes body substrings) is what destroyed typo recall:
+            # one unrelated conversation mentioning the query silenced the tier
+            # for the whole store. Computed the way the widget computes it so
+            # the two cannot drift.
+            precise = [row for row in rows if typed in row.name.lower() or typed in row.id.lower()]
+            if precise:
+                assert typed not in ran, f"soft tier ran at {typed!r} despite a name/id hit"
             else:
-                assert typed in ran, f"soft tier did not run at {typed!r} with no exact hits"
+                assert typed in ran, f"soft tier did not run at {typed!r} with no name/id hit"
 
 
 def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> None:
