@@ -485,3 +485,149 @@ async def test_dispose_does_not_leak_an_in_flight_pass(tmp_path, monkeypatch):
 
     assert session._pending_compaction is None
     assert not [task for task in session._background_tasks if not task.done()]
+
+
+# --- A HINT MUST NOT DIVERT A GENUINE CEILING BREACH ----------------------
+#
+# Agent review round 4, MAJOR-1. The routing used to test "is a hint in hand",
+# and justified deferring on the premise that an advisory pass is "by
+# definition below the configured threshold". Nothing enforces that:
+# `_maybe_spawn_advisor` gates on a LOWER bound only, so a usable hint can sit
+# in the slot while the context is genuinely over the ceiling. `should_compact`
+# then fires on size alone, the plan carries the hint, and the one pass that is
+# not supposed to be deferrable was deferred.
+
+
+@pytest.mark.asyncio
+async def test_a_ceiling_breach_with_a_hint_pending_still_runs_synchronously(tmp_path, monkeypatch):
+    """THE round-4 regression, at the reviewer's reproduction size.
+
+    700k against a 600k trigger, with one usable hint seeded. The hint is real
+    and usable; the context is over the ceiling anyway, so the pass must
+    relieve the turn NOW rather than being handed to the background.
+    """
+    stream = SlowSummaryStream()
+    session = make_session(tmp_path, stream=stream)
+    await talk(session)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    pin_measured_context(monkeypatch, 700_000)
+    seed_hint(session)
+
+    # Pinned open, so a SYNCHRONOUS pass cannot complete the boundary. If the
+    # boundary returns anyway, the ceiling was routed to the background.
+    stream.gate = asyncio.Event()
+    boundary = asyncio.ensure_future(drive_boundary(session, 700_000))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(boundary), timeout=0.5)
+
+    assert stream.summary_calls == 1, "no summarization was started at the ceiling"
+    assert not session._compaction_pass_in_flight, (
+        "a genuine ceiling breach was deferred to the background because a hint "
+        "happened to be pending — the safety net became asynchronous"
+    )
+
+    stream.gate.set()
+    await asyncio.wait_for(boundary, timeout=5.0)
+    ends = [event for event in events if isinstance(event, CompactionEndEvent)]
+    assert ends and ends[-1].success, "the ceiling pass never committed"
+    assert session._pending_compaction is None
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_small_window_at_its_ceiling_is_relieved_on_the_turn(tmp_path, monkeypatch):
+    """The reviewer's second shape: 195k of a 200k window, hint pending.
+
+    Here the synchronous pass is the only thing between the turn and an
+    overflow, and the absolute 600k knob is irrelevant — the resolved trigger
+    is the PERCENTAGE of a small window. Routing must read the same resolved
+    number the gate does, not a hard-coded ceiling.
+    """
+    small = ModelSpec(provider="test", model_id="small", context_window=200_000)
+    stream = SlowSummaryStream()
+    session = Session(
+        model=small,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+        compaction_settings=advisor_settings(
+            # Inside the advisor's own band for this window, so a hint is
+            # legitimately in hand at the same time the ceiling is breached.
+            advisor_trigger_tokens=100_000,
+            advisor_floor_tokens=120_000,
+        ),
+    )
+    await talk(session)
+    pin_measured_context(monkeypatch, 195_000)
+    seed_hint(session)
+
+    stream.gate = asyncio.Event()
+    boundary = asyncio.ensure_future(drive_boundary(session, 195_000))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(boundary), timeout=0.5)
+
+    assert (
+        not session._compaction_pass_in_flight
+    ), "a 200k-window session at 195k deferred its relief and continued unrelieved"
+    stream.gate.set()
+    await asyncio.wait_for(boundary, timeout=5.0)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_ceiling_boundaries_are_never_starved(tmp_path, monkeypatch):
+    """The reviewer's third shape: the deferral must not SUSTAIN.
+
+    With the provider slow and hints arriving, the old routing deferred every
+    ceiling boundary and committed nothing across five of them, because the
+    spawn refuses to queue and the caller deliberately does not fall through.
+    Each ceiling boundary must instead do the pass itself.
+    """
+    stream = SlowSummaryStream(delay=0.05)
+    session = make_session(tmp_path, stream=stream)
+    await talk(session)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    pin_measured_context(monkeypatch, 700_000)
+
+    committed = 0
+    for _ in range(5):
+        seed_hint(session)
+        await asyncio.wait_for(drive_boundary(session, 700_000), timeout=10.0)
+        committed = len([e for e in events if isinstance(e, CompactionEndEvent) and e.success])
+        if committed:
+            break
+
+    assert committed, (
+        "five consecutive ceiling boundaries at 700k committed no pass at all — "
+        "the ceiling is being starved by the asynchronous path"
+    )
+    await settle_background(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_sub_ceiling_advisory_pass_still_goes_to_the_background(tmp_path, monkeypatch):
+    """The fix must not close the async path it exists to open.
+
+    Same session, same hint, context genuinely BELOW the trigger: this is the
+    case the feature is for, and it must still defer.
+    """
+    stream = SlowSummaryStream()
+    session = make_session(tmp_path, stream=stream)
+    await talk(session)
+    pin_measured_context(monkeypatch, 400_000)
+    seed_hint(session)
+
+    stream.gate = asyncio.Event()
+    await asyncio.wait_for(drive_boundary(session, 400_000), timeout=5.0)
+
+    assert session._compaction_pass_in_flight, (
+        "a sub-ceiling advisory pass was made synchronous — the fix for MAJOR-1 "
+        "has closed the path the feature exists to open"
+    )
+    stream.gate.set()
+    await settle_background(session)
+    await session.dispose()

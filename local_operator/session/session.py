@@ -5358,19 +5358,26 @@ class Session:
             # a background pass just landed, or the run accumulator keeps the
             # history the pass removed and the next request re-sends it.
             return list(self._context.messages) if applied else None
-        if planned.advisor_hint is not None:
-            # Advisor-triggered: the pass runs off the turn and applies at a
-            # later boundary. The context is unchanged right now, so the loop
-            # continues on exactly the history it already holds.
+        if planned.advisor_hint is not None and self._pass_may_run_off_the_turn(planned):
+            # An EARLY pass, on advice, with the context still below the
+            # ordinary trigger: nothing is forcing relief, so it runs off the
+            # turn and applies at a later boundary. The context is unchanged
+            # right now, so the loop continues on the history it already holds.
+            #
+            # Both conditions are load-bearing. A hint alone is NOT enough to
+            # defer (round 4, MAJOR-1): a hint can be in hand while the context
+            # is genuinely over the ceiling, and deferring there is exactly the
+            # safety net becoming asynchronous. ``_pass_may_run_off_the_turn``
+            # asks the resolved trigger itself, so an over-ceiling context
+            # falls through to the synchronous pass below.
             #
             # A spawn REFUSED (one already in flight) skips the pass rather
-            # than falling back to the inline one. An advisory pass fires below
-            # the configured threshold by construction, so nothing is forcing
-            # relief and there is no reason to make the user wait for a
-            # summarization call — falling through would reintroduce exactly
-            # the stall this path removes, and at the worst moment: a boundary
-            # that already has a pass running. The hint was consumed, and the
-            # advisor produces another when it next runs.
+            # than falling back to the inline one. Below the trigger nothing is
+            # forcing relief, so making the user wait for a summarization call
+            # would reintroduce exactly the stall this path removes, at the
+            # worst moment: a boundary that already has a pass running. The
+            # hint was consumed, and the advisor produces another when it next
+            # runs.
             self._spawn_compaction_pass(planned, reason="mid-turn")
             return list(self._context.messages) if applied else None
         outcome = await self._run_compaction(planned, reason="mid-turn")
@@ -5420,14 +5427,17 @@ class Session:
             # The automatic path has nobody to tell — a turn that did not need
             # compacting must not narrate that fact every time.
             return
-        if planned.advisor_hint is not None:
-            # Advisor-triggered, so by definition BELOW the configured
-            # threshold: nothing is forcing relief right now and the next turn
-            # can safely start on the uncompacted context. The auto-continue
-            # bookkeeping below belongs to the pass and runs when it applies.
-            # A refused spawn skips the pass for the reason the mid-turn gate
-            # spells out: an inline fallback here is the stall this path
-            # exists to remove.
+        if planned.advisor_hint is not None and self._pass_may_run_off_the_turn(planned):
+            # Advisory AND genuinely below the configured trigger: nothing is
+            # forcing relief right now and the next turn can safely start on
+            # the uncompacted context. The auto-continue bookkeeping below
+            # belongs to the pass and runs when it applies. A refused spawn
+            # skips the pass for the reason the mid-turn gate spells out: an
+            # inline fallback here is the stall this path exists to remove.
+            #
+            # A hint in hand does NOT by itself mean the context is below the
+            # trigger (round 4, MAJOR-1); when it is not, this falls through to
+            # the synchronous pass, which is the safety net and must stay so.
             self._spawn_compaction_pass(planned, reason="context-window")
             return
         outcome = await self._run_compaction(planned, reason="context-window")
@@ -6140,11 +6150,55 @@ class Session:
             await self._emit(CompactionEndEvent(reason=reason, success=False))
             return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
 
+    def _pass_may_run_off_the_turn(self, plan: _CompactionPlan) -> bool:
+        """Whether THIS pass may be deferred, or must relieve the turn now.
+
+        The async path exists for a pass that fires EARLY, on advice, while the
+        context is still comfortably below the configured trigger: nothing is
+        forcing relief, so nobody should wait for a summarization call. The
+        moment the context is genuinely at or above the ordinary ceiling that
+        reasoning inverts — the turn cannot safely continue, and the pass is
+        the only thing standing between it and an overflow.
+
+        The routing therefore asks the ACTUAL CONDITION rather than "is a hint
+        in hand". Those are not the same question, and agent review round 4
+        (MAJOR-1) is what proved it: ``_maybe_spawn_advisor`` gates only on a
+        LOWER bound (``advisor_trigger_tokens``), and ``_advisory_is_usable``
+        checks ``compact_now`` and freshness only, so nothing stops a usable
+        hint from being in hand while the context sits over the ceiling.
+        ``should_compact`` then returns True on size ALONE, the plan carries an
+        ``advisor_hint``, and a hint-presence test routed a genuine breach into
+        the background: reproduced at 700k against a 600k trigger with zero
+        synchronous passes, and sustained across five consecutive ceiling
+        boundaries while the provider was slow. The comments here used to
+        assert this could not happen, which is worse than the bug: a reader
+        trusts an invariant the code never enforced.
+
+        Asked through the SAME resolver the gate itself uses, with
+        ``advisory_ok=False`` so the question is exactly "would this context
+        have compacted without any advice?". That is deliberately not a second
+        notion of the ceiling — there is one resolved trigger
+        (``compaction.thresholds.should_compact``) and this reads it, so the
+        two can never drift.
+        """
+        return not _should_compact(
+            plan.compaction_api,
+            plan.context_tokens,
+            self.effective_model.context_window,
+            plan.settings,
+            False,
+        )
+
     def _spawn_compaction_pass(self, plan: _CompactionPlan, *, reason: str) -> None:
         """Run an ADVISOR-triggered pass off the turn, awaiting nothing.
 
-        Declining is a full answer, never a fall-back to the inline pass: an
-        advisory pass fires below the configured threshold, so skipping one
+        Reached ONLY for a pass the callers have already established may be
+        deferred — advisory AND below the ordinary trigger
+        (:meth:`_pass_may_run_off_the_turn`). An over-ceiling context never
+        arrives here; it takes the synchronous pass, which is the safety net.
+
+        Given that, declining is a full answer and never a fall-back to the
+        inline pass: below the trigger nothing is forcing relief, so skipping
         costs a later trigger while running one inline costs the user a
         summarization call mid-conversation — the stall this whole path
         removes. The callers therefore return either way.
