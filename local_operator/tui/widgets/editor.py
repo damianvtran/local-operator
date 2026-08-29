@@ -1053,7 +1053,77 @@ class Editor(TextArea):
         # the same cells: a marker opens with `[` and lives in the message tail,
         # the command word and name open with `/` on line 0 — so order is
         # immaterial for correctness (see :meth:`_paint_slash`).
-        return self._paint_slash(self._paint_markers(super().render_line(y), y), y)
+        return self._paint_ghost_caret(
+            self._paint_slash(self._paint_markers(super().render_line(y), y), y), y
+        )
+
+    def _paint_ghost_caret(self, strip: Strip, y: int) -> Strip:
+        """Move the caret block OFF the ghost, onto the last typed cell.
+
+        Textual inserts the suggestion AT ``cursor_column`` and then paints the
+        caret over that same cell, so the composer's opaque block
+        (``text-area--cursor``, an inverted ground) landed on the ghost's FIRST
+        character. Two consequences, one cause (design review round 1, D1/D2):
+
+        * every command's completion ends in a trailing space, so a fully typed
+          command (`/mcp`) has the one-character ghost `' '` — entirely under
+          the block, drawing ZERO dim pixels. The feature was invisible in the
+          state every user passes through on the way to Enter;
+        * a longer ghost split into a bright inverted cell and a dim tail
+          (`/mcp login n` painting `o` inverted then `tion` grey), which reads
+          as one errored character rather than as a caret.
+
+        The block itself is deliberate and load-bearing elsewhere — the boot
+        composer, the read-only composer and the attachment chip all assert an
+        inverted caret cell — so it is kept exactly as it is and MOVED instead:
+        one cell left, onto the last character the user actually typed. That is
+        the boundary between committed and previewed text, which is where the
+        eye needs the mark anyway, and it leaves the whole ghost painting in
+        ``$lo-dim``.
+
+        A post-pass rather than a change to the base class's ``_render_line``,
+        matching the idiom :meth:`_paint_markers` and :meth:`_paint_slash`
+        already establish: adjust cells the base class has finished painting.
+        Runs only while a ghost is showing, so ordinary editing is untouched and
+        pays one boolean.
+        """
+        if not self.suggestion or not self._draw_cursor:
+            return strip
+        row, column = self.selection.end
+        # Nothing to move the caret onto at column 0 (a ghost on an empty line),
+        # so the base class's painting stands.
+        if column <= 0:
+            return strip
+        # The ghost's gates guarantee a single line with the caret at its end,
+        # but the wrap still decides WHICH screen row carries that column, and
+        # only that row may be repainted.
+        wrapped = self.wrapped_document
+        absolute_y = self.scroll_offset.y + y
+        if absolute_y >= wrapped.height:
+            return strip
+        row_line, _section_start = wrapped.offset_to_location(Offset(0, absolute_y))
+        if row_line != row:
+            return strip
+        caret_x = wrapped.location_to_offset((row, column)).x + self.gutter_width
+        typed_x = wrapped.location_to_offset((row, column - 1)).x + self.gutter_width
+        if caret_x >= strip.cell_length or typed_x >= caret_x:
+            return strip
+        cursor_style = self.get_component_rich_style("text-area--cursor")
+        ghost_style = self.get_component_rich_style("text-area--suggestion")
+        # Rebuild three runs: text before the last typed cell, that cell now
+        # carrying the caret, and the ghost cell restored to the dim ink the
+        # base class overpainted.
+        left, rest = strip.divide([typed_x, strip.cell_length])
+        typed_cell, tail = rest.divide([caret_x - typed_x, rest.cell_length])
+        ghost_cell, right = tail.divide([1, tail.cell_length])
+        return Strip.join(
+            [
+                left,
+                Strip(Segment.apply_style(typed_cell, post_style=cursor_style)),
+                Strip(Segment.apply_style(ghost_cell, post_style=ghost_style)),
+                right,
+            ]
+        )
 
     # -- public API ---------------------------------------------------------
     @property
